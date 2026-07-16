@@ -53,3 +53,5 @@ chore: 说明内容
   - Devices 右侧栏设置面板、数字通道/采样率/捕获模式/触发/Glitch/Buffer 骨架。
 - `docs/ported-features/2026-07-16-recording-settings-sidebar.md`
   - Recording Settings 的 MSO 可见性规则、Recording Type、Timer/Trigger/Single Shot/Trigger Sampling 骨架。
+- `docs/ported-features/2026-07-16-analyzers-sidebar.md`
+  - Analyzers selector、Suggested/active analyzer、Async Serial UART decode、Data Table/Terminal。

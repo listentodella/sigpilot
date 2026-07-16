@@ -5,10 +5,12 @@ import {
   BarChart3,
   ChevronDown,
   ChevronUp,
+  Copy,
   Clock3,
   Download,
   FileDown,
   FolderOpen,
+  GripVertical,
   Maximize2,
   Plus,
   RefreshCw,
@@ -16,6 +18,9 @@ import {
   Search,
   Settings2,
   SlidersHorizontal,
+  Table2,
+  Terminal,
+  Trash2,
   Usb,
   X,
   ZoomIn,
@@ -88,6 +93,7 @@ interface UiSession {
   decodeBusy: boolean;
   message: string;
   analyzers: string[];
+  analyzerDataPane: "table" | "terminal";
   rangeMeasurements: number;
   markerPairs: number;
   singleMarkers: number;
@@ -120,6 +126,7 @@ interface UiDeviceSettings {
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
+const AVAILABLE_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
 
 const panelMeta: Record<
   SidebarPanel,
@@ -201,6 +208,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     decodeBusy: false,
     message: "Ready",
     analyzers: [],
+    analyzerDataPane: "table",
     rangeMeasurements: 0,
     markerPairs: 0,
     singleMarkers: 0,
@@ -1995,100 +2003,230 @@ function AnalyzersPanel({
   onViewportChange: (start: number, samples: number) => void;
   session: UiSession;
 }) {
+  const [selectorOpen, setSelectorOpen] = useState(false);
   const channelCount = session.summary?.metadata.channel_count ?? session.settings.channel_count;
-  return (
-    <div className="analyzerPanel">
-      <section className="inspector-card">
-        <div className="inspector-title">
-          <span>
-            <SlidersHorizontal size={14} />
-            Analyzer
-          </span>
-          <small>UART</small>
-        </div>
-        <label className="stack-field">
-          <span>Input channel</span>
-          <select
-            value={session.decodeChannel}
-            onChange={(event) => onUpdateSession((current) => ({ ...current, decodeChannel: Number(event.target.value) }))}
-          >
-            {Array.from({ length: channelCount }, (_, index) => (
-              <option value={index} key={index}>
-                D{index}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="stack-field">
-          <span>Baud rate</span>
-          <input
-            min={300}
-            onChange={(event) => onUpdateSession((current) => ({ ...current, decodeBaud: Number(event.target.value) }))}
-            type="number"
-            value={session.decodeBaud}
-          />
-        </label>
-        <label className="toggle-field panel-toggle">
-          <input
-            checked={session.decodeInverted}
-            onChange={(event) => onUpdateSession((current) => ({ ...current, decodeInverted: event.target.checked }))}
-            type="checkbox"
-          />
-          Inverted
-        </label>
-        <button className="panel-action" onClick={onDecode} disabled={!session.summary || session.decodeBusy} type="button">
-          <Search size={15} />
-          Decode
-        </button>
-      </section>
+  const hasAsyncSerial = session.analyzers.includes("Async Serial");
 
-      <section className="inspector-card fill">
-        <div className="inspector-title">
-          <span>
-            <BarChart3 size={14} />
-            Frames
-          </span>
-          <small>{session.decodedFrames.length}</small>
+  function addAnalyzer(name: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      analyzers: current.analyzers.includes(name) ? current.analyzers : [...current.analyzers, name],
+      message: `${name} analyzer selected`,
+    }));
+    setSelectorOpen(false);
+  }
+
+  function removeAnalyzer(name: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      analyzers: current.analyzers.filter((analyzer) => analyzer !== name),
+      message: `${name} analyzer removed`,
+    }));
+  }
+
+  function moveAnalyzer(name: string, direction: -1 | 1) {
+    onUpdateSession((current) => {
+      const index = current.analyzers.indexOf(name);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= current.analyzers.length) return current;
+      const analyzers = [...current.analyzers];
+      [analyzers[index], analyzers[target]] = [analyzers[target], analyzers[index]];
+      return { ...current, analyzers };
+    });
+  }
+
+  return (
+    <div className="analyzersSidebarPanel">
+      <section className="analyzersSelectorSection">
+        <div className="sidebarTitleRow">
+          <div className="sidebarTitleText">Analyzers</div>
+          <button className={`sidebarCircleButton ${selectorOpen ? "active" : ""}`} onClick={() => setSelectorOpen((open) => !open)} type="button">
+            <Plus size={13} />
+          </button>
         </div>
-        <div className="result-list">
-          {session.decodedFrames.length === 0 ? (
-            <div className="empty-result">No frames</div>
-          ) : (
-            session.decodedFrames.slice(0, 200).map((frame, index) => (
+
+        {selectorOpen && (
+          <div className="analyzerSelectionPopover">
+            {AVAILABLE_ANALYZERS.map((name) => (
               <button
-                className="decode-row"
-                key={`${frame.start_sample}-${index}`}
-                onClick={() => onViewportChange(frame.start_sample, Math.max(128, frame.end_sample - frame.start_sample))}
+                className="analyzerSelectionItem"
+                disabled={session.analyzers.includes(name)}
+                key={name}
+                onClick={() => addAnalyzer(name)}
                 type="button"
               >
-                <span>{frame.label}</span>
-                <small>{formatSamples(frame.start_sample)}</small>
+                <span>{name}</span>
+                <small>{name === "Async Serial" ? "Built-in UART decoder" : "Analyzer"}</small>
               </button>
-            ))
-          )}
-        </div>
+            ))}
+          </div>
+        )}
+
+        {session.analyzers.length === 0 ? (
+          <div className="suggestedAnalyzers">
+            <div className="suggestedAnalyzersTitle">Suggested Analyzers</div>
+            {AVAILABLE_ANALYZERS.slice(0, 4).map((name) => (
+              <button className="suggestedAnalyzerItem" key={name} onClick={() => addAnalyzer(name)} type="button">
+                <SlidersHorizontal size={13} />
+                <span>{name}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="activeAnalyzerList">
+            {session.analyzers.map((name, index) => (
+              <div className="activeAnalyzerItem" key={name}>
+                <div className="activeAnalyzerHeader">
+                  <GripVertical size={13} />
+                  <span className="analyzerColorIndicator" />
+                  <strong>{name}</strong>
+                  <div className="analyzerRowActions">
+                    <button disabled={index === 0} onClick={() => moveAnalyzer(name, -1)} title="Move up" type="button">
+                      <ChevronUp size={12} />
+                    </button>
+                    <button
+                      disabled={index === session.analyzers.length - 1}
+                      onClick={() => moveAnalyzer(name, 1)}
+                      title="Move down"
+                      type="button"
+                    >
+                      <ChevronDown size={12} />
+                    </button>
+                    <button onClick={() => removeAnalyzer(name)} title="Delete" type="button">
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+
+                {name === "Async Serial" ? (
+                  <div className="analyzerSettingsGrid">
+                    <label className="stack-field">
+                      <span>Input channel</span>
+                      <select
+                        value={session.decodeChannel}
+                        onChange={(event) => onUpdateSession((current) => ({ ...current, decodeChannel: Number(event.target.value) }))}
+                      >
+                        {Array.from({ length: channelCount }, (_, channelIndex) => (
+                          <option value={channelIndex} key={channelIndex}>
+                            D{channelIndex}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="stack-field">
+                      <span>Bit rate</span>
+                      <input
+                        min={300}
+                        onChange={(event) => onUpdateSession((current) => ({ ...current, decodeBaud: Number(event.target.value) }))}
+                        type="number"
+                        value={session.decodeBaud}
+                      />
+                    </label>
+                    <label className="toggle-field panel-toggle">
+                      <input
+                        checked={session.decodeInverted}
+                        onChange={(event) => onUpdateSession((current) => ({ ...current, decodeInverted: event.target.checked }))}
+                        type="checkbox"
+                      />
+                      Inverted
+                    </label>
+                    <button className="panel-action" onClick={onDecode} disabled={!session.summary || session.decodeBusy} type="button">
+                      <Search size={15} />
+                      Decode
+                    </button>
+                  </div>
+                ) : (
+                  <div className="analyzerPendingSettings">
+                    <label className="stack-field">
+                      <span>Input channel</span>
+                      <select disabled>
+                        <option>D0</option>
+                      </select>
+                    </label>
+                    <button className="panel-action" disabled type="button">
+                      <Settings2 size={15} />
+                      Configure
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
-      <section className="inspector-card trace-card">
-        <div className="inspector-title">
-          <span>
-            <Settings2 size={14} />
-            USB Trace
-          </span>
-          <small>{session.diagnostics.length}</small>
+      <section className="analyzerDataSection">
+        <div className="sidebarTitleRow tight">
+          <div className="sidebarTitleText">
+            Data
+            <small>{session.decodedFrames.length}</small>
+          </div>
+          <div className="dataPaneButtons">
+            <button
+              className={session.analyzerDataPane === "table" ? "active" : ""}
+              onClick={() => onUpdateSession((current) => ({ ...current, analyzerDataPane: "table" }))}
+              title="Data Table"
+              type="button"
+            >
+              <Table2 size={13} />
+            </button>
+            <button
+              className={session.analyzerDataPane === "terminal" ? "active" : ""}
+              onClick={() => onUpdateSession((current) => ({ ...current, analyzerDataPane: "terminal" }))}
+              title="Terminal"
+              type="button"
+            >
+              <Terminal size={13} />
+            </button>
+          </div>
         </div>
-        <div className="trace-list">
-          {session.diagnostics.length === 0 ? (
-            <div className="empty-result">No USB events</div>
-          ) : (
-            session.diagnostics.slice(-80).map((event, index) => (
-              <div className={`trace-row trace-${event.level.toLowerCase()}`} key={`${event.phase}-${index}`}>
-                <span>{event.phase}</span>
-                <small>{event.message}</small>
-              </div>
-            ))
-          )}
-        </div>
+
+        {session.analyzerDataPane === "table" ? (
+          <div className="analyzerDataTable">
+            <div className="analyzerDataToolbar">
+              <button
+                disabled={session.decodedFrames.length === 0}
+                onClick={() => void navigator.clipboard?.writeText(session.decodedFrames.map((frame) => frame.label).join("\n"))}
+                type="button"
+              >
+                <Copy size={12} />
+                Copy
+              </button>
+            </div>
+            <div className="result-list analyzerFramesList">
+              {!hasAsyncSerial ? (
+                <div className="empty-result">Add Async Serial to decode UART frames</div>
+              ) : session.decodedFrames.length === 0 ? (
+                <div className="empty-result">No frames</div>
+              ) : (
+                session.decodedFrames.slice(0, 200).map((frame, index) => (
+                  <button
+                    className="decode-row"
+                    key={`${frame.start_sample}-${index}`}
+                    onClick={() => onViewportChange(frame.start_sample, Math.max(128, frame.end_sample - frame.start_sample))}
+                    type="button"
+                  >
+                    <span>{frame.label}</span>
+                    <small>{formatSamples(frame.start_sample)}</small>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="analyzerTerminal">
+            {session.decodedFrames.length === 0 ? (
+              <div className="empty-result">No terminal data</div>
+            ) : (
+              session.decodedFrames.slice(0, 200).map((frame, index) => (
+                <div className="terminalLine" key={`${frame.start_sample}-${index}`}>
+                  <span>{formatSamples(frame.start_sample)}</span>
+                  <strong>{frame.label}</strong>
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </section>
     </div>
   );
