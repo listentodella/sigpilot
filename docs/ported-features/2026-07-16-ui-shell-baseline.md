@@ -68,4 +68,4 @@
 
 ## 对应 Git 提交
 
-- `003fceaf11d42bb4f8949ad193aa32db957d07fc`
+- `c220332` (`chore: initialize pxlogic workspace baseline`)
