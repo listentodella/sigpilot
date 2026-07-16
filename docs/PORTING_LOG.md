@@ -49,3 +49,5 @@ chore: 说明内容
   - 边沿跳转 tooltip、图标方向、300ms 平移动画细节优化。
 - `docs/ported-features/2026-07-16-sidebar-command-infrastructure.md`
   - 右侧栏面板入口规则、统一命令层和原版快捷键基础设施。
+- `docs/ported-features/2026-07-16-devices-sidebar-settings.md`
+  - Devices 右侧栏设置面板、数字通道/采样率/捕获模式/触发/Glitch/Buffer 骨架。

@@ -72,6 +72,7 @@ interface UiSession {
   name: string;
   selectedDevice: string;
   settings: CaptureSettings;
+  deviceSettings: UiDeviceSettings;
   summary: CaptureSummary | null;
   progress: CaptureProgress | null;
   tile: WaveformTile | null;
@@ -93,9 +94,24 @@ interface UiSession {
   notes: string;
 }
 
+type UiRecordingMode = "FreeRun" | "Timer" | "Trigger";
+type UiTriggerEdge = "Rising Edge" | "Falling Edge" | "High Pulse" | "Low Pulse";
+
+interface UiDeviceSettings {
+  bufferSizeMb: number;
+  captureMode: UiRecordingMode;
+  digitalChannels: boolean[];
+  glitchFilterEnabled: boolean;
+  glitchFilterNs: number;
+  triggerChannel: number;
+  triggerEdge: UiTriggerEdge;
+  triggerPulseWidthUs: number;
+  trimAfterCapture: boolean;
+}
+
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
-const CHANNEL_COUNTS = [4, 8, 16, 24, 32];
+const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
 
 const panelMeta: Record<
   SidebarPanel,
@@ -126,6 +142,24 @@ function defaultSettings(deviceId: string): CaptureSettings {
   };
 }
 
+function makeDigitalChannels(channelCount: number) {
+  return Array.from({ length: 32 }, (_, index) => index < channelCount);
+}
+
+function defaultDeviceSettings(channelCount: number): UiDeviceSettings {
+  return {
+    bufferSizeMb: 1024,
+    captureMode: "Timer",
+    digitalChannels: makeDigitalChannels(channelCount),
+    glitchFilterEnabled: false,
+    glitchFilterNs: 10,
+    triggerChannel: 0,
+    triggerEdge: "Rising Edge",
+    triggerPulseWidthUs: 10,
+    trimAfterCapture: true,
+  };
+}
+
 function makeSession(id: string, name: string, deviceId: string, source?: UiSession): UiSession {
   const settings = source ? { ...source.settings, device_id: deviceId } : defaultSettings(deviceId);
   return {
@@ -133,6 +167,9 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     name,
     selectedDevice: deviceId,
     settings,
+    deviceSettings: source
+      ? { ...source.deviceSettings, digitalChannels: [...source.deviceSettings.digitalChannels] }
+      : defaultDeviceSettings(settings.channel_count),
     summary: null,
     progress: null,
     tile: null,
@@ -509,6 +546,11 @@ export default function App() {
         device_id: summary.metadata.source_device || session.selectedDevice,
         sample_rate_hz: summary.metadata.sample_rate_hz,
         channel_count: summary.metadata.channel_count,
+      },
+      deviceSettings: {
+        ...session.deviceSettings,
+        digitalChannels: makeDigitalChannels(summary.metadata.channel_count),
+        triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, summary.metadata.channel_count - 1)),
       },
       summary,
       tile: null,
@@ -1345,10 +1387,12 @@ function SidebarPanelContent({
       {panel === "devices" && (
         <DeviceSettingsPanel
           devices={devices}
-          onCreateSession={onCreateSession}
           onRefreshDevices={onRefreshDevices}
           onSelectDevice={onSelectDevice}
+          onUpdateSession={onUpdateSession}
+          onUpdateSettings={onUpdateSettings}
           selectedDevice={selectedDevice}
+          session={session}
         />
       )}
       {panel === "recordingSettings" && <RecordingSettingsPanel onUpdateSettings={onUpdateSettings} session={session} />}
@@ -1383,28 +1427,302 @@ function SidebarPanelContent({
 
 function DeviceSettingsPanel({
   devices,
-  onCreateSession,
   onRefreshDevices,
   onSelectDevice,
+  onUpdateSession,
+  onUpdateSettings,
   selectedDevice,
+  session,
 }: {
   devices: DeviceInfo[];
-  onCreateSession: (deviceId?: string) => void;
   onRefreshDevices: () => void;
   onSelectDevice: (deviceId: string) => void;
+  onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
+  onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   selectedDevice: string;
+  session: UiSession;
 }) {
+  const [showDeviceInfo, setShowDeviceInfo] = useState(false);
+  const selected = devices.find((device) => device.id === selectedDevice);
+  const enabledChannels = selected
+    ? session.deviceSettings.digitalChannels.filter(Boolean).length
+    : session.settings.channel_count;
+  const digitalChannels = session.deviceSettings.digitalChannels;
+
+  function updateDeviceSettings(patch: Partial<UiDeviceSettings>) {
+    onUpdateSession((current) => ({
+      ...current,
+      deviceSettings: {
+        ...current.deviceSettings,
+        ...patch,
+        digitalChannels: patch.digitalChannels
+          ? [...patch.digitalChannels]
+          : [...current.deviceSettings.digitalChannels],
+      },
+    }));
+  }
+
+  function setChannelCount(channelCount: number) {
+    onUpdateSettings({ channel_count: channelCount });
+    updateDeviceSettings({
+      digitalChannels: makeDigitalChannels(channelCount),
+      triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, channelCount - 1)),
+    });
+  }
+
+  function toggleDigitalChannel(index: number) {
+    const nextChannels = [...digitalChannels];
+    nextChannels[index] = !nextChannels[index];
+    if (!nextChannels.some(Boolean)) {
+      nextChannels[index] = true;
+    }
+    const highestEnabled = nextChannels.reduce((highest, enabled, channelIndex) => (enabled ? channelIndex : highest), 0);
+    onUpdateSettings({ channel_count: Math.max(1, highestEnabled + 1) });
+    updateDeviceSettings({
+      digitalChannels: nextChannels,
+      triggerChannel: Math.min(session.deviceSettings.triggerChannel, highestEnabled),
+    });
+  }
+
+  function selectAllDigitalChannels(enabled: boolean) {
+    const nextCount = enabled ? 16 : 1;
+    onUpdateSettings({ channel_count: nextCount });
+    updateDeviceSettings({
+      digitalChannels: makeDigitalChannels(nextCount),
+      triggerChannel: 0,
+    });
+  }
+
   return (
-    <div className="sidebarSection">
-      <DeviceMenuRows
-        devices={devices}
-        onCreateSession={onCreateSession}
-        onRefreshDevices={onRefreshDevices}
-        onSelectDevice={onSelectDevice}
-        selectedDevice={selectedDevice}
-      />
+    <div className="deviceSettingsPanel">
+      <section className="deviceSettingsHeader">
+        <div className="deviceSettingsTitle">
+          <strong>{selected?.label ?? "Disconnected"}</strong>
+          <small>{selected?.kind === "Usb" ? "Connected Logic Device" : "Demo Logic Device"}</small>
+        </div>
+        <button className="deviceSettingsSmallButton" onClick={() => setShowDeviceInfo((open) => !open)} type="button">
+          Device Information
+        </button>
+      </section>
+
+      {showDeviceInfo && (
+        <section className="deviceInfoPanel">
+          <InfoRow label="Device ID" value={selectedDevice} />
+          <InfoRow label="VID / PID" value={selected ? `${hex16(selected.vid)} / ${hex16(selected.pid)}` : "-"} />
+          <InfoRow label="USB Address" value={selected?.bus == null ? "Simulation" : `${selected.bus}:${selected.address}`} />
+          <InfoRow label="Capture Buffer" value={formatBytes(session.deviceSettings.bufferSizeMb * 1024 * 1024)} />
+          <button className="deviceSettingsSmallButton" onClick={onRefreshDevices} type="button">
+            <RefreshCw size={13} />
+            Refresh Devices
+          </button>
+        </section>
+      )}
+
+      <section className="deviceSettingsBlock">
+        <div className="deviceSettingsBlockTitle">
+          <span>Digital</span>
+          <div className="deviceSettingsActions">
+            <button type="button" onClick={() => selectAllDigitalChannels(true)}>
+              All
+            </button>
+            <button type="button" onClick={() => selectAllDigitalChannels(false)}>
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div className="channelPickerGrid">
+          {digitalChannels.map((enabled, index) => (
+            <button
+              className={`channelPickerButton channel${index % 4} ${enabled ? "enabled" : ""}`}
+              key={index}
+              onClick={() => toggleDigitalChannel(index)}
+              type="button"
+            >
+              {index}
+            </button>
+          ))}
+        </div>
+
+        <label className="stack-field">
+          <span>Sample rate</span>
+          <select
+            value={session.settings.sample_rate_hz}
+            onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
+          >
+            {SAMPLE_RATES.map((rate) => (
+              <option key={rate} value={rate}>
+                {formatRate(rate)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="stack-field">
+          <span>Active channels</span>
+          <select value={session.settings.channel_count} onChange={(event) => setChannelCount(Number(event.target.value))}>
+            {CHANNEL_COUNTS.map((count) => (
+              <option key={count} value={count}>
+                {count} digital
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="stack-field">
+          <span>Digital threshold</span>
+          <input
+            min={0}
+            onChange={(event) => onUpdateSettings({ threshold_volts: Number(event.target.value) })}
+            step={0.1}
+            type="number"
+            value={session.settings.threshold_volts}
+          />
+        </label>
+      </section>
+
+      <section className="deviceSettingsBlock">
+        <div className="deviceSettingsBlockTitle">
+          <span>Capture Mode</span>
+          <small>{session.deviceSettings.captureMode}</small>
+        </div>
+        <div className="modeButtonGroup">
+          {(["FreeRun", "Timer", "Trigger"] as UiRecordingMode[]).map((mode) => (
+            <button
+              className={session.deviceSettings.captureMode === mode ? "active" : ""}
+              key={mode}
+              onClick={() => updateDeviceSettings({ captureMode: mode })}
+              type="button"
+            >
+              {mode === "FreeRun" ? "Looping" : mode}
+            </button>
+          ))}
+        </div>
+
+        {session.deviceSettings.captureMode === "Timer" && (
+          <label className="stack-field">
+            <span>After time</span>
+            <input
+              min={1}
+              onChange={(event) => onUpdateSettings({ duration_ms: Number(event.target.value) })}
+              type="number"
+              value={session.settings.duration_ms}
+            />
+          </label>
+        )}
+
+        {session.deviceSettings.captureMode === "Trigger" && (
+          <div className="triggerSettingsGrid">
+            <label className="stack-field">
+              <span>Trigger channel</span>
+              <select
+                value={session.deviceSettings.triggerChannel}
+                onChange={(event) => updateDeviceSettings({ triggerChannel: Number(event.target.value) })}
+              >
+                {Array.from({ length: Math.max(1, session.settings.channel_count) }, (_, index) => (
+                  <option key={index} value={index}>
+                    D{index}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="stack-field">
+              <span>Trigger type</span>
+              <select
+                value={session.deviceSettings.triggerEdge}
+                onChange={(event) => updateDeviceSettings({ triggerEdge: event.target.value as UiTriggerEdge })}
+              >
+                {(["Rising Edge", "Falling Edge", "High Pulse", "Low Pulse"] as UiTriggerEdge[]).map((edge) => (
+                  <option key={edge} value={edge}>
+                    {edge}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="stack-field">
+              <span>Pulse width us</span>
+              <input
+                min={0}
+                onChange={(event) => updateDeviceSettings({ triggerPulseWidthUs: Number(event.target.value) })}
+                type="number"
+                value={session.deviceSettings.triggerPulseWidthUs}
+              />
+            </label>
+          </div>
+        )}
+      </section>
+
+      <section className="deviceSettingsBlock compact">
+        <label className="toggle-field panel-toggle">
+          <input
+            checked={session.deviceSettings.trimAfterCapture}
+            onChange={(event) => updateDeviceSettings({ trimAfterCapture: event.target.checked })}
+            type="checkbox"
+          />
+          Trim after capture
+        </label>
+        <label className="toggle-field panel-toggle">
+          <input
+            checked={session.deviceSettings.glitchFilterEnabled}
+            onChange={(event) => updateDeviceSettings({ glitchFilterEnabled: event.target.checked })}
+            type="checkbox"
+          />
+          Glitch filter
+        </label>
+        {session.deviceSettings.glitchFilterEnabled && (
+          <label className="stack-field">
+            <span>Glitch filter width ns</span>
+            <input
+              min={1}
+              onChange={(event) => updateDeviceSettings({ glitchFilterNs: Number(event.target.value) })}
+              type="number"
+              value={session.deviceSettings.glitchFilterNs}
+            />
+          </label>
+        )}
+        <label className="stack-field">
+          <span>Buffer size</span>
+          <select
+            value={session.deviceSettings.bufferSizeMb}
+            onChange={(event) => updateDeviceSettings({ bufferSizeMb: Number(event.target.value) })}
+          >
+            {[256, 512, 1024, 2048, 4096].map((size) => (
+              <option key={size} value={size}>
+                {formatBytes(size * 1024 * 1024)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </section>
+
+      <section className="deviceSettingsBlock compact">
+        <div className="deviceSettingsBlockTitle">
+          <span>Connected Devices</span>
+          <small>{enabledChannels} active</small>
+        </div>
+        <DeviceMenuRows
+          devices={devices}
+          onCreateSession={() => undefined}
+          onRefreshDevices={onRefreshDevices}
+          onSelectDevice={onSelectDevice}
+          selectedDevice={selectedDevice}
+        />
+      </section>
+
+      {session.busy && <div className="deviceSettingsDisabledOverlay">Settings are disabled during capture</div>}
     </div>
   );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="deviceInfoRow">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function hex16(value: number) {
+  return `0x${value.toString(16).padStart(4, "0").toUpperCase()}`;
 }
 
 function RecordingSettingsPanel({

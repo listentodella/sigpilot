@@ -1397,6 +1397,200 @@ button:disabled {
   gap: 10px;
 }
 
+.deviceSettingsPanel {
+  min-height: 0;
+  position: relative;
+  flex: 1;
+  overflow: auto;
+  padding: 14px 16px 18px;
+}
+
+.deviceSettingsHeader,
+.deviceSettingsBlock,
+.deviceInfoPanel {
+  border-bottom: 1px solid var(--border-20);
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+}
+
+.deviceSettingsHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.deviceSettingsTitle {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.deviceSettingsTitle strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-0);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deviceSettingsTitle small,
+.deviceSettingsBlockTitle small {
+  color: var(--on-background-30);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.deviceSettingsSmallButton,
+.deviceSettingsActions button,
+.modeButtonGroup button {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border-20);
+  border-radius: 999px;
+  color: var(--on-background-20);
+  background: var(--background-20);
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.deviceSettingsSmallButton:hover,
+.deviceSettingsActions button:hover,
+.modeButtonGroup button:hover,
+.modeButtonGroup button.active {
+  color: var(--on-background-0);
+  background: var(--background-30);
+}
+
+.deviceInfoPanel {
+  display: grid;
+  gap: 8px;
+}
+
+.deviceInfoRow {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--on-background-30);
+  font-size: 11px;
+}
+
+.deviceInfoRow strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-10);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deviceSettingsBlock {
+  display: grid;
+  gap: 10px;
+}
+
+.deviceSettingsBlock.compact {
+  gap: 8px;
+}
+
+.deviceSettingsBlockTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--on-background-10);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.deviceSettingsActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.channelPickerGrid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.channelPickerButton {
+  aspect-ratio: 1;
+  min-width: 0;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-30);
+  background: var(--background-20);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.channelPickerButton.enabled.channel0 {
+  color: #001c26;
+  background: var(--channel0);
+}
+
+.channelPickerButton.enabled.channel1 {
+  color: #211600;
+  background: var(--channel1);
+}
+
+.channelPickerButton.enabled.channel2 {
+  color: #002011;
+  background: var(--channel2);
+}
+
+.channelPickerButton.enabled.channel3 {
+  color: #2a0010;
+  background: var(--channel3);
+}
+
+.modeButtonGroup {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.modeButtonGroup button {
+  min-width: 0;
+  border-radius: 4px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.triggerSettingsGrid {
+  display: grid;
+  gap: 8px;
+}
+
+.deviceSettingsDisabledOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  color: var(--on-background-10);
+  background: rgba(var(--black-base), 0.58);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  padding: 24px;
+}
+
 .analyzerPanel {
   flex: 1;
   display: grid;
