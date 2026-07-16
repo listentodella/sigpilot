@@ -65,3 +65,5 @@ chore: 说明内容
   - 右侧栏 tooltip、Devices 通道色、左侧通道重命名/右键菜单、智能时间轴和竖直虚线。
 - `docs/ported-features/2026-07-16-saleae-time-axis.md`
   - 直接搬运原版高精度双层时间刻度、major/minor 分组和两级竖直虚线算法。
+- `docs/ported-features/2026-07-16-saleae-channel-colors.md`
+  - 直接搬运原版 legacy 8 色通道色板，并统一 Devices、通道标签和波形颜色。

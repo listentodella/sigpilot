@@ -68,6 +68,7 @@ import {
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
+import { saleaeLegacyChannelColor } from "./lib/saleaeChannelColors";
 import {
   AnalyzerCommands,
   CommandPayload,
@@ -1391,10 +1392,15 @@ function ChannelLabelRow({
       onContextMenu={onContextMenu}
       onDoubleClick={onEditStart}
       role="button"
+      style={
+        {
+          "--channel-color": saleaeLegacyChannelColor(index),
+        } as CSSProperties
+      }
       tabIndex={0}
       title={`${label} - double click to rename`}
     >
-      <span className={`channelHeader channel${index % 4} digital small focusable`}>
+      <span className="channelHeader digital small focusable">
         <span className="channelNumber">{index}</span>
       </span>
       <span className="channelText">
@@ -2332,9 +2338,14 @@ function DeviceSettingsPanel({
         <div className="channelPickerGrid">
           {digitalChannels.map((enabled, index) => (
             <button
-              className={`channelPickerButton channel${index % 4} ${enabled ? "enabled" : ""}`}
+              className={`channelPickerButton ${enabled ? "enabled" : ""}`}
               key={index}
               onClick={() => toggleDigitalChannel(index)}
+              style={
+                {
+                  "--channel-color": saleaeLegacyChannelColor(index),
+                } as CSSProperties
+              }
               type="button"
             >
               {index}

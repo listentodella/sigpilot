@@ -895,34 +895,14 @@ button:disabled {
 }
 
 .channelHeader {
-  --darker-channel-color: rgba(0, 0, 0, 0.28);
+  --darker-channel-color: rgba(0, 0, 0, 0.24);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 4px;
   padding: 2px;
-  background: var(--channel-mso);
-}
-
-.channelHeader.channel0 {
-  --channel-mso: var(--channel-mso-0);
-  --on-channel-mso: var(--on-channel-mso-0);
-}
-
-.channelHeader.channel1 {
-  --channel-mso: var(--channel-mso-1);
-  --on-channel-mso: var(--on-channel-mso-1);
-}
-
-.channelHeader.channel2 {
-  --channel-mso: var(--channel-mso-2);
-  --on-channel-mso: var(--on-channel-mso-2);
-}
-
-.channelHeader.channel3 {
-  --channel-mso: var(--channel-mso-3);
-  --on-channel-mso: var(--on-channel-mso-3);
+  background: var(--channel-color);
 }
 
 .channelHeader.digital {
@@ -952,7 +932,7 @@ button:disabled {
   justify-content: center;
   border-radius: 4px;
   background: var(--darker-channel-color);
-  color: var(--on-channel-mso);
+  color: #141415;
   font-size: 13px;
   font-weight: 700;
   line-height: 1;
@@ -1817,7 +1797,7 @@ button:disabled {
   min-width: 0;
   border: 1px solid var(--border-20);
   border-radius: 4px;
-  color: var(--on-background-30);
+  color: var(--channel-color);
   background: var(--background-20);
   font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
@@ -1825,28 +1805,18 @@ button:disabled {
   cursor: pointer;
 }
 
-.channelPickerButton.enabled.channel0 {
-  color: var(--on-channel-mso-0);
-  background: var(--channel-mso-0);
-  border-color: var(--channel-mso-0);
+.channelPickerButton:hover {
+  border-color: var(--channel-color);
 }
 
-.channelPickerButton.enabled.channel1 {
-  color: var(--on-channel-mso-1);
-  background: var(--channel-mso-1);
-  border-color: var(--channel-mso-1);
+.channelPickerButton.enabled {
+  color: #141415;
+  background: var(--channel-color);
+  border-color: var(--channel-color);
 }
 
-.channelPickerButton.enabled.channel2 {
-  color: var(--on-channel-mso-2);
-  background: var(--channel-mso-2);
-  border-color: var(--channel-mso-2);
-}
-
-.channelPickerButton.enabled.channel3 {
-  color: var(--on-channel-mso-3);
-  background: var(--channel-mso-3);
-  border-color: var(--channel-mso-3);
+.channelPickerButton.enabled:hover {
+  border-color: var(--on-background-0);
 }
 
 .modeButtonGroup {

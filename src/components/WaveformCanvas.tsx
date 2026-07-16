@@ -1,5 +1,6 @@
 import { PointerEvent, useEffect, useRef, useState } from "react";
 import type { WaveformTile } from "../lib/api";
+import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
@@ -16,7 +17,6 @@ interface WaveformCanvasProps {
   onViewportChange: (start: number, samples: number) => void;
 }
 
-const colors = ["#43baeb", "#ffcb46", "#00b140", "#f52a66"];
 const graphPaddingLeft = 8;
 const graphPaddingRight = 10;
 const digitalGraphGutterPx = 8;
@@ -475,7 +475,7 @@ function draw(
 
     if (channel.segments.length > 0) {
       drawDigitalSegments(ctx, {
-        color: colors[index % colors.length],
+        color: saleaeLegacyChannelColor(channel.channel),
         highY,
         lowY,
         left,
@@ -487,7 +487,7 @@ function draw(
       });
     } else {
       drawDigitalChannel(ctx, {
-        color: colors[index % colors.length],
+        color: saleaeLegacyChannelColor(channel.channel),
         highY,
         lowY,
         left,
