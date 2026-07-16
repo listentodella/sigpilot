@@ -44,6 +44,8 @@
   - 包含默认扩展、排序规则、持久化和本地 package 转换。
 - `src/lib/sidebar.ts`
   - 右侧栏面板类型、原版命令字符串、面板快捷键和命令到面板映射。
+- `src/lib/saleaeChannelLayout.ts`
+  - 从 Logic 2.4.43 RowsManager 搬运的数字通道默认/最小高度、自动布局、RowV2 间距和 resize handle 几何。
 
 ## 已搬入的小型 Saleae 视觉资源
 

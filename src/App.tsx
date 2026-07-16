@@ -33,6 +33,7 @@ import {
   PointerEvent as ReactPointerEvent,
   ReactNode,
   RefObject,
+  UIEvent as ReactUIEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -70,6 +71,14 @@ import {
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
+import {
+  fitSaleaeDigitalRowsToViewport,
+  makeSaleaeDigitalRowHeights,
+  saleaeChannelContentHeight,
+  saleaeChannelResizeHandleTop,
+  SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
+  SALEAE_ROW_V2_SPACING_PX,
+} from "./lib/saleaeChannelLayout";
 import { saleaeLegacyChannelColor } from "./lib/saleaeChannelColors";
 import {
   loadUiExtensions,
@@ -99,6 +108,9 @@ interface UiSession {
   settings: CaptureSettings;
   deviceSettings: UiDeviceSettings;
   channelLabels: string[];
+  channelHeights: number[];
+  manualChannelLayout: boolean;
+  graphScrollTop: number;
   summary: CaptureSummary | null;
   progress: CaptureProgress | null;
   tile: WaveformTile | null;
@@ -215,6 +227,39 @@ function channelLabelsForCount(channelCount: number, existing: string[] = []) {
   return Array.from({ length: Math.max(1, channelCount) }, (_, index) => existing[index] ?? `D${index}`);
 }
 
+function captureChannelLimit(session: UiSession) {
+  return Math.max(1, session.summary?.metadata.channel_count ?? session.settings.channel_count);
+}
+
+function isDigitalChannelEnabled(session: UiSession, channelIndex: number) {
+  return session.deviceSettings.digitalChannels[channelIndex] ?? channelIndex < session.settings.channel_count;
+}
+
+function visibleDigitalChannelIndexes(session: UiSession) {
+  const limit = captureChannelLimit(session);
+  return Array.from({ length: limit }, (_, index) => index).filter((index) =>
+    isDigitalChannelEnabled(session, index),
+  );
+}
+
+function highestEnabledDigitalChannel(channels: boolean[], fallback = 0) {
+  return channels.reduce((highest, enabled, index) => (enabled ? index : highest), fallback);
+}
+
+function tileForVisibleChannels(tile: WaveformTile | null, channelIndexes: number[], labels: string[]) {
+  if (!tile) return null;
+  const visible = new Set(channelIndexes);
+  return {
+    ...tile,
+    channels: tile.channels
+      .filter((channel) => visible.has(channel.channel))
+      .map((channel) => ({
+        ...channel,
+        label: labels[channel.channel] ?? channel.label,
+      })),
+  };
+}
+
 function summaryWithLabels(summary: CaptureSummary, labels: string[]): CaptureSummary {
   return {
     ...summary,
@@ -303,6 +348,11 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     channelLabels: source
       ? channelLabelsForCount(settings.channel_count, source.channelLabels)
       : channelLabelsForCount(settings.channel_count),
+    channelHeights: source
+      ? makeSaleaeDigitalRowHeights(32, source.channelHeights ?? [])
+      : makeSaleaeDigitalRowHeights(),
+    manualChannelLayout: source?.manualChannelLayout ?? false,
+    graphScrollTop: 0,
     summary: null,
     progress: null,
     tile: null,
@@ -381,10 +431,14 @@ export default function App() {
   const [footerPopover, setFooterPopover] = useState<FooterPopover>(null);
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
   const [channelContextMenu, setChannelContextMenu] = useState<{ channelIndex: number; x: number; y: number } | null>(null);
+  const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [startupMessage, setStartupMessage] = useState("Ready");
 
   const footerRef = useRef<HTMLElement>(null);
+  const graphScrollerRef = useRef<HTMLDivElement>(null);
   const channelContextMenuRef = useRef<HTMLDivElement>(null);
+  const graphScrollFrameRef = useRef<number | null>(null);
+  const pendingGraphScrollRef = useRef<{ sessionId: string; scrollTop: number } | null>(null);
   const sessionsRef = useRef<UiSession[]>([]);
   const activeSessionIdRef = useRef<string | null>(null);
   const captureSessionRef = useRef<string | null>(null);
@@ -408,6 +462,34 @@ export default function App() {
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
   );
+
+  useEffect(() => {
+    const scroller = graphScrollerRef.current;
+    if (!scroller || !activeSession) {
+      setGraphViewportHeight(0);
+      return;
+    }
+
+    const updateHeight = () => setGraphViewportHeight(Math.max(0, Math.floor(scroller.clientHeight)));
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(scroller);
+    updateHeight();
+    const frame = window.requestAnimationFrame(() => {
+      scroller.scrollTop = activeSession.graphScrollTop;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [activeSession?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (graphScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(graphScrollFrameRef.current);
+      }
+    };
+  }, []);
 
   const selectedDevice = activeSession?.selectedDevice ?? draftSelectedDevice;
   const selected = useMemo(
@@ -522,6 +604,31 @@ export default function App() {
       activeSession?.summary?.metadata.labels,
     ],
   );
+  const visibleChannelIndexes = useMemo(
+    () => (activeSession ? visibleDigitalChannelIndexes(activeSession) : []),
+    [activeSession],
+  );
+  const visibleChannelLabels = useMemo(
+    () => visibleChannelIndexes.map((channelIndex) => channelLabels[channelIndex] ?? `D${channelIndex}`),
+    [channelLabels, visibleChannelIndexes],
+  );
+  const visibleChannelHeights = useMemo(
+    () =>
+      activeSession
+        ? fitSaleaeDigitalRowsToViewport({
+            availableHeight: graphViewportHeight,
+            channelIndexes: visibleChannelIndexes,
+            storedHeights: activeSession.channelHeights,
+            manualLayout: activeSession.manualChannelLayout,
+          })
+        : [],
+    [activeSession, graphViewportHeight, visibleChannelIndexes],
+  );
+  const visibleTile = useMemo(
+    () => tileForVisibleChannels(activeSession?.tile ?? null, visibleChannelIndexes, channelLabels),
+    [activeSession?.tile, channelLabels, visibleChannelIndexes],
+  );
+  const graphContentHeight = Math.max(graphViewportHeight, saleaeChannelContentHeight(visibleChannelHeights));
 
   const totalSamples = activeSession?.summary?.metadata.sample_count ?? 0;
   const progressPercent =
@@ -847,8 +954,7 @@ export default function App() {
       const digitalChannels = [...session.deviceSettings.digitalChannels];
       while (digitalChannels.length <= channelIndex) digitalChannels.push(false);
       digitalChannels[channelIndex] = enabled;
-      if (!digitalChannels.some(Boolean)) digitalChannels[channelIndex] = true;
-      const highestEnabled = digitalChannels.reduce((highest, isEnabled, index) => (isEnabled ? index : highest), 0);
+      const highestEnabled = highestEnabledDigitalChannel(digitalChannels);
       const channelCount = Math.max(1, highestEnabled + 1);
       return {
         ...session,
@@ -859,8 +965,46 @@ export default function App() {
           digitalChannels,
           triggerChannel: Math.min(session.deviceSettings.triggerChannel, highestEnabled),
         },
-        message: `D${channelIndex} ${digitalChannels[channelIndex] ? "enabled" : "disabled"} for next capture`,
+        message: `D${channelIndex} ${digitalChannels[channelIndex] ? "shown and enabled" : "hidden and disabled"}`,
       };
+    });
+  }
+
+  function setChannelHeight(channelIndex: number, height: number) {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const channelHeights = makeSaleaeDigitalRowHeights(32, session.channelHeights);
+      if (!session.manualChannelLayout) {
+        visibleChannelIndexes.forEach((visibleChannelIndex, rowIndex) => {
+          channelHeights[visibleChannelIndex] =
+            visibleChannelHeights[rowIndex] ?? channelHeights[visibleChannelIndex];
+        });
+      }
+      channelHeights[channelIndex] = Math.max(SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX, height);
+      return {
+        ...session,
+        channelHeights,
+        manualChannelLayout: true,
+      };
+    });
+  }
+
+  function handleGraphScroll(event: ReactUIEvent<HTMLDivElement>) {
+    if (!activeSession) return;
+    pendingGraphScrollRef.current = {
+      sessionId: activeSession.id,
+      scrollTop: event.currentTarget.scrollTop,
+    };
+    if (graphScrollFrameRef.current !== null) return;
+    graphScrollFrameRef.current = window.requestAnimationFrame(() => {
+      graphScrollFrameRef.current = null;
+      const pending = pendingGraphScrollRef.current;
+      pendingGraphScrollRef.current = null;
+      if (!pending) return;
+      updateSession(pending.sessionId, (session) => ({
+        ...session,
+        graphScrollTop: pending.scrollTop,
+      }));
     });
   }
 
@@ -1142,7 +1286,7 @@ export default function App() {
             <div className="topArea">
               <div className="channelLabelHeader">
                 <span className="channelCounter">
-                  {activeSession ? `${channelLabels.length} Channels` : "Select Device"}
+                  {activeSession ? `${visibleChannelIndexes.length} Channels` : "Select Device"}
                 </span>
               </div>
               <div className="aboveGraph">
@@ -1170,32 +1314,40 @@ export default function App() {
 
             {activeSession ? (
               <>
-                <div className="graph rowV2">
-                  <div className="contentContainer rowV2">
+                <div className="graph rowV2" onScroll={handleGraphScroll} ref={graphScrollerRef}>
+                  <div
+                    className="contentContainer rowV2"
+                    style={{ height: graphContentHeight, minHeight: graphContentHeight }}
+                  >
                     <div className="labelsBackground" />
                     <div
                       className="channelLabels"
-                      style={{ gridTemplateRows: `repeat(${Math.max(1, channelLabels.length)}, minmax(34px, 1fr))` }}
+                      style={{
+                        gridTemplateRows:
+                          visibleChannelHeights.length > 0
+                            ? visibleChannelHeights.map((height) => `${height}px`).join(" ")
+                            : undefined,
+                      }}
                     >
-                      {channelLabels.map((label, index) => (
+                      {visibleChannelIndexes.map((channelIndex, rowIndex) => (
                         <ChannelLabelRow
-                          index={index}
-                          isEditing={editingChannel === index}
-                          isEnabled={activeSession.deviceSettings.digitalChannels[index] ?? index < activeSession.settings.channel_count}
-                          isTrigger={activeSession.deviceSettings.triggerChannel === index}
-                          key={index}
-                          label={label}
+                          index={channelIndex}
+                          isEditing={editingChannel === channelIndex}
+                          isEnabled
+                          isTrigger={activeSession.deviceSettings.triggerChannel === channelIndex}
+                          key={channelIndex}
+                          label={visibleChannelLabels[rowIndex]}
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setEditingChannel(null);
-                            setChannelContextMenu({ channelIndex: index, x: event.clientX, y: event.clientY });
+                            setChannelContextMenu({ channelIndex, x: event.clientX, y: event.clientY });
                           }}
                           onEditEnd={() => setEditingChannel(null)}
                           onEditStart={() => {
                             setChannelContextMenu(null);
-                            setEditingChannel(index);
+                            setEditingChannel(channelIndex);
                           }}
-                          onRename={(name) => renameChannelLabel(index, name)}
+                          onRename={(name) => renameChannelLabel(channelIndex, name)}
                         />
                       ))}
                     </div>
@@ -1230,7 +1382,8 @@ export default function App() {
                     )}
                     <div className="graphViewport">
                       <WaveformCanvas
-                        tile={activeSession.tile}
+                        rowHeights={visibleChannelHeights}
+                        tile={visibleTile}
                         onWidthChange={(width) =>
                           updateSession(activeSession.id, (session) => ({ ...session, canvasWidth: width }))
                         }
@@ -1253,6 +1406,15 @@ export default function App() {
                         session={activeSession}
                       />
                     </div>
+                    {visibleChannelIndexes.slice(0, -1).map((channelIndex, rowIndex) => (
+                      <ChannelResizeHandle
+                        channelIndex={channelIndex}
+                        height={visibleChannelHeights[rowIndex]}
+                        key={channelIndex}
+                        onResize={(height) => setChannelHeight(channelIndex, height)}
+                        top={saleaeChannelResizeHandleTop(visibleChannelHeights, rowIndex)}
+                      />
+                    ))}
                   </div>
                 </div>
 
@@ -1447,6 +1609,60 @@ function ChannelLabelRow({
         </small>
       </span>
     </div>
+  );
+}
+
+function ChannelResizeHandle({
+  channelIndex,
+  height,
+  onResize,
+  top,
+}: {
+  channelIndex: number;
+  height: number;
+  onResize: (height: number) => void;
+  top: number;
+}) {
+  const dragRef = useRef<{ pointerId: number; startHeight: number; startY: number } | null>(null);
+
+  function finishDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  return (
+    <div
+      aria-label={`Resize D${channelIndex} height`}
+      aria-orientation="horizontal"
+      aria-valuemin={SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX}
+      aria-valuenow={Math.round(height)}
+      className="channelResizeHandle"
+      onPointerCancel={finishDrag}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        dragRef.current = {
+          pointerId: event.pointerId,
+          startHeight: height,
+          startY: event.clientY,
+        };
+      }}
+      onPointerMove={(event) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        event.preventDefault();
+        onResize(Math.max(SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX, drag.startHeight + event.clientY - drag.startY));
+      }}
+      onPointerUp={finishDrag}
+      role="separator"
+      style={{ top, height: SALEAE_ROW_V2_SPACING_PX }}
+      tabIndex={0}
+      title={`Drag to resize D${channelIndex}`}
+    />
   );
 }
 
@@ -2332,24 +2548,31 @@ function DeviceSettingsPanel({
   function toggleDigitalChannel(index: number) {
     const nextChannels = [...digitalChannels];
     nextChannels[index] = !nextChannels[index];
-    if (!nextChannels.some(Boolean)) {
-      nextChannels[index] = true;
-    }
-    const highestEnabled = nextChannels.reduce((highest, enabled, channelIndex) => (enabled ? channelIndex : highest), 0);
+    const highestEnabled = highestEnabledDigitalChannel(nextChannels);
     onUpdateSettings({ channel_count: Math.max(1, highestEnabled + 1) });
-    updateDeviceSettings({
-      digitalChannels: nextChannels,
-      triggerChannel: Math.min(session.deviceSettings.triggerChannel, highestEnabled),
-    });
+    onUpdateSession((current) => ({
+      ...current,
+      deviceSettings: {
+        ...current.deviceSettings,
+        digitalChannels: nextChannels,
+        triggerChannel: Math.min(current.deviceSettings.triggerChannel, highestEnabled),
+      },
+      message: `D${index} ${nextChannels[index] ? "shown and enabled" : "hidden and disabled"}`,
+    }));
   }
 
   function selectAllDigitalChannels(enabled: boolean) {
-    const nextCount = enabled ? 16 : 1;
+    const nextCount = enabled ? 32 : 1;
     onUpdateSettings({ channel_count: nextCount });
-    updateDeviceSettings({
-      digitalChannels: makeDigitalChannels(nextCount),
-      triggerChannel: 0,
-    });
+    onUpdateSession((current) => ({
+      ...current,
+      deviceSettings: {
+        ...current.deviceSettings,
+        digitalChannels: enabled ? Array.from({ length: 32 }, () => true) : Array.from({ length: 32 }, () => false),
+        triggerChannel: 0,
+      },
+      message: enabled ? "All 32 digital channels shown and enabled" : "All digital channels hidden and disabled",
+    }));
   }
 
   return (
@@ -2401,6 +2624,7 @@ function DeviceSettingsPanel({
                   "--channel-color": saleaeLegacyChannelColor(index),
                 } as CSSProperties
               }
+              title={`${enabled ? "Hide and disable" : "Show and enable"} D${index}`}
               type="button"
             >
               {index}

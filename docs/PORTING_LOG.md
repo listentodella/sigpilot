@@ -71,3 +71,5 @@ chore: 说明内容
   - 直接搬运原版高精度双层时间刻度、major/minor 分组和两级竖直虚线算法。
 - `docs/ported-features/2026-07-16-saleae-channel-colors.md`
   - 直接搬运原版 legacy 8 色通道色板，并统一 Devices、通道标签和波形颜色。
+- `docs/ported-features/2026-07-16-device-settings-channel-layout.md`
+  - Device Settings 捕获后通道显示/隐藏、32 通道自动布局、逐行高度拖动和纵向滚动。

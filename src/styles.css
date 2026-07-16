@@ -193,11 +193,13 @@ input[type="range"] {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   border-top: 1px solid var(--border-10);
 }
 
 .graphRowsMain {
+  height: 100%;
   display: flex;
   flex-direction: column;
   flex-grow: 1;
@@ -824,23 +826,45 @@ button:disabled {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: auto hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   position: relative;
   background: var(--background-10);
+  scrollbar-color: var(--grey100) var(--background-10);
+  scrollbar-width: thin;
 }
 
 .graph.rowV2 {
   background-color: rgba(var(--on-background-40-base), 0.025);
 }
 
+.graph::-webkit-scrollbar {
+  width: 11px;
+}
+
+.graph::-webkit-scrollbar-track {
+  background: var(--background-10);
+}
+
+.graph::-webkit-scrollbar-thumb {
+  border: 3px solid var(--background-10);
+  border-radius: 6px;
+  background: var(--grey100);
+}
+
+.graph::-webkit-scrollbar-thumb:hover {
+  background: var(--grey50);
+}
+
 .contentContainer.rowV2 {
   --graph-offset: calc(var(--channel-label-width) + (var(--row-v2-container-padding-px) * 1px));
-  min-height: 0;
-  flex: 1;
+  width: 100%;
+  flex: 0 0 auto;
   position: relative;
   padding: calc(var(--row-v2-container-padding-px) * 1px) 0 0 calc(var(--row-v2-container-padding-px) * 1px);
   display: grid;
   grid-template-columns: var(--channel-label-width) minmax(0, 1fr);
+  align-items: stretch;
   gap: calc(var(--row-v2-spacing-px) * 1px);
 }
 
@@ -858,6 +882,7 @@ button:disabled {
   min-height: 0;
   z-index: 1;
   display: grid;
+  align-content: start;
   gap: calc(var(--row-v2-spacing-px) * 1px);
   padding-top: 30px;
   padding-right: 4px;
@@ -1030,9 +1055,35 @@ button:disabled {
 
 .graphViewport {
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   position: relative;
   overflow: hidden;
   background: #101013;
+}
+
+.channelResizeHandle {
+  position: absolute;
+  left: calc(var(--row-v2-container-padding-px) * 1px);
+  right: 0;
+  z-index: 24;
+  border: 0;
+  background: transparent;
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.channelResizeHandle:hover,
+.channelResizeHandle:focus-visible {
+  background-color: rgba(var(--white-base), 0.6);
+  outline: none;
+}
+
+.channelResizeHandle::before {
+  content: "";
+  position: absolute;
+  inset: -3px 0;
 }
 
 .waveformCanvasHost {

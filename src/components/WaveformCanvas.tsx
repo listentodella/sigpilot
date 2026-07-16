@@ -1,5 +1,11 @@
 import { PointerEvent, useEffect, useRef, useState } from "react";
 import type { WaveformTile } from "../lib/api";
+import {
+  SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
+  SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
+  SALEAE_ROW_V2_SPACING_PX,
+  SALEAE_TIME_RULER_HEIGHT_PX,
+} from "../lib/saleaeChannelLayout";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import {
   getHorizontalGraphTicks,
@@ -8,6 +14,7 @@ import {
 } from "../lib/saleaeTimingDisplay";
 
 interface WaveformCanvasProps {
+  rowHeights: number[];
   tile: WaveformTile | null;
   onWidthChange: (width: number) => void;
   sampleRateHz: number;
@@ -22,7 +29,7 @@ const graphPaddingRight = 10;
 const digitalGraphGutterPx = 8;
 const digitalGraphLabelHeightPx = 16;
 const digitalMeasurementBoxMinWidthPx = 110;
-const timeRulerHeightPx = 30;
+const timeRulerHeightPx = SALEAE_TIME_RULER_HEIGHT_PX;
 const panningAnimationDurationMs = 300;
 
 type EdgeKind = "rising" | "falling";
@@ -52,6 +59,7 @@ interface HoverNavigation {
 }
 
 export function WaveformCanvas({
+  rowHeights,
   tile,
   onWidthChange,
   sampleRateHz,
@@ -67,6 +75,7 @@ export function WaveformCanvas({
   const viewportRef = useRef({ start: viewportStart, samples: viewportSamples });
   const sampleRateRef = useRef(sampleRateHz);
   const totalSamplesRef = useRef(totalSamples);
+  const rowHeightsRef = useRef(rowHeights);
   const hoverRef = useRef<HoverMeasurement | null>(null);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
@@ -84,7 +93,15 @@ export function WaveformCanvas({
       canvas.width = Math.max(1, Math.floor(rect.width * dpr));
       canvas.height = Math.max(1, Math.floor(rect.height * dpr));
       onWidthChange(Math.max(1, Math.floor(rect.width)));
-      draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, hoverRef.current, sampleRateRef.current);
+      draw(
+        canvas,
+        tileRef.current,
+        viewportRef.current.start,
+        viewportRef.current.samples,
+        hoverRef.current,
+        sampleRateRef.current,
+        rowHeightsRef.current,
+      );
     });
     observer.observe(host);
     return () => observer.disconnect();
@@ -95,9 +112,10 @@ export function WaveformCanvas({
     viewportRef.current = { start: viewportStart, samples: viewportSamples };
     sampleRateRef.current = sampleRateHz;
     totalSamplesRef.current = totalSamples;
+    rowHeightsRef.current = rowHeights;
     const canvas = canvasRef.current;
-    if (canvas) draw(canvas, tile, viewportStart, viewportSamples, hoverRef.current, sampleRateHz);
-  }, [sampleRateHz, tile, totalSamples, viewportSamples, viewportStart]);
+    if (canvas) draw(canvas, tile, viewportStart, viewportSamples, hoverRef.current, sampleRateHz, rowHeights);
+  }, [rowHeights, sampleRateHz, tile, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
@@ -121,7 +139,17 @@ export function WaveformCanvas({
   function scheduleViewportChange(start: number, samples: number) {
     viewportRef.current = { start, samples };
     const canvas = canvasRef.current;
-    if (canvas) draw(canvas, tileRef.current, start, samples, hoverRef.current, sampleRateRef.current);
+    if (canvas) {
+      draw(
+        canvas,
+        tileRef.current,
+        start,
+        samples,
+        hoverRef.current,
+        sampleRateRef.current,
+        rowHeightsRef.current,
+      );
+    }
     syncNavigationToViewport(start, samples);
 
     pendingViewportRef.current = { start, samples };
@@ -174,10 +202,19 @@ export function WaveformCanvas({
     const host = hostRef.current;
     if (!currentNavigation || !host) return;
 
-    const rect = host.getBoundingClientRect();
-    const laneHeight = getLaneHeight(rect, tileRef.current);
+    const channelLayout = getChannelLayout(rowHeightsRef.current, tileRef.current?.channels.length ?? 0)[
+      currentNavigation.channelIndex
+    ];
+    if (!channelLayout) return;
     setNavigation(
-      findChannelNavigation(tileRef.current, currentNavigation.channelIndex, start, samples, laneHeight),
+      findChannelNavigation(
+        tileRef.current,
+        currentNavigation.channelIndex,
+        start,
+        samples,
+        channelLayout.top,
+        channelLayout.height,
+      ),
     );
   }
 
@@ -252,7 +289,17 @@ export function WaveformCanvas({
     hoverRef.current = null;
     setNavigation(null);
     const canvas = canvasRef.current;
-    if (canvas) draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, null, sampleRateRef.current);
+    if (canvas) {
+      draw(
+        canvas,
+        tileRef.current,
+        viewportRef.current.start,
+        viewportRef.current.samples,
+        null,
+        sampleRateRef.current,
+        rowHeightsRef.current,
+      );
+    }
   }
 
   function updateHover(event: PointerEvent<HTMLDivElement>) {
@@ -269,6 +316,7 @@ export function WaveformCanvas({
       viewportRef.current.samples,
       x,
       y,
+      rowHeightsRef.current,
     );
     setNavigation(
       findHoverNavigation(
@@ -277,9 +325,18 @@ export function WaveformCanvas({
         viewportRef.current.start,
         viewportRef.current.samples,
         event.clientY - rect.top,
+        rowHeightsRef.current,
       ),
     );
-    draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, hoverRef.current, sampleRateRef.current);
+    draw(
+      canvas,
+      tileRef.current,
+      viewportRef.current.start,
+      viewportRef.current.samples,
+      hoverRef.current,
+      sampleRateRef.current,
+      rowHeightsRef.current,
+    );
   }
 
   useEffect(() => {
@@ -435,6 +492,7 @@ function draw(
   viewportSamples: number,
   hover: HoverMeasurement | null,
   sampleRateHz: number,
+  rowHeights: number[],
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -450,13 +508,16 @@ function draw(
   if (!tile || tile.channels.length === 0) {
     ctx.fillStyle = "rgba(255,255,255,0.55)";
     ctx.font = `${12 * devicePixelRatio}px Roboto, Helvetica, Arial, sans-serif`;
-    ctx.fillText("No capture loaded", 24 * devicePixelRatio, (timeRulerHeightPx + 24) * devicePixelRatio);
+    ctx.fillText(
+      tile ? "No channels visible" : "No capture loaded",
+      24 * devicePixelRatio,
+      (timeRulerHeightPx + 24) * devicePixelRatio,
+    );
     return;
   }
 
   const dpr = window.devicePixelRatio || 1;
-  const rulerHeight = timeRulerHeightPx * dpr;
-  const laneHeight = Math.max(34 * dpr, (height - rulerHeight) / tile.channels.length);
+  const channelLayout = getChannelLayout(rowHeights, tile.channels.length, dpr);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
   const usableWidth = Math.max(1, right - left);
@@ -464,7 +525,9 @@ function draw(
   const viewStart = viewportStart || 0;
 
   tile.channels.forEach((channel, index) => {
-    const top = rulerHeight + index * laneHeight;
+    const layout = channelLayout[index];
+    const top = layout.top;
+    const laneHeight = layout.height;
     const highY = top + laneHeight * 0.28;
     const lowY = top + laneHeight * 0.72;
     ctx.strokeStyle = "rgba(255,255,255,0.075)";
@@ -503,7 +566,7 @@ function draw(
   });
 
   if (hover) {
-    drawHoverMeasurement(ctx, canvas, tile, hover, viewportStart, viewportSamples, sampleRateHz);
+    drawHoverMeasurement(ctx, canvas, tile, hover, viewportStart, viewportSamples, sampleRateHz, rowHeights);
   }
 }
 
@@ -632,12 +695,15 @@ function findHoverNavigation(
   viewportStart: number,
   viewportSamples: number,
   y: number,
+  rowHeights: number[],
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
-  const laneHeight = getLaneHeight(rect, tile);
   if (y < timeRulerHeightPx) return null;
-  const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor((y - timeRulerHeightPx) / laneHeight)));
-  return findChannelNavigation(tile, channelIndex, viewportStart, viewportSamples, laneHeight);
+  const channelLayout = getChannelLayout(rowHeights, tile.channels.length);
+  const channelIndex = findChannelIndexAtY(channelLayout, Math.min(rect.height, y));
+  if (channelIndex === null) return null;
+  const layout = channelLayout[channelIndex];
+  return findChannelNavigation(tile, channelIndex, viewportStart, viewportSamples, layout.top, layout.height);
 }
 
 function findChannelNavigation(
@@ -645,6 +711,7 @@ function findChannelNavigation(
   channelIndex: number,
   viewportStart: number,
   viewportSamples: number,
+  channelTop: number,
   laneHeight: number,
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
@@ -659,14 +726,37 @@ function findChannelNavigation(
 
   return {
     channelIndex,
-    topPx: timeRulerHeightPx + channelIndex * laneHeight + Math.max(0, laneHeight - 26) / 2,
+    topPx: channelTop + Math.max(0, laneHeight - 26) / 2,
     previousEdge,
     nextEdge,
   };
 }
 
-function getLaneHeight(rect: DOMRect, tile: WaveformTile | null) {
-  return Math.max(34, (rect.height - timeRulerHeightPx) / Math.max(1, tile?.channels.length ?? 1));
+interface ChannelLayout {
+  height: number;
+  top: number;
+}
+
+function getChannelLayout(rowHeights: number[], channelCount: number, scale = 1): ChannelLayout[] {
+  let top = timeRulerHeightPx * scale;
+  return Array.from({ length: channelCount }, (_, index) => {
+    const height =
+      Math.max(
+        SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
+        rowHeights[index] ?? SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
+      ) * scale;
+    const layout = { height, top };
+    top += height + SALEAE_ROW_V2_SPACING_PX * scale;
+    return layout;
+  });
+}
+
+function findChannelIndexAtY(layout: ChannelLayout[], y: number) {
+  for (let index = 0; index < layout.length; index += 1) {
+    const row = layout[index];
+    if (y >= row.top && y <= row.top + row.height) return index;
+  }
+  return null;
 }
 
 function findHoverMeasurement(
@@ -676,15 +766,13 @@ function findHoverMeasurement(
   viewportSamples: number,
   x: number,
   y: number,
+  rowHeights: number[],
 ): HoverMeasurement | null {
   if (!tile || tile.channels.length === 0) return null;
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
-  const height = canvas.height;
-  const rulerHeight = timeRulerHeightPx * dpr;
-  if (y < rulerHeight) return null;
-  const laneHeight = Math.max(34 * dpr, (height - rulerHeight) / tile.channels.length);
-  const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor((y - rulerHeight) / laneHeight)));
+  const channelIndex = findChannelIndexAtY(getChannelLayout(rowHeights, tile.channels.length, dpr), y);
+  if (channelIndex === null) return null;
   const channel = tile.channels[channelIndex];
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
@@ -738,13 +826,15 @@ function drawHoverMeasurement(
   viewportStart: number,
   viewportSamples: number,
   sampleRateHz: number,
+  rowHeights: number[],
 ) {
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
   const height = canvas.height;
-  const rulerHeight = timeRulerHeightPx * dpr;
-  const laneHeight = Math.max(34 * dpr, (height - rulerHeight) / tile.channels.length);
-  const top = rulerHeight + hover.channelIndex * laneHeight;
+  const layout = getChannelLayout(rowHeights, tile.channels.length, dpr)[hover.channelIndex];
+  if (!layout) return;
+  const laneHeight = layout.height;
+  const top = layout.top;
   const bottom = Math.min(height, top + laneHeight);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
