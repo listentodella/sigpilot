@@ -859,7 +859,7 @@ button:disabled {
   z-index: 1;
   display: grid;
   gap: calc(var(--row-v2-spacing-px) * 1px);
-  padding-top: 22px;
+  padding-top: 30px;
   padding-right: 4px;
 }
 

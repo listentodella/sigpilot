@@ -63,3 +63,5 @@ chore: 说明内容
   - Timing Marker 对象模型、Add Pair/Single、右栏列表/动作和波形 marker overlay。
 - `docs/ported-features/2026-07-16-interaction-time-axis-polish.md`
   - 右侧栏 tooltip、Devices 通道色、左侧通道重命名/右键菜单、智能时间轴和竖直虚线。
+- `docs/ported-features/2026-07-16-saleae-time-axis.md`
+  - 直接搬运原版高精度双层时间刻度、major/minor 分组和两级竖直虚线算法。
