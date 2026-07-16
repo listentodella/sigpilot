@@ -859,6 +859,7 @@ button:disabled {
   z-index: 1;
   display: grid;
   gap: calc(var(--row-v2-spacing-px) * 1px);
+  padding-top: 22px;
   padding-right: 4px;
 }
 
@@ -873,6 +874,24 @@ button:disabled {
   padding: 0;
   text-align: left;
   cursor: pointer;
+}
+
+.channelRow.disabled {
+  opacity: 0.46;
+}
+
+.channelRow.triggerChannel .channelText strong::after {
+  content: " TRIG";
+  margin-left: 5px;
+  color: var(--selected-highlight);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.channelRow:focus-visible {
+  outline: 1px solid var(--selected-highlight);
+  outline-offset: 2px;
 }
 
 .channelHeader {
@@ -966,6 +985,67 @@ button:disabled {
 .channelText small {
   color: var(--on-background-30);
   font-size: 10px;
+}
+
+.channelNameInput {
+  width: 100%;
+  min-width: 0;
+  height: 22px;
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  color: var(--on-background-0);
+  background: var(--background-30);
+  padding: 0 5px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.channelNameInput:focus {
+  border-color: var(--selected-highlight);
+  outline: none;
+}
+
+.channelContextMenu {
+  width: 214px;
+  position: fixed;
+  z-index: 80;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-0);
+  box-shadow: var(--box-shadow);
+  padding: 5px;
+}
+
+.channelContextHeader {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border-20);
+  margin: 0 3px 4px;
+  color: var(--on-background-30);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.channelContextMenu button {
+  width: 100%;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  border-radius: 3px;
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 0 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.channelContextMenu button:hover,
+.channelContextMenu button.active {
+  color: var(--on-background-0);
+  background: var(--hover-background);
 }
 
 .graphViewport {
@@ -1452,6 +1532,65 @@ button:disabled {
   cursor: pointer;
 }
 
+.singleSwitcher[data-help-tooltip]::before,
+.singleSwitcher[data-help-tooltip]::after {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 8px);
+  z-index: 90;
+  opacity: 0;
+  transform: translate(3px, -50%);
+  transition:
+    opacity 90ms ease,
+    transform 90ms ease;
+  pointer-events: none;
+}
+
+.singleSwitcher[data-help-tooltip]::before {
+  content: attr(data-help-tooltip);
+  min-width: max-content;
+  max-width: 210px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-10);
+  background: var(--background-0);
+  box-shadow: var(--box-shadow);
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
+}
+
+.singleSwitcher[data-help-tooltip]::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  right: calc(100% + 4px);
+  border-top: 1px solid var(--border-20);
+  border-right: 1px solid var(--border-20);
+  background: var(--background-0);
+  transform: translate(3px, -50%) rotate(45deg);
+}
+
+.singleSwitcher[data-help-tooltip]:hover::before,
+.singleSwitcher[data-help-tooltip]:hover::after,
+.singleSwitcher[data-help-tooltip]:focus-visible::before,
+.singleSwitcher[data-help-tooltip]:focus-visible::after {
+  opacity: 1;
+}
+
+.singleSwitcher[data-help-tooltip]:hover::before,
+.singleSwitcher[data-help-tooltip]:focus-visible::before {
+  transform: translate(0, -50%);
+}
+
+.singleSwitcher[data-help-tooltip]:hover::after,
+.singleSwitcher[data-help-tooltip]:focus-visible::after {
+  transform: translate(0, -50%) rotate(45deg);
+}
+
 .singleSwitcher:hover,
 .selectedSwitcher {
   color: var(--on-background-0);
@@ -1687,23 +1826,27 @@ button:disabled {
 }
 
 .channelPickerButton.enabled.channel0 {
-  color: #001c26;
-  background: var(--channel0);
+  color: var(--on-channel-mso-0);
+  background: var(--channel-mso-0);
+  border-color: var(--channel-mso-0);
 }
 
 .channelPickerButton.enabled.channel1 {
-  color: #211600;
-  background: var(--channel1);
+  color: var(--on-channel-mso-1);
+  background: var(--channel-mso-1);
+  border-color: var(--channel-mso-1);
 }
 
 .channelPickerButton.enabled.channel2 {
-  color: #002011;
-  background: var(--channel2);
+  color: var(--on-channel-mso-2);
+  background: var(--channel-mso-2);
+  border-color: var(--channel-mso-2);
 }
 
 .channelPickerButton.enabled.channel3 {
-  color: #2a0010;
-  background: var(--channel3);
+  color: var(--on-channel-mso-3);
+  background: var(--channel-mso-3);
+  border-color: var(--channel-mso-3);
 }
 
 .modeButtonGroup {

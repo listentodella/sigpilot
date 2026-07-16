@@ -17,6 +17,7 @@ const graphPaddingRight = 10;
 const digitalGraphGutterPx = 8;
 const digitalGraphLabelHeightPx = 16;
 const digitalMeasurementBoxMinWidthPx = 110;
+const timeRulerHeightPx = 22;
 const panningAnimationDurationMs = 300;
 
 type EdgeKind = "rising" | "falling";
@@ -439,17 +440,18 @@ function draw(
   ctx.fillStyle = "#101013";
   ctx.fillRect(0, 0, width, height);
 
-  drawGrid(ctx, width, height);
+  drawTimeGrid(ctx, width, height, viewportStart, viewportSamples, sampleRateHz);
 
   if (!tile || tile.channels.length === 0) {
     ctx.fillStyle = "rgba(255,255,255,0.55)";
     ctx.font = `${12 * devicePixelRatio}px Roboto, Helvetica, Arial, sans-serif`;
-    ctx.fillText("No capture loaded", 24 * devicePixelRatio, 36 * devicePixelRatio);
+    ctx.fillText("No capture loaded", 24 * devicePixelRatio, (timeRulerHeightPx + 24) * devicePixelRatio);
     return;
   }
 
   const dpr = window.devicePixelRatio || 1;
-  const laneHeight = Math.max(34 * dpr, height / tile.channels.length);
+  const rulerHeight = timeRulerHeightPx * dpr;
+  const laneHeight = Math.max(34 * dpr, (height - rulerHeight) / tile.channels.length);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
   const usableWidth = Math.max(1, right - left);
@@ -457,7 +459,7 @@ function draw(
   const viewStart = viewportStart || 0;
 
   tile.channels.forEach((channel, index) => {
-    const top = index * laneHeight;
+    const top = rulerHeight + index * laneHeight;
     const highY = top + laneHeight * 0.28;
     const lowY = top + laneHeight * 0.72;
     ctx.strokeStyle = "rgba(255,255,255,0.075)";
@@ -628,7 +630,8 @@ function findHoverNavigation(
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
   const laneHeight = getLaneHeight(rect, tile);
-  const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor(y / laneHeight)));
+  if (y < timeRulerHeightPx) return null;
+  const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor((y - timeRulerHeightPx) / laneHeight)));
   return findChannelNavigation(tile, channelIndex, viewportStart, viewportSamples, laneHeight);
 }
 
@@ -651,14 +654,14 @@ function findChannelNavigation(
 
   return {
     channelIndex,
-    topPx: channelIndex * laneHeight + Math.max(0, laneHeight - 26) / 2,
+    topPx: timeRulerHeightPx + channelIndex * laneHeight + Math.max(0, laneHeight - 26) / 2,
     previousEdge,
     nextEdge,
   };
 }
 
 function getLaneHeight(rect: DOMRect, tile: WaveformTile | null) {
-  return Math.max(34, rect.height / Math.max(1, tile?.channels.length ?? 1));
+  return Math.max(34, (rect.height - timeRulerHeightPx) / Math.max(1, tile?.channels.length ?? 1));
 }
 
 function findHoverMeasurement(
@@ -673,8 +676,10 @@ function findHoverMeasurement(
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
   const height = canvas.height;
-  const laneHeight = Math.max(34 * dpr, height / tile.channels.length);
-  const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor(y / laneHeight)));
+  const rulerHeight = timeRulerHeightPx * dpr;
+  if (y < rulerHeight) return null;
+  const laneHeight = Math.max(34 * dpr, (height - rulerHeight) / tile.channels.length);
+  const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor((y - rulerHeight) / laneHeight)));
   const channel = tile.channels[channelIndex];
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
@@ -732,8 +737,9 @@ function drawHoverMeasurement(
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
   const height = canvas.height;
-  const laneHeight = Math.max(34 * dpr, height / tile.channels.length);
-  const top = hover.channelIndex * laneHeight;
+  const rulerHeight = timeRulerHeightPx * dpr;
+  const laneHeight = Math.max(34 * dpr, (height - rulerHeight) / tile.channels.length);
+  const top = rulerHeight + hover.channelIndex * laneHeight;
   const bottom = Math.min(height, top + laneHeight);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
@@ -1126,15 +1132,193 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: n
   ctx.closePath();
 }
 
-function drawGrid(ctx: CanvasRenderingContext2D, width: number, height: number) {
+function drawTimeGrid(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  viewportStart: number,
+  viewportSamples: number,
+  sampleRateHz: number,
+) {
   const dpr = window.devicePixelRatio || 1;
-  ctx.strokeStyle = "rgba(255,255,255,0.06)";
-  ctx.lineWidth = 1;
-  const step = 96 * dpr;
-  for (let x = 0; x < width; x += step) {
-    ctx.beginPath();
-    ctx.moveTo(Math.floor(x) + 0.5, 0);
-    ctx.lineTo(Math.floor(x) + 0.5, height);
-    ctx.stroke();
+  const rulerHeight = timeRulerHeightPx * dpr;
+  const left = graphPaddingLeft * dpr;
+  const right = width - graphPaddingRight * dpr;
+  const usableWidth = Math.max(1, right - left);
+
+  ctx.save();
+  ctx.fillStyle = "rgba(19, 19, 22, 0.92)";
+  ctx.fillRect(0, 0, width, rulerHeight);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(0, crispY(rulerHeight));
+  ctx.lineTo(width, crispY(rulerHeight));
+  ctx.stroke();
+
+  if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0 || !Number.isFinite(viewportSamples) || viewportSamples <= 0) {
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    const fallbackStep = 96 * dpr;
+    for (let x = left; x < right; x += fallbackStep) {
+      drawVerticalGridLine(ctx, x, rulerHeight, height, false, dpr);
+    }
+    ctx.restore();
+    return;
   }
+
+  const startSeconds = viewportStart / sampleRateHz;
+  const endSeconds = (viewportStart + viewportSamples) / sampleRateHz;
+  const viewportSeconds = Math.max(Number.EPSILON, viewportSamples / sampleRateHz);
+  const majorStep = niceTimeStep((viewportSeconds / Math.max(1, usableWidth / dpr)) * 280);
+  const majorSpacingPx = (majorStep / viewportSeconds) * usableWidth;
+  const minorStep = majorStep / 10;
+  const minorSpacingPx = majorSpacingPx / 10;
+  const drawMinorLines = minorSpacingPx >= 9 * dpr;
+  const firstMajor = Math.floor(startSeconds / majorStep) * majorStep;
+  const maxIterations = 700;
+  const epsilon = majorStep / 1000;
+
+  ctx.font = `${10 * dpr}px "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace`;
+  ctx.textBaseline = "alphabetic";
+  const minorLabelWidth = ctx.measureText(`+${formatAxisTime(minorStep, minorStep)}`).width;
+  const drawMinorLabels = minorSpacingPx >= 24 * dpr && minorLabelWidth <= minorSpacingPx + 6 * dpr;
+  let lastLabelRight = left;
+
+  let iterations = 0;
+  for (let major = firstMajor; major <= endSeconds + epsilon && iterations < maxIterations; major += majorStep) {
+    iterations += 1;
+    const nextMajor = major + majorStep;
+
+    if (major >= startSeconds - epsilon && major <= endSeconds + epsilon) {
+      const x = xForTime(major, left, right, startSeconds, viewportSeconds);
+      drawVerticalGridLine(ctx, x, rulerHeight, height, true, dpr);
+      lastLabelRight =
+        drawTimeTickLabel(ctx, formatAxisTime(major, majorStep), x, 10 * dpr, left, right, true, dpr, lastLabelRight) ??
+        lastLabelRight;
+    }
+
+    if (drawMinorLines) {
+      for (let index = 1; index < 10; index += 1) {
+        const minor = major + minorStep * index;
+        if (minor < startSeconds - epsilon || minor > endSeconds + epsilon) continue;
+        const x = xForTime(minor, left, right, startSeconds, viewportSeconds);
+        drawVerticalGridLine(ctx, x, rulerHeight, height, false, dpr);
+        if (drawMinorLabels) {
+          lastLabelRight =
+            drawTimeTickLabel(
+              ctx,
+              `+${formatAxisTime(minor - major, minorStep)}`,
+              x,
+              19 * dpr,
+              left,
+              right,
+              false,
+              dpr,
+              lastLabelRight,
+            ) ?? lastLabelRight;
+        }
+      }
+    }
+
+    if (!drawMinorLabels && majorSpacingPx >= 210 * dpr) {
+      const half = major + (nextMajor - major) / 2;
+      if (half >= startSeconds && half <= endSeconds) {
+        const halfX = xForTime(half, left, right, startSeconds, viewportSeconds);
+        lastLabelRight =
+          drawTimeTickLabel(
+            ctx,
+            `+${formatAxisTime((nextMajor - major) / 2, majorStep / 2)}`,
+            halfX,
+            19 * dpr,
+            left,
+            right,
+            false,
+            dpr,
+            lastLabelRight,
+          ) ?? lastLabelRight;
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawVerticalGridLine(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  top: number,
+  bottom: number,
+  major: boolean,
+  dpr: number,
+) {
+  ctx.save();
+  ctx.strokeStyle = major ? "rgba(255, 255, 255, 0.16)" : "rgba(255, 255, 255, 0.075)";
+  ctx.lineWidth = Math.max(1, dpr);
+  ctx.setLineDash(major ? [4 * dpr, 5 * dpr] : [2 * dpr, 5 * dpr]);
+  ctx.beginPath();
+  ctx.moveTo(crispX(x), top);
+  ctx.lineTo(crispX(x), bottom);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawTimeTickLabel(
+  ctx: CanvasRenderingContext2D,
+  label: string,
+  x: number,
+  baseline: number,
+  graphLeft: number,
+  graphRight: number,
+  major: boolean,
+  dpr: number,
+  minLabelLeft = graphLeft,
+) {
+  const paddingX = 3 * dpr;
+  const textWidth = ctx.measureText(label).width;
+  const labelWidth = textWidth + paddingX * 2;
+  const boxHeight = major ? 12 * dpr : 11 * dpr;
+  const preferredX = x + 4 * dpr;
+  const boxX = clamp(preferredX, graphLeft + 1 * dpr, Math.max(graphLeft + 1 * dpr, graphRight - labelWidth - 1 * dpr));
+  const boxY = Math.max(1 * dpr, baseline - boxHeight + 2 * dpr);
+  if (!major && boxX < minLabelLeft + 4 * dpr) return null;
+
+  ctx.save();
+  ctx.fillStyle = major ? "rgba(16, 16, 19, 0.86)" : "rgba(16, 16, 19, 0.64)";
+  roundRect(ctx, boxX, boxY, labelWidth, boxHeight, 2 * dpr);
+  ctx.fill();
+  ctx.fillStyle = major ? "rgba(255, 255, 255, 0.72)" : "rgba(255, 255, 255, 0.46)";
+  ctx.fillText(label, boxX + paddingX, baseline);
+  ctx.restore();
+  return boxX + labelWidth;
+}
+
+function niceTimeStep(rawSeconds: number) {
+  if (!Number.isFinite(rawSeconds) || rawSeconds <= 0) return 1e-3;
+  const exponent = Math.floor(Math.log10(rawSeconds));
+  const magnitude = 10 ** exponent;
+  const fraction = rawSeconds / magnitude;
+  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+  return niceFraction * magnitude;
+}
+
+function xForTime(seconds: number, left: number, right: number, viewStartSeconds: number, viewSeconds: number) {
+  return left + ((seconds - viewStartSeconds) / viewSeconds) * Math.max(1, right - left);
+}
+
+function formatAxisTime(seconds: number, resolutionSeconds = Math.abs(seconds)) {
+  if (!Number.isFinite(seconds)) return "--";
+  if (Math.abs(seconds) < 1e-15) return "0 s";
+  const sign = seconds < 0 ? "-" : "";
+  const abs = Math.abs(seconds);
+  if (abs < 1e-9) return `${sign}${formatAxisNumber(abs * 1e12, resolutionSeconds * 1e12)} ps`;
+  if (abs < 1e-6) return `${sign}${formatAxisNumber(abs * 1e9, resolutionSeconds * 1e9)} ns`;
+  if (abs < 1e-3) return `${sign}${formatAxisNumber(abs * 1e6, resolutionSeconds * 1e6)} us`;
+  if (abs < 1) return `${sign}${formatAxisNumber(abs * 1e3, resolutionSeconds * 1e3)} ms`;
+  return `${sign}${formatAxisNumber(abs, resolutionSeconds)} s`;
+}
+
+function formatAxisNumber(value: number, resolution: number) {
+  if (!Number.isFinite(value)) return "--";
+  if (!Number.isFinite(resolution) || resolution <= 0) return trim(value);
+  const decimals = resolution >= 1 ? 0 : Math.min(6, Math.max(0, Math.ceil(-Math.log10(resolution)) + 1));
+  return value.toFixed(decimals).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
 }

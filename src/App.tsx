@@ -26,7 +26,19 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import analyzersIcon from "./assets/saleae/sidebar/analyzers.svg";
 import cursorsIcon from "./assets/saleae/sidebar/cursors.svg";
 import devicesIcon from "./assets/saleae/sidebar/devices.svg";
@@ -78,6 +90,7 @@ interface UiSession {
   selectedDevice: string;
   settings: CaptureSettings;
   deviceSettings: UiDeviceSettings;
+  channelLabels: string[];
   summary: CaptureSummary | null;
   progress: CaptureProgress | null;
   tile: WaveformTile | null;
@@ -190,6 +203,20 @@ function makeDigitalChannels(channelCount: number) {
   return Array.from({ length: 32 }, (_, index) => index < channelCount);
 }
 
+function channelLabelsForCount(channelCount: number, existing: string[] = []) {
+  return Array.from({ length: Math.max(1, channelCount) }, (_, index) => existing[index] ?? `D${index}`);
+}
+
+function summaryWithLabels(summary: CaptureSummary, labels: string[]): CaptureSummary {
+  return {
+    ...summary,
+    metadata: {
+      ...summary.metadata,
+      labels: channelLabelsForCount(summary.metadata.channel_count, labels),
+    },
+  };
+}
+
 function defaultDeviceSettings(channelCount: number): UiDeviceSettings {
   return {
     bufferSizeMb: 1024,
@@ -265,6 +292,9 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     deviceSettings: source
       ? { ...source.deviceSettings, digitalChannels: [...source.deviceSettings.digitalChannels] }
       : defaultDeviceSettings(settings.channel_count),
+    channelLabels: source
+      ? channelLabelsForCount(settings.channel_count, source.channelLabels)
+      : channelLabelsForCount(settings.channel_count),
     summary: null,
     progress: null,
     tile: null,
@@ -340,9 +370,12 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedPanel, setSelectedPanel] = useState<SidebarPanel | undefined>(undefined);
   const [footerPopover, setFooterPopover] = useState<FooterPopover>(null);
+  const [editingChannel, setEditingChannel] = useState<number | null>(null);
+  const [channelContextMenu, setChannelContextMenu] = useState<{ channelIndex: number; x: number; y: number } | null>(null);
   const [startupMessage, setStartupMessage] = useState("Ready");
 
   const footerRef = useRef<HTMLElement>(null);
+  const channelContextMenuRef = useRef<HTMLDivElement>(null);
   const sessionsRef = useRef<UiSession[]>([]);
   const activeSessionIdRef = useRef<string | null>(null);
   const captureSessionRef = useRef<string | null>(null);
@@ -405,6 +438,9 @@ export default function App() {
       if (!footerRef.current?.contains(event.target as Node)) {
         setFooterPopover(null);
       }
+      if (!channelContextMenuRef.current?.contains(event.target as Node)) {
+        setChannelContextMenu(null);
+      }
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -423,7 +459,8 @@ export default function App() {
         if (!targetId) return;
         updateSession(targetId, (session) => ({
           ...session,
-          summary: event.payload,
+          channelLabels: channelLabelsForCount(event.payload.metadata.channel_count, session.channelLabels),
+          summary: summaryWithLabels(event.payload, session.channelLabels),
           viewportStart: 0,
           viewportSamples: Math.min(event.payload.metadata.sample_count, 100_000),
           cursorState: {
@@ -458,10 +495,19 @@ export default function App() {
   }, [updateSession]);
 
   const channelLabels = useMemo(
-    () =>
-      activeSession?.summary?.metadata.labels ??
-      Array.from({ length: activeSession?.settings.channel_count ?? 16 }, (_, index) => `D${index}`),
-    [activeSession?.settings.channel_count, activeSession?.summary?.metadata.labels],
+    () => {
+      const count = activeSession?.summary?.metadata.channel_count ?? activeSession?.settings.channel_count ?? 16;
+      const labels = activeSession?.summary?.metadata.labels.length
+        ? activeSession.summary.metadata.labels
+        : activeSession?.channelLabels;
+      return channelLabelsForCount(count, labels);
+    },
+    [
+      activeSession?.channelLabels,
+      activeSession?.settings.channel_count,
+      activeSession?.summary?.metadata.channel_count,
+      activeSession?.summary?.metadata.labels,
+    ],
   );
 
   const totalSamples = activeSession?.summary?.metadata.sample_count ?? 0;
@@ -535,7 +581,16 @@ export default function App() {
           channels: [],
         });
         if (requestSeq === tileRequestSeq.current) {
-          updateSession(sessionSnapshot.id, (session) => ({ ...session, tile: next }));
+          updateSession(sessionSnapshot.id, (session) => ({
+            ...session,
+            tile: {
+              ...next,
+              channels: next.channels.map((channel) => ({
+                ...channel,
+                label: session.channelLabels[channel.channel] ?? channel.label,
+              })),
+            },
+          }));
         }
       } catch (error) {
         if (requestSeq === tileRequestSeq.current) {
@@ -572,7 +627,8 @@ export default function App() {
       const next = await startCapture(nextSettings);
       updateSession(session.id, (current) => ({
         ...current,
-        summary: next,
+        channelLabels: channelLabelsForCount(next.metadata.channel_count, current.channelLabels),
+        summary: summaryWithLabels(next, current.channelLabels),
         viewportStart: 0,
         viewportSamples: Math.min(next.metadata.sample_count, 100_000),
         cursorState: {
@@ -644,6 +700,7 @@ export default function App() {
       activeSession && !activeSession.summary
         ? activeSession
         : createSession(summary.metadata.source_device || selectedDevice, activeSession ?? undefined);
+    const labels = channelLabelsForCount(summary.metadata.channel_count, summary.metadata.labels);
     updateSession(target.id, (session) => ({
       ...session,
       selectedDevice: summary.metadata.source_device || session.selectedDevice,
@@ -658,8 +715,9 @@ export default function App() {
         digitalChannels: makeDigitalChannels(summary.metadata.channel_count),
         triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, summary.metadata.channel_count - 1)),
       },
+      channelLabels: labels,
       cursorState: defaultCursorState(summary.metadata.sample_count, summary.metadata.channel_count),
-      summary,
+      summary: summaryWithLabels(summary, labels),
       tile: null,
       viewportStart: 0,
       viewportSamples: Math.min(summary.metadata.sample_count, 100_000),
@@ -736,7 +794,86 @@ export default function App() {
 
   function updateActiveSettings(patch: Partial<CaptureSettings>) {
     if (!activeSession) return;
-    updateSession(activeSession.id, (session) => ({ ...session, settings: { ...session.settings, ...patch } }));
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      channelLabels:
+        patch.channel_count == null
+          ? session.channelLabels
+          : channelLabelsForCount(patch.channel_count, session.channelLabels),
+      settings: { ...session.settings, ...patch },
+    }));
+  }
+
+  function renameChannelLabel(channelIndex: number, name: string) {
+    if (!activeSession) return;
+    const nextName = name.trim() || `D${channelIndex}`;
+    updateSession(activeSession.id, (session) => {
+      const count = session.summary?.metadata.channel_count ?? session.settings.channel_count;
+      const labels = channelLabelsForCount(count, session.channelLabels);
+      labels[channelIndex] = nextName;
+      return {
+        ...session,
+        channelLabels: labels,
+        summary: session.summary ? summaryWithLabels(session.summary, labels) : session.summary,
+        tile: session.tile
+          ? {
+              ...session.tile,
+              channels: session.tile.channels.map((channel) =>
+                channel.channel === channelIndex ? { ...channel, label: nextName } : channel,
+              ),
+            }
+          : session.tile,
+        message: `D${channelIndex} renamed to ${nextName}`,
+      };
+    });
+  }
+
+  function setChannelEnabled(channelIndex: number, enabled: boolean) {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const digitalChannels = [...session.deviceSettings.digitalChannels];
+      while (digitalChannels.length <= channelIndex) digitalChannels.push(false);
+      digitalChannels[channelIndex] = enabled;
+      if (!digitalChannels.some(Boolean)) digitalChannels[channelIndex] = true;
+      const highestEnabled = digitalChannels.reduce((highest, isEnabled, index) => (isEnabled ? index : highest), 0);
+      const channelCount = Math.max(1, highestEnabled + 1);
+      return {
+        ...session,
+        channelLabels: channelLabelsForCount(channelCount, session.channelLabels),
+        settings: { ...session.settings, channel_count: channelCount },
+        deviceSettings: {
+          ...session.deviceSettings,
+          digitalChannels,
+          triggerChannel: Math.min(session.deviceSettings.triggerChannel, highestEnabled),
+        },
+        message: `D${channelIndex} ${digitalChannels[channelIndex] ? "enabled" : "disabled"} for next capture`,
+      };
+    });
+  }
+
+  function setTriggerChannel(channelIndex: number) {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      deviceSettings: {
+        ...session.deviceSettings,
+        captureMode: "Trigger",
+        triggerChannel: channelIndex,
+      },
+      message: `D${channelIndex} selected as trigger channel`,
+    }));
+    openSidebarPanel("devices");
+  }
+
+  function addAnalyzerForChannel(channelIndex: number) {
+    openSidebarPanel("analyzers");
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      analyzers: session.analyzers.includes("Async Serial") ? session.analyzers : [...session.analyzers, "Async Serial"],
+      decodeChannel: channelIndex,
+      message: `Async Serial assigned to D${channelIndex}`,
+    }));
   }
 
   function openSidebarPanel(panel: SidebarPanel) {
@@ -1028,17 +1165,56 @@ export default function App() {
                       style={{ gridTemplateRows: `repeat(${Math.max(1, channelLabels.length)}, minmax(34px, 1fr))` }}
                     >
                       {channelLabels.map((label, index) => (
-                        <button className="channelRow" key={`${label}-${index}`} title={label}>
-                          <span className={`channelHeader channel${index % 4} digital small focusable`}>
-                            <span className="channelNumber">{index}</span>
-                          </span>
-                          <span className="channelText">
-                            <strong>{label}</strong>
-                            <small>D{index}</small>
-                          </span>
-                        </button>
+                        <ChannelLabelRow
+                          index={index}
+                          isEditing={editingChannel === index}
+                          isEnabled={activeSession.deviceSettings.digitalChannels[index] ?? index < activeSession.settings.channel_count}
+                          isTrigger={activeSession.deviceSettings.triggerChannel === index}
+                          key={index}
+                          label={label}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            setEditingChannel(null);
+                            setChannelContextMenu({ channelIndex: index, x: event.clientX, y: event.clientY });
+                          }}
+                          onEditEnd={() => setEditingChannel(null)}
+                          onEditStart={() => {
+                            setChannelContextMenu(null);
+                            setEditingChannel(index);
+                          }}
+                          onRename={(name) => renameChannelLabel(index, name)}
+                        />
                       ))}
                     </div>
+                    {channelContextMenu && (
+                      <ChannelContextMenu
+                        channelIndex={channelContextMenu.channelIndex}
+                        isEnabled={
+                          activeSession.deviceSettings.digitalChannels[channelContextMenu.channelIndex] ??
+                          channelContextMenu.channelIndex < activeSession.settings.channel_count
+                        }
+                        isTrigger={activeSession.deviceSettings.triggerChannel === channelContextMenu.channelIndex}
+                        onAddAnalyzer={() => addAnalyzerForChannel(channelContextMenu.channelIndex)}
+                        onClose={() => setChannelContextMenu(null)}
+                        onRename={() => {
+                          setEditingChannel(channelContextMenu.channelIndex);
+                          setChannelContextMenu(null);
+                        }}
+                        onSetTrigger={() => setTriggerChannel(channelContextMenu.channelIndex)}
+                        onToggleChannel={() =>
+                          setChannelEnabled(
+                            channelContextMenu.channelIndex,
+                            !(
+                              activeSession.deviceSettings.digitalChannels[channelContextMenu.channelIndex] ??
+                              channelContextMenu.channelIndex < activeSession.settings.channel_count
+                            ),
+                          )
+                        }
+                        refElement={channelContextMenuRef}
+                        x={channelContextMenu.x}
+                        y={channelContextMenu.y}
+                      />
+                    )}
                     <div className="graphViewport">
                       <WaveformCanvas
                         tile={activeSession.tile}
@@ -1154,6 +1330,152 @@ function SaleaeSidebarIcon({ iconUrl }: { iconUrl: string }) {
       className="saleaeSidebarIcon"
       style={{ "--sidebar-icon-url": `url(${iconUrl})` } as CSSProperties}
     />
+  );
+}
+
+function ChannelLabelRow({
+  index,
+  isEditing,
+  isEnabled,
+  isTrigger,
+  label,
+  onContextMenu,
+  onEditEnd,
+  onEditStart,
+  onRename,
+}: {
+  index: number;
+  isEditing: boolean;
+  isEnabled: boolean;
+  isTrigger: boolean;
+  label: string;
+  onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  onEditEnd: () => void;
+  onEditStart: () => void;
+  onRename: (name: string) => void;
+}) {
+  const [draft, setDraft] = useState(label);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isEditing) {
+      setDraft(label);
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isEditing, label]);
+
+  function commit() {
+    onRename(draft);
+    onEditEnd();
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setDraft(label);
+      onEditEnd();
+    }
+  }
+
+  return (
+    <div
+      className={`channelRow ${isEnabled ? "" : "disabled"} ${isTrigger ? "triggerChannel" : ""}`}
+      onContextMenu={onContextMenu}
+      onDoubleClick={onEditStart}
+      role="button"
+      tabIndex={0}
+      title={`${label} - double click to rename`}
+    >
+      <span className={`channelHeader channel${index % 4} digital small focusable`}>
+        <span className="channelNumber">{index}</span>
+      </span>
+      <span className="channelText">
+        {isEditing ? (
+          <input
+            aria-label={`Rename D${index}`}
+            className="channelNameInput"
+            onBlur={commit}
+            onChange={(event) => setDraft(event.target.value)}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={handleKeyDown}
+            ref={inputRef}
+            value={draft}
+          />
+        ) : (
+          <strong>{label}</strong>
+        )}
+        <small>
+          D{index}
+          {isTrigger ? " - trigger" : ""}
+        </small>
+      </span>
+    </div>
+  );
+}
+
+function ChannelContextMenu({
+  channelIndex,
+  isEnabled,
+  isTrigger,
+  onAddAnalyzer,
+  onClose,
+  onRename,
+  onSetTrigger,
+  onToggleChannel,
+  refElement,
+  x,
+  y,
+}: {
+  channelIndex: number;
+  isEnabled: boolean;
+  isTrigger: boolean;
+  onAddAnalyzer: () => void;
+  onClose: () => void;
+  onRename: () => void;
+  onSetTrigger: () => void;
+  onToggleChannel: () => void;
+  refElement: RefObject<HTMLDivElement>;
+  x: number;
+  y: number;
+}) {
+  const menuLeft = typeof window === "undefined" ? x : Math.max(8, Math.min(x, window.innerWidth - 230));
+  const menuTop = typeof window === "undefined" ? y : Math.max(8, Math.min(y, window.innerHeight - 190));
+
+  function run(action: () => void) {
+    action();
+    onClose();
+  }
+
+  return (
+    <div
+      className="channelContextMenu"
+      onContextMenu={(event) => event.preventDefault()}
+      ref={refElement}
+      role="menu"
+      style={{ left: menuLeft, top: menuTop }}
+    >
+      <div className="channelContextHeader">D{channelIndex}</div>
+      <button onClick={() => run(onRename)} role="menuitem" type="button">
+        Rename
+      </button>
+      <button onClick={() => run(onToggleChannel)} role="menuitem" type="button">
+        {isEnabled ? "Disable Channel" : "Enable Channel"}
+      </button>
+      <button className={isTrigger ? "active" : ""} onClick={() => run(onSetTrigger)} role="menuitem" type="button">
+        Set as Trigger
+      </button>
+      <button onClick={() => run(onAddAnalyzer)} role="menuitem" type="button">
+        Add Analyzer
+      </button>
+    </div>
   );
 }
 
@@ -1783,10 +2105,14 @@ function RightSidebar({
             return (
               <button
                 className={`singleSwitcher ${allowed.isSelectable ? "selectableSwitcher" : "disabledSwitcher"} ${isSelected ? "selectedSwitcher" : ""}`}
-                disabled={!allowed.isSelectable}
+                aria-disabled={!allowed.isSelectable}
+                aria-label={title}
+                data-help-tooltip={allowed.disabledReason ?? title}
+                data-help-tooltip-at="left"
                 key={panel}
-                onClick={() => onSelectPanel(isSelected ? undefined : panel)}
-                title={allowed.disabledReason ?? title}
+                onClick={() => {
+                  if (allowed.isSelectable) onSelectPanel(isSelected ? undefined : panel);
+                }}
                 type="button"
               >
                 <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
