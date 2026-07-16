@@ -63,6 +63,8 @@ chore: 说明内容
   - Timing Marker 对象模型、Add Pair/Single、右栏列表/动作和波形 marker overlay。
 - `docs/ported-features/2026-07-16-extensions-sidebar.md`
   - Extensions 应用级管理器、搜索/菜单/列表、安装启停、创建/加载、详情页与 HLA selector 联动。
+- `docs/ported-features/2026-07-16-notes-sidebar.md`
+  - Notes 原版标题/帮助/编辑器排版、`N N` 快捷键和 session 独立内容。
 - `docs/ported-features/2026-07-16-interaction-time-axis-polish.md`
   - 右侧栏 tooltip、Devices 通道色、左侧通道重命名/右键菜单、智能时间轴和竖直虚线。
 - `docs/ported-features/2026-07-16-saleae-time-axis.md`

@@ -47,6 +47,7 @@ import measurementsIcon from "./assets/saleae/sidebar/measurements.svg";
 import notesIcon from "./assets/saleae/sidebar/notes.svg";
 import recordingSettingsIcon from "./assets/saleae/sidebar/recordingSettings.svg";
 import timingMarkersIcon from "./assets/saleae/sidebar/timingMarkers.svg";
+import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
@@ -2197,7 +2198,7 @@ function SidebarPanelContent({
   const meta = panelMeta[panel];
   return (
     <div className="sidebarPanelContent">
-      {panel !== "extensions" && (
+      {panel !== "extensions" && panel !== "notes" && (
         <header className="sidebarPanelHeader">
           <span>
             <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
@@ -2274,11 +2275,9 @@ function SidebarPanelContent({
         />
       )}
       {panel === "notes" && session && (
-        <textarea
-          className="notesEditor"
-          onChange={(event) => onUpdateSession((current) => ({ ...current, notes: event.target.value }))}
-          placeholder="Capture notes"
-          value={session.notes}
+        <CaptureNotesPanel
+          notes={session.notes}
+          onChange={(notes) => onUpdateSession((current) => ({ ...current, notes }))}
         />
       )}
     </div>

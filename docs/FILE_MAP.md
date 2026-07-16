@@ -20,6 +20,8 @@
 - `src/components/DeviceStartScreen.tsx`
   - 启动时的设备选择界面。
   - 使用 Saleae Logic / Logic Pro 风格设备图。
+- `src/components/CaptureNotesPanel.tsx`
+  - Notes 右栏标题、帮助说明和 session 级捕获说明编辑器。
 - `src/components/LogicToolbar.tsx`
   - 顶部工具栏骨架。
   - 当前负责 Start、Add Analyzer、Range Measurements、Marker 操作入口。
