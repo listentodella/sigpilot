@@ -17,6 +17,7 @@ const graphPaddingRight = 10;
 const digitalGraphGutterPx = 8;
 const digitalGraphLabelHeightPx = 16;
 const digitalMeasurementBoxMinWidthPx = 110;
+const panningAnimationDurationMs = 300;
 
 type EdgeKind = "rising" | "falling";
 
@@ -64,6 +65,7 @@ export function WaveformCanvas({
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
   const viewportFrameRef = useRef<number | null>(null);
+  const animatedViewportFrameRef = useRef<number | null>(null);
   const [hoverNavigation, setHoverNavigation] = useState<HoverNavigation | null>(null);
 
   useEffect(() => {
@@ -96,6 +98,7 @@ export function WaveformCanvas({
       if (viewportFrameRef.current !== null) {
         cancelAnimationFrame(viewportFrameRef.current);
       }
+      cancelViewportAnimation();
     };
   }, []);
 
@@ -105,18 +108,15 @@ export function WaveformCanvas({
   }
 
   function clampViewport(start: number, samples: number) {
-    const currentTotalSamples = totalSamplesRef.current;
-    const minSamples = currentTotalSamples ? 1 : 1;
-    const nextSamples = Math.max(minSamples, Math.min(currentTotalSamples || samples, Math.round(samples)));
-    const maxStart = Math.max(0, (currentTotalSamples || 0) - nextSamples);
-    const nextStart = Math.max(0, Math.min(maxStart, Math.round(start)));
-    scheduleViewportChange(nextStart, nextSamples);
+    const next = normalizeViewport(start, samples, totalSamplesRef.current);
+    scheduleViewportChange(next.start, next.samples);
   }
 
   function scheduleViewportChange(start: number, samples: number) {
     viewportRef.current = { start, samples };
     const canvas = canvasRef.current;
     if (canvas) draw(canvas, tileRef.current, start, samples, hoverRef.current, sampleRateRef.current);
+    syncNavigationToViewport(start, samples);
 
     pendingViewportRef.current = { start, samples };
     if (viewportFrameRef.current !== null) return;
@@ -128,6 +128,53 @@ export function WaveformCanvas({
     });
   }
 
+  function animateViewportTo(start: number, samples: number) {
+    cancelViewportAnimation();
+    const target = normalizeViewport(start, samples, totalSamplesRef.current);
+    const initial = viewportRef.current;
+    const startDelta = target.start - initial.start;
+    const samplesDelta = target.samples - initial.samples;
+    if (Math.abs(startDelta) < 1 && Math.abs(samplesDelta) < 1) {
+      scheduleViewportChange(target.start, target.samples);
+      return;
+    }
+
+    const startedAt = performance.now();
+    const step = (now: number) => {
+      const progress = clamp((now - startedAt) / panningAnimationDurationMs, 0, 1);
+      const eased = easeOutCubic(progress);
+      scheduleViewportChange(initial.start + startDelta * eased, initial.samples + samplesDelta * eased);
+
+      if (progress < 1) {
+        animatedViewportFrameRef.current = requestAnimationFrame(step);
+      } else {
+        animatedViewportFrameRef.current = null;
+        scheduleViewportChange(target.start, target.samples);
+      }
+    };
+
+    animatedViewportFrameRef.current = requestAnimationFrame(step);
+  }
+
+  function cancelViewportAnimation() {
+    if (animatedViewportFrameRef.current !== null) {
+      cancelAnimationFrame(animatedViewportFrameRef.current);
+      animatedViewportFrameRef.current = null;
+    }
+  }
+
+  function syncNavigationToViewport(start: number, samples: number) {
+    const currentNavigation = hoverNavigationRef.current;
+    const host = hostRef.current;
+    if (!currentNavigation || !host) return;
+
+    const rect = host.getBoundingClientRect();
+    const laneHeight = getLaneHeight(rect, tileRef.current);
+    setNavigation(
+      findChannelNavigation(tileRef.current, currentNavigation.channelIndex, start, samples, laneHeight),
+    );
+  }
+
   function jumpToEdge(direction: EdgeNavigationDirection) {
     const navigation = hoverNavigationRef.current;
     const edgeSample = direction === "next" ? navigation?.nextEdge : navigation?.previousEdge;
@@ -135,17 +182,14 @@ export function WaveformCanvas({
 
     const current = viewportRef.current;
     const offset = current.samples * (direction === "next" ? 0.25 : 0.75);
-    clampViewport(edgeSample - offset, current.samples);
-    const canvas = canvasRef.current;
-    if (canvas) {
-      hoverRef.current = null;
-      draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, null, sampleRateRef.current);
-    }
+    hoverRef.current = null;
+    animateViewportTo(edgeSample - offset, current.samples);
   }
 
   function handleWheel(event: WheelEvent) {
     if (!totalSamplesRef.current) return;
     event.preventDefault();
+    cancelViewportAnimation();
     hoverRef.current = null;
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -170,6 +214,7 @@ export function WaveformCanvas({
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (!totalSamplesRef.current) return;
+    cancelViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
     hoverRef.current = null;
     dragRef.current = {
@@ -302,15 +347,14 @@ function DigitalNavigationButton({
   onNavigate: () => void;
   top: number;
 }) {
-  const shortcut = direction === "next" ? "Cmd/Ctrl + Right" : "Cmd/Ctrl + Left";
   const label = direction === "next" ? "Next Edge" : "Previous Edge";
+  const shortcutPieces = shortcutPiecesForEdgeNavigation(direction);
   return (
     <button
       type="button"
       className={`digitalNavigationButton ${direction}`}
       style={{ top }}
-      title={`${label} (${shortcut})`}
-      aria-label={`${label} (${shortcut})`}
+      aria-label={`${label} (${shortcutPieces.join(" + ")})`}
       onPointerDown={(event) => event.stopPropagation()}
       onDoubleClick={(event) => event.stopPropagation()}
       onClick={(event) => {
@@ -319,8 +363,25 @@ function DigitalNavigationButton({
       }}
     >
       {direction === "next" ? <JumpToNextEdgeIcon /> : <JumpToPreviousEdgeIcon />}
+      <span className={`edgeNavigationTooltip ${direction}`} role="tooltip">
+        <span>{label}</span>
+        <span className="shortcutIcon">
+          {shortcutPieces.map((piece, index) => (
+            <span className="shortcutPiece" key={`${piece}-${index}`}>
+              {piece}
+            </span>
+          ))}
+        </span>
+      </span>
     </button>
   );
+}
+
+function shortcutPiecesForEdgeNavigation(direction: EdgeNavigationDirection) {
+  const isMac =
+    typeof navigator !== "undefined" &&
+    (/Mac|iPhone|iPad|iPod/.test(navigator.platform) || /Mac/.test(navigator.userAgent));
+  return [isMac ? "⌘" : "Ctrl", direction === "next" ? "→" : "←"];
 }
 
 function JumpToNextEdgeIcon() {
@@ -566,8 +627,20 @@ function findHoverNavigation(
   y: number,
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
-  const laneHeight = Math.max(34, rect.height / tile.channels.length);
+  const laneHeight = getLaneHeight(rect, tile);
   const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor(y / laneHeight)));
+  return findChannelNavigation(tile, channelIndex, viewportStart, viewportSamples, laneHeight);
+}
+
+function findChannelNavigation(
+  tile: WaveformTile | null,
+  channelIndex: number,
+  viewportStart: number,
+  viewportSamples: number,
+  laneHeight: number,
+): HoverNavigation | null {
+  if (!tile || tile.channels.length === 0) return null;
+  if (channelIndex < 0 || channelIndex >= tile.channels.length) return null;
   const edges = collectDigitalEdges(tile, channelIndex);
   if (edges.length === 0) return null;
 
@@ -582,6 +655,10 @@ function findHoverNavigation(
     previousEdge,
     nextEdge,
   };
+}
+
+function getLaneHeight(rect: DOMRect, tile: WaveformTile | null) {
+  return Math.max(34, rect.height / Math.max(1, tile?.channels.length ?? 1));
 }
 
 function findHoverMeasurement(
@@ -1020,6 +1097,18 @@ function trim(value: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeViewport(start: number, samples: number, totalSamples: number) {
+  const minSamples = totalSamples ? 1 : 1;
+  const nextSamples = Math.max(minSamples, Math.min(totalSamples || samples, Math.round(samples)));
+  const maxStart = Math.max(0, (totalSamples || 0) - nextSamples);
+  const nextStart = Math.max(0, Math.min(maxStart, Math.round(start)));
+  return { start: nextStart, samples: nextSamples };
+}
+
+function easeOutCubic(progress: number) {
+  return 1 - Math.pow(1 - progress, 3);
 }
 
 function isTextEditingTarget(target: EventTarget | null) {

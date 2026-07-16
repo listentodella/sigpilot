@@ -45,3 +45,5 @@ chore: 说明内容
   - 当前 Saleae 风格 UI 骨架基线。
 - `docs/ported-features/2026-07-16-digital-edge-navigation.md`
   - 数字通道 hover 时的 Previous Edge / Next Edge 按钮与快捷键跳转。
+- `docs/ported-features/2026-07-16-digital-edge-navigation-polish.md`
+  - 边沿跳转 tooltip、图标方向、300ms 平移动画细节优化。
