@@ -51,4 +51,4 @@
 
 ## 对应 Git 提交
 
-- 待提交后回填。
+- `68e578c` (`polish: digital edge navigation`)
