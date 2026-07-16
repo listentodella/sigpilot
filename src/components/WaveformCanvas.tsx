@@ -9,6 +9,8 @@ import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
+  SALEAE_DARK_GRIDLINE_PRIMARY,
+  SALEAE_DARK_GRIDLINE_SECONDARY,
 } from "../lib/saleaeTimingDisplay";
 
 interface WaveformCanvasProps {
@@ -1275,7 +1277,7 @@ function drawVerticalGridLine(
 ) {
   if (x < 0 || x > ctx.canvas.width) return;
   ctx.save();
-  ctx.strokeStyle = level === "major" ? "#1a1a1d" : "#262629";
+  ctx.strokeStyle = level === "major" ? SALEAE_DARK_GRIDLINE_PRIMARY : SALEAE_DARK_GRIDLINE_SECONDARY;
   ctx.lineWidth = Math.max(1, dpr);
   ctx.setLineDash([3 * dpr, 3 * dpr]);
   ctx.beginPath();

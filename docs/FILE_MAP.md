@@ -49,6 +49,9 @@
   - 右侧栏面板类型、原版命令字符串、面板快捷键和命令到面板映射。
 - `src/lib/saleaeChannelLayout.ts`
   - 从 Logic 2.4.43 RowsManager 搬运的数字通道默认/最小高度、自动布局、RowV2 间距和 resize handle 几何。
+- `src/lib/saleaeTimingDisplay.ts`
+  - 从 Logic 2.4.43 `timingDisplay.ts` 搬运的高精度 major/minor 时间刻度算法。
+  - 包含原版 DarkTheme `border-10` / `border-20` GridLines 色值。
 
 ## 已搬入的小型 Saleae 视觉资源
 

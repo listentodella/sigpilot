@@ -1070,7 +1070,7 @@ button:disabled {
 .channelResizeHandle {
   position: absolute;
   left: calc(var(--row-v2-container-padding-px) * 1px);
-  right: 0;
+  width: var(--channel-label-width);
   z-index: 24;
   border: 0;
   background: transparent;
@@ -1088,7 +1088,7 @@ button:disabled {
 .channelResizeHandle::before {
   content: "";
   position: absolute;
-  inset: -3px 0;
+  inset: 0;
 }
 
 .waveformCanvasHost {

@@ -229,7 +229,12 @@ function channelLabelsForCount(channelCount: number, existing: string[] = []) {
 }
 
 function captureChannelLimit(session: UiSession) {
-  return Math.max(1, session.summary?.metadata.channel_count ?? session.settings.channel_count);
+  return Math.max(
+    1,
+    session.summary?.metadata.channel_count ?? 0,
+    session.settings.channel_count,
+    highestEnabledDigitalChannel(session.deviceSettings.digitalChannels) + 1,
+  );
 }
 
 function isDigitalChannelEnabled(session: UiSession, channelIndex: number) {
@@ -249,15 +254,26 @@ function highestEnabledDigitalChannel(channels: boolean[], fallback = 0) {
 
 function tileForVisibleChannels(tile: WaveformTile | null, channelIndexes: number[], labels: string[]) {
   if (!tile) return null;
-  const visible = new Set(channelIndexes);
+  const channelsByIndex = new Map(tile.channels.map((channel) => [channel.channel, channel]));
   return {
     ...tile,
-    channels: tile.channels
-      .filter((channel) => visible.has(channel.channel))
-      .map((channel) => ({
+    channels: channelIndexes.map((channelIndex) => {
+      const channel = channelsByIndex.get(channelIndex);
+      if (!channel) {
+        return {
+          channel: channelIndex,
+          label: labels[channelIndex] ?? `D${channelIndex}`,
+          bins: [],
+          segments: [],
+          rising_edges: [],
+          falling_edges: [],
+        };
+      }
+      return {
         ...channel,
-        label: labels[channel.channel] ?? channel.label,
-      })),
+        label: labels[channelIndex] ?? channel.label,
+      };
+    }),
   };
 }
 
@@ -592,17 +608,14 @@ export default function App() {
 
   const channelLabels = useMemo(
     () => {
-      const count = activeSession?.summary?.metadata.channel_count ?? activeSession?.settings.channel_count ?? 16;
-      const labels = activeSession?.summary?.metadata.labels.length
-        ? activeSession.summary.metadata.labels
-        : activeSession?.channelLabels;
-      return channelLabelsForCount(count, labels);
+      if (!activeSession) return channelLabelsForCount(16);
+      return channelLabelsForCount(captureChannelLimit(activeSession), activeSession.channelLabels);
     },
     [
       activeSession?.channelLabels,
+      activeSession?.deviceSettings.digitalChannels,
       activeSession?.settings.channel_count,
       activeSession?.summary?.metadata.channel_count,
-      activeSession?.summary?.metadata.labels,
     ],
   );
   const visibleChannelIndexes = useMemo(

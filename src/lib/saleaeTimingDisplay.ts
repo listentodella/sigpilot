@@ -5,6 +5,10 @@ import { Decimal } from "decimal.js";
 export const minimumHorizontalTickSpacingPx = 45;
 export const timeTickExpansionPx = minimumHorizontalTickSpacingPx;
 
+// Logic 2.4.43 DarkTheme border-10 / border-20, used by useGridlineColors().
+export const SALEAE_DARK_GRIDLINE_PRIMARY = "#303136";
+export const SALEAE_DARK_GRIDLINE_SECONDARY = "#57575E";
+
 export interface TimingTick {
   leftPx: number;
   isOutOfRange?: boolean;

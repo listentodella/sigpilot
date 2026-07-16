@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
+  SALEAE_DARK_GRIDLINE_PRIMARY,
+  SALEAE_DARK_GRIDLINE_SECONDARY,
   TimingTick,
 } from "../lib/saleaeTimingDisplay";
 import {
@@ -97,7 +99,7 @@ function drawTimingDisplay(
   ctx.fillStyle = backgroundGradient;
   ctx.fillRect(0, 0, width, 20 * dpr);
 
-  ctx.strokeStyle = "#1a1a1d";
+  ctx.strokeStyle = SALEAE_DARK_GRIDLINE_PRIMARY;
   ctx.lineWidth = Math.max(1, dpr);
   ctx.beginPath();
   ctx.moveTo(0, crisp(height - dpr * 0.5));
@@ -158,7 +160,7 @@ function drawTick(
     ctx.fill();
     textX += arrowWidth + 2 * dpr;
   } else {
-    ctx.strokeStyle = isMajor ? "#1a1a1d" : "#262629";
+    ctx.strokeStyle = isMajor ? SALEAE_DARK_GRIDLINE_PRIMARY : SALEAE_DARK_GRIDLINE_SECONDARY;
     ctx.lineWidth = Math.max(1, dpr);
     ctx.beginPath();
     ctx.moveTo(crisp(x), yOffset);
