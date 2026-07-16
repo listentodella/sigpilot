@@ -73,3 +73,5 @@ chore: 说明内容
   - 直接搬运原版 legacy 8 色通道色板，并统一 Devices、通道标签和波形颜色。
 - `docs/ported-features/2026-07-16-device-settings-channel-layout.md`
   - Device Settings 捕获后通道显示/隐藏、32 通道自动布局、逐行高度拖动和纵向滚动。
+- `docs/ported-features/2026-07-16-sticky-timing-waveform-demo.md`
+  - 30px 置顶时间标尺、固定 8px 数字波形 gutter，以及基于原版 Graph Server 实测的变脉宽 Demo 数据。

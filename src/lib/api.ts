@@ -298,9 +298,11 @@ function buildPreviewTile(request: WaveformRequest): WaveformTile {
     pixels,
     samples_per_pixel: samplesPerPixel,
     channels: channels.map((channel) => {
-      const period = 24 + channel * 11;
-      const phase = channel * 7;
-      const exact = buildPreviewExactDigitalData(request.start_sample, sampleCount, period, phase);
+      const exact = buildSaleaePreviewDigitalData(request.start_sample, sampleCount, channel);
+      const edges = [
+        ...exact.rising_edges.map((sample) => ({ sample, high: true })),
+        ...exact.falling_edges.map((sample) => ({ sample, high: false })),
+      ].sort((left, right) => left.sample - right.sample);
       return {
         channel,
         label: metadata.labels[channel] ?? `D${channel}`,
@@ -310,21 +312,28 @@ function buildPreviewTile(request: WaveformRequest): WaveformTile {
         bins: Array.from({ length: pixels }, (_, x) => {
           const sample0 = request.start_sample + x * samplesPerPixel;
           const sample1 = sample0 + samplesPerPixel;
-          const first = Math.floor((sample0 + phase) / period) % 2 === 0;
-          const last = Math.floor((sample1 + phase) / period) % 2 === 0;
-          const firstEdge = nextPreviewEdge(sample0, period, phase);
-          const lastEdge = previousPreviewEdge(sample1, period, phase);
-          const hasEdge = firstEdge !== null && firstEdge > sample0 && firstEdge <= sample1;
-          const multiEdge = firstEdge !== null && lastEdge !== null && lastEdge > firstEdge;
+          const first = previewLevelInSegments(exact.segments, sample0);
+          const last = previewLevelInSegments(
+            exact.segments,
+            Math.max(sample0, sample1 - Math.min(0.5, samplesPerPixel / 2)),
+          );
+          const binEdges = edges.filter((edge) => edge.sample > sample0 && edge.sample <= sample1);
+          const overlappingSegments = exact.segments.filter(
+            (segment) => segment.end_sample > sample0 && segment.start_sample < sample1,
+          );
           return {
             x,
             first,
             last,
-            has_high: first || last || hasEdge || multiEdge,
-            has_low: !first || !last || hasEdge || multiEdge,
-            edges: multiEdge ? 2 : hasEdge ? 1 : 0,
-            first_edge_offset: hasEdge ? Math.max(0, Math.round(firstEdge - sample0)) : null,
-            last_edge_offset: multiEdge ? Math.max(0, Math.round(lastEdge - sample0)) : hasEdge ? Math.max(0, Math.round(firstEdge - sample0)) : null,
+            has_high: overlappingSegments.some((segment) => segment.high),
+            has_low: overlappingSegments.some((segment) => !segment.high),
+            edges: binEdges.length,
+            first_edge_offset: binEdges.length
+              ? Math.max(0, Math.round(binEdges[0].sample - sample0))
+              : null,
+            last_edge_offset: binEdges.length
+              ? Math.max(0, Math.round(binEdges[binEdges.length - 1].sample - sample0))
+              : null,
           };
         }),
       };
@@ -332,26 +341,33 @@ function buildPreviewTile(request: WaveformRequest): WaveformTile {
   };
 }
 
-function buildPreviewExactDigitalData(startSample: number, sampleCount: number, period: number, phase: number) {
+// Ported from the run-length behavior observed from Logic Pro 16's Graph Server demo source.
+function buildSaleaePreviewDigitalData(startSample: number, sampleCount: number, channel: number) {
   const endSample = startSample + sampleCount;
   const segments: DigitalSegment[] = [];
   const rising_edges: number[] = [];
   const falling_edges: number[] = [];
-  let cursor = startSample;
-  let high = previewStateAt(cursor, period, phase);
+  let cursor = 0;
+  let high = false;
+  let random = (0x6d2b79f5 ^ Math.imul(channel, 0x9e3779b9)) >>> 0;
 
   while (cursor < endSample) {
-    const edge = nextPreviewEdge(cursor, period, phase);
-    const segmentEnd = edge == null ? endSample : Math.min(endSample, edge);
-    if (segmentEnd > cursor) {
-      segments.push({ start_sample: cursor, end_sample: segmentEnd, high });
+    random = (Math.imul(random, 1_664_525) + 1_013_904_223) >>> 0;
+    const edge = cursor + 1 + ((random >>> 17) & 0x7fff);
+    const visibleStart = Math.max(startSample, cursor);
+    const visibleEnd = Math.min(endSample, edge);
+    if (visibleEnd > visibleStart) {
+      segments.push({ start_sample: visibleStart, end_sample: visibleEnd, high });
     }
-    if (edge == null || edge >= endSample) break;
+
+    if (edge >= endSample) break;
     high = !high;
-    if (high) {
-      rising_edges.push(edge);
-    } else {
-      falling_edges.push(edge);
+    if (edge >= startSample) {
+      if (high) {
+        rising_edges.push(edge);
+      } else {
+        falling_edges.push(edge);
+      }
     }
     cursor = edge;
   }
@@ -359,16 +375,6 @@ function buildPreviewExactDigitalData(startSample: number, sampleCount: number, 
   return { segments, rising_edges, falling_edges };
 }
 
-function previewStateAt(sample: number, period: number, phase: number) {
-  return Math.floor((sample + phase) / period) % 2 === 0;
-}
-
-function nextPreviewEdge(sample: number, period: number, phase: number) {
-  const nextBoundary = (Math.floor((sample + phase) / period) + 1) * period - phase;
-  return Number.isFinite(nextBoundary) ? nextBoundary : null;
-}
-
-function previousPreviewEdge(sample: number, period: number, phase: number) {
-  const previousBoundary = Math.floor((sample + phase) / period) * period - phase;
-  return Number.isFinite(previousBoundary) ? previousBoundary : null;
+function previewLevelInSegments(segments: DigitalSegment[], sample: number) {
+  return segments.find((segment) => sample >= segment.start_sample && sample < segment.end_sample)?.high ?? false;
 }

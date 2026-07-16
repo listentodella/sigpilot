@@ -216,7 +216,7 @@ input[type="range"] {
 .channelLabelHeader {
   width: var(--channel-label-width);
   flex: 0 0 var(--channel-label-width);
-  height: 54px;
+  height: 61px;
   display: flex;
   align-items: flex-end;
   padding: 0 8px 6px;
@@ -573,17 +573,22 @@ button:disabled {
   cursor: not-allowed;
 }
 
-.timingDisplay {
-  height: 23px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 18px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--border-20);
-  color: var(--on-background-30);
-  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
+.timingDisplayCanvasHost {
+  width: 100%;
+  height: 30px;
+  flex: 0 0 30px;
+  position: relative;
+  background: var(--background-10);
+}
+
+.timingDisplayCanvas {
+  width: 100%;
+  height: 30px;
+  display: block;
+  position: absolute;
+  inset: 0;
+  border-bottom: 1px solid var(--border-10);
+  pointer-events: none;
 }
 
 .mainArea.emptySession {
@@ -884,7 +889,7 @@ button:disabled {
   display: grid;
   align-content: start;
   gap: calc(var(--row-v2-spacing-px) * 1px);
-  padding-top: 30px;
+  padding-top: 0;
   padding-right: 4px;
 }
 

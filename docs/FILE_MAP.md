@@ -30,13 +30,16 @@
   - 包含搜索、管理菜单、扩展项动作、创建对话框和扩展详情覆盖页。
 - `src/components/WaveformCanvas.tsx`
   - 数字波形 Canvas 渲染。
-  - 包含平滑数字波形绘制、边沿吸附、周期/占空比/脉宽 hover 测量显示。
+  - 包含平滑数字波形绘制、原版 8px 上下 gutter、边沿吸附、周期/占空比/脉宽 hover 测量显示。
+- `src/components/TimingDisplayCanvas.tsx`
+  - 独立于通道滚动区的 30px Saleae 时间标尺。
+  - 搬运原版 major/minor tick、离屏 major 箭头和标尺背景绘制规则。
 
 ## 前端工具与 API
 
 - `src/lib/api.ts`
   - Tauri 命令封装。
-  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、UART decode。
+  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、UART decode，以及浏览器变脉宽 Demo tile。
 - `src/lib/format.ts`
   - 时间与数量格式化工具。
 - `src/lib/extensions.ts`

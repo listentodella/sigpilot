@@ -4,13 +4,11 @@ import {
   SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
   SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
   SALEAE_ROW_V2_SPACING_PX,
-  SALEAE_TIME_RULER_HEIGHT_PX,
 } from "../lib/saleaeChannelLayout";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
-  TimingTick,
 } from "../lib/saleaeTimingDisplay";
 
 interface WaveformCanvasProps {
@@ -24,12 +22,11 @@ interface WaveformCanvasProps {
   onViewportChange: (start: number, samples: number) => void;
 }
 
-const graphPaddingLeft = 8;
-const graphPaddingRight = 10;
+const graphPaddingLeft = 0;
+const graphPaddingRight = 0;
 const digitalGraphGutterPx = 8;
 const digitalGraphLabelHeightPx = 16;
 const digitalMeasurementBoxMinWidthPx = 110;
-const timeRulerHeightPx = SALEAE_TIME_RULER_HEIGHT_PX;
 const panningAnimationDurationMs = 300;
 
 type EdgeKind = "rising" | "falling";
@@ -503,7 +500,7 @@ function draw(
   ctx.fillStyle = "#101013";
   ctx.fillRect(0, 0, width, height);
 
-  drawTimeGrid(ctx, width, height, viewportStart, viewportSamples, sampleRateHz);
+  drawGridLines(ctx, width, height, viewportStart, viewportSamples, sampleRateHz);
 
   if (!tile || tile.channels.length === 0) {
     ctx.fillStyle = "rgba(255,255,255,0.55)";
@@ -511,7 +508,7 @@ function draw(
     ctx.fillText(
       tile ? "No channels visible" : "No capture loaded",
       24 * devicePixelRatio,
-      (timeRulerHeightPx + 24) * devicePixelRatio,
+      24 * devicePixelRatio,
     );
     return;
   }
@@ -528,8 +525,10 @@ function draw(
     const layout = channelLayout[index];
     const top = layout.top;
     const laneHeight = layout.height;
-    const highY = top + laneHeight * 0.28;
-    const lowY = top + laneHeight * 0.72;
+    const gutter = Math.min(digitalGraphGutterPx * dpr, Math.max(0, (laneHeight - 2 * dpr) / 2));
+    const highY = top + gutter + 0.5 * dpr;
+    const transitionHeight = Math.max(dpr, Math.round(laneHeight - 2 * gutter));
+    const lowY = highY + transitionHeight - dpr;
     ctx.strokeStyle = "rgba(255,255,255,0.075)";
     ctx.beginPath();
     ctx.moveTo(0, Math.floor(top) + 0.5);
@@ -698,7 +697,6 @@ function findHoverNavigation(
   rowHeights: number[],
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
-  if (y < timeRulerHeightPx) return null;
   const channelLayout = getChannelLayout(rowHeights, tile.channels.length);
   const channelIndex = findChannelIndexAtY(channelLayout, Math.min(rect.height, y));
   if (channelIndex === null) return null;
@@ -738,7 +736,7 @@ interface ChannelLayout {
 }
 
 function getChannelLayout(rowHeights: number[], channelCount: number, scale = 1): ChannelLayout[] {
-  let top = timeRulerHeightPx * scale;
+  let top = 0;
   return Array.from({ length: channelCount }, (_, index) => {
     const height =
       Math.max(
@@ -1227,7 +1225,7 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: n
   ctx.closePath();
 }
 
-function drawTimeGrid(
+function drawGridLines(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
@@ -1236,31 +1234,16 @@ function drawTimeGrid(
   sampleRateHz: number,
 ) {
   const dpr = window.devicePixelRatio || 1;
-  const rulerHeight = timeRulerHeightPx * dpr;
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
   const usableWidth = Math.max(1, right - left);
   const usableWidthCss = usableWidth / dpr;
 
   ctx.save();
-  ctx.fillStyle = "#131316";
-  ctx.fillRect(0, 0, width, rulerHeight);
-  const backgroundGradient = ctx.createLinearGradient(0, 0, 0, 20 * dpr);
-  backgroundGradient.addColorStop(0, "rgba(0, 0, 0, 0.08)");
-  backgroundGradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-  ctx.fillStyle = backgroundGradient;
-  ctx.fillRect(0, 0, width, 20 * dpr);
-  ctx.strokeStyle = "#1a1a1d";
-  ctx.setLineDash([]);
-  ctx.beginPath();
-  ctx.moveTo(0, crispY(rulerHeight));
-  ctx.lineTo(width, crispY(rulerHeight));
-  ctx.stroke();
-
   if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0 || !Number.isFinite(viewportSamples) || viewportSamples <= 0) {
     const fallbackStep = minimumHorizontalTickSpacingPx * dpr;
     for (let x = left; x < right; x += fallbackStep) {
-      drawVerticalGridLine(ctx, x, rulerHeight, height, "minor", dpr);
+      drawVerticalGridLine(ctx, x, 0, height, "minor", dpr);
     }
     ctx.restore();
     return;
@@ -1273,26 +1256,11 @@ function drawTimeGrid(
     majorThresholdPx: 0,
     minorThresholdPx: 0,
   });
-  const displayTicks = getHorizontalGraphTicks(startSeconds, timeSecondsPerPixel, usableWidthCss, {
-    minorThresholdPx: minimumHorizontalTickSpacingPx,
-    addClosestOffscreenMajorTicks: true,
-    negativeMinorTicks: true,
-  });
-
   for (const tick of gridTicks.majorTicks) {
-    drawVerticalGridLine(ctx, left + tick.leftPx * dpr, rulerHeight, height, "major", dpr);
+    drawVerticalGridLine(ctx, left + tick.leftPx * dpr, 0, height, "major", dpr);
   }
   for (const tick of gridTicks.minorTicks) {
-    drawVerticalGridLine(ctx, left + tick.leftPx * dpr, rulerHeight, height, "minor", dpr);
-  }
-
-  ctx.font = `700 ${11 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
-  ctx.textBaseline = "bottom";
-  for (const tick of displayTicks.majorTicks) {
-    drawTimingTick(ctx, tick, left, right, rulerHeight, true, dpr);
-  }
-  for (const tick of displayTicks.minorTicks) {
-    drawTimingTick(ctx, tick, left, right, rulerHeight, false, dpr);
+    drawVerticalGridLine(ctx, left + tick.leftPx * dpr, 0, height, "minor", dpr);
   }
   ctx.restore();
 }
@@ -1314,47 +1282,5 @@ function drawVerticalGridLine(
   ctx.moveTo(crispX(x), top);
   ctx.lineTo(crispX(x), bottom);
   ctx.stroke();
-  ctx.restore();
-}
-
-function drawTimingTick(
-  ctx: CanvasRenderingContext2D,
-  tick: TimingTick,
-  left: number,
-  right: number,
-  height: number,
-  isMajor: boolean,
-  dpr: number,
-) {
-  const yOffset = isMajor ? height * 0.5 : height - 3 * dpr;
-  const x = left + tick.leftPx * dpr;
-  let textX = x + (isMajor ? 0 : -2.5 * dpr);
-  ctx.save();
-  if (tick.isOutOfRange) {
-    const arrowWidth = 4 * dpr;
-    const arrowHeight = 6 * dpr;
-    const arrowY = (yOffset - arrowHeight) / 2 + dpr;
-    ctx.fillStyle = "#26a3d9";
-    ctx.beginPath();
-    ctx.moveTo(x, arrowY);
-    ctx.lineTo(x + arrowWidth, arrowY + arrowHeight / 2);
-    ctx.lineTo(x, arrowY + arrowHeight);
-    ctx.closePath();
-    ctx.fill();
-    textX += arrowWidth + 2 * dpr;
-  } else {
-    ctx.strokeStyle = isMajor ? "#1a1a1d" : "#262629";
-    ctx.lineWidth = Math.max(1, dpr);
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.moveTo(crispX(x), yOffset);
-    ctx.lineTo(crispX(x), height);
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = isMajor ? "#ffffff" : "rgba(255, 255, 255, 0.74)";
-  const textWidth = ctx.measureText(tick.label).width;
-  const clampedTextX = clamp(textX, left, Math.max(left, right - textWidth));
-  ctx.fillText(tick.label, clampedTextX, yOffset);
   ctx.restore();
 }

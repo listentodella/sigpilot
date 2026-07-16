@@ -459,17 +459,17 @@ pub fn generate_sample_words(settings: &CaptureSettings) -> Result<CaptureData> 
         settings.decode_cross,
     )?;
     let mut samples = Vec::with_capacity(sample_count as usize * usize::from(unitsize));
+    let mut demo_channels: Vec<_> = (0..settings.channel_count)
+        .map(SaleaeDemoPulseChannel::new)
+        .collect();
     for sample_index in 0..sample_count {
         let mut word = 0u32;
         for channel in 0..settings.channel_count {
             let high = if channel == 0 {
-                demo_uart_level(sample_index, settings.sample_rate_hz).unwrap_or_else(|| {
-                    let period = 1u64 << 3;
-                    (sample_index / period) % 2 == 1
-                })
+                demo_uart_level(sample_index, settings.sample_rate_hz)
+                    .unwrap_or_else(|| demo_channels[usize::from(channel)].level_at(sample_index))
             } else {
-                let period = 1u64 << (u64::from(channel % 12) + 3);
-                ((sample_index / period) + u64::from(channel % 3)) % 2 == 1
+                demo_channels[usize::from(channel)].level_at(sample_index)
             };
             if high {
                 word |= 1u32 << channel;
@@ -493,6 +493,42 @@ pub fn generate_sample_words(settings: &CaptureSettings) -> Result<CaptureData> 
         },
         samples,
     })
+}
+
+// Logic Pro 16 demo captures use independent runs of 1..32768 samples per channel.
+// Keep the generator deterministic so screenshots, measurements, and tests are repeatable.
+struct SaleaeDemoPulseChannel {
+    high: bool,
+    next_edge: u64,
+    random: u32,
+}
+
+impl SaleaeDemoPulseChannel {
+    fn new(channel: u8) -> Self {
+        let mut result = Self {
+            high: false,
+            next_edge: 0,
+            random: 0x6D2B_79F5 ^ u32::from(channel).wrapping_mul(0x9E37_79B9),
+        };
+        result.next_edge = result.next_run_samples();
+        result
+    }
+
+    fn level_at(&mut self, sample_index: u64) -> bool {
+        if sample_index >= self.next_edge {
+            self.high = !self.high;
+            self.next_edge = self.next_edge.saturating_add(self.next_run_samples());
+        }
+        self.high
+    }
+
+    fn next_run_samples(&mut self) -> u64 {
+        self.random = self
+            .random
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        1 + u64::from((self.random >> 17) & 0x7FFF)
+    }
 }
 
 fn demo_uart_level(sample_index: u64, sample_rate_hz: u64) -> Option<bool> {
@@ -659,5 +695,38 @@ mod tests {
         let capture = generate_sample_words(&settings).unwrap();
         assert_eq!(capture.metadata.sample_count, 128);
         assert_eq!(capture.samples.len(), 128 * 2);
+    }
+
+    #[test]
+    fn demo_channels_have_varied_pulse_widths() {
+        let capture = generate_sample_words(&CaptureSettings {
+            sample_rate_hz: 25_000_000,
+            duration_ms: 10,
+            channel_count: 4,
+            ..CaptureSettings::default()
+        })
+        .unwrap();
+
+        let mut previous = false;
+        let mut last_edge = None;
+        let mut run_lengths = Vec::new();
+        for sample in 0..capture.metadata.sample_count {
+            let high = read_sample_word(&capture.samples, capture.metadata.unitsize, sample)
+                .map(|word| word & (1 << 1) != 0)
+                .unwrap();
+            if high != previous {
+                if let Some(last) = last_edge {
+                    run_lengths.push(sample - last);
+                }
+                last_edge = Some(sample);
+                previous = high;
+            }
+        }
+
+        assert!(run_lengths.len() >= 5);
+        assert!(run_lengths.windows(2).any(|pair| pair[0] != pair[1]));
+        assert!(run_lengths
+            .iter()
+            .all(|length| (1..=32_768).contains(length)));
     }
 }

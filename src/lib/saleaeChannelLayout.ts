@@ -40,7 +40,6 @@ export function fitSaleaeDigitalRowsToViewport({
     0,
     availableHeight -
       SALEAE_ROW_V2_CONTAINER_PADDING_PX -
-      SALEAE_TIME_RULER_HEIGHT_PX -
       SALEAE_ROW_V2_SPACING_PX * Math.max(channelIndexes.length - 1, 0),
   );
   const desiredHeight = Math.max(
@@ -58,7 +57,6 @@ export function fitSaleaeDigitalRowsToViewport({
 export function saleaeChannelContentHeight(rowHeights: number[]) {
   return (
     SALEAE_ROW_V2_CONTAINER_PADDING_PX +
-    SALEAE_TIME_RULER_HEIGHT_PX +
     rowHeights.reduce((total, height) => total + height, 0) +
     SALEAE_ROW_V2_SPACING_PX * Math.max(rowHeights.length - 1, 0)
   );
@@ -67,7 +65,6 @@ export function saleaeChannelContentHeight(rowHeights: number[]) {
 export function saleaeChannelResizeHandleTop(rowHeights: number[], rowIndex: number) {
   return (
     SALEAE_ROW_V2_CONTAINER_PADDING_PX +
-    SALEAE_TIME_RULER_HEIGHT_PX +
     rowHeights.slice(0, rowIndex + 1).reduce((total, height) => total + height, 0) +
     SALEAE_ROW_V2_SPACING_PX * rowIndex
   );

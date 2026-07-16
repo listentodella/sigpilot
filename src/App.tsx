@@ -52,6 +52,7 @@ import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
+import { TimingDisplayCanvas } from "./components/TimingDisplayCanvas";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import {
   cancelCapture,
@@ -635,8 +636,6 @@ export default function App() {
     activeSession?.progress && activeSession.progress.bytes_expected > 0
       ? Math.min(100, (activeSession.progress.bytes_read / activeSession.progress.bytes_expected) * 100)
       : 0;
-  const visibleStart = activeSession?.summary ? formatSamples(activeSession.viewportStart) : "0 S";
-  const visibleWindow = activeSession?.summary ? formatSamples(activeSession.viewportSamples) : "0 S";
   const activeSettings = activeSession?.settings ?? defaultSettings(selectedDevice);
   const activeMessage = activeSession?.message ?? startupMessage;
 
@@ -1290,15 +1289,12 @@ export default function App() {
                 </span>
               </div>
               <div className="aboveGraph">
-                <div className="timingDisplay">
-                  <span>{visibleStart}</span>
-                  <span>{visibleWindow}</span>
-                  <span>
-                    {activeSession?.summary
-                      ? formatRate(activeSession.summary.metadata.sample_rate_hz)
-                      : formatRate(activeSettings.sample_rate_hz)}
-                  </span>
-                </div>
+                <TimingDisplayCanvas
+                  graphWidthPx={activeSession?.canvasWidth ?? 0}
+                  sampleRateHz={activeSession?.summary?.metadata.sample_rate_hz ?? activeSettings.sample_rate_hz}
+                  viewportSamples={activeSession?.summary ? activeSession.viewportSamples : 0}
+                  viewportStart={activeSession?.summary ? activeSession.viewportStart : 0}
+                />
                 <LogicToolbar
                   busy={Boolean(activeSession?.busy)}
                   hasCapture={Boolean(activeSession?.summary)}
