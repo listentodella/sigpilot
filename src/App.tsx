@@ -52,6 +52,7 @@ import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
+import { StripChartScrollbar } from "./components/StripChartScrollbar";
 import { TimingDisplayCanvas } from "./components/TimingDisplayCanvas";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import {
@@ -1429,19 +1430,13 @@ export default function App() {
 
                 {activeSession.summary && (
                   <div className="horizontalScrollBar">
-                    <input
-                      type="range"
-                      min={0}
-                      max={Math.max(0, totalSamples - activeSession.viewportSamples)}
-                      value={activeSession.viewportStart}
-                      onChange={(event) => updateViewport(activeSession.id, Number(event.target.value), activeSession.viewportSamples)}
-                    />
-                    <input
-                      type="range"
-                      min={totalSamples ? 1 : 1}
-                      max={totalSamples || 1_000_000}
-                      value={activeSession.viewportSamples}
-                      onChange={(event) => updateViewport(activeSession.id, activeSession.viewportStart, Number(event.target.value))}
+                    <StripChartScrollbar
+                      onViewportStartChange={(startSample) =>
+                        updateViewport(activeSession.id, startSample, activeSession.viewportSamples)
+                      }
+                      totalSamples={totalSamples}
+                      viewportSamples={activeSession.viewportSamples}
+                      viewportStart={activeSession.viewportStart}
                     />
                   </div>
                 )}

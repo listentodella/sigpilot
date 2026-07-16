@@ -34,6 +34,9 @@
 - `src/components/TimingDisplayCanvas.tsx`
   - 独立于通道滚动区的 30px Saleae 时间标尺。
   - 搬运原版 major/minor tick、离屏 major 箭头和标尺背景绘制规则。
+- `src/components/StripChartScrollbar.tsx`
+  - 从 Logic 2.4.43 `stripChartScrollbar` 搬运的单 thumb 水平时间滚动条。
+  - thumb 宽度表示可视时间范围，位置表示当前 viewport 起点。
 
 ## 前端工具与 API
 

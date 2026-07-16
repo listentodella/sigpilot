@@ -77,3 +77,5 @@ chore: 说明内容
   - 30px 置顶时间标尺、固定 8px 数字波形 gutter，以及基于原版 Graph Server 实测的变脉宽 Demo 数据。
 - `docs/ported-features/2026-07-16-channel-arming-gridline-polish.md`
   - 捕获后新启用通道的空行占位、仅左侧标签栏可调整高度，以及原版 DarkTheme 网格线色值。
+- `docs/ported-features/2026-07-16-strip-chart-scrollbar.md`
+  - 原版 10px 单 thumb 水平时间滚动条、viewport 比例换算、拖拽平移和轨道点击动画。
