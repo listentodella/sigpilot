@@ -1,4 +1,4 @@
-import { PointerEvent, useEffect, useRef } from "react";
+import { PointerEvent, useEffect, useRef, useState } from "react";
 import type { WaveformTile } from "../lib/api";
 
 interface WaveformCanvasProps {
@@ -35,6 +35,15 @@ interface HoverMeasurement {
   periodEnd: number | null;
 }
 
+type EdgeNavigationDirection = "previous" | "next";
+
+interface HoverNavigation {
+  channelIndex: number;
+  topPx: number;
+  previousEdge: number | null;
+  nextEdge: number | null;
+}
+
 export function WaveformCanvas({
   tile,
   onWidthChange,
@@ -44,18 +53,23 @@ export function WaveformCanvas({
   viewportSamples,
   onViewportChange,
 }: WaveformCanvasProps) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragRef = useRef<{ x: number; start: number; samples: number } | null>(null);
   const tileRef = useRef<WaveformTile | null>(null);
   const viewportRef = useRef({ start: viewportStart, samples: viewportSamples });
   const sampleRateRef = useRef(sampleRateHz);
+  const totalSamplesRef = useRef(totalSamples);
   const hoverRef = useRef<HoverMeasurement | null>(null);
+  const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
   const viewportFrameRef = useRef<number | null>(null);
+  const [hoverNavigation, setHoverNavigation] = useState<HoverNavigation | null>(null);
 
   useEffect(() => {
+    const host = hostRef.current;
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!host || !canvas) return;
     const observer = new ResizeObserver(([entry]) => {
       const rect = entry.contentRect;
       const dpr = window.devicePixelRatio || 1;
@@ -64,7 +78,7 @@ export function WaveformCanvas({
       onWidthChange(Math.max(1, Math.floor(rect.width)));
       draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, hoverRef.current, sampleRateRef.current);
     });
-    observer.observe(canvas);
+    observer.observe(host);
     return () => observer.disconnect();
   }, [onWidthChange]);
 
@@ -72,9 +86,10 @@ export function WaveformCanvas({
     tileRef.current = tile;
     viewportRef.current = { start: viewportStart, samples: viewportSamples };
     sampleRateRef.current = sampleRateHz;
+    totalSamplesRef.current = totalSamples;
     const canvas = canvasRef.current;
     if (canvas) draw(canvas, tile, viewportStart, viewportSamples, hoverRef.current, sampleRateHz);
-  }, [sampleRateHz, tile, viewportSamples, viewportStart]);
+  }, [sampleRateHz, tile, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
@@ -84,10 +99,16 @@ export function WaveformCanvas({
     };
   }, []);
 
+  function setNavigation(next: HoverNavigation | null) {
+    hoverNavigationRef.current = next;
+    setHoverNavigation((current) => (sameHoverNavigation(current, next) ? current : next));
+  }
+
   function clampViewport(start: number, samples: number) {
-    const minSamples = totalSamples ? 1 : 1;
-    const nextSamples = Math.max(minSamples, Math.min(totalSamples || samples, Math.round(samples)));
-    const maxStart = Math.max(0, (totalSamples || 0) - nextSamples);
+    const currentTotalSamples = totalSamplesRef.current;
+    const minSamples = currentTotalSamples ? 1 : 1;
+    const nextSamples = Math.max(minSamples, Math.min(currentTotalSamples || samples, Math.round(samples)));
+    const maxStart = Math.max(0, (currentTotalSamples || 0) - nextSamples);
     const nextStart = Math.max(0, Math.min(maxStart, Math.round(start)));
     scheduleViewportChange(nextStart, nextSamples);
   }
@@ -107,8 +128,23 @@ export function WaveformCanvas({
     });
   }
 
+  function jumpToEdge(direction: EdgeNavigationDirection) {
+    const navigation = hoverNavigationRef.current;
+    const edgeSample = direction === "next" ? navigation?.nextEdge : navigation?.previousEdge;
+    if (edgeSample == null) return;
+
+    const current = viewportRef.current;
+    const offset = current.samples * (direction === "next" ? 0.25 : 0.75);
+    clampViewport(edgeSample - offset, current.samples);
+    const canvas = canvasRef.current;
+    if (canvas) {
+      hoverRef.current = null;
+      draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, null, sampleRateRef.current);
+    }
+  }
+
   function handleWheel(event: WheelEvent) {
-    if (!totalSamples) return;
+    if (!totalSamplesRef.current) return;
     event.preventDefault();
     hoverRef.current = null;
     const canvas = canvasRef.current;
@@ -132,8 +168,8 @@ export function WaveformCanvas({
     clampViewport(anchor - nextSamples * xRatio, nextSamples);
   }
 
-  function handlePointerDown(event: PointerEvent<HTMLCanvasElement>) {
-    if (!totalSamples) return;
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (!totalSamplesRef.current) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     hoverRef.current = null;
     dragRef.current = {
@@ -143,8 +179,8 @@ export function WaveformCanvas({
     };
   }
 
-  function handlePointerMove(event: PointerEvent<HTMLCanvasElement>) {
-    if (!totalSamples) return;
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (!totalSamplesRef.current) return;
     if (!dragRef.current) {
       updateHover(event);
       return;
@@ -155,7 +191,7 @@ export function WaveformCanvas({
     clampViewport(dragRef.current.start + deltaSamples, dragRef.current.samples);
   }
 
-  function handlePointerUp(event: PointerEvent<HTMLCanvasElement>) {
+  function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
     dragRef.current = null;
     event.currentTarget.releasePointerCapture(event.pointerId);
     updateHover(event);
@@ -163,11 +199,12 @@ export function WaveformCanvas({
 
   function handlePointerLeave() {
     hoverRef.current = null;
+    setNavigation(null);
     const canvas = canvasRef.current;
     if (canvas) draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, null, sampleRateRef.current);
   }
 
-  function updateHover(event: PointerEvent<HTMLCanvasElement>) {
+  function updateHover(event: PointerEvent<HTMLDivElement>) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -182,27 +219,71 @@ export function WaveformCanvas({
       x,
       y,
     );
+    setNavigation(
+      findHoverNavigation(
+        rect,
+        tileRef.current,
+        viewportRef.current.start,
+        viewportRef.current.samples,
+        event.clientY - rect.top,
+      ),
+    );
     draw(canvas, tileRef.current, viewportRef.current.start, viewportRef.current.samples, hoverRef.current, sampleRateRef.current);
   }
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const host = hostRef.current;
+    if (!host) return;
     const onWheel = (event: WheelEvent) => handleWheel(event);
-    canvas.addEventListener("wheel", onWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", onWheel);
+    host.addEventListener("wheel", onWheel, { passive: false });
+    return () => host.removeEventListener("wheel", onWheel);
+  });
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!hoverNavigationRef.current || isTextEditingTarget(event.target)) return;
+      const isCommandOrCtrl = event.metaKey || event.ctrlKey;
+      if (!isCommandOrCtrl) return;
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        jumpToEdge("previous");
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        jumpToEdge("next");
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
   });
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="waveform-canvas"
+    <div
+      ref={hostRef}
+      className="waveformCanvasHost"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       onPointerLeave={handlePointerLeave}
-    />
+    >
+      <canvas ref={canvasRef} className="waveform-canvas" />
+      {hoverNavigation?.previousEdge != null && (
+        <DigitalNavigationButton
+          direction="previous"
+          top={hoverNavigation.topPx}
+          onNavigate={() => jumpToEdge("previous")}
+        />
+      )}
+      {hoverNavigation?.nextEdge != null && (
+        <DigitalNavigationButton
+          direction="next"
+          top={hoverNavigation.topPx}
+          onNavigate={() => jumpToEdge("next")}
+        />
+      )}
+    </div>
   );
 }
 
@@ -210,6 +291,74 @@ function normalizeWheelDelta(delta: number, deltaMode: number) {
   if (deltaMode === 1) return delta * 16;
   if (deltaMode === 2) return delta * 240;
   return delta;
+}
+
+function DigitalNavigationButton({
+  direction,
+  onNavigate,
+  top,
+}: {
+  direction: EdgeNavigationDirection;
+  onNavigate: () => void;
+  top: number;
+}) {
+  const shortcut = direction === "next" ? "Cmd/Ctrl + Right" : "Cmd/Ctrl + Left";
+  const label = direction === "next" ? "Next Edge" : "Previous Edge";
+  return (
+    <button
+      type="button"
+      className={`digitalNavigationButton ${direction}`}
+      style={{ top }}
+      title={`${label} (${shortcut})`}
+      aria-label={`${label} (${shortcut})`}
+      onPointerDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        onNavigate();
+      }}
+    >
+      {direction === "next" ? <JumpToNextEdgeIcon /> : <JumpToPreviousEdgeIcon />}
+    </button>
+  );
+}
+
+function JumpToNextEdgeIcon() {
+  return (
+    <svg width="16" height="11" viewBox="0 0 16 11" aria-hidden="true">
+      <path
+        d="M7.12072 5.86709L7.09386 6.30951L7.52986 6.38923L10.2479 6.88626L10.2254 7.01195L6.95778 6.41443L6.86784 6.90627L6.95778 6.41443L6.8932 6.40262L6.90461 6.33797L6.90886 6.31393L6.91074 6.28959L7.1668 2.97831L7.2947 3.00141L7.12072 5.86709Z"
+        fill="currentColor"
+        stroke="currentColor"
+      />
+      <path
+        d="M14.8043 7.11793C12.1828 1.90948 10.6869 1.79842 7.27213 6.13904"
+        stroke="currentColor"
+        fill="none"
+        strokeWidth="1.5"
+      />
+      <path d="M6 9H3.09502V2H0" stroke="currentColor" fill="none" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function JumpToPreviousEdgeIcon() {
+  return (
+    <svg width="16" height="11" viewBox="0 0 16 11" aria-hidden="true">
+      <path
+        d="M8.87928 5.86709L8.90614 6.30951L8.47014 6.38923L5.75209 6.88626L5.77456 7.01195L9.04222 6.41443L9.13216 6.90627L9.04222 6.41443L9.1068 6.40262L9.09539 6.33797L9.09114 6.31393L9.08926 6.28959L8.8332 2.97831L8.7053 3.00141L8.87928 5.86709Z"
+        fill="currentColor"
+        stroke="currentColor"
+      />
+      <path
+        d="M1.19569 7.11793C3.81716 1.90948 5.31308 1.79842 8.72787 6.13904"
+        stroke="currentColor"
+        fill="none"
+        strokeWidth="1.5"
+      />
+      <path d="M10 9H12.905V2H16" stroke="currentColor" fill="none" strokeWidth="1.5" />
+    </svg>
+  );
 }
 
 function draw(
@@ -407,6 +556,32 @@ function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelD
 
   ctx.stroke(stablePath);
   ctx.stroke(edgePath);
+}
+
+function findHoverNavigation(
+  rect: DOMRect,
+  tile: WaveformTile | null,
+  viewportStart: number,
+  viewportSamples: number,
+  y: number,
+): HoverNavigation | null {
+  if (!tile || tile.channels.length === 0) return null;
+  const laneHeight = Math.max(34, rect.height / tile.channels.length);
+  const channelIndex = Math.max(0, Math.min(tile.channels.length - 1, Math.floor(y / laneHeight)));
+  const edges = collectDigitalEdges(tile, channelIndex);
+  if (edges.length === 0) return null;
+
+  const viewportEnd = viewportStart + viewportSamples;
+  const previousEdge = findPreviousEdge(edges, viewportStart);
+  const nextEdge = findNextEdgeSample(edges, viewportEnd);
+  if (previousEdge == null && nextEdge == null) return null;
+
+  return {
+    channelIndex,
+    topPx: channelIndex * laneHeight + Math.max(0, laneHeight - 26) / 2,
+    previousEdge,
+    nextEdge,
+  };
 }
 
 function findHoverMeasurement(
@@ -766,6 +941,31 @@ function collectDigitalEdges(tile: WaveformTile, channelIndex: number): DigitalE
   return edges.sort((a, b) => a.sample - b.sample);
 }
 
+function findPreviousEdge(edges: DigitalEdge[], sample: number) {
+  for (let index = edges.length - 1; index >= 0; index -= 1) {
+    if (edges[index].sample < sample) return edges[index].sample;
+  }
+  return null;
+}
+
+function findNextEdgeSample(edges: DigitalEdge[], sample: number) {
+  for (const edge of edges) {
+    if (edge.sample > sample) return edge.sample;
+  }
+  return null;
+}
+
+function sameHoverNavigation(left: HoverNavigation | null, right: HoverNavigation | null) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return (
+    left.channelIndex === right.channelIndex &&
+    left.topPx === right.topPx &&
+    left.previousEdge === right.previousEdge &&
+    left.nextEdge === right.nextEdge
+  );
+}
+
 function findNextEdge(edges: number[], sample: number) {
   for (const edge of edges) {
     if (edge > sample) return edge;
@@ -820,6 +1020,11 @@ function trim(value: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function isTextEditingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
