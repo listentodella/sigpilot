@@ -59,3 +59,5 @@ chore: 说明内容
   - Cursors On、x/y cursor 表格、Copy、`C` 快捷键和 x1/x2 波形 overlay。
 - `docs/ported-features/2026-07-16-measurements-sidebar.md`
   - Range Measurements 对象模型、右栏列表/动作、波形 range overlay 和基础数字指标。
+- `docs/ported-features/2026-07-16-timing-markers-sidebar.md`
+  - Timing Marker 对象模型、Add Pair/Single、右栏列表/动作和波形 marker overlay。

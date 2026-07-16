@@ -96,8 +96,7 @@ interface UiSession {
   analyzers: string[];
   analyzerDataPane: "table" | "terminal";
   rangeMeasurements: UiRangeMeasurement[];
-  markerPairs: number;
-  singleMarkers: number;
+  timingMarkers: UiTimingMarker[];
   notes: string;
 }
 
@@ -140,6 +139,16 @@ interface UiRangeMeasurement {
   note: string;
   selected: boolean;
   startSample: number;
+}
+
+interface UiTimingMarker {
+  endSample?: number;
+  id: string;
+  name: string;
+  note: string;
+  sample: number;
+  selected: boolean;
+  type: "pair" | "single";
 }
 
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
@@ -230,6 +239,22 @@ function createRangeMeasurement(session: UiSession): UiRangeMeasurement {
   };
 }
 
+function createTimingMarker(session: UiSession, type: "pair" | "single"): UiTimingMarker {
+  const totalSamples = session.summary?.metadata.sample_count ?? Math.max(1, session.viewportSamples);
+  const center = Math.max(0, Math.min(totalSamples - 1, Math.round(session.viewportStart + session.viewportSamples * 0.5)));
+  const width = Math.max(16, Math.round(session.viewportSamples * 0.22));
+  const index = session.timingMarkers.filter((marker) => marker.type === type).length + 1;
+  return {
+    endSample: type === "pair" ? Math.min(totalSamples, center + width) : undefined,
+    id: `marker-${Date.now()}-${type}-${index}`,
+    name: type === "pair" ? `Pair ${index}` : `Marker ${index}`,
+    note: "",
+    sample: type === "pair" ? Math.max(0, center - width) : center,
+    selected: true,
+    type,
+  };
+}
+
 function makeSession(id: string, name: string, deviceId: string, source?: UiSession): UiSession {
   const settings = source ? { ...source.settings, device_id: deviceId } : defaultSettings(deviceId);
   return {
@@ -260,8 +285,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     analyzers: [],
     analyzerDataPane: "table",
     rangeMeasurements: [],
-    markerPairs: 0,
-    singleMarkers: 0,
+    timingMarkers: [],
     notes: "",
   };
 }
@@ -798,7 +822,10 @@ export default function App() {
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
-      markerPairs: session.markerPairs + 1,
+      timingMarkers: [
+        ...session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
+        createTimingMarker(session, "pair"),
+      ],
       message: "Marker pair added",
     }));
   }
@@ -808,7 +835,10 @@ export default function App() {
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
-      singleMarkers: session.singleMarkers + 1,
+      timingMarkers: [
+        ...session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
+        createTimingMarker(session, "single"),
+      ],
       message: "Single marker added",
     }));
   }
@@ -1026,6 +1056,10 @@ export default function App() {
                         session={activeSession}
                       />
                       <RangeMeasurementsOverlay
+                        onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
+                        session={activeSession}
+                      />
+                      <TimingMarkersOverlay
                         onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
                         session={activeSession}
                       />
@@ -1306,6 +1340,129 @@ function RangeMeasurementsOverlay({
               onPointerCancel={handlePointerUp}
               type="button"
             />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TimingMarkersOverlay({
+  onUpdateSession,
+  session,
+}: {
+  onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
+  session: UiSession;
+}) {
+  const dragRef = useRef<{ edge: "end" | "start"; id: string } | null>(null);
+  const totalSamples = session.summary?.metadata.sample_count ?? 0;
+  if (!session.summary || totalSamples <= 0 || session.timingMarkers.length === 0) return null;
+
+  function sampleToPercent(sample: number) {
+    const ratio = (sample - session.viewportStart) / Math.max(1, session.viewportSamples);
+    return Math.max(0, Math.min(1, ratio)) * 100;
+  }
+
+  function clientXToSample(clientX: number, host: HTMLElement) {
+    const rect = host.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    return Math.max(0, Math.min(totalSamples, Math.round(session.viewportStart + ratio * session.viewportSamples)));
+  }
+
+  function selectMarker(id: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      timingMarkers: current.timingMarkers.map((marker) => ({ ...marker, selected: marker.id === id })),
+    }));
+  }
+
+  function updateDraggedMarker(clientX: number, host: HTMLElement) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const sample = clientXToSample(clientX, host);
+    onUpdateSession((current) => ({
+      ...current,
+      timingMarkers: current.timingMarkers.map((marker) => {
+        if (marker.id !== drag.id) return marker;
+        if (marker.type === "single" || drag.edge === "start") {
+          return {
+            ...marker,
+            sample: marker.type === "pair" ? Math.min(sample, (marker.endSample ?? sample + 1) - 1) : sample,
+            selected: true,
+          };
+        }
+        return { ...marker, endSample: Math.max(sample, marker.sample + 1), selected: true };
+      }),
+    }));
+  }
+
+  function handlePointerDown(
+    id: string,
+    edge: "end" | "start",
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) {
+    const host = event.currentTarget.parentElement?.parentElement;
+    if (!host) return;
+    dragRef.current = { edge, id };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+    selectMarker(id);
+    updateDraggedMarker(event.clientX, host);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const host = event.currentTarget.parentElement?.parentElement;
+    if (!host || !dragRef.current) return;
+    event.stopPropagation();
+    updateDraggedMarker(event.clientX, host);
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    event.stopPropagation();
+  }
+
+  return (
+    <div className="timingMarkerOverlay" aria-hidden="false">
+      {session.timingMarkers.map((marker) => {
+        const start = sampleToPercent(marker.sample);
+        const end = sampleToPercent(marker.endSample ?? marker.sample);
+        const width = Math.max(0, end - start);
+        return (
+          <div
+            className={`timingMarkerBand ${marker.type} ${marker.selected ? "selected" : ""}`}
+            key={marker.id}
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              selectMarker(marker.id);
+            }}
+            style={{ left: `${start}%`, width: `${marker.type === "pair" ? width : 0}%` }}
+          >
+            <button
+              aria-label={`${marker.name} start`}
+              className="timingMarkerLine start"
+              onPointerDown={(event) => handlePointerDown(marker.id, "start", event)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              type="button"
+            >
+              <span>{marker.type === "pair" ? "A1" : "T"}</span>
+            </button>
+            {marker.type === "pair" && (
+              <button
+                aria-label={`${marker.name} end`}
+                className="timingMarkerLine end"
+                onPointerDown={(event) => handlePointerDown(marker.id, "end", event)}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerUp}
+                type="button"
+              >
+                <span>A2</span>
+              </button>
+            )}
           </div>
         );
       })}
@@ -2830,31 +2987,148 @@ function TimingMarkersPanel({
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   session: UiSession;
 }) {
+  const [addOpen, setAddOpen] = useState(false);
+  const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
+
+  function addMarker(type: "pair" | "single") {
+    onUpdateSession((current) => ({
+      ...current,
+      timingMarkers: [
+        ...current.timingMarkers.map((marker) => ({ ...marker, selected: false })),
+        createTimingMarker(current, type),
+      ],
+    }));
+    setAddOpen(false);
+  }
+
+  function updateMarker(id: string, patch: Partial<UiTimingMarker>) {
+    onUpdateSession((current) => ({
+      ...current,
+      timingMarkers: current.timingMarkers.map((marker) =>
+        marker.id === id ? { ...marker, ...patch } : marker,
+      ),
+    }));
+  }
+
+  function selectMarker(id: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      timingMarkers: current.timingMarkers.map((marker) => ({ ...marker, selected: marker.id === id })),
+    }));
+  }
+
+  function deleteMarker(id: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      timingMarkers: current.timingMarkers.filter((marker) => marker.id !== id),
+    }));
+  }
+
   return (
-    <div className="sidebarSection">
-      <button
-        className="panel-action"
-        onClick={() => onUpdateSession((current) => ({ ...current, markerPairs: current.markerPairs + 1 }))}
-        type="button"
-      >
-        <Plus size={15} />
-        Add Marker Pair
-      </button>
-      <button
-        className="panel-action"
-        onClick={() => onUpdateSession((current) => ({ ...current, singleMarkers: current.singleMarkers + 1 }))}
-        type="button"
-      >
-        <Plus size={15} />
-        Add Single Marker
-      </button>
-      <SimpleListPanel
-        emptyText="No timing markers"
-        rows={[
-          ...Array.from({ length: session.markerPairs }, (_, index) => `Pair ${index + 1}`),
-          ...Array.from({ length: session.singleMarkers }, (_, index) => `Marker ${index + 1}`),
-        ]}
-      />
+    <div className="timingMarkersSidebarPanel">
+      <div className="sidebarTitleRow">
+        <div className="sidebarTitleText">Timing Markers</div>
+        <div className="markerAddMenu">
+          <button className={`sidebarCircleButton ${addOpen ? "active" : ""}`} onClick={() => setAddOpen((open) => !open)} type="button">
+            <Plus size={13} />
+          </button>
+          {addOpen && (
+            <div className="markerAddPopover">
+              <button onClick={() => addMarker("pair")} type="button">
+                <span>Add Marker Pair</span>
+                <small>Cmd/Ctrl+T</small>
+              </button>
+              <button onClick={() => addMarker("single")} type="button">
+                <span>Add Single Marker</span>
+                <small>Shift+Cmd/Ctrl+T</small>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {session.timingMarkers.length === 0 ? (
+        <div className="emptyMeasurementState">
+          <Clock3 size={24} />
+          <span>Click "+" to add Timing Markers</span>
+        </div>
+      ) : (
+        <div className="timingMarkerList">
+          {session.timingMarkers.map((marker) => {
+            const duration =
+              marker.type === "pair" && marker.endSample !== undefined
+                ? formatSeconds(Math.abs(marker.endSample - marker.sample) / Math.max(1, sampleRateHz))
+                : formatSeconds(marker.sample / Math.max(1, sampleRateHz));
+            return (
+              <section
+                className={`timingMarkerItem ${marker.selected ? "selected" : ""}`}
+                key={marker.id}
+                onClick={() => selectMarker(marker.id)}
+              >
+                <div className="rangeMeasurementHeader">
+                  <span className={`markerTypeBadge ${marker.type}`}>{marker.type === "pair" ? "A" : "T"}</span>
+                  <input
+                    aria-label="Marker name"
+                    onChange={(event) => updateMarker(marker.id, { name: event.target.value })}
+                    value={marker.name}
+                  />
+                  <div className="rangeMeasurementActions">
+                    <button
+                      onClick={() => {
+                        onUpdateSession((current) => ({
+                          ...current,
+                          timingMarkers: current.timingMarkers.map((item) => ({ ...item, selected: item.id === marker.id })),
+                          viewportStart: Math.max(0, marker.sample - Math.round(current.viewportSamples / 2)),
+                        }));
+                      }}
+                      title="Go to Marker"
+                      type="button"
+                    >
+                      <Search size={12} />
+                    </button>
+                    <button
+                      onClick={() => {
+                        const span = marker.type === "pair" && marker.endSample ? Math.abs(marker.endSample - marker.sample) : session.viewportSamples;
+                        onUpdateSession((current) => ({
+                          ...current,
+                          timingMarkers: current.timingMarkers.map((item) => ({ ...item, selected: item.id === marker.id })),
+                          viewportStart: Math.max(0, marker.sample - Math.round(span * 0.1)),
+                          viewportSamples: Math.round(Math.max(128, span * 1.2)),
+                        }));
+                      }}
+                      title="Zoom"
+                      type="button"
+                    >
+                      <Maximize2 size={12} />
+                    </button>
+                    <button onClick={() => deleteMarker(marker.id)} title="Delete" type="button">
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+                <div className="markerSummary">
+                  <MetricCell label={marker.type === "pair" ? "Delta" : "Time"} value={duration} />
+                  <MetricCell label="Sample" value={formatSamples(marker.sample)} />
+                </div>
+                <textarea
+                  className="rangeNote"
+                  onChange={(event) => updateMarker(marker.id, { note: event.target.value })}
+                  placeholder="Add note"
+                  value={marker.note}
+                />
+              </section>
+            );
+          })}
+          <button
+            className="panel-action"
+            onClick={() => onUpdateSession((current) => ({ ...current, timingMarkers: [] }))}
+            type="button"
+          >
+            <Trash2 size={15} />
+            Delete All
+          </button>
+        </div>
+      )}
     </div>
   );
 }

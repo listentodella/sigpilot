@@ -1081,6 +1081,67 @@ button:disabled {
   right: -7px;
 }
 
+.timingMarkerOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 17;
+  pointer-events: none;
+}
+
+.timingMarkerBand {
+  height: 100%;
+  position: absolute;
+  top: 0;
+  background: rgba(var(--white-base), 0.05);
+  pointer-events: auto;
+}
+
+.timingMarkerBand.selected {
+  background: rgba(var(--white-base), 0.09);
+}
+
+.timingMarkerBand.single {
+  width: 0;
+}
+
+.timingMarkerLine {
+  width: 13px;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  border: 0;
+  border-left: 1px solid var(--on-background-10);
+  color: var(--background-10);
+  background: transparent;
+  padding: 0;
+  cursor: ew-resize;
+}
+
+.timingMarkerLine.start {
+  left: -6px;
+}
+
+.timingMarkerLine.end {
+  right: -7px;
+}
+
+.timingMarkerLine span {
+  min-width: 22px;
+  height: 18px;
+  position: absolute;
+  top: 24px;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: var(--on-background-10);
+  color: var(--background-10);
+  font-size: 10px;
+  font-weight: 800;
+  transform: translateX(-50%);
+}
+
 .digitalNavigationButton {
   width: 26px;
   height: 26px;
@@ -2145,6 +2206,107 @@ button:disabled {
   font: inherit;
   font-size: 11px;
   outline: none;
+}
+
+.timingMarkersSidebarPanel {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.markerAddMenu {
+  position: relative;
+}
+
+.markerAddPopover {
+  width: 218px;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-20);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 6px 0;
+}
+
+.markerAddPopover button {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 0 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.markerAddPopover button:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.markerAddPopover span,
+.markerAddPopover small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markerAddPopover small {
+  color: var(--on-background-30);
+  font-size: 10px;
+}
+
+.timingMarkerList {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding: 0 12px 12px;
+}
+
+.timingMarkerItem {
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-20);
+}
+
+.timingMarkerItem.selected {
+  border-color: var(--on-background-10);
+}
+
+.markerTypeBadge {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  color: var(--background-10);
+  background: var(--on-background-10);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.markerTypeBadge.single {
+  background: var(--selected-highlight);
+}
+
+.markerSummary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
 }
 
 .analyzerDataTable,
