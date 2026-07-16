@@ -26,7 +26,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { CSSProperties, ReactNode, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode, RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import analyzersIcon from "./assets/saleae/sidebar/analyzers.svg";
 import cursorsIcon from "./assets/saleae/sidebar/cursors.svg";
 import devicesIcon from "./assets/saleae/sidebar/devices.svg";
@@ -81,6 +81,7 @@ interface UiSession {
   summary: CaptureSummary | null;
   progress: CaptureProgress | null;
   tile: WaveformTile | null;
+  cursorState: UiCursorState;
   canvasWidth: number;
   viewportStart: number;
   viewportSamples: number;
@@ -121,6 +122,14 @@ interface UiDeviceSettings {
   triggerSamplingRateHz: number;
   triggerPulseWidthUs: number;
   trimAfterCapture: boolean;
+}
+
+interface UiCursorState {
+  visible: boolean;
+  x1Sample: number;
+  x2Sample: number;
+  y1Channel: number;
+  y2Channel: number;
 }
 
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
@@ -183,6 +192,16 @@ function defaultDeviceSettings(channelCount: number): UiDeviceSettings {
   };
 }
 
+function defaultCursorState(sampleCount = 100_000, channelCount = 16): UiCursorState {
+  return {
+    visible: false,
+    x1Sample: Math.max(0, Math.round(sampleCount * 0.25)),
+    x2Sample: Math.max(1, Math.round(sampleCount * 0.75)),
+    y1Channel: 0,
+    y2Channel: Math.min(1, Math.max(0, channelCount - 1)),
+  };
+}
+
 function makeSession(id: string, name: string, deviceId: string, source?: UiSession): UiSession {
   const settings = source ? { ...source.settings, device_id: deviceId } : defaultSettings(deviceId);
   return {
@@ -196,6 +215,9 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     summary: null,
     progress: null,
     tile: null,
+    cursorState: source
+      ? { ...source.cursorState }
+      : defaultCursorState(100_000, settings.channel_count),
     canvasWidth: 1000,
     viewportStart: 0,
     viewportSamples: 50_000,
@@ -352,6 +374,10 @@ export default function App() {
           summary: event.payload,
           viewportStart: 0,
           viewportSamples: Math.min(event.payload.metadata.sample_count, 100_000),
+          cursorState: {
+            ...defaultCursorState(event.payload.metadata.sample_count, event.payload.metadata.channel_count),
+            visible: session.cursorState.visible,
+          },
           decodedFrames: [],
           message: "Capture complete",
         }));
@@ -497,6 +523,10 @@ export default function App() {
         summary: next,
         viewportStart: 0,
         viewportSamples: Math.min(next.metadata.sample_count, 100_000),
+        cursorState: {
+          ...defaultCursorState(next.metadata.sample_count, next.metadata.channel_count),
+          visible: current.cursorState.visible,
+        },
         decodedFrames: [],
         message: "Capture complete",
       }));
@@ -576,6 +606,7 @@ export default function App() {
         digitalChannels: makeDigitalChannels(summary.metadata.channel_count),
         triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, summary.metadata.channel_count - 1)),
       },
+      cursorState: defaultCursorState(summary.metadata.sample_count, summary.metadata.channel_count),
       summary,
       tile: null,
       viewportStart: 0,
@@ -827,6 +858,15 @@ export default function App() {
         return;
       }
 
+      if (key === "c" && getSidebarPanelAllowed("cursors", activeSession).isSelectable && activeSession) {
+        event.preventDefault();
+        updateSession(activeSession.id, (session) => ({
+          ...session,
+          cursorState: { ...session.cursorState, visible: !session.cursorState.visible },
+        }));
+        return;
+      }
+
       if (key === "n") {
         event.preventDefault();
         shortcutState.waiting = true;
@@ -950,6 +990,10 @@ export default function App() {
                         viewportSamples={activeSession.viewportSamples}
                         onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
                       />
+                      <CursorOverlay
+                        onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
+                        session={activeSession}
+                      />
                     </div>
                   </div>
                 </div>
@@ -1041,6 +1085,82 @@ function SaleaeSidebarIcon({ iconUrl }: { iconUrl: string }) {
       className="saleaeSidebarIcon"
       style={{ "--sidebar-icon-url": `url(${iconUrl})` } as CSSProperties}
     />
+  );
+}
+
+function CursorOverlay({
+  onUpdateSession,
+  session,
+}: {
+  onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
+  session: UiSession;
+}) {
+  const dragRef = useRef<"x1Sample" | "x2Sample" | null>(null);
+  const totalSamples = session.summary?.metadata.sample_count ?? 0;
+  if (!session.cursorState.visible || !session.summary || totalSamples <= 0) return null;
+
+  function sampleToPercent(sample: number) {
+    const ratio = (sample - session.viewportStart) / Math.max(1, session.viewportSamples);
+    return Math.max(0, Math.min(1, ratio)) * 100;
+  }
+
+  function updateCursorFromClientX(clientX: number, host: HTMLElement) {
+    const key = dragRef.current;
+    if (!key) return;
+    const rect = host.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    const sample = Math.round(session.viewportStart + ratio * session.viewportSamples);
+    const nextSample = Math.max(0, Math.min(totalSamples - 1, sample));
+    onUpdateSession((current) => ({
+      ...current,
+      cursorState: { ...current.cursorState, [key]: nextSample },
+    }));
+  }
+
+  function handlePointerDown(key: "x1Sample" | "x2Sample", event: ReactPointerEvent<HTMLButtonElement>) {
+    const host = event.currentTarget.parentElement;
+    if (!host) return;
+    dragRef.current = key;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+    updateCursorFromClientX(event.clientX, host);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const host = event.currentTarget.parentElement;
+    if (!host || !dragRef.current) return;
+    event.stopPropagation();
+    updateCursorFromClientX(event.clientX, host);
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    event.stopPropagation();
+  }
+
+  return (
+    <div className="cursorOverlay" aria-hidden="false">
+      {(["x1Sample", "x2Sample"] as const).map((key, index) => {
+        const label = index === 0 ? "x1" : "x2";
+        const sample = session.cursorState[key];
+        return (
+          <button
+            aria-label={`${label} cursor`}
+            className={`xCursorLine ${label}`}
+            key={key}
+            onPointerDown={(event) => handlePointerDown(key, event)}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+            style={{ left: `${sampleToPercent(sample)}%` }}
+            type="button"
+          >
+            <span>{label}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1434,7 +1554,13 @@ function SidebarPanelContent({
           session={session}
         />
       )}
-      {panel === "cursors" && <SimpleListPanel emptyText="No cursors" rows={["Center cursor", "A1 / A2 timing cursors"]} />}
+      {panel === "cursors" && (
+        <CursorsPanel
+          onUpdateSession={onUpdateSession}
+          sampleRateHz={session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz}
+          session={session}
+        />
+      )}
       {panel === "measurements" && (
         <MeasurementsPanel
           onAdd={() => onUpdateSession((current) => ({ ...current, rangeMeasurements: current.rangeMeasurements + 1 }))}
@@ -1753,6 +1879,20 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 
 function hex16(value: number) {
   return `0x${value.toString(16).padStart(4, "0").toUpperCase()}`;
+}
+
+function formatSeconds(value: number) {
+  const absolute = Math.abs(value);
+  if (absolute >= 1) return `${trimNumber(value)} s`;
+  if (absolute >= 1e-3) return `${trimNumber(value * 1e3)} ms`;
+  if (absolute >= 1e-6) return `${trimNumber(value * 1e6)} us`;
+  return `${trimNumber(value * 1e9)} ns`;
+}
+
+function trimNumber(value: number) {
+  if (!Number.isFinite(value)) return "-";
+  if (Number.isInteger(value)) return String(value);
+  return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function RecordingSettingsPanel({
@@ -2227,6 +2367,111 @@ function AnalyzersPanel({
             )}
           </div>
         )}
+      </section>
+    </div>
+  );
+}
+
+function CursorsPanel({
+  onUpdateSession,
+  sampleRateHz,
+  session,
+}: {
+  onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
+  sampleRateHz: number;
+  session: UiSession;
+}) {
+  const cursor = session.cursorState;
+  const deltaSamples = Math.abs(cursor.x2Sample - cursor.x1Sample);
+  const deltaSeconds = deltaSamples / Math.max(1, sampleRateHz);
+  const frequency = deltaSeconds > 0 ? 1 / deltaSeconds : 0;
+  const channelCount = session.summary?.metadata.channel_count ?? session.settings.channel_count;
+  const rows = [
+    ["x1", formatSeconds(cursor.x1Sample / Math.max(1, sampleRateHz)), ""],
+    ["x2", formatSeconds(cursor.x2Sample / Math.max(1, sampleRateHz)), ""],
+    ["Δx", formatSeconds(deltaSeconds), ""],
+    ["1/Δx", frequency > 0 ? formatRate(frequency) : "-", ""],
+    ["y1", cursor.visible ? "Digital" : "-", `D${cursor.y1Channel}`],
+    ["y2", cursor.visible ? "Digital" : "-", `D${cursor.y2Channel}`],
+    ["Δy", cursor.visible ? "1 state" : "-", ""],
+  ];
+
+  function updateCursor(patch: Partial<UiCursorState>) {
+    onUpdateSession((current) => ({
+      ...current,
+      cursorState: { ...current.cursorState, ...patch },
+    }));
+  }
+
+  function copyRows() {
+    const content = rows.map((row) => row.filter(Boolean).join("\t")).join("\n");
+    void navigator.clipboard?.writeText(content);
+  }
+
+  return (
+    <div className="cursorsSettingsPanel">
+      <section className="deviceSettingsBlock compact">
+        <div className="deviceSettingsBlockTitle">
+          <span>Cursors</span>
+          <button className="deviceSettingsSmallButton" onClick={copyRows} type="button">
+            <Copy size={12} />
+            Copy
+          </button>
+        </div>
+        <label className="toggle-field panel-toggle">
+          <input
+            checked={cursor.visible}
+            onChange={(event) => updateCursor({ visible: event.target.checked })}
+            type="checkbox"
+          />
+          Cursors On
+        </label>
+      </section>
+
+      <table className="cursorsTable">
+        <tbody>
+          {rows.map(([label, value, channel]) => (
+            <tr className={!cursor.visible ? "hiddenCursorRow" : ""} key={label}>
+              <th>{label}</th>
+              <td>{value}</td>
+              <td>{channel}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <section className="deviceSettingsBlock compact">
+        <div className="deviceSettingsBlockTitle">
+          <span>Y Cursor Channels</span>
+        </div>
+        <div className="twoColumnFields">
+          <label className="stack-field">
+            <span>y1</span>
+            <select
+              value={cursor.y1Channel}
+              onChange={(event) => updateCursor({ y1Channel: Number(event.target.value) })}
+            >
+              {Array.from({ length: channelCount }, (_, index) => (
+                <option key={index} value={index}>
+                  D{index}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="stack-field">
+            <span>y2</span>
+            <select
+              value={cursor.y2Channel}
+              onChange={(event) => updateCursor({ y2Channel: Number(event.target.value) })}
+            >
+              {Array.from({ length: channelCount }, (_, index) => (
+                <option key={index} value={index}>
+                  D{index}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </section>
     </div>
   );

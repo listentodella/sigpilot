@@ -55,3 +55,5 @@ chore: 说明内容
   - Recording Settings 的 MSO 可见性规则、Recording Type、Timer/Trigger/Single Shot/Trigger Sampling 骨架。
 - `docs/ported-features/2026-07-16-analyzers-sidebar.md`
   - Analyzers selector、Suggested/active analyzer、Async Serial UART decode、Data Table/Terminal。
+- `docs/ported-features/2026-07-16-cursors-sidebar.md`
+  - Cursors On、x/y cursor 表格、Copy、`C` 快捷键和 x1/x2 波形 overlay。
