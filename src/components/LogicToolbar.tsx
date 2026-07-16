@@ -1,5 +1,12 @@
 import { ChevronDown, ChevronUp, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
 import { ReactNode, useEffect, useRef, useState } from "react";
+import {
+  AnalyzerCommands,
+  CommandPayload,
+  MarkerCommands,
+  MeasurementCommands,
+  UiCommand,
+} from "../lib/sidebar";
 
 type MenuName = "analyzers" | "markers" | null;
 
@@ -8,10 +15,7 @@ interface LogicToolbarProps {
   hasCapture: boolean;
   onStart: () => void;
   onStop: () => void;
-  onAddAnalyzer: (name: string) => void;
-  onAddRangeMeasurement: () => void;
-  onAddMarkerPair: () => void;
-  onAddSingleMarker: () => void;
+  onCommand: (command: UiCommand, payload?: CommandPayload) => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onFit: () => void;
@@ -22,10 +26,7 @@ export function LogicToolbar({
   hasCapture,
   onStart,
   onStop,
-  onAddAnalyzer,
-  onAddRangeMeasurement,
-  onAddMarkerPair,
-  onAddSingleMarker,
+  onCommand,
   onZoomIn,
   onZoomOut,
   onFit,
@@ -76,7 +77,7 @@ export function LogicToolbar({
                 key={name}
                 onClick={() => {
                   setOpenMenu(null);
-                  onAddAnalyzer(name);
+                  onCommand(AnalyzerCommands.AddAnalyzer, { analyzerName: name });
                 }}
               >
                 <span>{name}</span>
@@ -86,7 +87,7 @@ export function LogicToolbar({
           </ToolbarMenu>
         )}
 
-        <ToolbarButton title="Add Range Measurement" onClick={onAddRangeMeasurement}>
+        <ToolbarButton title="Add Range Measurement" onClick={() => onCommand(MeasurementCommands.AddRange)}>
           <RangeMeasurementIcon />
         </ToolbarButton>
 
@@ -104,7 +105,7 @@ export function LogicToolbar({
               className="toolbarMenuItem"
               onClick={() => {
                 setOpenMenu(null);
-                onAddMarkerPair();
+                onCommand(MarkerCommands.AddPair);
               }}
             >
               <span>Add Marker Pair</span>
@@ -114,7 +115,7 @@ export function LogicToolbar({
               className="toolbarMenuItem"
               onClick={() => {
                 setOpenMenu(null);
-                onAddSingleMarker();
+                onCommand(MarkerCommands.AddMarker);
               }}
             >
               <span>Add Single Marker</span>

@@ -1309,6 +1309,17 @@ button:disabled {
   color: var(--on-background-0);
 }
 
+.singleSwitcher:disabled,
+.disabledSwitcher {
+  color: var(--on-background-40);
+  cursor: default;
+}
+
+.singleSwitcher:disabled:hover,
+.disabledSwitcher:hover {
+  color: var(--on-background-40);
+}
+
 .selectedSwitcher {
   border-left-color: var(--border-highlight, var(--selected-highlight));
   background-color: var(--background-30);

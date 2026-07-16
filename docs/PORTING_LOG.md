@@ -47,3 +47,5 @@ chore: 说明内容
   - 数字通道 hover 时的 Previous Edge / Next Edge 按钮与快捷键跳转。
 - `docs/ported-features/2026-07-16-digital-edge-navigation-polish.md`
   - 边沿跳转 tooltip、图标方向、300ms 平移动画细节优化。
+- `docs/ported-features/2026-07-16-sidebar-command-infrastructure.md`
+  - 右侧栏面板入口规则、统一命令层和原版快捷键基础设施。

@@ -51,16 +51,19 @@ import {
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
-
-type SidebarPanel =
-  | "devices"
-  | "recordingSettings"
-  | "analyzers"
-  | "cursors"
-  | "measurements"
-  | "timingMarkers"
-  | "extensions"
-  | "notes";
+import {
+  AnalyzerCommands,
+  CommandPayload,
+  MarkerCommands,
+  MeasurementCommands,
+  SIDEBAR_COMMAND_TO_PANEL,
+  SIDEBAR_PANELS,
+  SIDEBAR_PANEL_SHORTCUTS,
+  SIDEBAR_SHORTCUT_TO_COMMAND,
+  SidebarCommands,
+  SidebarPanel,
+  UiCommand,
+} from "./lib/sidebar";
 
 type FooterPopover = "devices" | "newSession" | "zoom" | null;
 
@@ -93,16 +96,6 @@ interface UiSession {
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 const CHANNEL_COUNTS = [4, 8, 16, 24, 32];
-const SIDEBAR_PANELS: SidebarPanel[] = [
-  "devices",
-  "recordingSettings",
-  "analyzers",
-  "cursors",
-  "measurements",
-  "timingMarkers",
-  "extensions",
-  "notes",
-];
 
 const panelMeta: Record<
   SidebarPanel,
@@ -162,6 +155,49 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
   };
 }
 
+interface SidebarPanelAllowed {
+  disabledReason?: string;
+  isSelectable: boolean;
+  isVisible: boolean;
+}
+
+function isMsoSession(session: UiSession | null | undefined) {
+  if (!session) return false;
+  const source = `${session.selectedDevice} ${session.summary?.metadata.source_device ?? ""}`.toLowerCase();
+  return source.includes("mso") || source.includes("logic pro");
+}
+
+function getSidebarPanelAllowed(panel: SidebarPanel, session: UiSession | null | undefined): SidebarPanelAllowed {
+  const hasActiveSession = Boolean(session);
+  const isMso = isMsoSession(session);
+
+  if (panel === "recordingSettings") {
+    return {
+      disabledReason: isMso ? undefined : "Recording Settings is available for Logic Pro / MSO sessions",
+      isSelectable: hasActiveSession && isMso,
+      isVisible: !hasActiveSession || isMso,
+    };
+  }
+
+  if (panel === "cursors") {
+    return {
+      disabledReason: isMso ? undefined : "Cursors are available for Logic Pro / MSO sessions",
+      isSelectable: hasActiveSession && isMso,
+      isVisible: isMso,
+    };
+  }
+
+  if (panel === "extensions") {
+    return { isSelectable: true, isVisible: true };
+  }
+
+  return {
+    disabledReason: hasActiveSession ? undefined : "Create or open a session first",
+    isSelectable: hasActiveSession,
+    isVisible: true,
+  };
+}
+
 export default function App() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [draftSelectedDevice, setDraftSelectedDevice] = useState(DEFAULT_DEVICE_ID);
@@ -175,6 +211,7 @@ export default function App() {
   const sessionsRef = useRef<UiSession[]>([]);
   const activeSessionIdRef = useRef<string | null>(null);
   const captureSessionRef = useRef<string | null>(null);
+  const sidebarShortcutRef = useRef<{ timeout: number | null; waiting: boolean }>({ timeout: null, waiting: false });
   const tileRequestSeq = useRef(0);
   const sessionCounter = useRef(1);
 
@@ -553,8 +590,63 @@ export default function App() {
     updateSession(activeSession.id, (session) => ({ ...session, settings: { ...session.settings, ...patch } }));
   }
 
+  function openSidebarPanel(panel: SidebarPanel) {
+    const allowed = getSidebarPanelAllowed(panel, activeSession);
+    if (!allowed.isVisible || !allowed.isSelectable) {
+      if (activeSession && allowed.disabledReason) {
+        updateSession(activeSession.id, (session) => ({ ...session, message: allowed.disabledReason ?? session.message }));
+      }
+      return;
+    }
+    setSelectedPanel(panel);
+  }
+
+  function toggleSidebarPanel(panel: SidebarPanel | undefined) {
+    if (!panel) {
+      setSelectedPanel(undefined);
+      return;
+    }
+    if (selectedPanel === panel) {
+      setSelectedPanel(undefined);
+      return;
+    }
+    openSidebarPanel(panel);
+  }
+
+  function invokeCommand(command: UiCommand, payload?: CommandPayload) {
+    if (command === SidebarCommands.CloseSidebar) {
+      setSelectedPanel(undefined);
+      return;
+    }
+
+    const sidebarPanel = SIDEBAR_COMMAND_TO_PANEL[command];
+    if (sidebarPanel) {
+      openSidebarPanel(sidebarPanel);
+      return;
+    }
+
+    if (command === AnalyzerCommands.AddAnalyzer) {
+      handleAddAnalyzer(payload?.analyzerName ?? "Async Serial");
+      return;
+    }
+
+    if (command === MeasurementCommands.AddRange) {
+      handleAddRangeMeasurement();
+      return;
+    }
+
+    if (command === MarkerCommands.AddPair) {
+      handleAddMarkerPair();
+      return;
+    }
+
+    if (command === MarkerCommands.AddMarker) {
+      handleAddSingleMarker();
+    }
+  }
+
   function handleAddAnalyzer(name: string) {
-    setSelectedPanel("analyzers");
+    openSidebarPanel("analyzers");
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
@@ -564,7 +656,7 @@ export default function App() {
   }
 
   function handleAddRangeMeasurement() {
-    setSelectedPanel("measurements");
+    openSidebarPanel("measurements");
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
@@ -574,7 +666,7 @@ export default function App() {
   }
 
   function handleAddMarkerPair() {
-    setSelectedPanel("timingMarkers");
+    openSidebarPanel("timingMarkers");
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
@@ -584,7 +676,7 @@ export default function App() {
   }
 
   function handleAddSingleMarker() {
-    setSelectedPanel("timingMarkers");
+    openSidebarPanel("timingMarkers");
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
@@ -612,6 +704,76 @@ export default function App() {
     setFooterPopover(null);
     createSession(deviceId, activeSession ?? undefined);
   }
+
+  useEffect(() => {
+    if (!selectedPanel) return;
+    const allowed = getSidebarPanelAllowed(selectedPanel, activeSession);
+    if (!allowed.isVisible || !allowed.isSelectable) {
+      setSelectedPanel(undefined);
+    }
+  }, [activeSession, selectedPanel]);
+
+  useEffect(() => {
+    const shortcutState = sidebarShortcutRef.current;
+    function clearSidebarSequence() {
+      shortcutState.waiting = false;
+      if (shortcutState.timeout !== null) {
+        window.clearTimeout(shortcutState.timeout);
+        shortcutState.timeout = null;
+      }
+    }
+
+    function isEditableTarget(target: EventTarget | null) {
+      if (!(target instanceof HTMLElement)) return false;
+      const tagName = target.tagName.toLowerCase();
+      return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (isEditableTarget(event.target)) return;
+
+      const key = event.key.toLowerCase();
+      const hasCommandModifier = event.metaKey || event.ctrlKey;
+
+      if (hasCommandModifier && !event.altKey && key === "g") {
+        event.preventDefault();
+        clearSidebarSequence();
+        invokeCommand(MeasurementCommands.AddRange);
+        return;
+      }
+
+      if (hasCommandModifier && !event.altKey && key === "t") {
+        event.preventDefault();
+        clearSidebarSequence();
+        invokeCommand(event.shiftKey ? MarkerCommands.AddMarker : MarkerCommands.AddPair);
+        return;
+      }
+
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      if (shortcutState.waiting) {
+        const command = SIDEBAR_SHORTCUT_TO_COMMAND[key];
+        clearSidebarSequence();
+        if (command) {
+          event.preventDefault();
+          invokeCommand(command);
+        }
+        return;
+      }
+
+      if (key === "n") {
+        event.preventDefault();
+        shortcutState.waiting = true;
+        shortcutState.timeout = window.setTimeout(clearSidebarSequence, 900);
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      clearSidebarSequence();
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  });
 
   const zoomLabel =
     activeSession?.summary && activeSession.canvasWidth > 0
@@ -679,10 +841,7 @@ export default function App() {
                 <LogicToolbar
                   busy={Boolean(activeSession?.busy)}
                   hasCapture={Boolean(activeSession?.summary)}
-                  onAddAnalyzer={handleAddAnalyzer}
-                  onAddMarkerPair={handleAddMarkerPair}
-                  onAddRangeMeasurement={handleAddRangeMeasurement}
-                  onAddSingleMarker={handleAddSingleMarker}
+                  onCommand={invokeCommand}
                   onFit={fitViewport}
                   onStart={handleCapture}
                   onStop={handleCancel}
@@ -768,7 +927,7 @@ export default function App() {
               onDecode={() => handleDecode(activeSession.id)}
               onRefreshDevices={refreshDevices}
               onSelectDevice={setSelectedDeviceForActive}
-              onSelectPanel={setSelectedPanel}
+              onSelectPanel={toggleSidebarPanel}
               onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
               onUpdateSettings={updateActiveSettings}
               onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
@@ -1124,13 +1283,18 @@ function RightSidebar({
         <div className="panelSwitcherTopSection">
           {SIDEBAR_PANELS.map((panel) => {
             const meta = panelMeta[panel];
+            const allowed = getSidebarPanelAllowed(panel, session);
+            if (!allowed.isVisible) return null;
             const isSelected = selectedPanel === panel;
+            const shortcut = SIDEBAR_PANEL_SHORTCUTS[panel];
+            const title = shortcut ? `${meta.label} (${shortcut})` : meta.label;
             return (
               <button
-                className={`singleSwitcher selectableSwitcher ${isSelected ? "selectedSwitcher" : ""}`}
+                className={`singleSwitcher ${allowed.isSelectable ? "selectableSwitcher" : "disabledSwitcher"} ${isSelected ? "selectedSwitcher" : ""}`}
+                disabled={!allowed.isSelectable}
                 key={panel}
                 onClick={() => onSelectPanel(isSelected ? undefined : panel)}
-                title={meta.label}
+                title={allowed.disabledReason ?? title}
                 type="button"
               >
                 <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
