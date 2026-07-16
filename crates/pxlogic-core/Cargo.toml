@@ -1,0 +1,16 @@
+[package]
+name = "pxlogic-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+default = ["rusb-transport"]
+rusb-transport = ["dep:rusb"]
+
+[dependencies]
+chrono.workspace = true
+rusb = { workspace = true, optional = true }
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

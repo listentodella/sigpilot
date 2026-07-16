@@ -1,0 +1,9 @@
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" color="var(--on-background-30)">
+<g>
+<path d="M14 10H12V12H10V14H12V16H14V14H16V12H14V10Z" fill="currentColor"></path>
+<rect x="12" width="2" height="9" fill="currentColor"></rect>
+<rect y="14" width="2" height="9" transform="rotate(-90 0 14)" fill="currentColor"></rect>
+<rect x="12" y="17" width="2" height="3" fill="currentColor"></rect>
+<rect x="17" y="12" width="3" height="2" fill="currentColor"></rect>
+</g>
+</svg>

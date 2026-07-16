@@ -1,0 +1,5 @@
+[build]
+target-dir = "/Volumes/tp7100s/work/pxlogic/target"
+
+[env]
+PXLOGIC_APP_DATA = "/Volumes/tp7100s/work/pxlogic/.app-data"

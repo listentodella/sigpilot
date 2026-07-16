@@ -1,0 +1,20 @@
+# Build outputs and dependency caches
+/target/
+/src-tauri/target/
+/node_modules/
+/dist/
+
+# Local reference checkouts / extracted application data.
+# Keep these on disk for porting, but do not mix them into this repo's history.
+/.app-data/
+/pxview-fork/
+
+# Local captures are useful while debugging, but should be promoted to a
+# deliberate test fixture before they enter version control.
+/debug-captures/
+
+# Local machine files
+/.DS_Store
+/.env.local
+/.env.*.local
+*.log
