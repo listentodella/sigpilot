@@ -57,5 +57,4 @@
 
 ## 对应 Git 提交
 
-- 待提交后回填。
-
+- `9948ace` (`port: digital edge navigation`)
