@@ -103,8 +103,16 @@ interface UiDeviceSettings {
   digitalChannels: boolean[];
   glitchFilterEnabled: boolean;
   glitchFilterNs: number;
+  singleShotEnabled: boolean;
+  singleShotHighResolution: boolean;
+  singleShotPostTriggerMs: number;
+  singleShotPreTriggerMs: number;
+  triggerHoldoffMs: number;
   triggerChannel: number;
   triggerEdge: UiTriggerEdge;
+  triggerSamplingEnabled: boolean;
+  triggerSamplingPriority: "Sample Rate" | "Duration";
+  triggerSamplingRateHz: number;
   triggerPulseWidthUs: number;
   trimAfterCapture: boolean;
 }
@@ -153,8 +161,16 @@ function defaultDeviceSettings(channelCount: number): UiDeviceSettings {
     digitalChannels: makeDigitalChannels(channelCount),
     glitchFilterEnabled: false,
     glitchFilterNs: 10,
+    singleShotEnabled: false,
+    singleShotHighResolution: false,
+    singleShotPostTriggerMs: 5,
+    singleShotPreTriggerMs: 5,
+    triggerHoldoffMs: 0,
     triggerChannel: 0,
     triggerEdge: "Rising Edge",
+    triggerSamplingEnabled: false,
+    triggerSamplingPriority: "Sample Rate",
+    triggerSamplingRateHz: 25_000_000,
     triggerPulseWidthUs: 10,
     trimAfterCapture: true,
   };
@@ -1395,7 +1411,13 @@ function SidebarPanelContent({
           session={session}
         />
       )}
-      {panel === "recordingSettings" && <RecordingSettingsPanel onUpdateSettings={onUpdateSettings} session={session} />}
+      {panel === "recordingSettings" && (
+        <RecordingSettingsPanel
+          onUpdateSession={onUpdateSession}
+          onUpdateSettings={onUpdateSettings}
+          session={session}
+        />
+      )}
       {panel === "analyzers" && (
         <AnalyzersPanel
           onDecode={onDecode}
@@ -1727,73 +1749,237 @@ function hex16(value: number) {
 
 function RecordingSettingsPanel({
   onUpdateSettings,
+  onUpdateSession,
   session,
 }: {
+  onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   session: UiSession;
 }) {
+  function updateDeviceSettings(patch: Partial<UiDeviceSettings>) {
+    onUpdateSession((current) => ({
+      ...current,
+      deviceSettings: {
+        ...current.deviceSettings,
+        ...patch,
+        digitalChannels: [...current.deviceSettings.digitalChannels],
+      },
+    }));
+  }
+
   return (
-    <div className="sidebarForm">
-      <label className="stack-field">
-        <span>Capture mode</span>
-        <select value={session.settings.mode} onChange={(event) => onUpdateSettings({ mode: event.target.value as CaptureSettings["mode"] })}>
-          <option value="Buffer">Buffer</option>
-          <option value="Stream">Stream</option>
-        </select>
-      </label>
-      <label className="stack-field">
-        <span>Sample rate</span>
-        <select
-          value={session.settings.sample_rate_hz}
-          onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
-        >
-          {SAMPLE_RATES.map((rate) => (
-            <option key={rate} value={rate}>
-              {formatRate(rate)}
-            </option>
+    <div className="recordingSettingsPanel">
+      <section className="deviceSettingsBlock">
+        <div className="deviceSettingsBlockTitle">
+          <span>Recording Type</span>
+          <small>{session.deviceSettings.captureMode}</small>
+        </div>
+        <div className="recordingTypeGrid">
+          {(["FreeRun", "Timer", "Trigger"] as UiRecordingMode[]).map((mode) => (
+            <button
+              className={session.deviceSettings.captureMode === mode ? "active" : ""}
+              key={mode}
+              onClick={() => updateDeviceSettings({ captureMode: mode })}
+              type="button"
+            >
+              <span>{mode === "FreeRun" ? "Looping" : mode}</span>
+              <small>{mode === "FreeRun" ? "Free Run" : mode === "Timer" ? "Timed" : "Event"}</small>
+            </button>
           ))}
-        </select>
-      </label>
-      <label className="stack-field">
-        <span>Channels</span>
-        <select
-          value={session.settings.channel_count}
-          onChange={(event) => onUpdateSettings({ channel_count: Number(event.target.value) })}
-        >
-          {CHANNEL_COUNTS.map((count) => (
-            <option key={count} value={count}>
-              {count} digital
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="stack-field">
-        <span>Duration</span>
-        <input
-          min={1}
-          onChange={(event) => onUpdateSettings({ duration_ms: Number(event.target.value) })}
-          type="number"
-          value={session.settings.duration_ms}
-        />
-      </label>
-      <label className="stack-field">
-        <span>Threshold</span>
-        <input
-          min={0}
-          onChange={(event) => onUpdateSettings({ threshold_volts: Number(event.target.value) })}
-          step={0.1}
-          type="number"
-          value={session.settings.threshold_volts}
-        />
-      </label>
-      <label className="toggle-field panel-toggle">
-        <input
-          checked={session.settings.decode_cross}
-          onChange={(event) => onUpdateSettings({ decode_cross: event.target.checked })}
-          type="checkbox"
-        />
-        Decode crossing edges
-      </label>
+        </div>
+      </section>
+
+      {session.deviceSettings.captureMode === "FreeRun" && (
+        <section className="deviceSettingsBlock">
+          <div className="deviceSettingsBlockTitle">
+            <span>Free Run Settings</span>
+            <small>Continuous</small>
+          </div>
+          <label className="stack-field">
+            <span>Continuous sample rate</span>
+            <select
+              value={session.settings.sample_rate_hz}
+              onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
+            >
+              {SAMPLE_RATES.map((rate) => (
+                <option key={rate} value={rate}>
+                  {formatRate(rate)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="toggle-field panel-toggle">
+            <input
+              checked={session.deviceSettings.trimAfterCapture}
+              onChange={(event) => updateDeviceSettings({ trimAfterCapture: event.target.checked })}
+              type="checkbox"
+            />
+            Trim after capture
+          </label>
+        </section>
+      )}
+
+      {session.deviceSettings.captureMode === "Timer" && (
+        <section className="deviceSettingsBlock">
+          <div className="deviceSettingsBlockTitle">
+            <span>Timer Settings</span>
+            <small>{formatRate(session.settings.sample_rate_hz)}</small>
+          </div>
+          <label className="stack-field">
+            <span>Stop after ms</span>
+            <input
+              min={1}
+              onChange={(event) => onUpdateSettings({ duration_ms: Number(event.target.value) })}
+              type="number"
+              value={session.settings.duration_ms}
+            />
+          </label>
+          <label className="stack-field">
+            <span>Sample rate</span>
+            <select
+              value={session.settings.sample_rate_hz}
+              onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
+            >
+              {SAMPLE_RATES.map((rate) => (
+                <option key={rate} value={rate}>
+                  {formatRate(rate)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+      )}
+
+      {session.deviceSettings.captureMode === "Trigger" && (
+        <>
+          <section className="deviceSettingsBlock">
+            <div className="deviceSettingsBlockTitle">
+              <span>Trigger Settings</span>
+              <small>Digital</small>
+            </div>
+            <label className="stack-field">
+              <span>Trigger channel</span>
+              <select
+                value={session.deviceSettings.triggerChannel}
+                onChange={(event) => updateDeviceSettings({ triggerChannel: Number(event.target.value) })}
+              >
+                {Array.from({ length: Math.max(1, session.settings.channel_count) }, (_, index) => (
+                  <option key={index} value={index}>
+                    D{index}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="stack-field">
+              <span>Trigger type</span>
+              <select
+                value={session.deviceSettings.triggerEdge}
+                onChange={(event) => updateDeviceSettings({ triggerEdge: event.target.value as UiTriggerEdge })}
+              >
+                {(["Rising Edge", "Falling Edge", "High Pulse", "Low Pulse"] as UiTriggerEdge[]).map((edge) => (
+                  <option key={edge} value={edge}>
+                    {edge}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="stack-field">
+              <span>Holdoff ms</span>
+              <input
+                min={0}
+                onChange={(event) => updateDeviceSettings({ triggerHoldoffMs: Number(event.target.value) })}
+                type="number"
+                value={session.deviceSettings.triggerHoldoffMs}
+              />
+            </label>
+          </section>
+
+          <section className="deviceSettingsBlock compact">
+            <div className="deviceSettingsBlockTitle">
+              <span>Single Shot</span>
+              <small>{session.deviceSettings.singleShotEnabled ? "On" : "Off"}</small>
+            </div>
+            <label className="toggle-field panel-toggle">
+              <input
+                checked={session.deviceSettings.singleShotEnabled}
+                onChange={(event) => updateDeviceSettings({ singleShotEnabled: event.target.checked })}
+                type="checkbox"
+              />
+              Enable single shot
+            </label>
+            <label className="toggle-field panel-toggle">
+              <input
+                checked={session.deviceSettings.singleShotHighResolution}
+                onChange={(event) => updateDeviceSettings({ singleShotHighResolution: event.target.checked })}
+                type="checkbox"
+              />
+              High resolution
+            </label>
+            <div className="twoColumnFields">
+              <label className="stack-field">
+                <span>Pre-trigger ms</span>
+                <input
+                  min={0}
+                  onChange={(event) => updateDeviceSettings({ singleShotPreTriggerMs: Number(event.target.value) })}
+                  type="number"
+                  value={session.deviceSettings.singleShotPreTriggerMs}
+                />
+              </label>
+              <label className="stack-field">
+                <span>Post-trigger ms</span>
+                <input
+                  min={0}
+                  onChange={(event) => updateDeviceSettings({ singleShotPostTriggerMs: Number(event.target.value) })}
+                  type="number"
+                  value={session.deviceSettings.singleShotPostTriggerMs}
+                />
+              </label>
+            </div>
+          </section>
+
+          <section className="deviceSettingsBlock compact">
+            <div className="deviceSettingsBlockTitle">
+              <span>Trigger Sampling</span>
+              <small>{session.deviceSettings.triggerSamplingEnabled ? "Manual" : "Auto"}</small>
+            </div>
+            <label className="toggle-field panel-toggle">
+              <input
+                checked={session.deviceSettings.triggerSamplingEnabled}
+                onChange={(event) => updateDeviceSettings({ triggerSamplingEnabled: event.target.checked })}
+                type="checkbox"
+              />
+              Manual trigger sample rate
+            </label>
+            <label className="stack-field">
+              <span>Sample rate</span>
+              <select
+                disabled={!session.deviceSettings.triggerSamplingEnabled}
+                value={session.deviceSettings.triggerSamplingRateHz}
+                onChange={(event) => updateDeviceSettings({ triggerSamplingRateHz: Number(event.target.value) })}
+              >
+                {SAMPLE_RATES.map((rate) => (
+                  <option key={rate} value={rate}>
+                    {formatRate(rate)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="stack-field">
+              <span>Priority</span>
+              <select
+                disabled={!session.deviceSettings.triggerSamplingEnabled}
+                value={session.deviceSettings.triggerSamplingPriority}
+                onChange={(event) =>
+                  updateDeviceSettings({ triggerSamplingPriority: event.target.value as UiDeviceSettings["triggerSamplingPriority"] })
+                }
+              >
+                <option value="Sample Rate">Sample Rate</option>
+                <option value="Duration">Duration</option>
+              </select>
+            </label>
+          </section>
+        </>
+      )}
     </div>
   );
 }
