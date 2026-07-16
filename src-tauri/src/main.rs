@@ -1,4 +1,6 @@
 use std::{
+    fs,
+    path::Path,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -13,7 +15,7 @@ use pxlogic_core::{
     UartDecodeSettings,
 };
 use pxlogic_waveform::{WaveformRequest, WaveformTile};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 #[cfg(feature = "rusb-transport")]
@@ -31,6 +33,25 @@ struct AppState {
 struct CaptureSummary {
     metadata: CaptureMetadata,
     bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtensionTemplateRequest {
+    author: String,
+    description: String,
+    name: String,
+    path: String,
+    #[serde(rename = "type")]
+    extension_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExtensionPackage {
+    manifest: serde_json::Value,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readme: Option<String>,
 }
 
 #[tauri::command]
@@ -225,6 +246,120 @@ fn decode_uart_frames(
     decode_uart(&capture, &settings).map_err(to_string)
 }
 
+#[tauri::command]
+fn read_extension_package(path: String) -> CommandResult<ExtensionPackage> {
+    let manifest_path = PathBuf::from(&path);
+    let contents = fs::read_to_string(&manifest_path).map_err(to_string)?;
+    let manifest = serde_json::from_str(&contents).map_err(to_string)?;
+    let readme = read_extension_readme(&manifest_path);
+    Ok(ExtensionPackage {
+        manifest,
+        path,
+        readme,
+    })
+}
+
+#[tauri::command]
+fn create_extension_template(request: ExtensionTemplateRequest) -> CommandResult<ExtensionPackage> {
+    let directory = PathBuf::from(&request.path);
+    if directory.exists() {
+        return Err("the extension directory already exists; choose a new location".to_string());
+    }
+    fs::create_dir_all(&directory).map_err(to_string)?;
+
+    let parsed_name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("My Extension");
+    let title = if request.name.trim().is_empty() {
+        parsed_name.to_string()
+    } else {
+        request.name.trim().to_string()
+    };
+    let author = if request.author.trim().is_empty() {
+        "shy coder".to_string()
+    } else {
+        request.author.trim().to_string()
+    };
+    let entry_point = match request.extension_type.as_str() {
+        "HighLevelAnalyzer" => "HighLevelAnalyzer.Hla".to_string(),
+        "DigitalMeasurement" => "DigitalMeasurement.MyDigitalMeasurer".to_string(),
+        "AnalogMeasurement" => "AnalogMeasurement.MyAnalogMeasurer".to_string(),
+        other => return Err(format!("unsupported extension type: {other}")),
+    };
+    let feature = if request.extension_type == "HighLevelAnalyzer" {
+        serde_json::json!({
+            "type": request.extension_type,
+            "entryPoint": entry_point,
+        })
+    } else {
+        serde_json::json!({
+            "type": request.extension_type,
+            "entryPoint": entry_point,
+            "metrics": {
+                "metricKey": {
+                    "name": "<metric_name>",
+                    "notation": "<short_notation>"
+                }
+            }
+        })
+    };
+    let manifest = serde_json::json!({
+        "name": title,
+        "apiVersion": "1.0.0",
+        "author": author,
+        "version": "0.0.1",
+        "description": request.description,
+        "extensions": {
+            title.clone(): feature
+        }
+    });
+
+    let manifest_path = directory.join("extension.json");
+    let readme_path = directory.join("README.md");
+    let python_path = directory.join(format!("{}.py", request.extension_type));
+    let readme = format!(
+        "# {title}\n\n## Getting started\n\n1. Update the generated Python entry point for your needs.\n2. Test the extension in PXLogic.\n3. Update this README.\n4. Publish the extension when it is ready.\n"
+    );
+    let python = extension_python_template(&request.extension_type)?;
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).map_err(to_string)?,
+    )
+    .map_err(to_string)?;
+    fs::write(&readme_path, &readme).map_err(to_string)?;
+    fs::write(python_path, python).map_err(to_string)?;
+
+    Ok(ExtensionPackage {
+        manifest,
+        path: manifest_path.to_string_lossy().to_string(),
+        readme: Some(readme),
+    })
+}
+
+fn read_extension_readme(manifest_path: &Path) -> Option<String> {
+    let directory = manifest_path.parent()?;
+    ["README.md", "readme.md", "Readme.md"]
+        .iter()
+        .find_map(|name| fs::read_to_string(directory.join(name)).ok())
+}
+
+fn extension_python_template(extension_type: &str) -> CommandResult<&'static str> {
+    match extension_type {
+        "HighLevelAnalyzer" => Ok(
+            "from saleae.analyzers import HighLevelAnalyzer, AnalyzerFrame\n\n\nclass Hla(HighLevelAnalyzer):\n    result_types = {\"frame\": {\"format\": \"{{data.value}}\"}}\n\n    def decode(self, frame: AnalyzerFrame):\n        return AnalyzerFrame(\"frame\", frame.start_time, frame.end_time, {\"value\": frame.type})\n",
+        ),
+        "DigitalMeasurement" => Ok(
+            "class MyDigitalMeasurer:\n    def __init__(self, requested_measurements):\n        self.requested_measurements = requested_measurements\n\n    def process_data(self, data):\n        pass\n\n    def measure(self):\n        return {\"metricKey\": 0}\n",
+        ),
+        "AnalogMeasurement" => Ok(
+            "class MyAnalogMeasurer:\n    def __init__(self, requested_measurements):\n        self.requested_measurements = requested_measurements\n\n    def process_data(self, data):\n        pass\n\n    def measure(self):\n        return {\"metricKey\": 0}\n",
+        ),
+        other => Err(format!("unsupported extension type: {other}")),
+    }
+}
+
 fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -243,6 +378,8 @@ fn main() {
             export_capture,
             get_waveform_tile,
             decode_uart_frames,
+            read_extension_package,
+            create_extension_template,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run PXLogic Studio");

@@ -48,6 +48,7 @@ import notesIcon from "./assets/saleae/sidebar/notes.svg";
 import recordingSettingsIcon from "./assets/saleae/sidebar/recordingSettings.svg";
 import timingMarkersIcon from "./assets/saleae/sidebar/timingMarkers.svg";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
+import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import {
@@ -69,6 +70,11 @@ import {
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
 import { saleaeLegacyChannelColor } from "./lib/saleaeChannelColors";
+import {
+  loadUiExtensions,
+  saveUiExtensions,
+  UiExtensionRecord,
+} from "./lib/extensions";
 import {
   AnalyzerCommands,
   CommandPayload,
@@ -168,7 +174,7 @@ interface UiTimingMarker {
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
-const AVAILABLE_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
+const BUILT_IN_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
 const RANGE_COLORS = ["#43baeb", "#ffcb46", "#00b140", "#f52a66"];
 
 const panelMeta: Record<
@@ -368,6 +374,7 @@ export default function App() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [draftSelectedDevice, setDraftSelectedDevice] = useState(DEFAULT_DEVICE_ID);
   const [sessions, setSessions] = useState<UiSession[]>([]);
+  const [extensions, setExtensions] = useState<UiExtensionRecord[]>(loadUiExtensions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedPanel, setSelectedPanel] = useState<SidebarPanel | undefined>(undefined);
   const [footerPopover, setFooterPopover] = useState<FooterPopover>(null);
@@ -387,6 +394,10 @@ export default function App() {
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    saveUiExtensions(extensions);
+  }, [extensions]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -991,7 +1002,7 @@ export default function App() {
       const nextActive = nextSessions[Math.min(targetIndex, nextSessions.length - 1)] ?? null;
       setActiveSessionId(nextActive?.id ?? null);
       if (!nextActive) {
-        setSelectedPanel(undefined);
+        setSelectedPanel((panel) => (panel === "extensions" ? panel : undefined));
       }
     }
   }
@@ -1276,22 +1287,33 @@ export default function App() {
             )}
           </section>
 
-          {activeSession && (
-            <RightSidebar
-              devices={devices}
-              onCreateSession={createSessionFromFooter}
-              onDecode={() => handleDecode(activeSession.id)}
-              onRefreshDevices={refreshDevices}
-              onSelectDevice={setSelectedDeviceForActive}
-              onSelectPanel={toggleSidebarPanel}
-              onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
-              onUpdateSettings={updateActiveSettings}
-              onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
-              selectedDevice={selectedDevice}
-              selectedPanel={selectedPanel}
-              session={activeSession}
-            />
-          )}
+          <RightSidebar
+            devices={devices}
+            extensions={extensions}
+            onChangeExtensions={(updater) => setExtensions((current) => updater(current))}
+            onCreateSession={createSessionFromFooter}
+            onDecode={() => activeSession && handleDecode(activeSession.id)}
+            onNotify={(message) => {
+              if (activeSession) {
+                updateSession(activeSession.id, (session) => ({ ...session, message }));
+              } else {
+                setStartupMessage(message);
+              }
+            }}
+            onRefreshDevices={refreshDevices}
+            onSelectDevice={setSelectedDeviceForActive}
+            onSelectPanel={toggleSidebarPanel}
+            onUpdateSession={(updater) => {
+              if (activeSession) updateSession(activeSession.id, updater);
+            }}
+            onUpdateSettings={updateActiveSettings}
+            onViewportChange={(start, samples) => {
+              if (activeSession) updateViewport(activeSession.id, start, samples);
+            }}
+            selectedDevice={selectedDevice}
+            selectedPanel={selectedPanel}
+            session={activeSession}
+          />
         </section>
 
         <BottomBar
@@ -2055,8 +2077,11 @@ function DeviceMenuRows({
 
 function RightSidebar({
   devices,
+  extensions,
+  onChangeExtensions,
   onCreateSession,
   onDecode,
+  onNotify,
   onRefreshDevices,
   onSelectDevice,
   onSelectPanel,
@@ -2068,8 +2093,11 @@ function RightSidebar({
   session,
 }: {
   devices: DeviceInfo[];
+  extensions: UiExtensionRecord[];
+  onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
   onCreateSession: (deviceId?: string) => void;
   onDecode: () => void;
+  onNotify: (message: string) => void;
   onRefreshDevices: () => void;
   onSelectDevice: (deviceId: string) => void;
   onSelectPanel: (panel: SidebarPanel | undefined) => void;
@@ -2078,7 +2106,7 @@ function RightSidebar({
   onViewportChange: (start: number, samples: number) => void;
   selectedDevice: string;
   selectedPanel: SidebarPanel | undefined;
-  session: UiSession;
+  session: UiSession | null;
 }) {
   return (
     <aside className="saleaeSidebarRoot">
@@ -2086,8 +2114,11 @@ function RightSidebar({
         <section className="sidebarActiveComponent">
           <SidebarPanelContent
             devices={devices}
+            extensions={extensions}
+            onChangeExtensions={onChangeExtensions}
             onCreateSession={onCreateSession}
             onDecode={onDecode}
+            onNotify={onNotify}
             onRefreshDevices={onRefreshDevices}
             onSelectDevice={onSelectDevice}
             onUpdateSession={onUpdateSession}
@@ -2122,7 +2153,7 @@ function RightSidebar({
                 type="button"
               >
                 <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
-                {panel === "measurements" && session.rangeMeasurements.length > 0 && <span className="indicatorDot" />}
+                {panel === "measurements" && session?.rangeMeasurements.length ? <span className="indicatorDot" /> : null}
               </button>
             );
           })}
@@ -2134,8 +2165,11 @@ function RightSidebar({
 
 function SidebarPanelContent({
   devices,
+  extensions,
+  onChangeExtensions,
   onCreateSession,
   onDecode,
+  onNotify,
   onRefreshDevices,
   onSelectDevice,
   onUpdateSession,
@@ -2146,8 +2180,11 @@ function SidebarPanelContent({
   session,
 }: {
   devices: DeviceInfo[];
+  extensions: UiExtensionRecord[];
+  onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
   onCreateSession: (deviceId?: string) => void;
   onDecode: () => void;
+  onNotify: (message: string) => void;
   onRefreshDevices: () => void;
   onSelectDevice: (deviceId: string) => void;
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
@@ -2155,18 +2192,20 @@ function SidebarPanelContent({
   onViewportChange: (start: number, samples: number) => void;
   panel: SidebarPanel;
   selectedDevice: string;
-  session: UiSession;
+  session: UiSession | null;
 }) {
   const meta = panelMeta[panel];
   return (
     <div className="sidebarPanelContent">
-      <header className="sidebarPanelHeader">
-        <span>
-          <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
-          {meta.label}
-        </span>
-      </header>
-      {panel === "devices" && (
+      {panel !== "extensions" && (
+        <header className="sidebarPanelHeader">
+          <span>
+            <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
+            {meta.label}
+          </span>
+        </header>
+      )}
+      {panel === "devices" && session && (
         <DeviceSettingsPanel
           devices={devices}
           onRefreshDevices={onRefreshDevices}
@@ -2177,29 +2216,39 @@ function SidebarPanelContent({
           session={session}
         />
       )}
-      {panel === "recordingSettings" && (
+      {panel === "recordingSettings" && session && (
         <RecordingSettingsPanel
           onUpdateSession={onUpdateSession}
           onUpdateSettings={onUpdateSettings}
           session={session}
         />
       )}
-      {panel === "analyzers" && (
+      {panel === "analyzers" && session && (
         <AnalyzersPanel
+          availableAnalyzers={[
+            ...BUILT_IN_ANALYZERS,
+            ...extensions
+              .filter((extension) => extension.installed && extension.enabled)
+              .flatMap((extension) =>
+                Object.entries(extension.manifest.extensions)
+                  .filter(([, feature]) => feature.type === "HighLevelAnalyzer")
+                  .map(([name]) => name),
+              ),
+          ].filter((name, index, analyzers) => analyzers.indexOf(name) === index)}
           onDecode={onDecode}
           onUpdateSession={onUpdateSession}
           onViewportChange={onViewportChange}
           session={session}
         />
       )}
-      {panel === "cursors" && (
+      {panel === "cursors" && session && (
         <CursorsPanel
           onUpdateSession={onUpdateSession}
           sampleRateHz={session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz}
           session={session}
         />
       )}
-      {panel === "measurements" && (
+      {panel === "measurements" && session && (
         <MeasurementsPanel
           onAdd={() =>
             onUpdateSession((current) => ({
@@ -2215,9 +2264,16 @@ function SidebarPanelContent({
           session={session}
         />
       )}
-      {panel === "timingMarkers" && <TimingMarkersPanel onUpdateSession={onUpdateSession} session={session} />}
-      {panel === "extensions" && <SimpleListPanel emptyText="No extensions" rows={["Marketplace", "Custom analyzers"]} />}
-      {panel === "notes" && (
+      {panel === "timingMarkers" && session && <TimingMarkersPanel onUpdateSession={onUpdateSession} session={session} />}
+      {panel === "extensions" && (
+        <ExtensionsPanel
+          busy={Boolean(session?.busy)}
+          extensions={extensions}
+          onChange={onChangeExtensions}
+          onNotify={onNotify}
+        />
+      )}
+      {panel === "notes" && session && (
         <textarea
           className="notesEditor"
           onChange={(event) => onUpdateSession((current) => ({ ...current, notes: event.target.value }))}
@@ -2786,11 +2842,13 @@ function RecordingSettingsPanel({
 }
 
 function AnalyzersPanel({
+  availableAnalyzers,
   onDecode,
   onUpdateSession,
   onViewportChange,
   session,
 }: {
+  availableAnalyzers: string[];
   onDecode: () => void;
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   onViewportChange: (start: number, samples: number) => void;
@@ -2840,7 +2898,7 @@ function AnalyzersPanel({
 
         {selectorOpen && (
           <div className="analyzerSelectionPopover">
-            {AVAILABLE_ANALYZERS.map((name) => (
+            {availableAnalyzers.map((name) => (
               <button
                 className="analyzerSelectionItem"
                 disabled={session.analyzers.includes(name)}
@@ -2858,7 +2916,7 @@ function AnalyzersPanel({
         {session.analyzers.length === 0 ? (
           <div className="suggestedAnalyzers">
             <div className="suggestedAnalyzersTitle">Suggested Analyzers</div>
-            {AVAILABLE_ANALYZERS.slice(0, 4).map((name) => (
+            {availableAnalyzers.slice(0, 4).map((name) => (
               <button className="suggestedAnalyzerItem" key={name} onClick={() => addAnalyzer(name)} type="button">
                 <SlidersHorizontal size={13} />
                 <span>{name}</span>
@@ -3465,23 +3523,6 @@ function TimingMarkersPanel({
             Delete All
           </button>
         </div>
-      )}
-    </div>
-  );
-}
-
-function SimpleListPanel({ emptyText, rows }: { emptyText: string; rows: string[] }) {
-  return (
-    <div className="simplePanelList">
-      {rows.length === 0 ? (
-        <div className="empty-result">{emptyText}</div>
-      ) : (
-        rows.map((row) => (
-          <div className="simplePanelRow" key={row}>
-            <Clock3 size={13} />
-            <span>{row}</span>
-          </div>
-        ))
       )}
     </div>
   );

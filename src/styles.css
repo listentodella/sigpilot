@@ -585,7 +585,7 @@ button:disabled {
 }
 
 .mainArea.emptySession {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .sessionPlaceholder {
@@ -2561,6 +2561,726 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.extensionsSidebar {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  background: var(--background-10);
+}
+
+.extensionsHeader {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+  padding: 0 16px;
+  color: var(--on-background-0);
+}
+
+.extensionsHeaderTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.extensionsHeaderTitle strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.extensionsHeader button,
+.extensionsMenuAnchor > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.extensionsHeaderTitle button,
+.extensionsMenuAnchor > button {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+}
+
+.extensionsHeader button:hover,
+.extensionsHeader button.active,
+.extensionsMenuAnchor > button:hover,
+.extensionsMenuAnchor > button.active {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.extensionsMenuAnchor {
+  position: relative;
+}
+
+.extensionsMenu,
+.extensionItemMenu {
+  position: absolute;
+  right: 0;
+  z-index: 12;
+  min-width: 212px;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-20);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 6px 0;
+}
+
+.extensionsMenu {
+  top: calc(100% + 5px);
+}
+
+.extensionsMenu button,
+.extensionItemMenu button {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 0 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.extensionsMenu button:hover:not(:disabled),
+.extensionItemMenu button:hover:not(:disabled) {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.extensionsMenu button:disabled,
+.extensionItemMenu button:disabled {
+  color: var(--on-background-40);
+  cursor: not-allowed;
+}
+
+.extensionsHelpPopover {
+  width: 252px;
+  position: absolute;
+  top: 42px;
+  left: 12px;
+  z-index: 11;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-20);
+  background: var(--background-20);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 12px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.extensionsHelpPopover button {
+  display: flex;
+  gap: 5px;
+  color: var(--selected-highlight);
+  margin-top: 8px;
+  padding: 0;
+}
+
+.extensionsSearchSection {
+  height: 46px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  border-bottom: 1px solid var(--border-20);
+  color: var(--on-background-30);
+  padding: 0 16px 14px;
+}
+
+.extensionsSearchSection input {
+  width: 100%;
+  height: 28px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-10);
+  background: var(--background-20);
+  padding: 0 8px;
+  outline: none;
+}
+
+.extensionsSearchSection input:focus {
+  border-color: var(--selected-highlight);
+}
+
+.extensionUpdateBar {
+  height: 32px;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--on-primary);
+  background: var(--selected-highlight);
+  padding: 4px 16px;
+  font-size: 11px;
+}
+
+.extensionUpdateBar button {
+  height: 24px;
+  border-radius: 4px;
+  color: var(--on-background-10);
+  background: var(--background-20);
+  padding: 0 10px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.extensionsListScroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.extensionListItem {
+  position: relative;
+  border-left: 2px solid transparent;
+  margin: 0 16px;
+  border-bottom: 1px solid var(--border-20);
+}
+
+.extensionListItem:hover,
+.extensionListItem.selected {
+  border-left-color: var(--on-background-0);
+  background: var(--hover-background);
+  margin: 0;
+  padding: 0 16px 0 14px;
+}
+
+.extensionListMain {
+  width: 100%;
+  min-height: 104px;
+  display: block;
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 10px 0 15px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.extensionListTitle {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-right: 28px;
+}
+
+.extensionListTitle strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-0);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.localBadge {
+  border-radius: 2px;
+  color: var(--on-background-20);
+  background: var(--background-40);
+  padding: 2px 4px;
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.extensionReloadButton {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.extensionReloadButton:hover:not(:disabled) {
+  color: var(--on-background-0);
+  background: var(--background-40);
+}
+
+.extensionListMain p {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--on-background-30);
+  margin: 7px 0 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.extensionListFooter {
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--on-background-30);
+  font-size: 10px;
+}
+
+.extensionListFooter span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extensionInlineAction {
+  color: var(--selected-highlight);
+  background: transparent;
+  padding: 0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.extensionItemMenuAnchor {
+  position: absolute;
+  top: 10px;
+  right: 0;
+  visibility: hidden;
+}
+
+.extensionListItem:hover .extensionItemMenuAnchor,
+.extensionItemMenuAnchor.visible {
+  visibility: visible;
+}
+
+.extensionItemMenuAnchor > button {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--on-background-20);
+  background: transparent;
+  cursor: pointer;
+}
+
+.extensionItemMenuAnchor > button:hover {
+  color: var(--on-background-0);
+  background: var(--background-40);
+}
+
+.extensionItemMenu {
+  top: calc(100% + 3px);
+  min-width: 116px;
+}
+
+.extensionsNoResults {
+  color: var(--on-background-20);
+  padding: 16px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.createExtensionCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-bottom: 1px solid var(--border-20);
+  margin: 0 16px;
+  padding: 16px 0;
+  text-align: center;
+}
+
+.extensionShapes {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 11px;
+}
+
+.extensionTriangle {
+  width: 0;
+  height: 0;
+  border-right: 5px solid transparent;
+  border-bottom: 10px solid #a4ec9e;
+  border-left: 5px solid transparent;
+}
+
+.extensionCircle,
+.extensionSquare {
+  width: 10px;
+  height: 10px;
+}
+
+.extensionCircle {
+  border-radius: 999px;
+  background: #ecc180;
+}
+
+.extensionSquare {
+  background: #f88585;
+}
+
+.createExtensionCard > strong {
+  color: var(--on-background-0);
+  margin-top: 9px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.createExtensionCard p {
+  color: var(--on-background-20);
+  margin: 12px 0 16px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.createExtensionCard p button,
+.extensionDocsLink,
+.extensionDetailLink {
+  color: var(--selected-highlight);
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.createExtensionButton,
+.extensionPrimaryButton,
+.extensionDangerButton,
+.extensionSaveAsButton {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 4px;
+  color: var(--on-primary);
+  background: var(--selected-highlight);
+  padding: 0 13px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.extensionFileInput {
+  display: none;
+}
+
+.extensionDialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.extensionDialog {
+  width: min(520px, calc(100vw - 36px));
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 6px;
+  color: var(--on-background-10);
+  background: var(--background-10);
+  box-shadow: var(--box-shadow);
+}
+
+.extensionDialog > header {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-20);
+  padding: 0 16px;
+}
+
+.extensionDialog > header strong {
+  font-size: 15px;
+}
+
+.extensionDialog > header button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.extensionDialogBody {
+  padding: 22px 24px 28px;
+}
+
+.extensionDialogBody h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.extensionTemplateRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+}
+
+.extensionTemplateRow select {
+  width: 100%;
+  height: 34px;
+}
+
+.extensionAdditionalToggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--on-background-30);
+  background: transparent;
+  margin-top: 12px;
+  padding: 0;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.extensionAdditionalToggle svg {
+  transition: transform 120ms ease;
+}
+
+.extensionAdditionalToggle.open svg {
+  transform: rotate(90deg);
+}
+
+.extensionAdditionalFields {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.extensionAdditionalFields input {
+  width: 100%;
+  height: 30px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-10);
+  background: var(--background-20);
+  padding: 0 8px;
+  outline: none;
+}
+
+.extensionAdditionalFields input:focus {
+  border-color: var(--selected-highlight);
+}
+
+.extensionSaveAsButton {
+  height: 34px;
+}
+
+.extensionDocsLink {
+  margin-top: 18px;
+  font-size: 11px;
+}
+
+.extensionDetailOverlay {
+  position: fixed;
+  top: 34px;
+  right: calc(var(--sidebar-panel-width) + var(--sidebar-tabs-width));
+  bottom: var(--bottom-bar-height);
+  left: 50px;
+  z-index: 90;
+  display: flex;
+  overflow: hidden;
+  border-left: 1px solid var(--border-20);
+  background: var(--background-10);
+  box-shadow: -4px 0 4px rgba(0, 0, 0, 0.12);
+}
+
+.extensionDetailSummary {
+  width: 220px;
+  min-width: 220px;
+  overflow-y: auto;
+  padding: 32px 16px 32px 32px;
+}
+
+.extensionDetailAvatar {
+  width: 130px;
+  height: 130px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-20);
+  border-radius: 5px;
+  color: var(--on-background-0);
+  background: var(--background-40);
+  font-size: 44px;
+  font-weight: 500;
+}
+
+.extensionDetailSummary h2 {
+  color: var(--on-background-0);
+  margin: 18px 0 10px;
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.extensionDetailSummary p {
+  color: var(--on-background-20);
+  margin: 0 0 10px;
+  font-size: 11px;
+}
+
+.extensionPrimaryButton,
+.extensionDangerButton {
+  min-width: 80px;
+  margin: 10px 0 12px;
+}
+
+.extensionDangerButton {
+  background: #a63b3b;
+}
+
+.extensionPrimaryButton:disabled,
+.extensionDangerButton:disabled,
+.extensionSaveAsButton:disabled,
+.createExtensionButton:disabled {
+  color: var(--on-background-30);
+  background: var(--background-40);
+  cursor: not-allowed;
+}
+
+.extensionEnabledToggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--on-background-20);
+  margin: 0 0 16px;
+  font-size: 11px;
+}
+
+.extensionEnabledToggle input {
+  accent-color: var(--selected-highlight);
+}
+
+.extensionDetailLink {
+  display: block;
+  margin: 0 0 12px;
+  font-size: 11px;
+}
+
+.extensionReadme {
+  min-width: 0;
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+  color: var(--on-background-20);
+  padding: 24px 42px 36px 32px;
+}
+
+.extensionDetailClose {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  border-radius: 4px;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.extensionDetailClose:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.extensionReadme h1,
+.extensionReadme h2,
+.extensionReadme h3 {
+  color: var(--on-background-0);
+  font-weight: 500;
+}
+
+.extensionReadme h1 {
+  margin: 0 0 18px;
+  font-size: 24px;
+}
+
+.extensionReadme h2 {
+  margin: 24px 0 12px;
+  font-size: 18px;
+}
+
+.extensionReadme h3 {
+  margin: 24px 0 10px;
+  font-size: 14px;
+}
+
+.extensionReadme p {
+  max-width: 760px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.extensionReadmeSpacer {
+  height: 7px;
+}
+
+.extensionReadmeList {
+  padding-left: 10px;
+}
+
+.extensionFeatureRow {
+  max-width: 680px;
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(130px, auto);
+  gap: 6px 18px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-20);
+  margin-bottom: 8px;
+  padding: 10px 12px;
+}
+
+.extensionFeatureRow strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-0);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extensionFeatureRow span {
+  color: var(--on-background-30);
+  font-size: 10px;
+  text-align: right;
+}
+
+.extensionFeatureRow code {
+  grid-column: 1 / -1;
+  color: var(--on-background-20);
+  font-size: 10px;
 }
 
 .notesEditor {

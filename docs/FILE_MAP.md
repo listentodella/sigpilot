@@ -23,6 +23,9 @@
 - `src/components/LogicToolbar.tsx`
   - 顶部工具栏骨架。
   - 当前负责 Start、Add Analyzer、Range Measurements、Marker 操作入口。
+- `src/components/ExtensionsPanel.tsx`
+  - Saleae 风格 Extensions 右栏。
+  - 包含搜索、管理菜单、扩展项动作、创建对话框和扩展详情覆盖页。
 - `src/components/WaveformCanvas.tsx`
   - 数字波形 Canvas 渲染。
   - 包含平滑数字波形绘制、边沿吸附、周期/占空比/脉宽 hover 测量显示。
@@ -34,6 +37,9 @@
   - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、UART decode。
 - `src/lib/format.ts`
   - 时间与数量格式化工具。
+- `src/lib/extensions.ts`
+  - 扩展 manifest、来源与安装状态类型。
+  - 包含默认扩展、排序规则、持久化和本地 package 转换。
 - `src/lib/sidebar.ts`
   - 右侧栏面板类型、原版命令字符串、面板快捷键和命令到面板映射。
 
@@ -56,6 +62,7 @@
 
 - `src-tauri/src/main.rs`
   - Tauri 命令层和事件转发。
+  - 包含读取本地扩展 package 和创建扩展模板目录的命令。
 - `src-tauri/src/bin/usb_smoke.rs`
   - USB smoke test 工具。
 - `src-tauri/tauri.conf.json`

@@ -1,4 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  UiExtensionFeatureType,
+  UiExtensionManifest,
+  UiExtensionPackage,
+  UiExtensionTemplateRequest,
+} from "./extensions";
 
 export type DeviceKind = "Fake" | "Usb";
 
@@ -215,6 +221,66 @@ export function decodeUartFrames(settings: UartDecodeSettings): Promise<DecodedF
     );
   }
   return callBackend("decode_uart_frames", { settings });
+}
+
+export function readExtensionPackage(path: string): Promise<UiExtensionPackage> {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("Loading an extension from disk requires the desktop app"));
+  }
+  return callBackend("read_extension_package", { path });
+}
+
+export function createExtensionTemplate(request: UiExtensionTemplateRequest): Promise<UiExtensionPackage> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(buildPreviewExtensionPackage(request));
+  }
+  return callBackend("create_extension_template", { request });
+}
+
+function buildPreviewExtensionPackage(request: UiExtensionTemplateRequest): UiExtensionPackage {
+  const title = request.name.trim() || previewExtensionName(request.path);
+  const featureName = title || "My Extension";
+  const entryPoint =
+    request.type === "HighLevelAnalyzer"
+      ? "HighLevelAnalyzer.Hla"
+      : `${request.type}.${request.type === "AnalogMeasurement" ? "MyAnalogMeasurer" : "MyDigitalMeasurer"}`;
+  const feature: UiExtensionManifest["extensions"][string] = {
+    entryPoint,
+    type: request.type,
+    ...(request.type === "HighLevelAnalyzer"
+      ? {}
+      : {
+          metrics: {
+            metricKey: {
+              name: "<metric_name>",
+              notation: "<short_notation>",
+            },
+          },
+        }),
+  };
+  return {
+    manifest: {
+      apiVersion: "1.0.0",
+      author: request.author.trim() || "shy coder",
+      description: request.description,
+      extensions: { [featureName]: feature },
+      name: featureName,
+      version: "0.0.1",
+    },
+    path: request.path,
+    readme: `# ${featureName}\n\nGenerated PXLogic extension template for ${extensionTypeName(request.type)}.`,
+  };
+}
+
+function previewExtensionName(path: string) {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.split("/").pop() || "My Extension";
+}
+
+function extensionTypeName(type: UiExtensionFeatureType) {
+  if (type === "HighLevelAnalyzer") return "a high-level analyzer";
+  if (type === "DigitalMeasurement") return "a digital measurement";
+  return "an analog measurement";
 }
 
 function buildPreviewTile(request: WaveformRequest): WaveformTile {
