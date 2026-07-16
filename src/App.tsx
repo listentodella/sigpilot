@@ -95,7 +95,7 @@ interface UiSession {
   message: string;
   analyzers: string[];
   analyzerDataPane: "table" | "terminal";
-  rangeMeasurements: number;
+  rangeMeasurements: UiRangeMeasurement[];
   markerPairs: number;
   singleMarkers: number;
   notes: string;
@@ -132,10 +132,21 @@ interface UiCursorState {
   y2Channel: number;
 }
 
+interface UiRangeMeasurement {
+  color: string;
+  endSample: number;
+  id: string;
+  name: string;
+  note: string;
+  selected: boolean;
+  startSample: number;
+}
+
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
 const AVAILABLE_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
+const RANGE_COLORS = ["#43baeb", "#ffcb46", "#00b140", "#f52a66"];
 
 const panelMeta: Record<
   SidebarPanel,
@@ -202,6 +213,23 @@ function defaultCursorState(sampleCount = 100_000, channelCount = 16): UiCursorS
   };
 }
 
+function createRangeMeasurement(session: UiSession): UiRangeMeasurement {
+  const totalSamples = session.summary?.metadata.sample_count ?? Math.max(1, session.viewportSamples);
+  const width = Math.max(16, Math.round(session.viewportSamples * 0.28));
+  const start = Math.max(0, Math.min(totalSamples - width, Math.round(session.viewportStart + session.viewportSamples * 0.36)));
+  const end = Math.max(start + 1, Math.min(totalSamples, start + width));
+  const index = session.rangeMeasurements.length;
+  return {
+    color: RANGE_COLORS[index % RANGE_COLORS.length],
+    endSample: end,
+    id: `range-${Date.now()}-${index}`,
+    name: `Range ${index + 1}`,
+    note: "",
+    selected: true,
+    startSample: start,
+  };
+}
+
 function makeSession(id: string, name: string, deviceId: string, source?: UiSession): UiSession {
   const settings = source ? { ...source.settings, device_id: deviceId } : defaultSettings(deviceId);
   return {
@@ -231,7 +259,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     message: "Ready",
     analyzers: [],
     analyzerDataPane: "table",
-    rangeMeasurements: 0,
+    rangeMeasurements: [],
     markerPairs: 0,
     singleMarkers: 0,
     notes: "",
@@ -757,7 +785,10 @@ export default function App() {
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
-      rangeMeasurements: session.rangeMeasurements + 1,
+      rangeMeasurements: [
+        ...session.rangeMeasurements.map((range) => ({ ...range, selected: false })),
+        createRangeMeasurement(session),
+      ],
       message: "Range measurement added",
     }));
   }
@@ -994,6 +1025,10 @@ export default function App() {
                         onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
                         session={activeSession}
                       />
+                      <RangeMeasurementsOverlay
+                        onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
+                        session={activeSession}
+                      />
                     </div>
                   </div>
                 </div>
@@ -1158,6 +1193,120 @@ function CursorOverlay({
           >
             <span>{label}</span>
           </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function RangeMeasurementsOverlay({
+  onUpdateSession,
+  session,
+}: {
+  onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
+  session: UiSession;
+}) {
+  const dragRef = useRef<{ edge: "start" | "end"; id: string } | null>(null);
+  const totalSamples = session.summary?.metadata.sample_count ?? 0;
+  if (!session.summary || totalSamples <= 0 || session.rangeMeasurements.length === 0) return null;
+
+  function sampleToPercent(sample: number) {
+    const ratio = (sample - session.viewportStart) / Math.max(1, session.viewportSamples);
+    return Math.max(0, Math.min(1, ratio)) * 100;
+  }
+
+  function clientXToSample(clientX: number, host: HTMLElement) {
+    const rect = host.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    return Math.max(0, Math.min(totalSamples, Math.round(session.viewportStart + ratio * session.viewportSamples)));
+  }
+
+  function selectRange(id: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      rangeMeasurements: current.rangeMeasurements.map((range) => ({ ...range, selected: range.id === id })),
+    }));
+  }
+
+  function updateDraggedRange(clientX: number, host: HTMLElement) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const sample = clientXToSample(clientX, host);
+    onUpdateSession((current) => ({
+      ...current,
+      rangeMeasurements: current.rangeMeasurements.map((range) => {
+        if (range.id !== drag.id) return range;
+        if (drag.edge === "start") {
+          return { ...range, startSample: Math.max(0, Math.min(sample, range.endSample - 1)), selected: true };
+        }
+        return { ...range, endSample: Math.min(totalSamples, Math.max(sample, range.startSample + 1)), selected: true };
+      }),
+    }));
+  }
+
+  function handlePointerDown(
+    id: string,
+    edge: "start" | "end",
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) {
+    const host = event.currentTarget.parentElement?.parentElement;
+    if (!host) return;
+    dragRef.current = { edge, id };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.stopPropagation();
+    selectRange(id);
+    updateDraggedRange(event.clientX, host);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const host = event.currentTarget.parentElement?.parentElement;
+    if (!host || !dragRef.current) return;
+    event.stopPropagation();
+    updateDraggedRange(event.clientX, host);
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    event.stopPropagation();
+  }
+
+  return (
+    <div className="rangeOverlay" aria-hidden="false">
+      {session.rangeMeasurements.map((range) => {
+        const left = sampleToPercent(range.startSample);
+        const right = sampleToPercent(range.endSample);
+        const width = Math.max(0, right - left);
+        if (right <= 0 || left >= 100) return null;
+        return (
+          <div
+            className={`rangeBand ${range.selected ? "selected" : ""}`}
+            key={range.id}
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              selectRange(range.id);
+            }}
+            style={{ left: `${left}%`, width: `${width}%`, "--range-color": range.color } as CSSProperties}
+          >
+            <button
+              aria-label={`${range.name} start`}
+              className="rangeEdge start"
+              onPointerDown={(event) => handlePointerDown(range.id, "start", event)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              type="button"
+            />
+            <button
+              aria-label={`${range.name} end`}
+              className="rangeEdge end"
+              onPointerDown={(event) => handlePointerDown(range.id, "end", event)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              type="button"
+            />
+          </div>
         );
       })}
     </div>
@@ -1484,7 +1633,7 @@ function RightSidebar({
                 type="button"
               >
                 <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
-                {panel === "measurements" && session.rangeMeasurements > 0 && <span className="indicatorDot" />}
+                {panel === "measurements" && session.rangeMeasurements.length > 0 && <span className="indicatorDot" />}
               </button>
             );
           })}
@@ -1563,7 +1712,17 @@ function SidebarPanelContent({
       )}
       {panel === "measurements" && (
         <MeasurementsPanel
-          onAdd={() => onUpdateSession((current) => ({ ...current, rangeMeasurements: current.rangeMeasurements + 1 }))}
+          onAdd={() =>
+            onUpdateSession((current) => ({
+              ...current,
+              rangeMeasurements: [
+                ...current.rangeMeasurements.map((range) => ({ ...range, selected: false })),
+                createRangeMeasurement(current),
+              ],
+            }))
+          }
+          onUpdateSession={onUpdateSession}
+          onViewportChange={onViewportChange}
           session={session}
         />
       )}
@@ -2477,19 +2636,191 @@ function CursorsPanel({
   );
 }
 
-function MeasurementsPanel({ onAdd, session }: { onAdd: () => void; session: UiSession }) {
+function MeasurementsPanel({
+  onAdd,
+  onUpdateSession,
+  onViewportChange,
+  session,
+}: {
+  onAdd: () => void;
+  onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
+  onViewportChange: (start: number, samples: number) => void;
+  session: UiSession;
+}) {
+  const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
+
+  function updateRange(id: string, patch: Partial<UiRangeMeasurement>) {
+    onUpdateSession((current) => ({
+      ...current,
+      rangeMeasurements: current.rangeMeasurements.map((range) =>
+        range.id === id ? { ...range, ...patch } : range,
+      ),
+    }));
+  }
+
+  function selectRange(id: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      rangeMeasurements: current.rangeMeasurements.map((range) => ({ ...range, selected: range.id === id })),
+    }));
+  }
+
+  function deleteRange(id: string) {
+    onUpdateSession((current) => ({
+      ...current,
+      rangeMeasurements: current.rangeMeasurements.filter((range) => range.id !== id),
+    }));
+  }
+
+  function deleteAll() {
+    onUpdateSession((current) => ({ ...current, rangeMeasurements: [] }));
+  }
+
+  function goToRange(range: UiRangeMeasurement, zoom = false) {
+    const span = Math.max(1, range.endSample - range.startSample);
+    const padding = zoom ? Math.round(span * 0.08) : Math.round(session.viewportSamples * 0.5);
+    const start = Math.max(0, range.startSample - padding);
+    const samples = zoom ? span + padding * 2 : session.viewportSamples;
+    onViewportChange(start, samples);
+    selectRange(range.id);
+  }
+
+  function copyRange(range: UiRangeMeasurement) {
+    const metrics = computeRangeMetrics(session, range, sampleRateHz);
+    const content = [
+      range.name,
+      `Duration\t${metrics.duration}`,
+      `Edges\t${metrics.edges}`,
+      `Frequency\t${metrics.frequency}`,
+      `Duty\t${metrics.duty}`,
+      `Width 1\t${metrics.width1}`,
+    ].join("\n");
+    void navigator.clipboard?.writeText(content);
+  }
+
   return (
-    <div className="sidebarSection">
-      <button className="panel-action" onClick={onAdd} type="button">
-        <Plus size={15} />
-        Add Range Measurement
-      </button>
-      <SimpleListPanel
-        emptyText="No range measurements"
-        rows={Array.from({ length: session.rangeMeasurements }, (_, index) => `Range ${index + 1}`)}
-      />
+    <div className="measurementsSidebarPanel">
+      <div className="sidebarTitleRow">
+        <div className="sidebarTitleText">Measurements</div>
+        <button className="sidebarCircleButton" onClick={onAdd} type="button">
+          <Plus size={13} />
+        </button>
+      </div>
+
+      {session.rangeMeasurements.length === 0 ? (
+        <div className="emptyMeasurementState">
+          <BarChart3 size={24} />
+          <span>Click "+" to add Measurements</span>
+        </div>
+      ) : (
+        <div className="rangeMeasurementList">
+          {session.rangeMeasurements.map((range) => {
+            const metrics = computeRangeMetrics(session, range, sampleRateHz);
+            return (
+              <section
+                className={`rangeMeasurementItem ${range.selected ? "selected" : ""}`}
+                key={range.id}
+                onClick={() => selectRange(range.id)}
+                style={{ "--range-color": range.color } as CSSProperties}
+              >
+                <div className="rangeMeasurementHeader">
+                  <span className="rangeColorSwatch" />
+                  <input
+                    aria-label="Range name"
+                    onChange={(event) => updateRange(range.id, { name: event.target.value })}
+                    value={range.name}
+                  />
+                  <div className="rangeMeasurementActions">
+                    <button onClick={() => copyRange(range)} title="Copy" type="button">
+                      <Copy size={12} />
+                    </button>
+                    <button onClick={() => goToRange(range)} title="Go to Range" type="button">
+                      <Search size={12} />
+                    </button>
+                    <button onClick={() => goToRange(range, true)} title="Zoom on Range" type="button">
+                      <Maximize2 size={12} />
+                    </button>
+                    <button onClick={() => deleteRange(range.id)} title="Delete" type="button">
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+                <div className="rangeMetricsGrid">
+                  <MetricCell label="Duration" value={metrics.duration} />
+                  <MetricCell label="Edges" value={String(metrics.edges)} />
+                  <MetricCell label="Frequency" value={metrics.frequency} />
+                  <MetricCell label="Duty" value={metrics.duty} />
+                  <MetricCell label="Width 1" value={metrics.width1} />
+                </div>
+                <textarea
+                  className="rangeNote"
+                  onChange={(event) => updateRange(range.id, { note: event.target.value })}
+                  placeholder="Add note"
+                  value={range.note}
+                />
+              </section>
+            );
+          })}
+          <button className="panel-action" onClick={deleteAll} type="button">
+            <Trash2 size={15} />
+            Delete All
+          </button>
+        </div>
+      )}
     </div>
   );
+}
+
+function MetricCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metricCell">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function computeRangeMetrics(session: UiSession, range: UiRangeMeasurement, sampleRateHz: number) {
+  const start = Math.min(range.startSample, range.endSample);
+  const end = Math.max(range.startSample, range.endSample);
+  const durationSamples = Math.max(1, end - start);
+  const channel = session.tile?.channels[0];
+  const edges = channel
+    ? [...channel.rising_edges, ...channel.falling_edges].filter((sample) => sample >= start && sample <= end).length
+    : 0;
+  const risingEdges = channel?.rising_edges.filter((sample) => sample >= start && sample <= end) ?? [];
+  const periodSamples =
+    risingEdges.length >= 2
+      ? risingEdges[1] - risingEdges[0]
+      : channel
+        ? [...channel.rising_edges, ...channel.falling_edges]
+            .filter((sample) => sample >= start && sample <= end)
+            .sort((a, b) => a - b)
+            .slice(0, 2)
+            .reduce((delta, sample, index, samples) => (index === 1 ? sample - samples[0] : delta), 0)
+        : 0;
+
+  let highSamples = 0;
+  let width1Samples = 0;
+  if (channel) {
+    channel.segments.forEach((segment) => {
+      if (!segment.high) return;
+      const overlapStart = Math.max(start, segment.start_sample);
+      const overlapEnd = Math.min(end, segment.end_sample);
+      const overlap = Math.max(0, overlapEnd - overlapStart);
+      highSamples += overlap;
+      width1Samples = Math.max(width1Samples, overlap);
+    });
+  }
+
+  const duty = durationSamples > 0 ? (highSamples / durationSamples) * 100 : 0;
+  return {
+    duration: formatSeconds(durationSamples / Math.max(1, sampleRateHz)),
+    duty: highSamples > 0 ? `${trimNumber(duty)}%` : "-",
+    edges,
+    frequency: periodSamples > 0 ? formatRate(sampleRateHz / periodSamples) : "-",
+    width1: width1Samples > 0 ? formatSeconds(width1Samples / Math.max(1, sampleRateHz)) : "-",
+  };
 }
 
 function TimingMarkersPanel({

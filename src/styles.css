@@ -1042,6 +1042,45 @@ button:disabled {
   transform: translateX(-50%);
 }
 
+.rangeOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 16;
+  pointer-events: none;
+}
+
+.rangeBand {
+  height: 100%;
+  position: absolute;
+  top: 0;
+  border-left: 1px solid var(--range-color);
+  border-right: 1px solid var(--range-color);
+  background: color-mix(in srgb, var(--range-color) 16%, transparent);
+  pointer-events: auto;
+}
+
+.rangeBand.selected {
+  background: color-mix(in srgb, var(--range-color) 24%, transparent);
+}
+
+.rangeEdge {
+  width: 13px;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  border: 0;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.rangeEdge.start {
+  left: -7px;
+}
+
+.rangeEdge.end {
+  right: -7px;
+}
+
 .digitalNavigationButton {
   width: 26px;
   height: 26px;
@@ -1970,6 +2009,142 @@ button:disabled {
 
 .hiddenCursorRow {
   color: var(--on-background-40);
+}
+
+.measurementsSidebarPanel {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.emptyMeasurementState {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--on-background-30);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.rangeMeasurementList {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding: 0 12px 12px;
+}
+
+.rangeMeasurementItem {
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-20);
+}
+
+.rangeMeasurementItem.selected {
+  border-color: var(--range-color);
+}
+
+.rangeMeasurementHeader {
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-20);
+  padding: 0 8px;
+}
+
+.rangeColorSwatch {
+  width: 6px;
+  height: 20px;
+  border-radius: 2px;
+  background: var(--range-color);
+}
+
+.rangeMeasurementHeader input {
+  min-width: 0;
+  height: 24px;
+  border: 0;
+  color: var(--on-background-0);
+  background: transparent;
+  padding: 0;
+  outline: none;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.rangeMeasurementActions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.rangeMeasurementActions button {
+  width: 21px;
+  height: 21px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.rangeMeasurementActions button:hover {
+  color: var(--on-background-0);
+  background: var(--background-30);
+}
+
+.rangeMetricsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+}
+
+.metricCell {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.metricCell span {
+  color: var(--on-background-30);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.metricCell strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-10);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rangeNote {
+  width: calc(100% - 16px);
+  min-height: 42px;
+  resize: vertical;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-20);
+  background: var(--background-10);
+  margin: 0 8px 8px;
+  padding: 7px;
+  font: inherit;
+  font-size: 11px;
+  outline: none;
 }
 
 .analyzerDataTable,
