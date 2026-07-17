@@ -119,6 +119,18 @@ export interface DecodedFrame {
   value: number;
 }
 
+export interface AnalyzerBubble {
+  type: "SingleBubble" | "MultiBubble";
+  frame_id_interval: {
+    begin: number;
+    end: number;
+  };
+  start_sample: number;
+  end_sample: number;
+  display_text: string[];
+  result_count: number;
+}
+
 export interface UartFrameWindowRequest extends UartDecodeSettings {
   start_sample: number;
   sample_count: number;
@@ -126,6 +138,7 @@ export interface UartFrameWindowRequest extends UartDecodeSettings {
 }
 
 export interface UartFrameWindow {
+  bubbles: AnalyzerBubble[];
   frames: DecodedFrame[];
   previous_frame: DecodedFrame | null;
   next_frame: DecodedFrame | null;
@@ -155,6 +168,9 @@ let previewCaptureRun: { cancelled: boolean } | null = null;
 
 // Ported from Logic 2.4.43 BaseAnalyzerManager.maximumMarkerResults.
 const PREVIEW_MAX_ANALYZER_MARKER_RESULTS = 300;
+const PREVIEW_MAX_MULTI_BUBBLE_STRINGS = 400;
+const PREVIEW_MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME = 15;
+const PREVIEW_MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES = 30;
 const PREVIEW_CAPTURE_UPDATE_MS = 33;
 
 async function callBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -292,7 +308,7 @@ export async function getUartFrameWindow(request: UartFrameWindowRequest): Promi
       inverted: request.inverted,
     },
   });
-  return buildFrameWindowFromFrames(frames, request.start_sample, request.sample_count);
+  return buildFrameWindowFromFrames(frames, request.start_sample, request.sample_count, request.width_px);
 }
 
 function buildPreviewUartFrames(settings: UartDecodeSettings): DecodedFrame[] {
@@ -307,11 +323,11 @@ function buildPreviewUartFrames(settings: UartDecodeSettings): DecodedFrame[] {
 
 function buildPreviewUartFrameWindow(request: UartFrameWindowRequest): UartFrameWindow {
   if (request.channel !== 0 || request.baud_rate <= 0) {
-    return { frames: [], previous_frame: null, next_frame: null };
+    return emptyUartFrameWindow();
   }
   const metadata = previewCapture.metadata;
   const bitPeriod = metadata.sample_rate_hz / request.baud_rate;
-  if (bitPeriod < 2) return { frames: [], previous_frame: null, next_frame: null };
+  if (bitPeriod < 2) return emptyUartFrameWindow();
 
   const startSample = Math.max(0, Math.min(metadata.sample_count, request.start_sample));
   const endSample = Math.max(
@@ -328,6 +344,8 @@ function buildPreviewUartFrameWindow(request: UartFrameWindowRequest): UartFrame
     0,
     Math.floor((queryStart / bitPeriod - PREVIEW_UART_LEAD_IDLE_BITS) / PREVIEW_UART_CYCLE_BITS) - 1,
   );
+  const denseBubbles = buildPreviewDenseUartBubbles(startSample, endSample, bitPeriod, request.width_px);
+  const bubbleAccumulators: BubbleAccumulator[] = [];
   const frames: DecodedFrame[] = [];
   let previousFrame: DecodedFrame | null = null;
   let nextFrame: DecodedFrame | null = null;
@@ -345,6 +363,7 @@ function buildPreviewUartFrameWindow(request: UartFrameWindowRequest): UartFrame
       if (frame.start_sample > queryEnd) {
         nextFrame = frame;
         return {
+          bubbles: denseBubbles ?? finalizeBubbleAccumulators(bubbleAccumulators),
           frames,
           previous_frame: previousFrame,
           next_frame: nextFrame,
@@ -355,19 +374,32 @@ function buildPreviewUartFrameWindow(request: UartFrameWindowRequest): UartFrame
       } else if (frame.start_sample > endSample) {
         nextFrame ??= frame;
       } else {
-        if (frames.length >= PREVIEW_MAX_ANALYZER_MARKER_RESULTS) {
-          nextFrame ??= frame;
-          return {
-            frames,
-            previous_frame: previousFrame,
-            next_frame: nextFrame,
-          };
+        if (!denseBubbles) {
+          appendFrameToBubbleAccumulators(
+            bubbleAccumulators,
+            frame,
+            Math.max(1, endSample - startSample),
+            request.width_px,
+          );
         }
-        frames.push(frame);
+        if (frames.length < PREVIEW_MAX_ANALYZER_MARKER_RESULTS) {
+          frames.push(frame);
+        } else {
+          nextFrame ??= frame;
+          if (denseBubbles) {
+            return {
+              bubbles: denseBubbles,
+              frames,
+              previous_frame: previousFrame,
+              next_frame: nextFrame,
+            };
+          }
+        }
       }
     }
   }
   return {
+    bubbles: denseBubbles ?? finalizeBubbleAccumulators(bubbleAccumulators),
     frames,
     previous_frame: previousFrame,
     next_frame: nextFrame,
@@ -378,6 +410,7 @@ function buildFrameWindowFromFrames(
   frames: DecodedFrame[],
   startSample: number,
   sampleCount: number,
+  widthPx: number,
 ): UartFrameWindow {
   const endSample = startSample + sampleCount;
   const normalized = frames.map((frame, index) => ({
@@ -387,13 +420,203 @@ function buildFrameWindowFromFrames(
   const visible = normalized.filter((frame) => frame.end_sample >= startSample && frame.start_sample <= endSample);
   const limited = visible.slice(0, PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
   return {
+    bubbles: buildAnalyzerBubblesFromFrames(visible, sampleCount, widthPx),
     frames: limited,
     previous_frame: [...normalized].reverse().find((frame) => frame.end_sample < startSample) ?? null,
     next_frame:
       visible.length > PREVIEW_MAX_ANALYZER_MARKER_RESULTS
         ? visible[PREVIEW_MAX_ANALYZER_MARKER_RESULTS]
-        : normalized.find((frame) => frame.start_sample > endSample) ?? null,
+      : normalized.find((frame) => frame.start_sample > endSample) ?? null,
   };
+}
+
+interface BubbleAccumulator extends AnalyzerBubble {
+  last_frame_end_sample: number;
+  last_frame_width_px: number;
+}
+
+function emptyUartFrameWindow(): UartFrameWindow {
+  return { bubbles: [], frames: [], previous_frame: null, next_frame: null };
+}
+
+function buildAnalyzerBubblesFromFrames(
+  frames: DecodedFrame[],
+  viewportSamples: number,
+  widthPx: number,
+): AnalyzerBubble[] {
+  const accumulators: BubbleAccumulator[] = [];
+  frames.forEach((frame) =>
+    appendFrameToBubbleAccumulators(accumulators, frame, viewportSamples, widthPx),
+  );
+  return enforceMaximumBubbleResults(finalizeBubbleAccumulators(accumulators));
+}
+
+function appendFrameToBubbleAccumulators(
+  accumulators: BubbleAccumulator[],
+  frame: DecodedFrame,
+  viewportSamples: number,
+  widthPx: number,
+) {
+  const safeViewportSamples = Math.max(1, viewportSamples);
+  const frameWidthPx = Math.max(
+    0,
+    ((frame.end_sample - frame.start_sample) / safeViewportSamples) * Math.max(1, widthPx),
+  );
+  const previous = accumulators[accumulators.length - 1];
+  const gapPx = previous
+    ? ((frame.start_sample - previous.last_frame_end_sample) / safeViewportSamples) * Math.max(1, widthPx)
+    : Number.POSITIVE_INFINITY;
+  const shouldMerge =
+    Boolean(previous) &&
+    frameWidthPx <= PREVIEW_MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME &&
+    previous.last_frame_width_px <= PREVIEW_MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME &&
+    gapPx <= PREVIEW_MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES;
+
+  if (previous && shouldMerge) {
+    previous.type = "MultiBubble";
+    previous.end_sample = Math.max(previous.end_sample, frame.end_sample);
+    previous.frame_id_interval.end = Math.max(previous.frame_id_interval.end, frame.frame_id + 1);
+    previous.result_count += 1;
+    previous.last_frame_end_sample = frame.end_sample;
+    previous.last_frame_width_px = frameWidthPx;
+    if (previous.display_text.length < PREVIEW_MAX_MULTI_BUBBLE_STRINGS) {
+      previous.display_text.push(frame.label);
+    }
+    return;
+  }
+
+  accumulators.push({
+    type: "SingleBubble",
+    frame_id_interval: { begin: frame.frame_id, end: frame.frame_id + 1 },
+    start_sample: frame.start_sample,
+    end_sample: frame.end_sample,
+    display_text: [frame.label],
+    result_count: 1,
+    last_frame_end_sample: frame.end_sample,
+    last_frame_width_px: frameWidthPx,
+  });
+}
+
+function finalizeBubbleAccumulators(accumulators: BubbleAccumulator[]): AnalyzerBubble[] {
+  return accumulators.map(
+    ({ last_frame_end_sample, last_frame_width_px, ...bubble }) => bubble,
+  );
+}
+
+function enforceMaximumBubbleResults(bubbles: AnalyzerBubble[]): AnalyzerBubble[] {
+  if (bubbles.length <= PREVIEW_MAX_ANALYZER_MARKER_RESULTS) return bubbles;
+  const bucketSize = Math.ceil(bubbles.length / PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
+  const merged: AnalyzerBubble[] = [];
+  for (let index = 0; index < bubbles.length; index += bucketSize) {
+    const bucket = bubbles.slice(index, index + bucketSize);
+    if (bucket.length === 1) {
+      merged.push(bucket[0]);
+      continue;
+    }
+    merged.push(mergeBubbles(bucket));
+  }
+  return merged;
+}
+
+function mergeBubbles(bubbles: AnalyzerBubble[]): AnalyzerBubble {
+  const first = bubbles[0];
+  const last = bubbles[bubbles.length - 1];
+  const displayText: string[] = [];
+  for (const bubble of bubbles) {
+    for (const text of bubble.display_text) {
+      if (displayText.length >= PREVIEW_MAX_MULTI_BUBBLE_STRINGS) break;
+      displayText.push(text);
+    }
+    if (displayText.length >= PREVIEW_MAX_MULTI_BUBBLE_STRINGS) break;
+  }
+  return {
+    type: "MultiBubble",
+    frame_id_interval: {
+      begin: first.frame_id_interval.begin,
+      end: last.frame_id_interval.end,
+    },
+    start_sample: first.start_sample,
+    end_sample: last.end_sample,
+    display_text: displayText,
+    result_count: bubbles.reduce((count, bubble) => count + bubble.result_count, 0),
+  };
+}
+
+function buildPreviewDenseUartBubbles(
+  startSample: number,
+  endSample: number,
+  bitPeriod: number,
+  widthPx: number,
+): AnalyzerBubble[] | null {
+  const viewportSamples = Math.max(1, endSample - startSample);
+  const frameWidthPx = ((10 * bitPeriod) / viewportSamples) * Math.max(1, widthPx);
+  const largestInterFrameGapPx =
+    (((PREVIEW_UART_LEAD_IDLE_BITS + PREVIEW_UART_TRAIL_IDLE_BITS) * bitPeriod) / viewportSamples) *
+    Math.max(1, widthPx);
+  if (
+    frameWidthPx > PREVIEW_MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME ||
+    largestInterFrameGapPx > PREVIEW_MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES
+  ) {
+    return null;
+  }
+
+  const firstFrame = findPreviewFrame(startSample, endSample, bitPeriod, "first");
+  const lastFrame = findPreviewFrame(startSample, endSample, bitPeriod, "last");
+  if (!firstFrame || !lastFrame || lastFrame.frame_id < firstFrame.frame_id) return [];
+
+  const resultCount = lastFrame.frame_id - firstFrame.frame_id + 1;
+  const displayText: string[] = [];
+  for (
+    let frameId = firstFrame.frame_id;
+    frameId <= lastFrame.frame_id && displayText.length < PREVIEW_MAX_MULTI_BUBBLE_STRINGS;
+    frameId += 1
+  ) {
+    displayText.push(previewUartFrameById(frameId, bitPeriod).label);
+  }
+
+  return [
+    {
+      type: resultCount === 1 ? "SingleBubble" : "MultiBubble",
+      frame_id_interval: { begin: firstFrame.frame_id, end: lastFrame.frame_id + 1 },
+      start_sample: firstFrame.start_sample,
+      end_sample: lastFrame.end_sample,
+      display_text: displayText,
+      result_count: resultCount,
+    },
+  ];
+}
+
+function findPreviewFrame(
+  startSample: number,
+  endSample: number,
+  bitPeriod: number,
+  direction: "first" | "last",
+): DecodedFrame | null {
+  if (direction === "first") {
+    const firstCycle = Math.max(
+      0,
+      Math.floor((startSample / bitPeriod - PREVIEW_UART_LEAD_IDLE_BITS) / PREVIEW_UART_CYCLE_BITS) - 1,
+    );
+    let frameId = firstCycle * PREVIEW_UART_MESSAGE.length;
+    for (let attempts = 0; attempts < PREVIEW_UART_MESSAGE.length * 4_000; attempts += 1, frameId += 1) {
+      const frame = previewUartFrameById(frameId, bitPeriod);
+      if (frame.start_sample > endSample) return null;
+      if (frame.end_sample >= startSample) return frame;
+    }
+    return null;
+  }
+
+  const lastCycle = Math.max(
+    0,
+    Math.floor((endSample / bitPeriod - PREVIEW_UART_LEAD_IDLE_BITS) / PREVIEW_UART_CYCLE_BITS) + 1,
+  );
+  let frameId = (lastCycle + 1) * PREVIEW_UART_MESSAGE.length - 1;
+  for (let attempts = 0; attempts < PREVIEW_UART_MESSAGE.length * 4_000 && frameId >= 0; attempts += 1, frameId -= 1) {
+    const frame = previewUartFrameById(frameId, bitPeriod);
+    if (frame.end_sample < startSample) return null;
+    if (frame.start_sample <= endSample) return frame;
+  }
+  return null;
 }
 
 const PREVIEW_UART_MESSAGE = Array.from(new TextEncoder().encode("PXLogic demo\n"));
@@ -420,6 +643,12 @@ function previewUartFrame(cycle: number, byteIndex: number, bitPeriod: number): 
     label: labelForPreviewByte(value),
     value,
   };
+}
+
+function previewUartFrameById(frameId: number, bitPeriod: number): DecodedFrame {
+  const cycle = Math.floor(frameId / PREVIEW_UART_MESSAGE.length);
+  const byteIndex = frameId % PREVIEW_UART_MESSAGE.length;
+  return previewUartFrame(cycle, byteIndex, bitPeriod);
 }
 
 function labelForPreviewByte(value: number) {

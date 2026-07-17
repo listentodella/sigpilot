@@ -1,5 +1,5 @@
 import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { DecodedFrame } from "../lib/api";
+import type { AnalyzerBubble } from "../lib/api";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
   ANALYZER_STRIP_HEIGHT_PX,
@@ -11,9 +11,6 @@ const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
 const MAX_MULTI_BUBBLE_COUNT = 99;
 const MAX_MULTI_BUBBLE_TEXT_LENGTH = 200;
-// Ported from Logic 2.4.43 BaseAnalyzerManager.
-const MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME = 15;
-const MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES = 30;
 
 interface AnalyzerBubblesOverlayProps {
   analyzers: UiAnalyzerInstance[];
@@ -24,13 +21,7 @@ interface AnalyzerBubblesOverlayProps {
   onGoToFrame: (analyzerId: string, frameIndex: number) => void;
   onOpenTableFrame: (analyzerId: string, frameIndex: number) => void;
   onSelectFrame: (analyzerId: string, frameIndex: number) => void;
-  onZoomFrame: (analyzerId: string, frameIndex: number) => void;
-}
-
-interface BubbleGroup {
-  endSample: number;
-  frames: Array<{ frame: DecodedFrame; frameIndex: number }>;
-  startSample: number;
+  onZoomBubble: (analyzerId: string, startSample: number, endSample: number, frameIndex: number) => void;
 }
 
 export function AnalyzerBubblesOverlay({
@@ -42,7 +33,7 @@ export function AnalyzerBubblesOverlay({
   onGoToFrame,
   onOpenTableFrame,
   onSelectFrame,
-  onZoomFrame,
+  onZoomBubble,
 }: AnalyzerBubblesOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const [overlayWidth, setOverlayWidth] = useState(1);
@@ -92,11 +83,8 @@ export function AnalyzerBubblesOverlay({
       {visibleChannelIndexes.flatMap((channel, rowIndex) => {
         const channelAnalyzers = analyzers.filter((analyzer) => analyzer.channel === channel);
         return channelAnalyzers.map((analyzer, analyzerIndex) => {
-          const groups = groupFramesForViewport(
-            analyzer.decodedFrames,
-            viewportStart,
-            viewportSamples,
-            overlayWidth,
+          const bubbles = analyzer.protocolBubbles.filter(
+            (bubble) => bubble.end_sample >= viewportStart && bubble.start_sample <= viewportEnd,
           );
           const previousIndex = analyzer.previousFrame?.frame_id ?? null;
           const nextIndex = analyzer.nextFrame?.frame_id ?? null;
@@ -112,51 +100,56 @@ export function AnalyzerBubblesOverlay({
                 top: rowTops[rowIndex] + analyzerIndex * ANALYZER_STRIP_HEIGHT_PX + ANALYZER_BUBBLES_PADDING_PX,
               }}
             >
-              {groups.map((group) => {
-                const originalLeft = ((group.startSample - viewportStart) / Math.max(1, viewportSamples)) * 100;
-                const originalRight = ((group.endSample - viewportStart) / Math.max(1, viewportSamples)) * 100;
-                const left = Math.max(0, originalLeft);
-                const right = Math.min(100, originalRight);
-                const width = Math.max(100 / overlayWidth, right - left);
-                const widthPx = (width / 100) * overlayWidth;
-                const overflowLeft = originalLeft < 0;
-                const overflowRight = originalRight > 100;
-                const first = group.frames[0];
-                const multi = group.frames.length > 1;
-                const highlighted = group.frames.some(
-                  ({ frameIndex }) => analyzer.highlightedFrameIndex === frameIndex,
+              {bubbles.map((bubble) => {
+                const left = ((bubble.start_sample - viewportStart) / Math.max(1, viewportSamples)) * overlayWidth;
+                const originalBubbleWidth =
+                  ((bubble.end_sample - bubble.start_sample) / Math.max(1, viewportSamples)) * overlayWidth;
+                const right = left + originalBubbleWidth;
+                if (right < 0 || left > overlayWidth) return null;
+
+                const bubbleWidth = Math.max(
+                  1,
+                  Math.min(originalBubbleWidth + Math.min(0, left), overlayWidth - Math.max(left, 0)),
                 );
+                const overflowLeft = left < 0;
+                const overflowRight = right > overlayWidth;
+                const firstFrameIndex = bubble.frame_id_interval.begin;
+                const multi = bubble.type === "MultiBubble" || bubble.result_count > 1;
+                const highlighted =
+                  analyzer.highlightedFrameIndex !== null &&
+                  analyzer.highlightedFrameIndex >= bubble.frame_id_interval.begin &&
+                  analyzer.highlightedFrameIndex < bubble.frame_id_interval.end;
                 const arrowWidth =
                   (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
                   (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
                 const text = multi
-                  ? multiBubbleText(group.frames.map(({ frame }) => frame), widthPx - 28)
-                  : bestFrameText(first.frame.label, widthPx - arrowWidth - 6);
+                  ? multiBubbleText(bubble, bubbleWidth - 28)
+                  : bestFrameText(bubble.display_text, bubbleWidth - arrowWidth - 6);
                 const tooltip = multi
-                  ? `[${group.frames.length} results] ${group.frames.map(({ frame }) => frame.label).join("·").slice(0, 80)}${group.frames.map(({ frame }) => frame.label).join("·").length > 80 ? "..." : ""}`
-                  : first.frame.label;
+                  ? bubbleTooltipText(bubble, text)
+                  : bubble.display_text[0] ?? "";
 
                 function handleClick(event: MouseEvent<HTMLButtonElement>) {
                   event.stopPropagation();
                   if (event.metaKey || event.ctrlKey) {
-                    onOpenTableFrame(analyzer.id, first.frameIndex);
+                    onOpenTableFrame(analyzer.id, firstFrameIndex);
                   } else {
-                    onSelectFrame(analyzer.id, first.frameIndex);
+                    onSelectFrame(analyzer.id, firstFrameIndex);
                   }
                 }
 
                 return (
                   <button
                     className={`analyzerBubble ${multi ? "multi" : ""} ${highlighted ? "highlighted" : ""} ${overflowLeft ? "overflowLeft" : ""} ${overflowRight ? "overflowRight" : ""}`}
-                    key={`${group.startSample}-${first.frameIndex}`}
+                    key={`${bubble.start_sample}-${bubble.frame_id_interval.begin}-${bubble.frame_id_interval.end}`}
                     onClick={handleClick}
                     onDoubleClick={(event) => {
                       event.stopPropagation();
-                      onZoomFrame(analyzer.id, first.frameIndex);
+                      onZoomBubble(analyzer.id, bubble.start_sample, bubble.end_sample, firstFrameIndex);
                     }}
                     style={{
-                      left: `${left}%`,
-                      width: `${width}%`,
+                      left: Math.max(left, 0),
+                      width: bubbleWidth,
                       "--analyzer-color": analyzer.color,
                     } as CSSProperties}
                     title={`${tooltip}\n${navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+click to scroll to table row`}
@@ -165,7 +158,7 @@ export function AnalyzerBubblesOverlay({
                     {!multi && overflowLeft && <span className="analyzerBubbleArrow left" />}
                     {multi && (
                       <span className="analyzerBubbleCounter">
-                        {group.frames.length > MAX_MULTI_BUBBLE_COUNT ? `${MAX_MULTI_BUBBLE_COUNT}+` : group.frames.length}
+                        {bubble.result_count > MAX_MULTI_BUBBLE_COUNT ? `${MAX_MULTI_BUBBLE_COUNT}+` : bubble.result_count}
                       </span>
                     )}
                     <span className="analyzerBubbleText">{text}</span>
@@ -225,52 +218,11 @@ function AnalyzerBubbleNavigationButton({
   );
 }
 
-function groupFramesForViewport(
-  frames: DecodedFrame[],
-  viewportStart: number,
-  viewportSamples: number,
-  overlayWidth: number,
-) {
-  const viewportEnd = viewportStart + viewportSamples;
-  const visible = frames
-    .map((frame, frameIndex) => ({ frame, frameIndex: frame.frame_id ?? frameIndex }))
-    .filter(({ frame }) => frame.end_sample >= viewportStart && frame.start_sample <= viewportEnd);
-  const groups: BubbleGroup[] = [];
-
-  visible.forEach((entry) => {
-    const widthPx =
-      ((entry.frame.end_sample - entry.frame.start_sample) / Math.max(1, viewportSamples)) * overlayWidth;
-    const previous = groups[groups.length - 1];
-    const previousFrame = previous?.frames[previous.frames.length - 1]?.frame;
-    const gapPx = previous
-      ? ((entry.frame.start_sample - previous.endSample) / Math.max(1, viewportSamples)) * overlayWidth
-      : Number.POSITIVE_INFINITY;
-    const previousWidthPx = previousFrame
-      ? ((previousFrame.end_sample - previousFrame.start_sample) / Math.max(1, viewportSamples)) * overlayWidth
-      : Number.POSITIVE_INFINITY;
-    const shouldMerge =
-      Boolean(previous) &&
-      widthPx <= MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME &&
-      previousWidthPx <= MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME &&
-      gapPx <= MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES;
-
-    if (previous && shouldMerge) {
-      previous.frames.push(entry);
-      previous.endSample = Math.max(previous.endSample, entry.frame.end_sample);
-    } else {
-      groups.push({
-        endSample: entry.frame.end_sample,
-        frames: [entry],
-        startSample: entry.frame.start_sample,
-      });
-    }
+function bestFrameText(displayText: string[], widthPx: number) {
+  const candidates = displayText.flatMap((label) => {
+    const quoted = label.match(/^'(.+)'\s+(0x[0-9A-F]+)$/i);
+    return quoted ? [label, quoted[1], quoted[2]] : [label];
   });
-  return groups;
-}
-
-function bestFrameText(label: string, widthPx: number) {
-  const quoted = label.match(/^'(.+)'\s+(0x[0-9A-F]+)$/i);
-  const candidates = quoted ? [label, quoted[1], quoted[2]] : [label];
   const sorted = [...candidates].sort((left, right) => right.length - left.length);
   return (
     sorted.find((candidate) => candidate.length * APPROXIMATE_CHARACTER_WIDTH_PX < widthPx) ??
@@ -279,11 +231,23 @@ function bestFrameText(label: string, widthPx: number) {
   );
 }
 
-function multiBubbleText(frames: DecodedFrame[], widthPx: number) {
-  const text = frames.map((frame) => bestFrameText(frame.label, widthPx)).join("·");
-  return text.length > MAX_MULTI_BUBBLE_TEXT_LENGTH
-    ? `${text.slice(0, MAX_MULTI_BUBBLE_TEXT_LENGTH)}...`
-    : text;
+function multiBubbleText(bubble: AnalyzerBubble, widthPx: number) {
+  const text = bubble.display_text.map((label) => bestFrameText([label], widthPx)).join("·");
+  const suffix = bubble.display_text.length < bubble.result_count ? "..." : "";
+  const output = `${text}${suffix}`;
+  return output.length > MAX_MULTI_BUBBLE_TEXT_LENGTH
+    ? `${output.slice(0, MAX_MULTI_BUBBLE_TEXT_LENGTH)}...`
+    : output;
+}
+
+function bubbleTooltipText(bubble: AnalyzerBubble, bubbleText: string) {
+  const text = bubble.display_text.join("·");
+  const output = text || bubbleText;
+  const clipped = output.length > 80 ? `${output.slice(0, 80)}...` : output;
+  if (bubble.type === "MultiBubble" || bubble.result_count > 1) {
+    return `[${bubble.result_count} results] ${clipped}`;
+  }
+  return clipped;
 }
 
 function NextBubbleIcon() {

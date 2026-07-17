@@ -83,3 +83,5 @@ chore: 说明内容
   - Demo 设备选择不自动采集、Stream/4096 MiB 默认 buffer、live summary 约 30fps 和停止 partial capture。
 - `docs/ported-features/2026-07-17-analyzer-bubbles-viewport-window.md`
   - Analyzer viewport frame window、纯 hex bubbles、previous/next frame、300 marker 上限和长捕获 Fit 聚合保护。
+- `docs/ported-features/2026-07-17-analyzer-protocol-bubbles.md`
+  - Analyzer overlay 改为独立 `protocolBubbles` 模型，Fit Capture 下 multi bubble 覆盖完整 graph，并按原版像素阈值拆合。

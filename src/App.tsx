@@ -633,6 +633,7 @@ export default function App() {
           },
           analyzers: session.analyzers.map((analyzer) => ({
             ...analyzer,
+            protocolBubbles: [],
             decodedFrames: [],
             previousFrame: null,
             nextFrame: null,
@@ -864,6 +865,7 @@ export default function App() {
       progress: null,
       analyzers: current.analyzers.map((analyzer) => ({
         ...analyzer,
+        protocolBubbles: [],
         decodedFrames: [],
         previousFrame: null,
         nextFrame: null,
@@ -889,6 +891,7 @@ export default function App() {
         },
         analyzers: current.analyzers.map((analyzer) => ({
           ...analyzer,
+          protocolBubbles: [],
           decodedFrames: [],
           previousFrame: null,
           nextFrame: null,
@@ -945,6 +948,7 @@ export default function App() {
           item.id === analyzerId
             ? {
                 ...item,
+                protocolBubbles: frameWindow.bubbles,
                 decodedFrames: frameWindow.frames,
                 previousFrame: frameWindow.previous_frame,
                 nextFrame: frameWindow.next_frame,
@@ -1042,6 +1046,7 @@ export default function App() {
       viewportSamples: Math.min(summary.metadata.sample_count, 100_000),
       analyzers: session.analyzers.map((analyzer) => ({
         ...analyzer,
+        protocolBubbles: [],
         decodedFrames: [],
         previousFrame: null,
         nextFrame: null,
@@ -1309,6 +1314,15 @@ export default function App() {
       const center = frame.start_sample + frameSamples / 2;
       animateViewport(session.id, center - session.viewportSamples / 2, session.viewportSamples);
     }
+  }
+
+  function zoomAnalyzerBubble(analyzerId: string, startSample: number, endSample: number, frameId: number) {
+    const session = sessionsRef.current.find((item) => item.id === activeSessionIdRef.current);
+    if (!session) return;
+    selectAnalyzerFrame(session.id, analyzerId, frameId);
+    const span = Math.max(1, endSample - startSample);
+    const padding = span * 0.05;
+    animateViewport(session.id, startSample - padding, span + padding * 2);
   }
 
   function openAnalyzerTableFrame(analyzerId: string, frameId: number) {
@@ -1692,7 +1706,7 @@ export default function App() {
                         onSelectFrame={(analyzerId, frameIndex) =>
                           selectAnalyzerFrame(activeSession.id, analyzerId, frameIndex)
                         }
-                        onZoomFrame={(analyzerId, frameIndex) => goToAnalyzerFrame(analyzerId, frameIndex, true)}
+                        onZoomBubble={zoomAnalyzerBubble}
                         rowHeights={visibleOuterRowHeights}
                         viewportSamples={activeSession.viewportSamples}
                         viewportStart={activeSession.viewportStart}

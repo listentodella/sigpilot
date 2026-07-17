@@ -1,4 +1,4 @@
-import type { DecodedFrame } from "./api";
+import type { AnalyzerBubble, DecodedFrame } from "./api";
 
 // Ported from Logic 2.4.43 uikit/utils/colors.ts.
 export const SALEAE_ANALYZER_COLORS = [
@@ -27,6 +27,7 @@ export interface UiAnalyzerInstance {
   inverted: boolean;
   showInDataTable: boolean;
   streamToTerminal: boolean;
+  protocolBubbles: AnalyzerBubble[];
   decodedFrames: DecodedFrame[];
   previousFrame: DecodedFrame | null;
   nextFrame: DecodedFrame | null;
@@ -59,6 +60,7 @@ export function createAnalyzerInstance(
     inverted: false,
     showInDataTable: true,
     streamToTerminal: false,
+    protocolBubbles: [],
     decodedFrames: [],
     previousFrame: null,
     nextFrame: null,
