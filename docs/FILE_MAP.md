@@ -6,7 +6,7 @@
 
 - `src/App.tsx`
   - 当前 React 工作台主体。
-  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口和通道右键菜单状态。
+  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口、通道右键菜单状态、Add Range Measurement 放置状态和 Measurements range overlay/tooltip。
 - `src/styles.css`
   - 全局视觉样式。
   - 包含 Saleae 风格顶部工具栏、启动页、右侧栏、底栏、session tab、popover、波形区域样式。
@@ -31,6 +31,7 @@
 - `src/components/WaveformCanvas.tsx`
   - 数字波形 Canvas 渲染。
   - 包含平滑数字波形绘制、原版 8px 上下 gutter、边沿吸附、周期/占空比/脉宽 hover 测量显示、右键菜单控制的交互测量开关，以及波形区右键菜单定位。
+  - 与 range overlay 共用 `src/lib/saleaeGraphLayout.ts` 计算 row 几何。
 - `src/components/TimingDisplayCanvas.tsx`
   - 独立于通道滚动区的 30px Saleae 时间标尺。
   - 搬运原版 major/minor tick、离屏 major 箭头和标尺背景绘制规则。
@@ -60,6 +61,9 @@
   - 右侧栏面板类型、原版命令字符串、面板快捷键和命令到面板映射。
 - `src/lib/saleaeChannelLayout.ts`
   - 从 Logic 2.4.43 RowsManager 搬运的数字通道默认/最小高度、自动布局、RowV2 间距和 resize handle 几何。
+- `src/lib/saleaeGraphLayout.ts`
+  - 供 Canvas、波形右键定位、range placing/overlay 共用的 Saleae row 几何计算。
+  - 从 `WaveformCanvas` 抽出，避免后续图上交互使用不一致的 row top/height。
 - `src/lib/saleaeTimingDisplay.ts`
   - 从 Logic 2.4.43 `timingDisplay.ts` 搬运的高精度 major/minor 时间刻度算法。
   - 包含原版 DarkTheme `border-10` / `border-20` GridLines 色值。

@@ -1,10 +1,9 @@
 import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useState } from "react";
 import type { WaveformTile } from "../lib/api";
 import {
-  SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
-  SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
-  SALEAE_ROW_V2_SPACING_PX,
-} from "../lib/saleaeChannelLayout";
+  findSaleaeGraphChannelIndexAtY,
+  getSaleaeGraphChannelLayout,
+} from "../lib/saleaeGraphLayout";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import {
   getHorizontalGraphTicks,
@@ -230,7 +229,7 @@ export function WaveformCanvas({
     const host = hostRef.current;
     if (!currentNavigation || !host) return;
 
-    const channelLayout = getChannelLayout(
+    const channelLayout = getSaleaeGraphChannelLayout(
       rowHeightsRef.current,
       tileRef.current?.channels.length ?? 0,
       1,
@@ -347,8 +346,8 @@ export function WaveformCanvas({
     const tileSnapshot = tileRef.current;
     if (!tileSnapshot || tileSnapshot.channels.length === 0) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const channelIndex = findChannelIndexAtY(
-      getChannelLayout(rowHeightsRef.current, tileSnapshot.channels.length, 1, rowTopInsetsRef.current),
+    const channelIndex = findSaleaeGraphChannelIndexAtY(
+      getSaleaeGraphChannelLayout(rowHeightsRef.current, tileSnapshot.channels.length, 1, rowTopInsetsRef.current),
       event.clientY - rect.top,
     );
     if (channelIndex === null) return;
@@ -585,7 +584,7 @@ function draw(
   }
 
   const dpr = window.devicePixelRatio || 1;
-  const channelLayout = getChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets);
+  const channelLayout = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
   const usableWidth = Math.max(1, right - left);
@@ -779,8 +778,8 @@ function findHoverNavigation(
   rowTopInsets: number[],
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
-  const channelLayout = getChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets);
-  const channelIndex = findChannelIndexAtY(channelLayout, Math.min(rect.height, y));
+  const channelLayout = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets);
+  const channelIndex = findSaleaeGraphChannelIndexAtY(channelLayout, Math.min(rect.height, y));
   if (channelIndex === null) return null;
   const layout = channelLayout[channelIndex];
   return findChannelNavigation(tile, channelIndex, viewportStart, viewportSamples, layout.top, layout.height);
@@ -812,46 +811,6 @@ function findChannelNavigation(
   };
 }
 
-interface ChannelLayout {
-  height: number;
-  outerHeight: number;
-  outerTop: number;
-  top: number;
-}
-
-function getChannelLayout(
-  rowHeights: number[],
-  channelCount: number,
-  scale = 1,
-  rowTopInsets: number[] = [],
-): ChannelLayout[] {
-  let top = 0;
-  return Array.from({ length: channelCount }, (_, index) => {
-    const outerHeight =
-      Math.max(
-        SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
-        rowHeights[index] ?? SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
-      ) * scale;
-    const inset = Math.max(0, rowTopInsets[index] ?? 0) * scale;
-    const layout = {
-      height: Math.max(scale, outerHeight - inset),
-      outerHeight,
-      outerTop: top,
-      top: top + inset,
-    };
-    top += outerHeight + SALEAE_ROW_V2_SPACING_PX * scale;
-    return layout;
-  });
-}
-
-function findChannelIndexAtY(layout: ChannelLayout[], y: number) {
-  for (let index = 0; index < layout.length; index += 1) {
-    const row = layout[index];
-    if (y >= row.top && y <= row.top + row.height) return index;
-  }
-  return null;
-}
-
 function findHoverMeasurement(
   canvas: HTMLCanvasElement,
   tile: WaveformTile | null,
@@ -865,8 +824,8 @@ function findHoverMeasurement(
   if (!tile || tile.channels.length === 0) return null;
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
-  const channelIndex = findChannelIndexAtY(
-    getChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets),
+  const channelIndex = findSaleaeGraphChannelIndexAtY(
+    getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets),
     y,
   );
   if (channelIndex === null) return null;
@@ -929,7 +888,7 @@ function drawHoverMeasurement(
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
   const height = canvas.height;
-  const layout = getChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets)[hover.channelIndex];
+  const layout = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets)[hover.channelIndex];
   if (!layout) return;
   const laneHeight = layout.height;
   const top = layout.top;

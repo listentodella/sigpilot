@@ -1478,22 +1478,40 @@ button:disabled {
   pointer-events: none;
 }
 
-.rangeBand {
-  height: 100%;
-  position: absolute;
-  top: 0;
-  border-left: 1px solid var(--range-color);
-  border-right: 1px solid var(--range-color);
-  background: color-mix(in srgb, var(--range-color) 16%, transparent);
+.rangeOverlay.placing {
+  cursor: crosshair;
   pointer-events: auto;
 }
 
+.rangeBand {
+  position: absolute;
+  display: flex;
+  min-width: 2px;
+  border-top: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+  background: color-mix(in srgb, var(--range-color) 15%, transparent);
+  pointer-events: auto;
+}
+
+.rangeOverlay.placing .rangeBand {
+  pointer-events: none;
+}
+
 .rangeBand.selected {
+  border-top-color: var(--selected-highlight);
+  border-bottom-color: var(--selected-highlight);
   background: color-mix(in srgb, var(--range-color) 24%, transparent);
 }
 
+.rangeCenterFill {
+  flex: 1;
+  min-width: 0;
+  border-left: 1px solid var(--range-color);
+  border-right: 1px solid var(--range-color);
+}
+
 .rangeEdge {
-  width: 13px;
+  width: 11px;
   height: 100%;
   position: absolute;
   top: 0;
@@ -1503,11 +1521,128 @@ button:disabled {
 }
 
 .rangeEdge.start {
-  left: -7px;
+  left: -6px;
+  border-left: 1px solid var(--range-color);
 }
 
 .rangeEdge.end {
-  right: -7px;
+  right: -6px;
+  border-right: 1px solid var(--range-color);
+}
+
+.placingRangeBand {
+  position: absolute;
+  min-width: 2px;
+  border-left: 1px solid var(--range-color);
+  border-right: 1px solid var(--range-color);
+  background: color-mix(in srgb, var(--range-color) 18%, transparent);
+  pointer-events: none;
+}
+
+.placingRangeBand span {
+  width: 100%;
+  border-top: 2px solid var(--selected-highlight);
+  border-bottom: 2px solid var(--selected-highlight);
+}
+
+.rangeMeasurementTooltip {
+  width: 470px;
+  position: absolute;
+  z-index: 22;
+  transform: translateX(-50%);
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 5px;
+  background: var(--background-30);
+  box-shadow: 0 6px 10px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+}
+
+.rangeTooltipGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 32px;
+  padding: 24px 24px 10px;
+}
+
+.rangeTooltipDragBar {
+  min-height: 26px;
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 10px 6px;
+}
+
+.rangeTooltipIconButton {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 3px;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.rangeTooltipIconButton:hover:not(:disabled) {
+  color: var(--on-background-0);
+  background: var(--background-40);
+}
+
+.rangeTooltipIconButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rangeTooltipCommentBox {
+  padding: 10px 0;
+  background: var(--background-20);
+}
+
+.rangeTooltipCommentBox textarea {
+  width: 100%;
+  min-height: 48px;
+  resize: vertical;
+  border: 0;
+  color: var(--on-background-0);
+  background: transparent;
+  padding: 0 24px;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.rangeTooltipLowerPart {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px 0 24px;
+}
+
+.rangeTooltipColorGrid {
+  display: flex;
+  gap: 7px;
+}
+
+.rangeTooltipColorGrid button {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 2px;
+  color: white;
+  background: var(--range-color);
+  cursor: pointer;
+}
+
+.rangeTooltipColorGrid button.selected {
+  outline: 1px solid var(--on-background-0);
+  outline-offset: 2px;
 }
 
 .timingMarkerOverlay {
@@ -2457,6 +2592,11 @@ button:disabled {
   background: var(--background-30);
 }
 
+.sidebarCircleButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .analyzerSelectionPopover {
   position: absolute;
   top: 38px;
@@ -2684,6 +2824,57 @@ button:disabled {
   overflow: hidden;
 }
 
+.measurementAddMenu {
+  position: relative;
+}
+
+.measurementAddPopover {
+  width: 218px;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 8;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-20);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 6px 0;
+}
+
+.measurementAddPopover button {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 0 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.measurementAddPopover button:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.measurementAddPopover span,
+.measurementAddPopover small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.measurementAddPopover small {
+  color: var(--on-background-30);
+  font-size: 10px;
+}
+
 .emptyMeasurementState {
   min-height: 220px;
   display: flex;
@@ -2699,64 +2890,141 @@ button:disabled {
 
 .rangeMeasurementList {
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns:
+    [expandButton] 18px [icon] 6px 8px [label] minmax(0, auto) 4px [value] auto
+    [comment] minmax(0, 1fr) [contentEnd] 4px [goto] 18px [menu] 18px 14px;
+  grid-auto-rows: min-content;
   overflow: auto;
-  padding: 0 12px 12px;
+  padding: 0 0 12px;
 }
 
 .rangeMeasurementItem {
-  border: 1px solid var(--border-20);
-  border-radius: 4px;
-  background: var(--background-20);
+  position: relative;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
 }
 
 .rangeMeasurementItem.selected {
-  border-color: var(--range-color);
+  background: var(--selected-highlight);
 }
 
 .rangeMeasurementHeader {
-  min-height: 36px;
+  min-height: 34px;
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--border-20);
-  padding: 0 8px;
+  padding: 8px 0;
+}
+
+.rangeExpandButton {
+  grid-column: expandButton;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.rangeExpandButton svg {
+  transition: transform 120ms ease;
+}
+
+.rangeExpandButton.expanded svg {
+  transform: rotate(90deg);
 }
 
 .rangeColorSwatch {
+  grid-column: icon;
   width: 6px;
-  height: 20px;
+  height: 8px;
   border-radius: 2px;
   background: var(--range-color);
 }
 
-.rangeMeasurementHeader input {
+.rangeLabelContainer {
+  grid-column: label;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.rangeLabelContainer input {
   min-width: 0;
   height: 24px;
   border: 0;
-  color: var(--on-background-0);
+  color: var(--on-background-10);
   background: transparent;
-  padding: 0;
+  padding: 0 6px;
   outline: none;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
+}
+
+.rangeMeasurementItem.selected .rangeLabelContainer input,
+.rangeMeasurementItem.selected .rangeDeltaValue,
+.rangeMeasurementItem.selected .rangeCommentPreview,
+.rangeMeasurementItem.selected .rangeExpandButton {
+  color: var(--on-primary);
+}
+
+.rangeLabelContainer span {
+  color: var(--on-background-30);
+  font-size: 12px;
+}
+
+.rangeDeltaValue {
+  grid-column: value;
+  color: var(--on-background-20);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.rangeCommentPreview {
+  grid-column: comment;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-30);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rangeMeasurementActions {
+  grid-column: goto / menu;
+  position: relative;
   display: inline-flex;
-  gap: 4px;
+  gap: 0;
+  opacity: 0;
+}
+
+.rangeMeasurementItem:hover .rangeMeasurementActions,
+.rangeMeasurementActions:focus-within,
+.rangeMeasurementItem.selected .rangeMeasurementActions {
+  opacity: 1;
 }
 
 .rangeMeasurementActions button {
-  width: 21px;
-  height: 21px;
+  width: 18px;
+  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border: 0;
+  border-radius: 3px;
   color: var(--on-background-30);
   background: transparent;
   cursor: pointer;
@@ -2767,11 +3035,40 @@ button:disabled {
   background: var(--background-30);
 }
 
+.rangeItemMenu {
+  width: 190px;
+  position: absolute;
+  top: 22px;
+  right: 0;
+  z-index: 30;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-30);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.32);
+}
+
+.rangeItemMenu button {
+  width: 100%;
+  height: 28px;
+  justify-content: flex-start;
+  padding: 0 10px;
+  border-radius: 0;
+  color: var(--on-background-10);
+  font-size: 12px;
+  text-align: left;
+}
+
+.rangeItemMenu button.purple {
+  color: #b79cff;
+}
+
 .rangeMetricsGrid {
   display: grid;
+  grid-column: label / contentEnd;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
-  padding: 8px;
+  padding: 0 14px 8px 0;
 }
 
 .metricCell {
@@ -2798,14 +3095,15 @@ button:disabled {
 }
 
 .rangeNote {
-  width: calc(100% - 16px);
+  grid-column: label / contentEnd;
+  width: calc(100% - 14px);
   min-height: 42px;
   resize: vertical;
   border: 1px solid var(--border-20);
   border-radius: 4px;
   color: var(--on-background-20);
   background: var(--background-10);
-  margin: 0 8px 8px;
+  margin: 0 14px 8px 0;
   padding: 7px;
   font: inherit;
   font-size: 11px;

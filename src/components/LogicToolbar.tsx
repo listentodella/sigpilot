@@ -87,7 +87,11 @@ export function LogicToolbar({
           </ToolbarMenu>
         )}
 
-        <ToolbarButton title="Add Range Measurement" onClick={() => onCommand(MeasurementCommands.AddRange)}>
+        <ToolbarButton
+          disabled={busy || !hasCapture}
+          title={busy || !hasCapture ? "Disabled while recording and before the first capture" : "Add Range Measurement"}
+          onClick={() => onCommand(MeasurementCommands.AddRange)}
+        >
           <RangeMeasurementIcon />
         </ToolbarButton>
 
