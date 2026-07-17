@@ -11,6 +11,7 @@ import {
   FileDown,
   FolderOpen,
   GripVertical,
+  LocateFixed,
   Maximize2,
   Plus,
   RefreshCw,
@@ -49,6 +50,8 @@ import notesIcon from "./assets/saleae/sidebar/notes.svg";
 import recordingSettingsIcon from "./assets/saleae/sidebar/recordingSettings.svg";
 import timingMarkersIcon from "./assets/saleae/sidebar/timingMarkers.svg";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
+import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
+import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
@@ -60,11 +63,10 @@ import {
   CaptureProgress,
   CaptureSettings,
   CaptureSummary,
-  decodeUartFrames,
-  DecodedFrame,
   DeviceInfo,
   DiagnosticEvent,
   exportCapture,
+  getUartFrameWindow,
   getWaveformTile,
   listDevices,
   openCapture,
@@ -73,6 +75,12 @@ import {
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
+import {
+  analyzerStripInsetForChannel,
+  analyzerSupportsDecoding,
+  createAnalyzerInstance,
+  UiAnalyzerInstance,
+} from "./lib/analyzers";
 import {
   fitSaleaeDigitalRowsToViewport,
   makeSaleaeDigitalRowHeights,
@@ -120,19 +128,20 @@ interface UiSession {
   canvasWidth: number;
   viewportStart: number;
   viewportSamples: number;
-  decodeChannel: number;
-  decodeBaud: number;
-  decodeInverted: boolean;
-  decodedFrames: DecodedFrame[];
   diagnostics: DiagnosticEvent[];
   busy: boolean;
-  decodeBusy: boolean;
   message: string;
-  analyzers: string[];
+  analyzers: UiAnalyzerInstance[];
   analyzerDataPane: "table" | "terminal";
   rangeMeasurements: UiRangeMeasurement[];
   timingMarkers: UiTimingMarker[];
   notes: string;
+}
+
+interface AnalyzerEditState {
+  analyzer: UiAnalyzerInstance;
+  isNew: boolean;
+  sessionId: string;
 }
 
 type UiRecordingMode = "FreeRun" | "Timer" | "Trigger";
@@ -187,6 +196,8 @@ interface UiTimingMarker {
 }
 
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
+const DEFAULT_BUFFER_SIZE_MB = 1024;
+const DEFAULT_DEMO_BUFFER_SIZE_MB = 4096;
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
 const BUILT_IN_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
@@ -215,10 +226,21 @@ function defaultSettings(deviceId: string): CaptureSettings {
     sample_rate_hz: 25_000_000,
     channel_count: 16,
     duration_ms: 10,
+    buffer_size_mb: defaultBufferSizeMb(deviceId),
     decode_cross: true,
     threshold_volts: 2.0,
-    mode: "Buffer",
+    mode: "Stream",
   };
+}
+
+function defaultBufferSizeMb(deviceId: string) {
+  return deviceId === DEFAULT_DEVICE_ID || deviceId.toLowerCase().includes("demo")
+    ? DEFAULT_DEMO_BUFFER_SIZE_MB
+    : DEFAULT_BUFFER_SIZE_MB;
+}
+
+function backendCaptureMode(mode: UiRecordingMode): CaptureSettings["mode"] {
+  return mode === "Timer" ? "Buffer" : "Stream";
 }
 
 function makeDigitalChannels(channelCount: number) {
@@ -288,10 +310,38 @@ function summaryWithLabels(summary: CaptureSummary, labels: string[]): CaptureSu
   };
 }
 
-function defaultDeviceSettings(channelCount: number): UiDeviceSettings {
+function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): UiSession {
+  const previousSamples = session.summary?.metadata.sample_count ?? 0;
+  const wasFollowingLiveEdge =
+    previousSamples === 0 ||
+    session.viewportStart + session.viewportSamples >=
+      previousSamples - Math.max(1, Math.round(session.viewportSamples * 0.05));
+  const viewportSamples = Math.max(
+    1,
+    Math.min(
+      summary.metadata.sample_count,
+      previousSamples > 0 ? session.viewportSamples : Math.min(summary.metadata.sample_count, 100_000),
+    ),
+  );
+  const maxViewportStart = Math.max(0, summary.metadata.sample_count - viewportSamples);
+  const viewportStart = wasFollowingLiveEdge
+    ? maxViewportStart
+    : Math.max(0, Math.min(maxViewportStart, session.viewportStart));
+
   return {
-    bufferSizeMb: 1024,
-    captureMode: "Timer",
+    ...session,
+    channelLabels: channelLabelsForCount(summary.metadata.channel_count, session.channelLabels),
+    summary: summaryWithLabels(summary, session.channelLabels),
+    viewportStart,
+    viewportSamples,
+    message: "Capturing",
+  };
+}
+
+function defaultDeviceSettings(channelCount: number, bufferSizeMb = DEFAULT_BUFFER_SIZE_MB): UiDeviceSettings {
+  return {
+    bufferSizeMb,
+    captureMode: "FreeRun",
     digitalChannels: makeDigitalChannels(channelCount),
     glitchFilterEnabled: false,
     glitchFilterNs: 10,
@@ -362,7 +412,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     settings,
     deviceSettings: source
       ? { ...source.deviceSettings, digitalChannels: [...source.deviceSettings.digitalChannels] }
-      : defaultDeviceSettings(settings.channel_count),
+      : defaultDeviceSettings(settings.channel_count, settings.buffer_size_mb),
     channelLabels: source
       ? channelLabelsForCount(settings.channel_count, source.channelLabels)
       : channelLabelsForCount(settings.channel_count),
@@ -380,13 +430,8 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     canvasWidth: 1000,
     viewportStart: 0,
     viewportSamples: 50_000,
-    decodeChannel: 0,
-    decodeBaud: 115_200,
-    decodeInverted: false,
-    decodedFrames: [],
     diagnostics: [],
     busy: false,
-    decodeBusy: false,
     message: "Ready",
     analyzers: [],
     analyzerDataPane: "table",
@@ -449,6 +494,7 @@ export default function App() {
   const [footerPopover, setFooterPopover] = useState<FooterPopover>(null);
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
   const [channelContextMenu, setChannelContextMenu] = useState<{ channelIndex: number; x: number; y: number } | null>(null);
+  const [analyzerInEdit, setAnalyzerInEdit] = useState<AnalyzerEditState | null>(null);
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [startupMessage, setStartupMessage] = useState("Ready");
 
@@ -462,6 +508,8 @@ export default function App() {
   const captureSessionRef = useRef<string | null>(null);
   const sidebarShortcutRef = useRef<{ timeout: number | null; waiting: boolean }>({ timeout: null, waiting: false });
   const tileRequestSeq = useRef(0);
+  const analyzerRequestSeq = useRef<Record<string, number>>({});
+  const viewportAnimationRef = useRef<number | null>(null);
   const sessionCounter = useRef(1);
 
   useEffect(() => {
@@ -505,6 +553,9 @@ export default function App() {
     return () => {
       if (graphScrollFrameRef.current !== null) {
         window.cancelAnimationFrame(graphScrollFrameRef.current);
+      }
+      if (viewportAnimationRef.current !== null) {
+        window.cancelAnimationFrame(viewportAnimationRef.current);
       }
     };
   }, []);
@@ -580,7 +631,13 @@ export default function App() {
             ...defaultCursorState(event.payload.metadata.sample_count, event.payload.metadata.channel_count),
             visible: session.cursorState.visible,
           },
-          decodedFrames: [],
+          analyzers: session.analyzers.map((analyzer) => ({
+            ...analyzer,
+            decodedFrames: [],
+            previousFrame: null,
+            nextFrame: null,
+            highlightedFrameIndex: null,
+          })),
           message: "Capture complete",
         }));
       }).catch(() => () => {}),
@@ -639,11 +696,24 @@ export default function App() {
         : [],
     [activeSession, graphViewportHeight, visibleChannelIndexes],
   );
+  const visibleAnalyzerInsets = useMemo(
+    () =>
+      activeSession
+        ? visibleChannelIndexes.map((channelIndex) =>
+            analyzerStripInsetForChannel(activeSession.analyzers, channelIndex),
+          )
+        : [],
+    [activeSession?.analyzers, visibleChannelIndexes],
+  );
+  const visibleOuterRowHeights = useMemo(
+    () => visibleChannelHeights.map((height, index) => height + (visibleAnalyzerInsets[index] ?? 0)),
+    [visibleAnalyzerInsets, visibleChannelHeights],
+  );
   const visibleTile = useMemo(
     () => tileForVisibleChannels(activeSession?.tile ?? null, visibleChannelIndexes, channelLabels),
     [activeSession?.tile, channelLabels, visibleChannelIndexes],
   );
-  const graphContentHeight = Math.max(graphViewportHeight, saleaeChannelContentHeight(visibleChannelHeights));
+  const graphContentHeight = Math.max(graphViewportHeight, saleaeChannelContentHeight(visibleOuterRowHeights));
 
   const totalSamples = activeSession?.summary?.metadata.sample_count ?? 0;
   const progressPercent =
@@ -670,6 +740,41 @@ export default function App() {
       });
     },
     [updateSession],
+  );
+
+  const animateViewport = useCallback(
+    (sessionId: string, start: number, samples: number) => {
+      if (viewportAnimationRef.current !== null) {
+        window.cancelAnimationFrame(viewportAnimationRef.current);
+      }
+      const session = sessionsRef.current.find((item) => item.id === sessionId);
+      const total = session?.summary?.metadata.sample_count ?? 0;
+      if (!session || total <= 0) return;
+
+      const targetSamples = Math.max(1, Math.min(total, samples));
+      const targetStart = Math.max(0, Math.min(total - targetSamples, start));
+      const initialStart = session.viewportStart;
+      const initialSamples = session.viewportSamples;
+      const startedAt = performance.now();
+
+      const step = (now: number) => {
+        const progress = Math.max(0, Math.min(1, (now - startedAt) / 300));
+        const eased = 1 - Math.pow(1 - progress, 3);
+        updateViewport(
+          sessionId,
+          initialStart + (targetStart - initialStart) * eased,
+          initialSamples + (targetSamples - initialSamples) * eased,
+        );
+        if (progress < 1) {
+          viewportAnimationRef.current = window.requestAnimationFrame(step);
+        } else {
+          viewportAnimationRef.current = null;
+        }
+      };
+
+      viewportAnimationRef.current = window.requestAnimationFrame(step);
+    },
+    [updateViewport],
   );
 
   const zoomViewport = useCallback(
@@ -743,7 +848,12 @@ export default function App() {
 
   async function runCaptureForSession(session: UiSession, deviceId: string) {
     const captureDevice = devices.find((device) => device.id === deviceId) ?? selected;
-    const nextSettings = { ...session.settings, device_id: deviceId };
+    const nextSettings = {
+      ...session.settings,
+      device_id: deviceId,
+      buffer_size_mb: session.deviceSettings.bufferSizeMb,
+      mode: backendCaptureMode(session.deviceSettings.captureMode),
+    };
     captureSessionRef.current = session.id;
     setDraftSelectedDevice(deviceId);
     updateSession(session.id, (current) => ({
@@ -752,23 +862,38 @@ export default function App() {
       settings: nextSettings,
       busy: true,
       progress: null,
-      decodedFrames: [],
+      analyzers: current.analyzers.map((analyzer) => ({
+        ...analyzer,
+        decodedFrames: [],
+        previousFrame: null,
+        nextFrame: null,
+        highlightedFrameIndex: null,
+      })),
       diagnostics: [],
       message: captureDevice?.kind === "Usb" ? "Preparing device and capturing" : "Capturing",
     }));
     try {
-      const next = await startCapture(nextSettings);
+      const next = await startCapture(nextSettings, {
+        onProgress: (progress) => {
+          updateSession(session.id, (current) => ({ ...current, progress }));
+        },
+        onSummary: (summary) => {
+          updateSession(session.id, (current) => applyLiveCaptureSummary(current, summary));
+        },
+      });
       updateSession(session.id, (current) => ({
-        ...current,
-        channelLabels: channelLabelsForCount(next.metadata.channel_count, current.channelLabels),
-        summary: summaryWithLabels(next, current.channelLabels),
-        viewportStart: 0,
-        viewportSamples: Math.min(next.metadata.sample_count, 100_000),
+        ...applyLiveCaptureSummary(current, next),
         cursorState: {
           ...defaultCursorState(next.metadata.sample_count, next.metadata.channel_count),
           visible: current.cursorState.visible,
         },
-        decodedFrames: [],
+        analyzers: current.analyzers.map((analyzer) => ({
+          ...analyzer,
+          decodedFrames: [],
+          previousFrame: null,
+          nextFrame: null,
+          highlightedFrameIndex: null,
+        })),
         message: "Capture complete",
       }));
     } catch (error) {
@@ -791,41 +916,102 @@ export default function App() {
     await runCaptureForSession({ ...session, selectedDevice: deviceId, settings: { ...session.settings, device_id: deviceId } }, deviceId);
   }
 
-  async function handleDecode(sessionId = activeSession?.id) {
+  async function handleDecodeAnalyzer(sessionId: string, analyzerId: string, silent = false) {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
-    if (!session?.summary) return;
-    updateSession(session.id, (current) => ({ ...current, decodeBusy: true }));
+    const analyzer = session?.analyzers.find((item) => item.id === analyzerId);
+    if (!session?.summary || !analyzer || !analyzerSupportsDecoding(analyzer)) return;
+    const requestKey = `${sessionId}:${analyzerId}`;
+    const requestSeq = (analyzerRequestSeq.current[requestKey] ?? 0) + 1;
+    analyzerRequestSeq.current[requestKey] = requestSeq;
+    updateSession(session.id, (current) => ({
+      ...current,
+      analyzers: current.analyzers.map((item) =>
+        item.id === analyzerId ? { ...item, decodeBusy: true } : item,
+      ),
+    }));
     try {
-      const frames = await decodeUartFrames({
-        channel: session.decodeChannel,
-        baud_rate: session.decodeBaud,
-        inverted: session.decodeInverted,
+      const frameWindow = await getUartFrameWindow({
+        channel: analyzer.channel,
+        baud_rate: analyzer.baudRate,
+        inverted: analyzer.inverted,
+        start_sample: session.viewportStart,
+        sample_count: session.viewportSamples,
+        width_px: Math.max(1, session.canvasWidth),
       });
+      if (requestSeq !== analyzerRequestSeq.current[requestKey]) return;
       updateSession(session.id, (current) => ({
         ...current,
-        decodedFrames: frames,
-        message: `Decoded ${frames.length} UART frame${frames.length === 1 ? "" : "s"}`,
+        analyzers: current.analyzers.map((item) =>
+          item.id === analyzerId
+            ? {
+                ...item,
+                decodedFrames: frameWindow.frames,
+                previousFrame: frameWindow.previous_frame,
+                nextFrame: frameWindow.next_frame,
+                decodeBusy: false,
+                highlightedFrameIndex: null,
+              }
+            : item,
+        ),
+        message: silent
+          ? current.message
+          : `Decoded ${frameWindow.frames.length} visible frame${frameWindow.frames.length === 1 ? "" : "s"} with ${analyzer.name}`,
       }));
     } catch (error) {
-      updateSession(session.id, (current) => ({ ...current, message: String(error) }));
-    } finally {
-      updateSession(session.id, (current) => ({ ...current, decodeBusy: false }));
+      if (requestSeq !== analyzerRequestSeq.current[requestKey]) return;
+      updateSession(session.id, (current) => ({
+        ...current,
+        analyzers: current.analyzers.map((item) =>
+          item.id === analyzerId ? { ...item, decodeBusy: false } : item,
+        ),
+        message: String(error),
+      }));
     }
   }
 
+  const analyzerDecodeSignature =
+    activeSession?.analyzers
+      .map((analyzer) =>
+        `${analyzer.id}:${analyzer.type}:${analyzer.channel}:${analyzer.baudRate}:${analyzer.inverted}`,
+      )
+      .join("|") ?? "";
+  const liveAnalyzerDecodeBucket =
+    activeSession?.busy && activeSession.summary
+      ? Math.floor(
+          activeSession.summary.metadata.sample_count /
+            Math.max(1, Math.floor(activeSession.summary.metadata.sample_rate_hz / 4)),
+        )
+      : -1;
+
   useEffect(() => {
-    if (!activeSession?.summary) return;
-    void handleDecode(activeSession.id);
+    if (!activeSession?.summary || activeSession.analyzers.length === 0) return;
+    const timeout = window.setTimeout(() => {
+      activeSession.analyzers.forEach((analyzer) => {
+        if (analyzerSupportsDecoding(analyzer)) {
+          void handleDecodeAnalyzer(activeSession.id, analyzer.id, true);
+        }
+      });
+    }, activeSession.busy ? 120 : 45);
+    return () => window.clearTimeout(timeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSession?.summary?.metadata.captured_at]);
+  }, [
+    activeSession?.canvasWidth,
+    activeSession?.id,
+    activeSession?.busy,
+    activeSession?.summary?.metadata.captured_at,
+    activeSession?.summary?.metadata.sample_count,
+    activeSession?.viewportSamples,
+    activeSession?.viewportStart,
+    analyzerDecodeSignature,
+    liveAnalyzerDecodeBucket,
+  ]);
 
   async function handleCancel() {
     await cancelCapture();
     const targetId = captureSessionRef.current ?? activeSession?.id;
     if (targetId) {
-      updateSession(targetId, (session) => ({ ...session, busy: false, message: "Cancel requested" }));
+      updateSession(targetId, (session) => ({ ...session, message: "Stopping capture" }));
     }
-    captureSessionRef.current = null;
   }
 
   async function loadCaptureIntoSession(summary: CaptureSummary) {
@@ -854,7 +1040,13 @@ export default function App() {
       tile: null,
       viewportStart: 0,
       viewportSamples: Math.min(summary.metadata.sample_count, 100_000),
-      decodedFrames: [],
+      analyzers: session.analyzers.map((analyzer) => ({
+        ...analyzer,
+        decodedFrames: [],
+        previousFrame: null,
+        nextFrame: null,
+        highlightedFrameIndex: null,
+      })),
       message: "Capture opened",
     }));
     setActiveSessionId(target.id);
@@ -1036,13 +1228,99 @@ export default function App() {
   }
 
   function addAnalyzerForChannel(channelIndex: number) {
-    openSidebarPanel("analyzers");
     if (!activeSession) return;
+    setAnalyzerInEdit({
+      analyzer: createAnalyzerInstance("Async Serial", activeSession.analyzers, channelIndex),
+      isNew: true,
+      sessionId: activeSession.id,
+    });
+  }
+
+  function beginAddAnalyzer(name: string, channelIndex?: number) {
+    if (!activeSession) return;
+    const firstEnabledChannel = activeSession.deviceSettings.digitalChannels.findIndex(Boolean);
+    setAnalyzerInEdit({
+      analyzer: createAnalyzerInstance(
+        name,
+        activeSession.analyzers,
+        channelIndex ?? Math.max(0, firstEnabledChannel),
+      ),
+      isNew: true,
+      sessionId: activeSession.id,
+    });
+  }
+
+  function beginEditAnalyzer(analyzerId: string) {
+    if (!activeSession) return;
+    const analyzer = activeSession.analyzers.find((item) => item.id === analyzerId);
+    if (!analyzer) return;
+    setAnalyzerInEdit({ analyzer: { ...analyzer }, isNew: false, sessionId: activeSession.id });
+  }
+
+  function saveAnalyzerSettings(analyzer: UiAnalyzerInstance) {
+    const editor = analyzerInEdit;
+    if (!editor) return;
+    updateSession(editor.sessionId, (session) => {
+      const digitalChannels = [...session.deviceSettings.digitalChannels];
+      while (digitalChannels.length <= analyzer.channel) digitalChannels.push(false);
+      digitalChannels[analyzer.channel] = true;
+      const channelCount = Math.max(session.settings.channel_count, analyzer.channel + 1);
+      const nextAnalyzers = editor.isNew
+        ? [...session.analyzers, analyzer]
+        : session.analyzers.map((item) => (item.id === analyzer.id ? analyzer : item));
+      return {
+        ...session,
+        analyzers: nextAnalyzers,
+        channelLabels: channelLabelsForCount(channelCount, session.channelLabels),
+        deviceSettings: { ...session.deviceSettings, digitalChannels },
+        settings: { ...session.settings, channel_count: channelCount },
+        message: `${analyzer.name} settings saved`,
+      };
+    });
+    setAnalyzerInEdit(null);
+    window.setTimeout(() => void handleDecodeAnalyzer(editor.sessionId, analyzer.id), 0);
+  }
+
+  function selectAnalyzerFrame(sessionId: string, analyzerId: string, frameId: number) {
+    updateSession(sessionId, (session) => ({
+      ...session,
+      analyzers: session.analyzers.map((analyzer) => ({
+        ...analyzer,
+        highlightedFrameIndex: analyzer.id === analyzerId ? frameId : null,
+      })),
+    }));
+  }
+
+  function goToAnalyzerFrame(analyzerId: string, frameId: number, zoom: boolean) {
+    const session = sessionsRef.current.find((item) => item.id === activeSessionIdRef.current);
+    const analyzer = session?.analyzers.find((item) => item.id === analyzerId);
+    const frame = analyzer
+      ? [...analyzer.decodedFrames, analyzer.previousFrame, analyzer.nextFrame]
+          .filter((item): item is NonNullable<typeof item> => Boolean(item))
+          .find((item) => item.frame_id === frameId)
+      : undefined;
+    if (!session || !frame) return;
+    selectAnalyzerFrame(session.id, analyzerId, frameId);
+    const frameSamples = Math.max(1, frame.end_sample - frame.start_sample);
+    if (zoom) {
+      const padding = frameSamples * 0.05;
+      animateViewport(session.id, frame.start_sample - padding, frameSamples + padding * 2);
+    } else {
+      const center = frame.start_sample + frameSamples / 2;
+      animateViewport(session.id, center - session.viewportSamples / 2, session.viewportSamples);
+    }
+  }
+
+  function openAnalyzerTableFrame(analyzerId: string, frameId: number) {
+    if (!activeSession) return;
+    setSelectedPanel("analyzers");
     updateSession(activeSession.id, (session) => ({
       ...session,
-      analyzers: session.analyzers.includes("Async Serial") ? session.analyzers : [...session.analyzers, "Async Serial"],
-      decodeChannel: channelIndex,
-      message: `Async Serial assigned to D${channelIndex}`,
+      analyzerDataPane: "table",
+      analyzers: session.analyzers.map((analyzer) => ({
+        ...analyzer,
+        highlightedFrameIndex: analyzer.id === analyzerId ? frameId : null,
+      })),
     }));
   }
 
@@ -1102,13 +1380,7 @@ export default function App() {
   }
 
   function handleAddAnalyzer(name: string) {
-    openSidebarPanel("analyzers");
-    if (!activeSession) return;
-    updateSession(activeSession.id, (session) => ({
-      ...session,
-      analyzers: session.analyzers.includes(name) ? session.analyzers : [...session.analyzers, name],
-      message: `${name} analyzer selected`,
-    }));
+    beginAddAnalyzer(name);
   }
 
   function handleAddRangeMeasurement() {
@@ -1167,6 +1439,11 @@ export default function App() {
 
   function createSessionFromFooter(deviceId = selectedDevice) {
     setFooterPopover(null);
+    createSession(deviceId, activeSession ?? undefined);
+  }
+
+  function createSessionFromStartScreen(deviceId: string) {
+    setDraftSelectedDevice(deviceId);
     createSession(deviceId, activeSession ?? undefined);
   }
 
@@ -1253,6 +1530,9 @@ export default function App() {
     activeSession?.summary && activeSession.canvasWidth > 0
       ? `${formatSamples(Math.max(1, Math.round(activeSession.viewportSamples / activeSession.canvasWidth)))}/px`
       : "Zoom";
+  const analyzerEditSession = analyzerInEdit
+    ? sessions.find((session) => session.id === analyzerInEdit.sessionId) ?? null
+    : null;
 
   return (
     <main className="logic-root">
@@ -1334,8 +1614,8 @@ export default function App() {
                       className="channelLabels"
                       style={{
                         gridTemplateRows:
-                          visibleChannelHeights.length > 0
-                            ? visibleChannelHeights.map((height) => `${height}px`).join(" ")
+                          visibleOuterRowHeights.length > 0
+                            ? visibleOuterRowHeights.map((height) => `${height}px`).join(" ")
                             : undefined,
                       }}
                     >
@@ -1347,6 +1627,7 @@ export default function App() {
                           isTrigger={activeSession.deviceSettings.triggerChannel === channelIndex}
                           key={channelIndex}
                           label={visibleChannelLabels[rowIndex]}
+                          analyzers={activeSession.analyzers.filter((analyzer) => analyzer.channel === channelIndex)}
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setEditingChannel(null);
@@ -1392,7 +1673,8 @@ export default function App() {
                     )}
                     <div className="graphViewport">
                       <WaveformCanvas
-                        rowHeights={visibleChannelHeights}
+                        rowHeights={visibleOuterRowHeights}
+                        rowTopInsets={visibleAnalyzerInsets}
                         tile={visibleTile}
                         onWidthChange={(width) =>
                           updateSession(activeSession.id, (session) => ({ ...session, canvasWidth: width }))
@@ -1402,6 +1684,19 @@ export default function App() {
                         viewportStart={activeSession.viewportStart}
                         viewportSamples={activeSession.viewportSamples}
                         onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
+                      />
+                      <AnalyzerBubblesOverlay
+                        analyzers={activeSession.analyzers}
+                        onGoToFrame={(analyzerId, frameIndex) => goToAnalyzerFrame(analyzerId, frameIndex, false)}
+                        onOpenTableFrame={openAnalyzerTableFrame}
+                        onSelectFrame={(analyzerId, frameIndex) =>
+                          selectAnalyzerFrame(activeSession.id, analyzerId, frameIndex)
+                        }
+                        onZoomFrame={(analyzerId, frameIndex) => goToAnalyzerFrame(analyzerId, frameIndex, true)}
+                        rowHeights={visibleOuterRowHeights}
+                        viewportSamples={activeSession.viewportSamples}
+                        viewportStart={activeSession.viewportStart}
+                        visibleChannelIndexes={visibleChannelIndexes}
                       />
                       <CursorOverlay
                         onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
@@ -1422,7 +1717,7 @@ export default function App() {
                         height={visibleChannelHeights[rowIndex]}
                         key={channelIndex}
                         onResize={(height) => setChannelHeight(channelIndex, height)}
-                        top={saleaeChannelResizeHandleTop(visibleChannelHeights, rowIndex)}
+                        top={saleaeChannelResizeHandleTop(visibleOuterRowHeights, rowIndex)}
                       />
                     ))}
                   </div>
@@ -1445,10 +1740,10 @@ export default function App() {
               <DeviceStartScreen
                 busy={false}
                 devices={devices}
+                onCreateSessionWithDevice={createSessionFromStartScreen}
                 onOpenCapture={handleOpen}
                 onRefreshDevices={refreshDevices}
                 onSelectDevice={setSelectedDeviceForActive}
-                onStartWithDevice={handleStartWithDevice}
                 selectedDevice={selectedDevice}
               />
             )}
@@ -1459,7 +1754,12 @@ export default function App() {
             extensions={extensions}
             onChangeExtensions={(updater) => setExtensions((current) => updater(current))}
             onCreateSession={createSessionFromFooter}
-            onDecode={() => activeSession && handleDecode(activeSession.id)}
+            onAddAnalyzer={beginAddAnalyzer}
+            onDecodeAnalyzer={(analyzerId) => activeSession && handleDecodeAnalyzer(activeSession.id, analyzerId)}
+            onEditAnalyzer={beginEditAnalyzer}
+            onGoToAnalyzerFrame={(analyzerId, frameIndex, zoom) =>
+              goToAnalyzerFrame(analyzerId, frameIndex, zoom)
+            }
             onNotify={(message) => {
               if (activeSession) {
                 updateSession(activeSession.id, (session) => ({ ...session, message }));
@@ -1482,6 +1782,22 @@ export default function App() {
             session={activeSession}
           />
         </section>
+
+        {analyzerInEdit && analyzerEditSession && (
+          <AnalyzerSettingsDialog
+            analyzer={analyzerInEdit.analyzer}
+            capturedChannelCount={analyzerEditSession.summary?.metadata.channel_count ?? 0}
+            channelEnabled={analyzerEditSession.deviceSettings.digitalChannels}
+            channelLabels={
+              channelLabelsForCount(
+                captureChannelLimit(analyzerEditSession),
+                analyzerEditSession.channelLabels,
+              )
+            }
+            onCancel={() => setAnalyzerInEdit(null)}
+            onSave={saveAnalyzerSettings}
+          />
+        )}
 
         <BottomBar
           activeSessionId={activeSessionId}
@@ -1524,6 +1840,7 @@ function SaleaeSidebarIcon({ iconUrl }: { iconUrl: string }) {
 }
 
 function ChannelLabelRow({
+  analyzers,
   index,
   isEditing,
   isEnabled,
@@ -1534,6 +1851,7 @@ function ChannelLabelRow({
   onEditStart,
   onRename,
 }: {
+  analyzers: UiAnalyzerInstance[];
   index: number;
   isEditing: boolean;
   isEnabled: boolean;
@@ -1611,6 +1929,16 @@ function ChannelLabelRow({
           D{index}
           {isTrigger ? " - trigger" : ""}
         </small>
+        {analyzers.length > 0 && (
+          <span className="channelAnalyzerSubtitle">
+            {analyzers.map((analyzer) => (
+              <span className="channelAnalyzerSubtitleRow" key={analyzer.id}>
+                <span className="channelAnalyzerSquare" style={{ background: analyzer.color }} />
+                <span>{analyzer.name}</span>
+              </span>
+            ))}
+          </span>
+        )}
       </span>
     </div>
   );
@@ -2300,8 +2628,11 @@ function RightSidebar({
   devices,
   extensions,
   onChangeExtensions,
+  onAddAnalyzer,
   onCreateSession,
-  onDecode,
+  onDecodeAnalyzer,
+  onEditAnalyzer,
+  onGoToAnalyzerFrame,
   onNotify,
   onRefreshDevices,
   onSelectDevice,
@@ -2316,8 +2647,11 @@ function RightSidebar({
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
+  onAddAnalyzer: (name: string) => void;
   onCreateSession: (deviceId?: string) => void;
-  onDecode: () => void;
+  onDecodeAnalyzer: (analyzerId: string) => void;
+  onEditAnalyzer: (analyzerId: string) => void;
+  onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean) => void;
   onNotify: (message: string) => void;
   onRefreshDevices: () => void;
   onSelectDevice: (deviceId: string) => void;
@@ -2337,8 +2671,11 @@ function RightSidebar({
             devices={devices}
             extensions={extensions}
             onChangeExtensions={onChangeExtensions}
+            onAddAnalyzer={onAddAnalyzer}
             onCreateSession={onCreateSession}
-            onDecode={onDecode}
+            onDecodeAnalyzer={onDecodeAnalyzer}
+            onEditAnalyzer={onEditAnalyzer}
+            onGoToAnalyzerFrame={onGoToAnalyzerFrame}
             onNotify={onNotify}
             onRefreshDevices={onRefreshDevices}
             onSelectDevice={onSelectDevice}
@@ -2388,8 +2725,11 @@ function SidebarPanelContent({
   devices,
   extensions,
   onChangeExtensions,
+  onAddAnalyzer,
   onCreateSession,
-  onDecode,
+  onDecodeAnalyzer,
+  onEditAnalyzer,
+  onGoToAnalyzerFrame,
   onNotify,
   onRefreshDevices,
   onSelectDevice,
@@ -2403,8 +2743,11 @@ function SidebarPanelContent({
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
+  onAddAnalyzer: (name: string) => void;
   onCreateSession: (deviceId?: string) => void;
-  onDecode: () => void;
+  onDecodeAnalyzer: (analyzerId: string) => void;
+  onEditAnalyzer: (analyzerId: string) => void;
+  onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean) => void;
   onNotify: (message: string) => void;
   onRefreshDevices: () => void;
   onSelectDevice: (deviceId: string) => void;
@@ -2456,9 +2799,11 @@ function SidebarPanelContent({
                   .map(([name]) => name),
               ),
           ].filter((name, index, analyzers) => analyzers.indexOf(name) === index)}
-          onDecode={onDecode}
+          onAddAnalyzer={onAddAnalyzer}
+          onDecodeAnalyzer={onDecodeAnalyzer}
+          onEditAnalyzer={onEditAnalyzer}
+          onGoToAnalyzerFrame={onGoToAnalyzerFrame}
           onUpdateSession={onUpdateSession}
-          onViewportChange={onViewportChange}
           session={session}
         />
       )}
@@ -2539,6 +2884,11 @@ function DeviceSettingsPanel({
           : [...current.deviceSettings.digitalChannels],
       },
     }));
+  }
+
+  function setCaptureMode(mode: UiRecordingMode) {
+    updateDeviceSettings({ captureMode: mode });
+    onUpdateSettings({ mode: backendCaptureMode(mode) });
   }
 
   function setChannelCount(channelCount: number) {
@@ -2681,7 +3031,7 @@ function DeviceSettingsPanel({
             <button
               className={session.deviceSettings.captureMode === mode ? "active" : ""}
               key={mode}
-              onClick={() => updateDeviceSettings({ captureMode: mode })}
+              onClick={() => setCaptureMode(mode)}
               type="button"
             >
               {mode === "FreeRun" ? "Looping" : mode}
@@ -2774,7 +3124,11 @@ function DeviceSettingsPanel({
           <span>Buffer size</span>
           <select
             value={session.deviceSettings.bufferSizeMb}
-            onChange={(event) => updateDeviceSettings({ bufferSizeMb: Number(event.target.value) })}
+            onChange={(event) => {
+              const bufferSizeMb = Number(event.target.value);
+              updateDeviceSettings({ bufferSizeMb });
+              onUpdateSettings({ buffer_size_mb: bufferSizeMb });
+            }}
           >
             {[256, 512, 1024, 2048, 4096].map((size) => (
               <option key={size} value={size}>
@@ -2851,6 +3205,11 @@ function RecordingSettingsPanel({
     }));
   }
 
+  function setCaptureMode(mode: UiRecordingMode) {
+    updateDeviceSettings({ captureMode: mode });
+    onUpdateSettings({ mode: backendCaptureMode(mode) });
+  }
+
   return (
     <div className="recordingSettingsPanel">
       <section className="deviceSettingsBlock">
@@ -2863,7 +3222,7 @@ function RecordingSettingsPanel({
             <button
               className={session.deviceSettings.captureMode === mode ? "active" : ""}
               key={mode}
-              onClick={() => updateDeviceSettings({ captureMode: mode })}
+              onClick={() => setCaptureMode(mode)}
               type="button"
             >
               <span>{mode === "FreeRun" ? "Looping" : mode}</span>
@@ -3070,41 +3429,41 @@ function RecordingSettingsPanel({
 
 function AnalyzersPanel({
   availableAnalyzers,
-  onDecode,
+  onAddAnalyzer,
+  onDecodeAnalyzer,
+  onEditAnalyzer,
+  onGoToAnalyzerFrame,
   onUpdateSession,
-  onViewportChange,
   session,
 }: {
   availableAnalyzers: string[];
-  onDecode: () => void;
+  onAddAnalyzer: (name: string) => void;
+  onDecodeAnalyzer: (analyzerId: string) => void;
+  onEditAnalyzer: (analyzerId: string) => void;
+  onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean) => void;
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
-  onViewportChange: (start: number, samples: number) => void;
   session: UiSession;
 }) {
   const [selectorOpen, setSelectorOpen] = useState(false);
-  const channelCount = session.summary?.metadata.channel_count ?? session.settings.channel_count;
-  const hasAsyncSerial = session.analyzers.includes("Async Serial");
+  const [searchQuery, setSearchQuery] = useState("");
+  const tableBodyRef = useRef<HTMLDivElement>(null);
 
   function addAnalyzer(name: string) {
-    onUpdateSession((current) => ({
-      ...current,
-      analyzers: current.analyzers.includes(name) ? current.analyzers : [...current.analyzers, name],
-      message: `${name} analyzer selected`,
-    }));
     setSelectorOpen(false);
+    onAddAnalyzer(name);
   }
 
-  function removeAnalyzer(name: string) {
+  function removeAnalyzer(analyzerId: string) {
     onUpdateSession((current) => ({
       ...current,
-      analyzers: current.analyzers.filter((analyzer) => analyzer !== name),
-      message: `${name} analyzer removed`,
+      analyzers: current.analyzers.filter((analyzer) => analyzer.id !== analyzerId),
+      message: "Analyzer removed",
     }));
   }
 
-  function moveAnalyzer(name: string, direction: -1 | 1) {
+  function moveAnalyzer(analyzerId: string, direction: -1 | 1) {
     onUpdateSession((current) => {
-      const index = current.analyzers.indexOf(name);
+      const index = current.analyzers.findIndex((analyzer) => analyzer.id === analyzerId);
       const target = index + direction;
       if (index < 0 || target < 0 || target >= current.analyzers.length) return current;
       const analyzers = [...current.analyzers];
@@ -3112,6 +3471,51 @@ function AnalyzersPanel({
       return { ...current, analyzers };
     });
   }
+
+  const tableFrames = session.analyzers
+    .filter((analyzer) => analyzer.showInDataTable)
+    .flatMap((analyzer) =>
+      analyzer.decodedFrames.map((frame, frameIndex) => ({
+        analyzer,
+        frame,
+        frameIndex: frame.frame_id ?? frameIndex,
+      })),
+    )
+    .sort((a, b) => a.frame.start_sample - b.frame.start_sample);
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const filteredTableFrames = normalizedSearch
+    ? tableFrames.filter(({ analyzer, frame }) =>
+        `${analyzer.name} ${frame.label}`.toLowerCase().includes(normalizedSearch),
+      )
+    : tableFrames;
+  const terminalFrames = session.analyzers
+    .filter((analyzer) => analyzer.streamToTerminal)
+    .flatMap((analyzer) =>
+      analyzer.decodedFrames.map((frame, frameIndex) => ({
+        analyzer,
+        frame,
+        frameIndex: frame.frame_id ?? frameIndex,
+      })),
+    )
+    .sort((a, b) => a.frame.start_sample - b.frame.start_sample);
+  const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
+  const highlightedFrame = session.analyzers
+    .map((analyzer) => ({
+      analyzerId: analyzer.id,
+      frameIndex: analyzer.highlightedFrameIndex,
+    }))
+    .find(({ frameIndex }) => frameIndex !== null);
+
+  useEffect(() => {
+    if (!highlightedFrame || session.analyzerDataPane !== "table") return;
+    window.requestAnimationFrame(() => {
+      tableBodyRef.current
+        ?.querySelector<HTMLElement>(
+          `[data-analyzer-frame="${highlightedFrame.analyzerId}:${highlightedFrame.frameIndex}"]`,
+        )
+        ?.scrollIntoView({ block: "nearest" });
+    });
+  }, [highlightedFrame?.analyzerId, highlightedFrame?.frameIndex, session.analyzerDataPane]);
 
   return (
     <div className="analyzersSidebarPanel">
@@ -3128,7 +3532,6 @@ function AnalyzersPanel({
             {availableAnalyzers.map((name) => (
               <button
                 className="analyzerSelectionItem"
-                disabled={session.analyzers.includes(name)}
                 key={name}
                 onClick={() => addAnalyzer(name)}
                 type="button"
@@ -3152,81 +3555,43 @@ function AnalyzersPanel({
           </div>
         ) : (
           <div className="activeAnalyzerList">
-            {session.analyzers.map((name, index) => (
-              <div className="activeAnalyzerItem" key={name}>
+            {session.analyzers.map((analyzer, index) => (
+              <div className="activeAnalyzerItem" key={analyzer.id}>
                 <div className="activeAnalyzerHeader">
                   <GripVertical size={13} />
-                  <span className="analyzerColorIndicator" />
-                  <strong>{name}</strong>
+                  <span className="analyzerColorIndicator" style={{ background: analyzer.color }} />
+                  <button className="analyzerNameButton" onClick={() => onEditAnalyzer(analyzer.id)} type="button">
+                    <strong>{analyzer.name}</strong>
+                    <small>D{analyzer.channel}</small>
+                  </button>
                   <div className="analyzerRowActions">
-                    <button disabled={index === 0} onClick={() => moveAnalyzer(name, -1)} title="Move up" type="button">
+                    <button disabled={index === 0} onClick={() => moveAnalyzer(analyzer.id, -1)} title="Move up" type="button">
                       <ChevronUp size={12} />
                     </button>
                     <button
                       disabled={index === session.analyzers.length - 1}
-                      onClick={() => moveAnalyzer(name, 1)}
+                      onClick={() => moveAnalyzer(analyzer.id, 1)}
                       title="Move down"
                       type="button"
                     >
                       <ChevronDown size={12} />
                     </button>
-                    <button onClick={() => removeAnalyzer(name)} title="Delete" type="button">
+                    <button onClick={() => onEditAnalyzer(analyzer.id)} title="Settings" type="button">
+                      <Settings2 size={12} />
+                    </button>
+                    <button
+                      disabled={!session.summary || analyzer.decodeBusy || !analyzerSupportsDecoding(analyzer)}
+                      onClick={() => onDecodeAnalyzer(analyzer.id)}
+                      title="Restart analyzer"
+                      type="button"
+                    >
+                      <RefreshCw size={12} />
+                    </button>
+                    <button onClick={() => removeAnalyzer(analyzer.id)} title="Delete" type="button">
                       <Trash2 size={12} />
                     </button>
                   </div>
                 </div>
-
-                {name === "Async Serial" ? (
-                  <div className="analyzerSettingsGrid">
-                    <label className="stack-field">
-                      <span>Input channel</span>
-                      <select
-                        value={session.decodeChannel}
-                        onChange={(event) => onUpdateSession((current) => ({ ...current, decodeChannel: Number(event.target.value) }))}
-                      >
-                        {Array.from({ length: channelCount }, (_, channelIndex) => (
-                          <option value={channelIndex} key={channelIndex}>
-                            D{channelIndex}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="stack-field">
-                      <span>Bit rate</span>
-                      <input
-                        min={300}
-                        onChange={(event) => onUpdateSession((current) => ({ ...current, decodeBaud: Number(event.target.value) }))}
-                        type="number"
-                        value={session.decodeBaud}
-                      />
-                    </label>
-                    <label className="toggle-field panel-toggle">
-                      <input
-                        checked={session.decodeInverted}
-                        onChange={(event) => onUpdateSession((current) => ({ ...current, decodeInverted: event.target.checked }))}
-                        type="checkbox"
-                      />
-                      Inverted
-                    </label>
-                    <button className="panel-action" onClick={onDecode} disabled={!session.summary || session.decodeBusy} type="button">
-                      <Search size={15} />
-                      Decode
-                    </button>
-                  </div>
-                ) : (
-                  <div className="analyzerPendingSettings">
-                    <label className="stack-field">
-                      <span>Input channel</span>
-                      <select disabled>
-                        <option>D0</option>
-                      </select>
-                    </label>
-                    <button className="panel-action" disabled type="button">
-                      <Settings2 size={15} />
-                      Configure
-                    </button>
-                  </div>
-                )}
               </div>
             ))}
           </div>
@@ -3237,7 +3602,7 @@ function AnalyzersPanel({
         <div className="sidebarTitleRow tight">
           <div className="sidebarTitleText">
             Data
-            <small>{session.decodedFrames.length}</small>
+            <small>{tableFrames.length}</small>
           </div>
           <div className="dataPaneButtons">
             <button
@@ -3262,42 +3627,91 @@ function AnalyzersPanel({
         {session.analyzerDataPane === "table" ? (
           <div className="analyzerDataTable">
             <div className="analyzerDataToolbar">
+              <div className="analyzerSearchField">
+                <Search size={13} />
+                <input
+                  aria-label="Search analyzer results"
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Type to search"
+                  type="search"
+                  value={searchQuery}
+                />
+              </div>
               <button
-                disabled={session.decodedFrames.length === 0}
-                onClick={() => void navigator.clipboard?.writeText(session.decodedFrames.map((frame) => frame.label).join("\n"))}
+                aria-label="Copy analyzer data"
+                disabled={filteredTableFrames.length === 0}
+                onClick={() => void navigator.clipboard?.writeText(filteredTableFrames.map(({ frame }) => frame.label).join("\n"))}
+                title="Copy"
                 type="button"
               >
                 <Copy size={12} />
-                Copy
               </button>
             </div>
-            <div className="result-list analyzerFramesList">
-              {!hasAsyncSerial ? (
-                <div className="empty-result">Add Async Serial to decode UART frames</div>
-              ) : session.decodedFrames.length === 0 ? (
+            <div className="analyzerTableHeader" aria-hidden="true">
+              <span />
+              <span>Start</span>
+              <span>Duration</span>
+              <span>Data</span>
+            </div>
+            <div className="analyzerFramesList" ref={tableBodyRef}>
+              {session.analyzers.length === 0 ? (
+                <div className="empty-result">No analyzers</div>
+              ) : tableFrames.length === 0 ? (
                 <div className="empty-result">No frames</div>
+              ) : filteredTableFrames.length === 0 ? (
+                <div className="empty-result">No matching frames</div>
               ) : (
-                session.decodedFrames.slice(0, 200).map((frame, index) => (
-                  <button
-                    className="decode-row"
-                    key={`${frame.start_sample}-${index}`}
-                    onClick={() => onViewportChange(frame.start_sample, Math.max(128, frame.end_sample - frame.start_sample))}
-                    type="button"
+                filteredTableFrames.slice(0, 500).map(({ analyzer, frame, frameIndex }) => (
+                  <div
+                    className={`decode-row ${analyzer.highlightedFrameIndex === frameIndex ? "selected" : ""}`}
+                    data-analyzer-frame={`${analyzer.id}:${frameIndex}`}
+                    key={`${analyzer.id}-${frame.start_sample}-${frameIndex}`}
+                    onClick={() =>
+                      onUpdateSession((current) => ({
+                        ...current,
+                        analyzers: current.analyzers.map((item) => ({
+                          ...item,
+                          highlightedFrameIndex: item.id === analyzer.id ? frameIndex : null,
+                        })),
+                      }))
+                    }
+                    style={{ "--analyzer-color": analyzer.color } as CSSProperties}
                   >
-                    <span>{frame.label}</span>
-                    <small>{formatSamples(frame.start_sample)}</small>
-                  </button>
+                    <span className="decodeAnalyzerDot" title={analyzer.name} />
+                    <span className="analyzerTimeCell">{formatSeconds(frame.start_sample / Math.max(1, sampleRateHz))}</span>
+                    <span className="analyzerTimeCell">
+                      {formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz))}
+                    </span>
+                    <span className="analyzerDataCell">
+                      <HighlightedAnalyzerText query={searchQuery} text={frame.label} />
+                    </span>
+                    <button
+                      className="analyzerGoToButton"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onGoToAnalyzerFrame(analyzer.id, frameIndex, false);
+                      }}
+                      onDoubleClick={(event) => {
+                        event.stopPropagation();
+                        onGoToAnalyzerFrame(analyzer.id, frameIndex, true);
+                      }}
+                      title={"Go to data\nDouble click to zoom"}
+                      type="button"
+                    >
+                      <LocateFixed size={13} />
+                    </button>
+                  </div>
                 ))
               )}
             </div>
           </div>
         ) : (
           <div className="analyzerTerminal">
-            {session.decodedFrames.length === 0 ? (
+            {terminalFrames.length === 0 ? (
               <div className="empty-result">No terminal data</div>
             ) : (
-              session.decodedFrames.slice(0, 200).map((frame, index) => (
-                <div className="terminalLine" key={`${frame.start_sample}-${index}`}>
+              terminalFrames.slice(0, 500).map(({ analyzer, frame, frameIndex }) => (
+                <div className="terminalLine" key={`${analyzer.id}-${frame.start_sample}-${frameIndex}`}>
                   <span>{formatSamples(frame.start_sample)}</span>
                   <strong>{frame.label}</strong>
                 </div>
@@ -3307,6 +3721,20 @@ function AnalyzersPanel({
         )}
       </section>
     </div>
+  );
+}
+
+function HighlightedAnalyzerText({ query, text }: { query: string; text: string }) {
+  const normalized = query.trim();
+  if (!normalized) return <>{text}</>;
+  const index = text.toLowerCase().indexOf(normalized.toLowerCase());
+  if (index < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, index)}
+      <mark>{text.slice(index, index + normalized.length)}</mark>
+      {text.slice(index + normalized.length)}
+    </>
   );
 }
 

@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use crate::{
     error::{CoreError, Result},
-    models::{CaptureData, CaptureMetadata, CaptureSettings},
+    models::{CaptureData, CaptureMetadata, CaptureMode, CaptureSettings},
     protocol,
 };
 
@@ -168,6 +168,25 @@ pub fn sample_count_from_duration(
     Ok(samples
         .try_into()
         .map_err(|_| CoreError::InvalidCaptureDuration)?)
+}
+
+pub fn sample_count_from_settings(settings: &CaptureSettings, unitsize: u8) -> Result<u64> {
+    match settings.mode {
+        CaptureMode::Buffer => sample_count_from_duration(
+            settings.sample_rate_hz,
+            settings.duration_ms,
+            settings.decode_cross,
+        ),
+        CaptureMode::Stream => {
+            let buffer_bytes = settings
+                .buffer_size_mb
+                .max(1)
+                .checked_mul(1024 * 1024)
+                .ok_or(CoreError::InvalidCaptureDuration)?;
+            let samples = buffer_bytes / u64::from(unitsize);
+            Ok(samples.max(1))
+        }
+    }
 }
 
 pub fn pxview_capture_transfer_size(
@@ -458,6 +477,14 @@ pub fn generate_sample_words(settings: &CaptureSettings) -> Result<CaptureData> 
         settings.duration_ms,
         settings.decode_cross,
     )?;
+    generate_sample_words_with_count(settings, sample_count, unitsize)
+}
+
+pub fn generate_sample_words_with_count(
+    settings: &CaptureSettings,
+    sample_count: u64,
+    unitsize: u8,
+) -> Result<CaptureData> {
     let mut samples = Vec::with_capacity(sample_count as usize * usize::from(unitsize));
     let mut demo_channels: Vec<_> = (0..settings.channel_count)
         .map(SaleaeDemoPulseChannel::new)
@@ -534,21 +561,27 @@ impl SaleaeDemoPulseChannel {
 fn demo_uart_level(sample_index: u64, sample_rate_hz: u64) -> Option<bool> {
     const BAUD: u64 = 115_200;
     const MESSAGE: &[u8] = b"PXLogic demo\n";
+    const LEAD_IDLE_BITS: u64 = 4;
+    const TRAIL_IDLE_BITS: u64 = 8;
 
     let bit_period = sample_rate_hz / BAUD;
     if bit_period < 8 {
         return None;
     }
 
-    let idle_bits = 4;
     let bit_index = sample_index / bit_period;
-    if bit_index < idle_bits {
+    let cycle_bits = LEAD_IDLE_BITS + MESSAGE.len() as u64 * 10 + TRAIL_IDLE_BITS;
+    let cycle_bit = bit_index % cycle_bits;
+    if cycle_bit < LEAD_IDLE_BITS {
+        return Some(true);
+    }
+    let message_bit = cycle_bit - LEAD_IDLE_BITS;
+    if message_bit >= MESSAGE.len() as u64 * 10 {
         return Some(true);
     }
 
-    let bit_index = bit_index - idle_bits;
-    let frame_index = bit_index / 10;
-    let frame_bit = bit_index % 10;
+    let frame_index = message_bit / 10;
+    let frame_bit = message_bit % 10;
     let byte = MESSAGE.get(frame_index as usize)?;
     match frame_bit {
         0 => Some(false),

@@ -86,6 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sample_rate_hz: options.sample_rate_hz,
         channel_count: options.channel_count,
         duration_ms: options.duration_ms,
+        buffer_size_mb: 16,
         decode_cross: options.decode_cross && !options.compare_mappings,
         threshold_volts: options.threshold_volts,
         mode: options.mode,

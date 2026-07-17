@@ -37,12 +37,20 @@
 - `src/components/StripChartScrollbar.tsx`
   - 从 Logic 2.4.43 `stripChartScrollbar` 搬运的单 thumb 水平时间滚动条。
   - thumb 宽度表示可视时间范围，位置表示当前 viewport 起点。
+- `src/components/AnalyzerBubblesOverlay.tsx`
+  - Saleae 风格 analyzer bubble overlay。
+  - 按当前 viewport 渲染 Async Serial frame bubbles、multi bubble 聚合和 previous/next data 按钮。
+- `src/components/AnalyzerSettingsDialog.tsx`
+  - Async Serial analyzer 设置对话框。
+  - 包含输入通道、bit rate、inverted、Data Table / Terminal 开关。
 
 ## 前端工具与 API
 
 - `src/lib/api.ts`
   - Tauri 命令封装。
-  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、UART decode，以及浏览器变脉宽 Demo tile。
+  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、UART decode、viewport UART frame window，以及浏览器变脉宽 Demo tile。
+- `src/lib/analyzers.ts`
+  - Analyzer UI 状态类型、Saleae analyzer 色板、bubble strip 尺寸常量和 Async Serial decode 支持判断。
 - `src/lib/format.ts`
   - 时间与数量格式化工具。
 - `src/lib/extensions.ts`

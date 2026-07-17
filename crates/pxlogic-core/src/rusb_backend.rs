@@ -11,7 +11,7 @@ use rusb::{Context, DeviceHandle, UsbContext};
 use crate::{
     capture::{
         build_capture_register_script, decode_cross_data, pxview_capture_transfer_size,
-        sample_count_from_duration, unitsize_for_channel_count, CaptureProfile,
+        sample_count_from_settings, unitsize_for_channel_count, CaptureProfile,
     },
     error::{CoreError, Result},
     models::{
@@ -175,11 +175,7 @@ impl RusbBackend {
             sink,
         );
         let unitsize = unitsize_for_channel_count(channel_count)?;
-        let sample_count = sample_count_from_duration(
-            settings.sample_rate_hz,
-            settings.duration_ms,
-            settings.decode_cross,
-        )?;
+        let sample_count = sample_count_from_settings(settings, unitsize)?;
         let target_bytes = sample_count * u64::from(unitsize);
         let transfer_size =
             pxview_capture_transfer_size(settings.sample_rate_hz, channel_count, superspeed)?;

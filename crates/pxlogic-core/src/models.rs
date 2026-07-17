@@ -25,6 +25,7 @@ pub struct CaptureSettings {
     pub sample_rate_hz: u64,
     pub channel_count: u8,
     pub duration_ms: u64,
+    pub buffer_size_mb: u64,
     pub decode_cross: bool,
     pub threshold_volts: f64,
     pub mode: CaptureMode,
@@ -37,9 +38,10 @@ impl Default for CaptureSettings {
             sample_rate_hz: 25_000_000,
             channel_count: 16,
             duration_ms: 10,
+            buffer_size_mb: 16,
             decode_cross: true,
             threshold_volts: 2.0,
-            mode: CaptureMode::Buffer,
+            mode: CaptureMode::Stream,
         }
     }
 }

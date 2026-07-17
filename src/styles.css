@@ -997,6 +997,37 @@ button:disabled {
   font-size: 10px;
 }
 
+.channelAnalyzerSubtitle {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.channelAnalyzerSubtitleRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--on-background-0);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.channelAnalyzerSubtitleRow > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channelAnalyzerSquare {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+}
+
 .channelNameInput {
   width: 100%;
   min-width: 0;
@@ -1108,6 +1139,171 @@ button:disabled {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+.analyzerBubblesOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.analyzerBubbleStrip {
+  height: 16px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: auto;
+}
+
+.analyzerBubble {
+  height: 16px;
+  min-width: 1px;
+  position: absolute;
+  top: 0;
+  display: flex;
+  align-items: stretch;
+  overflow: visible;
+  border: 0;
+  border-left: 1px solid var(--background-20);
+  border-radius: 0;
+  color: var(--on-color, #141415);
+  background: var(--analyzer-color);
+  padding: 0;
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+  cursor: default;
+  pointer-events: auto;
+}
+
+.analyzerBubble.highlighted {
+  outline: 1px solid var(--on-background-0);
+  outline-offset: -1px;
+  z-index: 2;
+}
+
+.analyzerBubble.multi {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.analyzerBubble.overflowLeft {
+  border-left: 0;
+}
+
+.analyzerBubbleText {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  padding: 0 3px;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.analyzerBubbleCounter {
+  height: 13px;
+  min-width: 13px;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  margin: 0 2px;
+  border-radius: 5px;
+  color: var(--on-background-0);
+  background: var(--background-30);
+  padding: 0 2px;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.analyzerBubbleArrow {
+  width: 0;
+  height: 0;
+  flex: 0 0 auto;
+  align-self: center;
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+}
+
+.analyzerBubbleArrow.left {
+  border-right: 3px solid var(--analyzer-color);
+}
+
+.analyzerBubbleArrow.right {
+  border-left: 3px solid var(--analyzer-color);
+}
+
+.analyzerBubbleNavigationButton {
+  width: 24px;
+  height: 24px;
+  position: absolute;
+  top: 50%;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 2px;
+  color: var(--on-background-30);
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.analyzerBubbleNavigationButton.previous {
+  left: 5px;
+}
+
+.analyzerBubbleNavigationButton.next {
+  right: 5px;
+}
+
+.analyzerBubbleNavigationButton:hover,
+.analyzerBubbleNavigationButton:focus-visible {
+  color: var(--on-background-0);
+  background: var(--background-30);
+  outline: none;
+}
+
+.analyzerBubbleNavigationTooltip {
+  min-width: 112px;
+  position: absolute;
+  top: 50%;
+  z-index: 22;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-0);
+  background: var(--background-10);
+  box-shadow: 0 4px 4px rgba(0, 0, 0, 0.15);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) scale(0.98);
+}
+
+.analyzerBubbleNavigationTooltip.previous {
+  left: calc(100% + 8px);
+}
+
+.analyzerBubbleNavigationTooltip.next {
+  right: calc(100% + 8px);
+}
+
+.analyzerBubbleNavigationButton:hover .analyzerBubbleNavigationTooltip,
+.analyzerBubbleNavigationButton:focus-visible .analyzerBubbleNavigationTooltip {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
 }
 
 .cursorOverlay {
@@ -1479,15 +1675,76 @@ button:disabled {
 
 .decode-row {
   width: 100%;
-  justify-content: space-between;
-  border-color: var(--border-20);
-  background: var(--background-20);
-  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
+  min-height: 28px;
+  height: 28px;
+  display: grid;
+  grid-template-columns: 18px 110px 80px minmax(75px, 1fr);
+  align-items: center;
+  justify-content: initial;
+  gap: 0;
+  position: relative;
+  border: 0;
+  border-radius: 0;
+  color: var(--on-background-10);
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+.decode-row:nth-child(odd) {
+  background: var(--background-0);
+}
+
+.decode-row:hover {
+  border-color: transparent;
+  color: var(--on-background-10);
+  background: rgba(var(--on-background-20-base), 0.14);
+}
+
+.decode-row.selected {
+  background: rgba(var(--on-background-20-base), 0.3);
+  box-shadow: inset 0 0 0 1px var(--on-background-0);
+}
+
+.decodeAnalyzerDot {
+  width: 6px;
+  height: 6px;
+  justify-self: center;
+  border-radius: 1px;
+  background: var(--analyzer-color);
+}
+
+.analyzerGoToButton {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  right: 10px;
+  top: 2px;
+  border: 1px solid var(--border-20);
+  border-radius: 2px;
+  color: var(--on-background-20);
+  background: var(--background-10);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.decode-row:hover .analyzerGoToButton,
+.decode-row.selected .analyzerGoToButton,
+.analyzerGoToButton:focus-visible {
+  opacity: 1;
+}
+
+.analyzerGoToButton:hover {
+  color: var(--on-background-0);
+  background: var(--background-40);
 }
 
 .decode-row span,
-.decode-row small,
 .trace-row span,
 .trace-row small {
   min-width: 0;
@@ -1496,8 +1753,26 @@ button:disabled {
   white-space: nowrap;
 }
 
-.decode-row small {
-  color: var(--on-background-30);
+.analyzerTimeCell,
+.analyzerDataCell {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-right: 1px solid var(--border-20);
+  padding: 0 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analyzerTimeCell {
+  color: var(--on-background-20);
+  font-variant-numeric: tabular-nums;
+}
+
+.analyzerDataCell mark {
+  color: inherit;
+  background: rgba(var(--selected-highlight-base), 0.5);
 }
 
 .empty-result {
@@ -2186,6 +2461,25 @@ button:disabled {
   white-space: nowrap;
 }
 
+.analyzerNameButton {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  color: inherit;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.analyzerNameButton small {
+  flex: 0 0 auto;
+  color: var(--on-background-30);
+  font-size: 9px;
+}
+
 .analyzerColorIndicator {
   width: 7px;
   height: 18px;
@@ -2507,38 +2801,102 @@ button:disabled {
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   padding: 0 12px 12px;
 }
 
 .analyzerDataToolbar {
-  min-height: 28px;
+  min-height: 43px;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  gap: 6px;
 }
 
 .analyzerDataToolbar button {
-  min-height: 22px;
+  width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  flex: 0 0 32px;
   border: 1px solid var(--border-20);
   border-radius: 4px;
   color: var(--on-background-20);
-  background: var(--background-20);
-  padding: 0 8px;
-  font-size: 10px;
-  font-weight: 700;
+  background: var(--background-30);
+  padding: 0;
   cursor: pointer;
 }
 
-.analyzerFramesList {
+.analyzerSearchField {
+  height: 32px;
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--border-20);
   border-radius: 4px;
-  background: var(--background-20);
-  padding: 5px;
+  color: var(--on-background-30);
+  background: var(--background-30);
+  padding: 0 7px;
+}
+
+.analyzerSearchField:focus-within {
+  border-color: var(--border-focused);
+  color: var(--on-background-20);
+}
+
+.analyzerSearchField input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  border: 0;
+  outline: 0;
+  color: var(--on-background-0);
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+}
+
+.analyzerSearchField input::placeholder {
+  color: var(--on-background-30);
+}
+
+.analyzerSearchField input::-webkit-search-cancel-button {
+  filter: invert(0.7);
+}
+
+.analyzerTableHeader {
+  height: 28px;
+  min-width: 283px;
+  display: grid;
+  grid-template-columns: 18px 110px 80px minmax(75px, 1fr);
+  flex: 0 0 28px;
+  border-top: 1px solid var(--border-20);
+  border-bottom: 1px solid var(--border-20);
+  color: var(--on-background-10);
+  background: var(--background-10);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.analyzerTableHeader span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-right: 1px solid var(--border-20);
+  padding: 0 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analyzerFramesList {
+  min-width: 283px;
+  min-height: 0;
+  overflow: auto;
+  background: var(--background-10);
 }
 
 .analyzerTerminal {
@@ -3717,6 +4075,182 @@ button:disabled {
 .footerMenuItem:hover {
   color: var(--on-background-0);
   background: var(--hover-background);
+}
+
+.analyzerDialogLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--background-0-base), 0.65);
+}
+
+.analyzerSettingsDialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-20);
+  border-radius: 0;
+  color: var(--on-background-10);
+  background: var(--background-20);
+  box-shadow: 0 3px 4px var(--border-10);
+  animation: analyzerDialogEnter 200ms ease both;
+}
+
+@keyframes analyzerDialogEnter {
+  from { opacity: 0; transform: translateY(-100px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.analyzerDialogHeader {
+  min-height: 72px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 24px 16px;
+}
+
+.analyzerDialogHeader h2 {
+  margin: 0;
+  color: var(--on-background-0);
+  font-size: 21px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.analyzerDialogHeader p {
+  margin: 5px 0 0;
+  color: var(--on-background-30);
+  font-size: 11px;
+}
+
+.analyzerDialogHeader button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--on-background-30);
+  background: transparent;
+  cursor: pointer;
+}
+
+.analyzerDialogHeader button:hover {
+  color: var(--on-background-0);
+}
+
+.analyzerDialogContent {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 24px 20px;
+}
+
+.analyzerSettingRow {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.analyzerSettingLabel {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-10);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analyzerSettingControl {
+  min-width: 0;
+}
+
+.analyzerSettingControl select,
+.analyzerSettingControl input[type="number"] {
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-10);
+  background: transparent;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.analyzerSettingControl select:hover,
+.analyzerSettingControl input[type="number"]:hover {
+  border-color: var(--border-hover);
+}
+
+.analyzerSettingControl select:focus,
+.analyzerSettingControl input[type="number"]:focus {
+  border-color: var(--border-focused);
+  outline: none;
+}
+
+.analyzerDialogCheckbox {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--on-background-10);
+  font-size: 12px;
+}
+
+.analyzerDialogCheckbox input {
+  accent-color: var(--selected-highlight);
+}
+
+.analyzerDialogWarning {
+  margin: 8px 0 8px 132px;
+  border-left: 2px solid var(--yellow);
+  color: var(--on-background-20);
+  padding: 7px 10px;
+  font-size: 11px;
+}
+
+.analyzerDialogFooter {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--border-20);
+  padding: 18px 24px;
+}
+
+.analyzerDialogFooter > div {
+  display: flex;
+  gap: 12px;
+}
+
+.analyzerDialogButton {
+  width: 80px;
+  height: 34px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-10);
+  background: var(--background-30);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.analyzerDialogButton:hover:not(:disabled) {
+  border-color: var(--border-focused);
+}
+
+.analyzerDialogButton.transparent {
+  background: transparent;
+}
+
+.analyzerDialogButton.primary {
+  border-color: var(--selected-highlight);
+  color: var(--on-primary);
+  background: var(--selected-highlight);
 }
 
 @media (max-width: 980px) {

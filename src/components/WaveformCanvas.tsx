@@ -15,6 +15,7 @@ import {
 
 interface WaveformCanvasProps {
   rowHeights: number[];
+  rowTopInsets?: number[];
   tile: WaveformTile | null;
   onWidthChange: (width: number) => void;
   sampleRateHz: number;
@@ -59,6 +60,7 @@ interface HoverNavigation {
 
 export function WaveformCanvas({
   rowHeights,
+  rowTopInsets = [],
   tile,
   onWidthChange,
   sampleRateHz,
@@ -75,6 +77,7 @@ export function WaveformCanvas({
   const sampleRateRef = useRef(sampleRateHz);
   const totalSamplesRef = useRef(totalSamples);
   const rowHeightsRef = useRef(rowHeights);
+  const rowTopInsetsRef = useRef(rowTopInsets);
   const hoverRef = useRef<HoverMeasurement | null>(null);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
@@ -100,6 +103,7 @@ export function WaveformCanvas({
         hoverRef.current,
         sampleRateRef.current,
         rowHeightsRef.current,
+        rowTopInsetsRef.current,
       );
     });
     observer.observe(host);
@@ -112,9 +116,10 @@ export function WaveformCanvas({
     sampleRateRef.current = sampleRateHz;
     totalSamplesRef.current = totalSamples;
     rowHeightsRef.current = rowHeights;
+    rowTopInsetsRef.current = rowTopInsets;
     const canvas = canvasRef.current;
-    if (canvas) draw(canvas, tile, viewportStart, viewportSamples, hoverRef.current, sampleRateHz, rowHeights);
-  }, [rowHeights, sampleRateHz, tile, totalSamples, viewportSamples, viewportStart]);
+    if (canvas) draw(canvas, tile, viewportStart, viewportSamples, hoverRef.current, sampleRateHz, rowHeights, rowTopInsets);
+  }, [rowHeights, rowTopInsets, sampleRateHz, tile, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
@@ -147,6 +152,7 @@ export function WaveformCanvas({
         hoverRef.current,
         sampleRateRef.current,
         rowHeightsRef.current,
+        rowTopInsetsRef.current,
       );
     }
     syncNavigationToViewport(start, samples);
@@ -201,7 +207,12 @@ export function WaveformCanvas({
     const host = hostRef.current;
     if (!currentNavigation || !host) return;
 
-    const channelLayout = getChannelLayout(rowHeightsRef.current, tileRef.current?.channels.length ?? 0)[
+    const channelLayout = getChannelLayout(
+      rowHeightsRef.current,
+      tileRef.current?.channels.length ?? 0,
+      1,
+      rowTopInsetsRef.current,
+    )[
       currentNavigation.channelIndex
     ];
     if (!channelLayout) return;
@@ -297,6 +308,7 @@ export function WaveformCanvas({
         null,
         sampleRateRef.current,
         rowHeightsRef.current,
+        rowTopInsetsRef.current,
       );
     }
   }
@@ -316,6 +328,7 @@ export function WaveformCanvas({
       x,
       y,
       rowHeightsRef.current,
+      rowTopInsetsRef.current,
     );
     setNavigation(
       findHoverNavigation(
@@ -325,6 +338,7 @@ export function WaveformCanvas({
         viewportRef.current.samples,
         event.clientY - rect.top,
         rowHeightsRef.current,
+        rowTopInsetsRef.current,
       ),
     );
     draw(
@@ -335,6 +349,7 @@ export function WaveformCanvas({
       hoverRef.current,
       sampleRateRef.current,
       rowHeightsRef.current,
+      rowTopInsetsRef.current,
     );
   }
 
@@ -492,6 +507,7 @@ function draw(
   hover: HoverMeasurement | null,
   sampleRateHz: number,
   rowHeights: number[],
+  rowTopInsets: number[],
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -516,7 +532,7 @@ function draw(
   }
 
   const dpr = window.devicePixelRatio || 1;
-  const channelLayout = getChannelLayout(rowHeights, tile.channels.length, dpr);
+  const channelLayout = getChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
   const usableWidth = Math.max(1, right - left);
@@ -533,8 +549,8 @@ function draw(
     const lowY = highY + transitionHeight - dpr;
     ctx.strokeStyle = "rgba(255,255,255,0.075)";
     ctx.beginPath();
-    ctx.moveTo(0, Math.floor(top) + 0.5);
-    ctx.lineTo(width, Math.floor(top) + 0.5);
+    ctx.moveTo(0, Math.floor(layout.outerTop) + 0.5);
+    ctx.lineTo(width, Math.floor(layout.outerTop) + 0.5);
     ctx.stroke();
 
     if (channel.segments.length > 0) {
@@ -567,7 +583,17 @@ function draw(
   });
 
   if (hover) {
-    drawHoverMeasurement(ctx, canvas, tile, hover, viewportStart, viewportSamples, sampleRateHz, rowHeights);
+    drawHoverMeasurement(
+      ctx,
+      canvas,
+      tile,
+      hover,
+      viewportStart,
+      viewportSamples,
+      sampleRateHz,
+      rowHeights,
+      rowTopInsets,
+    );
   }
 }
 
@@ -697,9 +723,10 @@ function findHoverNavigation(
   viewportSamples: number,
   y: number,
   rowHeights: number[],
+  rowTopInsets: number[],
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
-  const channelLayout = getChannelLayout(rowHeights, tile.channels.length);
+  const channelLayout = getChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets);
   const channelIndex = findChannelIndexAtY(channelLayout, Math.min(rect.height, y));
   if (channelIndex === null) return null;
   const layout = channelLayout[channelIndex];
@@ -734,19 +761,32 @@ function findChannelNavigation(
 
 interface ChannelLayout {
   height: number;
+  outerHeight: number;
+  outerTop: number;
   top: number;
 }
 
-function getChannelLayout(rowHeights: number[], channelCount: number, scale = 1): ChannelLayout[] {
+function getChannelLayout(
+  rowHeights: number[],
+  channelCount: number,
+  scale = 1,
+  rowTopInsets: number[] = [],
+): ChannelLayout[] {
   let top = 0;
   return Array.from({ length: channelCount }, (_, index) => {
-    const height =
+    const outerHeight =
       Math.max(
         SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
         rowHeights[index] ?? SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
       ) * scale;
-    const layout = { height, top };
-    top += height + SALEAE_ROW_V2_SPACING_PX * scale;
+    const inset = Math.max(0, rowTopInsets[index] ?? 0) * scale;
+    const layout = {
+      height: Math.max(scale, outerHeight - inset),
+      outerHeight,
+      outerTop: top,
+      top: top + inset,
+    };
+    top += outerHeight + SALEAE_ROW_V2_SPACING_PX * scale;
     return layout;
   });
 }
@@ -767,11 +807,15 @@ function findHoverMeasurement(
   x: number,
   y: number,
   rowHeights: number[],
+  rowTopInsets: number[],
 ): HoverMeasurement | null {
   if (!tile || tile.channels.length === 0) return null;
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
-  const channelIndex = findChannelIndexAtY(getChannelLayout(rowHeights, tile.channels.length, dpr), y);
+  const channelIndex = findChannelIndexAtY(
+    getChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets),
+    y,
+  );
   if (channelIndex === null) return null;
   const channel = tile.channels[channelIndex];
   const left = graphPaddingLeft * dpr;
@@ -827,11 +871,12 @@ function drawHoverMeasurement(
   viewportSamples: number,
   sampleRateHz: number,
   rowHeights: number[],
+  rowTopInsets: number[],
 ) {
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width;
   const height = canvas.height;
-  const layout = getChannelLayout(rowHeights, tile.channels.length, dpr)[hover.channelIndex];
+  const layout = getChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets)[hover.channelIndex];
   if (!layout) return;
   const laneHeight = layout.height;
   const top = layout.top;

@@ -79,3 +79,7 @@ chore: 说明内容
   - 捕获后新启用通道的空行占位、仅左侧标签栏可调整高度，以及原版 DarkTheme 网格线色值。
 - `docs/ported-features/2026-07-16-strip-chart-scrollbar.md`
   - 原版 10px 单 thumb 水平时间滚动条、viewport 比例换算、拖拽平移和轨道点击动画。
+- `docs/ported-features/2026-07-17-demo-session-stream-stability.md`
+  - Demo 设备选择不自动采集、Stream/4096 MiB 默认 buffer、live summary 约 30fps 和停止 partial capture。
+- `docs/ported-features/2026-07-17-analyzer-bubbles-viewport-window.md`
+  - Analyzer viewport frame window、纯 hex bubbles、previous/next frame、300 marker 上限和长捕获 Fit 聚合保护。

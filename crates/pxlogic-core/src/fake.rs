@@ -5,9 +5,12 @@ use std::{
 };
 
 use crate::{
-    capture::{generate_sample_words, sample_count_from_duration, unitsize_for_channel_count},
+    capture::{
+        generate_sample_words_with_count, sample_count_from_duration, sample_count_from_settings,
+        unitsize_for_channel_count,
+    },
     error::{CoreError, Result},
-    models::{CaptureData, CaptureProgress, CaptureSettings, DeviceInfo, DeviceKind},
+    models::{CaptureData, CaptureMode, CaptureProgress, CaptureSettings, DeviceInfo, DeviceKind},
     protocol::{PXLOGIC_WCH_PID, PXLOGIC_WCH_VID},
     transport::CaptureBackend,
 };
@@ -18,6 +21,8 @@ pub struct FakeBackend;
 impl FakeBackend {
     pub const DEVICE_ID: &'static str = "fake:pxlogic-demo";
 }
+
+const MAX_FAKE_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 
 impl CaptureBackend for FakeBackend {
     fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
@@ -55,27 +60,57 @@ impl CaptureBackend for FakeBackend {
             return Err(CoreError::UnsupportedDevice);
         }
 
-        let unitsize = u64::from(unitsize_for_channel_count(settings.channel_count)?);
-        let sample_count = sample_count_from_duration(
-            settings.sample_rate_hz,
-            settings.duration_ms,
-            settings.decode_cross,
-        )?;
+        let unitsize_u8 = unitsize_for_channel_count(settings.channel_count)?;
+        let unitsize = u64::from(unitsize_u8);
+        let configured_sample_count = sample_count_from_settings(settings, unitsize_u8)?;
+        let sample_count = if matches!(settings.mode, CaptureMode::Stream) {
+            configured_sample_count.min(MAX_FAKE_STREAM_BYTES / unitsize)
+        } else {
+            sample_count_from_duration(
+                settings.sample_rate_hz,
+                settings.duration_ms,
+                settings.decode_cross,
+            )?
+        };
         let bytes_expected = sample_count * unitsize;
-        let checkpoints = 8u64;
-        for step in 0..=checkpoints {
+        let started = std::time::Instant::now();
+        let mut samples_read = 0u64;
+
+        loop {
             if cancel.load(Ordering::Acquire) {
-                return Err(CoreError::Cancelled);
+                let partial_samples = samples_read.max(1).min(sample_count);
+                progress(CaptureProgress {
+                    bytes_read: partial_samples * unitsize,
+                    bytes_expected,
+                    samples_read: partial_samples,
+                });
+                return generate_sample_words_with_count(settings, partial_samples, unitsize_u8);
             }
-            let samples_read = sample_count * step / checkpoints;
+            samples_read = if matches!(settings.mode, CaptureMode::Stream) {
+                let elapsed_samples =
+                    (started.elapsed().as_secs_f64() * settings.sample_rate_hz as f64) as u64;
+                elapsed_samples.max(1).min(sample_count)
+            } else {
+                let elapsed = started.elapsed().as_millis() as u64;
+                let duration = settings.duration_ms.max(1);
+                sample_count
+                    .saturating_mul(elapsed.min(duration))
+                    .checked_div(duration)
+                    .unwrap_or(sample_count)
+                    .max(1)
+                    .min(sample_count)
+            };
             progress(CaptureProgress {
                 bytes_read: samples_read * unitsize,
                 bytes_expected,
                 samples_read,
             });
-            thread::sleep(Duration::from_millis(12));
+            if samples_read >= sample_count {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
         }
 
-        generate_sample_words(settings)
+        generate_sample_words_with_count(settings, sample_count, unitsize_u8)
     }
 }

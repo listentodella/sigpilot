@@ -9,8 +9,8 @@ interface DeviceStartScreenProps {
   selectedDevice: string;
   onOpenCapture: () => void;
   onRefreshDevices: () => void;
+  onCreateSessionWithDevice: (deviceId: string) => void;
   onSelectDevice: (deviceId: string) => void;
-  onStartWithDevice: (deviceId: string) => void;
 }
 
 export function DeviceStartScreen({
@@ -19,8 +19,8 @@ export function DeviceStartScreen({
   selectedDevice,
   onOpenCapture,
   onRefreshDevices,
+  onCreateSessionWithDevice,
   onSelectDevice,
-  onStartWithDevice,
 }: DeviceStartScreenProps) {
   const physicalDevices = devices.filter((device) => device.kind === "Usb");
   const demoDevices = devices.filter((device) => device.kind === "Fake");
@@ -35,8 +35,8 @@ export function DeviceStartScreen({
             devices={physicalDevices}
             emptyLabel="No Logic MSO detected"
             onRefreshDevices={onRefreshDevices}
+            onCreateSessionWithDevice={onCreateSessionWithDevice}
             onSelectDevice={onSelectDevice}
-            onStartWithDevice={onStartWithDevice}
             selectedDevice={selectedDevice}
           />
         </DevicePromptCard>
@@ -47,15 +47,18 @@ export function DeviceStartScreen({
             devices={physicalDevices}
             emptyLabel="No Logic device detected"
             onRefreshDevices={onRefreshDevices}
+            onCreateSessionWithDevice={onCreateSessionWithDevice}
             onSelectDevice={onSelectDevice}
-            onStartWithDevice={onStartWithDevice}
             selectedDevice={selectedDevice}
           />
           {selectedDemo && (
             <button
               className="saleaeSecondaryButton demoDeviceButton"
               disabled={busy}
-              onClick={() => onStartWithDevice(selectedDemo.id)}
+              onClick={() => {
+                onSelectDevice(selectedDemo.id);
+                onCreateSessionWithDevice(selectedDemo.id);
+              }}
               type="button"
             >
               Try a demo Logic device
@@ -102,8 +105,8 @@ interface DeviceListProps {
   emptyLabel: string;
   selectedDevice: string;
   onRefreshDevices: () => void;
+  onCreateSessionWithDevice: (deviceId: string) => void;
   onSelectDevice: (deviceId: string) => void;
-  onStartWithDevice: (deviceId: string) => void;
 }
 
 function DeviceList({
@@ -112,8 +115,8 @@ function DeviceList({
   emptyLabel,
   selectedDevice,
   onRefreshDevices,
+  onCreateSessionWithDevice,
   onSelectDevice,
-  onStartWithDevice,
 }: DeviceListProps) {
   if (devices.length === 0) {
     return (
@@ -138,7 +141,7 @@ function DeviceList({
             key={device.id}
             onClick={() => {
               onSelectDevice(device.id);
-              onStartWithDevice(device.id);
+              onCreateSessionWithDevice(device.id);
             }}
             type="button"
           >

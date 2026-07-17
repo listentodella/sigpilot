@@ -25,6 +25,7 @@ impl Default for UartDecodeSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecodedFrame {
+    pub frame_id: u64,
     pub start_sample: u64,
     pub end_sample: u64,
     pub label: String,
@@ -81,6 +82,7 @@ pub fn decode_uart(
             {
                 let end_sample = sample + ((bit_period * 10.0).ceil() as u64);
                 frames.push(DecodedFrame {
+                    frame_id: frames.len() as u64,
                     start_sample: sample,
                     end_sample,
                     label: label_for_byte(value),
@@ -116,15 +118,7 @@ fn logical_bit(capture: &CaptureData, settings: &UartDecodeSettings, sample: u64
 }
 
 fn label_for_byte(value: u8) -> String {
-    if value.is_ascii_graphic() || value == b' ' {
-        format!("'{}' 0x{value:02X}", value as char)
-    } else if value == b'\n' {
-        "LF 0x0A".to_string()
-    } else if value == b'\r' {
-        "CR 0x0D".to_string()
-    } else {
-        format!("0x{value:02X}")
-    }
+    format!("0x{value:02X}")
 }
 
 #[cfg(test)]
