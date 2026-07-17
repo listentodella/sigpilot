@@ -19,6 +19,7 @@ interface WaveformCanvasProps {
   tile: WaveformTile | null;
   onWidthChange: (width: number) => void;
   sampleRateHz: number;
+  showInteractiveMeasurement?: boolean;
   totalSamples: number;
   viewportStart: number;
   viewportSamples: number;
@@ -64,6 +65,7 @@ export function WaveformCanvas({
   tile,
   onWidthChange,
   sampleRateHz,
+  showInteractiveMeasurement = true,
   totalSamples,
   viewportStart,
   viewportSamples,
@@ -79,6 +81,7 @@ export function WaveformCanvas({
   const rowHeightsRef = useRef(rowHeights);
   const rowTopInsetsRef = useRef(rowTopInsets);
   const hoverRef = useRef<HoverMeasurement | null>(null);
+  const showInteractiveMeasurementRef = useRef(showInteractiveMeasurement);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
   const viewportFrameRef = useRef<number | null>(null);
@@ -100,7 +103,7 @@ export function WaveformCanvas({
         tileRef.current,
         viewportRef.current.start,
         viewportRef.current.samples,
-        hoverRef.current,
+        showInteractiveMeasurementRef.current ? hoverRef.current : null,
         sampleRateRef.current,
         rowHeightsRef.current,
         rowTopInsetsRef.current,
@@ -114,12 +117,25 @@ export function WaveformCanvas({
     tileRef.current = tile;
     viewportRef.current = { start: viewportStart, samples: viewportSamples };
     sampleRateRef.current = sampleRateHz;
+    showInteractiveMeasurementRef.current = showInteractiveMeasurement;
     totalSamplesRef.current = totalSamples;
     rowHeightsRef.current = rowHeights;
     rowTopInsetsRef.current = rowTopInsets;
     const canvas = canvasRef.current;
-    if (canvas) draw(canvas, tile, viewportStart, viewportSamples, hoverRef.current, sampleRateHz, rowHeights, rowTopInsets);
-  }, [rowHeights, rowTopInsets, sampleRateHz, tile, totalSamples, viewportSamples, viewportStart]);
+    if (!showInteractiveMeasurement) hoverRef.current = null;
+    if (canvas) {
+      draw(
+        canvas,
+        tile,
+        viewportStart,
+        viewportSamples,
+        showInteractiveMeasurement ? hoverRef.current : null,
+        sampleRateHz,
+        rowHeights,
+        rowTopInsets,
+      );
+    }
+  }, [rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
@@ -149,7 +165,7 @@ export function WaveformCanvas({
         tileRef.current,
         start,
         samples,
-        hoverRef.current,
+        showInteractiveMeasurementRef.current ? hoverRef.current : null,
         sampleRateRef.current,
         rowHeightsRef.current,
         rowTopInsetsRef.current,
@@ -320,16 +336,18 @@ export function WaveformCanvas({
     const dpr = window.devicePixelRatio || 1;
     const x = (event.clientX - rect.left) * dpr;
     const y = (event.clientY - rect.top) * dpr;
-    hoverRef.current = findHoverMeasurement(
-      canvas,
-      tileRef.current,
-      viewportRef.current.start,
-      viewportRef.current.samples,
-      x,
-      y,
-      rowHeightsRef.current,
-      rowTopInsetsRef.current,
-    );
+    hoverRef.current = showInteractiveMeasurementRef.current
+      ? findHoverMeasurement(
+          canvas,
+          tileRef.current,
+          viewportRef.current.start,
+          viewportRef.current.samples,
+          x,
+          y,
+          rowHeightsRef.current,
+          rowTopInsetsRef.current,
+        )
+      : null;
     setNavigation(
       findHoverNavigation(
         rect,
@@ -346,7 +364,7 @@ export function WaveformCanvas({
       tileRef.current,
       viewportRef.current.start,
       viewportRef.current.samples,
-      hoverRef.current,
+      showInteractiveMeasurementRef.current ? hoverRef.current : null,
       sampleRateRef.current,
       rowHeightsRef.current,
       rowTopInsetsRef.current,

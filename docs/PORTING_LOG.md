@@ -85,3 +85,5 @@ chore: 说明内容
   - Analyzer viewport frame window、纯 hex bubbles、previous/next frame、300 marker 上限和长捕获 Fit 聚合保护。
 - `docs/ported-features/2026-07-17-analyzer-protocol-bubbles.md`
   - Analyzer overlay 改为独立 `protocolBubbles` 模型，Fit Capture 下 multi bubble 覆盖完整 graph，并按原版像素阈值拆合。
+- `docs/ported-features/2026-07-17-channel-context-menu.md`
+  - 通道标签右键菜单、Show/Hide Channels 子菜单、隐藏行状态、Auto Layout 和交互测量开关。

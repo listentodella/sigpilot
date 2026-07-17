@@ -6,7 +6,7 @@
 
 - `src/App.tsx`
   - 当前 React 工作台主体。
-  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放与 hover 测量入口。
+  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口和通道右键菜单状态。
 - `src/styles.css`
   - 全局视觉样式。
   - 包含 Saleae 风格顶部工具栏、启动页、右侧栏、底栏、session tab、popover、波形区域样式。
@@ -30,7 +30,7 @@
   - 包含搜索、管理菜单、扩展项动作、创建对话框和扩展详情覆盖页。
 - `src/components/WaveformCanvas.tsx`
   - 数字波形 Canvas 渲染。
-  - 包含平滑数字波形绘制、原版 8px 上下 gutter、边沿吸附、周期/占空比/脉宽 hover 测量显示。
+  - 包含平滑数字波形绘制、原版 8px 上下 gutter、边沿吸附、周期/占空比/脉宽 hover 测量显示，以及右键菜单控制的交互测量开关。
 - `src/components/TimingDisplayCanvas.tsx`
   - 独立于通道滚动区的 30px Saleae 时间标尺。
   - 搬运原版 major/minor tick、离屏 major 箭头和标尺背景绘制规则。

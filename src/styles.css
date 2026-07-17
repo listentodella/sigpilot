@@ -1047,46 +1047,159 @@ button:disabled {
 }
 
 .channelContextMenu {
-  width: 214px;
+  width: 286px;
   position: fixed;
   z-index: 80;
-  overflow: hidden;
   border: 1px solid var(--border-20);
-  border-radius: 4px;
-  background: var(--background-0);
-  box-shadow: var(--box-shadow);
-  padding: 5px;
-}
-
-.channelContextHeader {
-  height: 24px;
-  display: flex;
-  align-items: center;
-  border-bottom: 1px solid var(--border-20);
-  margin: 0 3px 4px;
-  color: var(--on-background-30);
-  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.channelContextMenu button {
-  width: 100%;
-  min-height: 28px;
-  display: flex;
-  align-items: center;
   border-radius: 3px;
-  color: var(--on-background-20);
+  background: #2a2a2e;
+  box-shadow: var(--box-shadow);
+  padding: 4px 0;
+  color: var(--on-background-0);
+  font-size: 12px;
+}
+
+.channelContextItem {
+  width: 100%;
+  min-height: 31px;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 60px;
+  align-items: center;
+  border: 0;
+  border-radius: 0;
+  color: var(--on-background-0);
   background: transparent;
-  padding: 0 8px;
+  padding: 7px 12px;
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.channelContextMenu button:hover,
-.channelContextMenu button.active {
-  color: var(--on-background-0);
+.channelContextItem.selectable {
+  grid-template-columns: 8px 4px minmax(0, 1fr) 60px;
+  padding: 7px 16px 7px 8px;
+}
+
+.channelContextItem.submenuTrigger {
+  grid-template-columns: 8px 4px minmax(0, 1fr) 18px;
+}
+
+.channelContextItem:disabled {
+  color: var(--on-background-50);
+  cursor: default;
+  opacity: 0.55;
+}
+
+.channelContextItem:hover:not(:disabled),
+.channelContextSubmenu:hover > .channelContextItem {
   background: var(--hover-background);
+}
+
+.channelContextCheckmark {
+  width: 8px;
+  height: 16px;
+  grid-column: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.channelContextLabel {
+  min-width: 0;
+  overflow: hidden;
+  grid-column: 1;
+  text-overflow: ellipsis;
+}
+
+.channelContextItem.selectable .channelContextLabel {
+  grid-column: 3;
+}
+
+.channelContextShortcut {
+  grid-column: 2;
+  justify-self: end;
+  color: var(--on-background-30);
+}
+
+.channelContextItem.selectable .channelContextShortcut {
+  grid-column: 4;
+}
+
+.channelContextSeparator {
+  height: 1px;
+  margin: 4px 0;
+  background: rgba(var(--white-base), 0.1);
+}
+
+.channelContextSubmenu {
+  position: relative;
+}
+
+.channelContextSubmenuPanel {
+  width: 286px;
+  max-height: min(420px, calc(100vh - 24px));
+  position: absolute;
+  left: calc(100% - 2px);
+  top: -4px;
+  display: none;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  background: #2a2a2e;
+  box-shadow: var(--box-shadow);
+  padding: 4px 0;
+}
+
+.channelContextMenu.submenuLeft .channelContextSubmenuPanel {
+  right: calc(100% - 2px);
+  left: auto;
+}
+
+.channelContextSubmenu:hover .channelContextSubmenuPanel,
+.channelContextSubmenu:focus-within .channelContextSubmenuPanel {
+  display: block;
+}
+
+.channelVisibilityRows {
+  max-height: 348px;
+  overflow-y: auto;
+  scrollbar-color: var(--grey100) transparent;
+  scrollbar-width: thin;
+}
+
+.channelVisibilityRows::-webkit-scrollbar {
+  width: 9px;
+}
+
+.channelVisibilityRows::-webkit-scrollbar-thumb {
+  border: 2px solid #2a2a2e;
+  border-radius: 6px;
+  background: var(--grey100);
+}
+
+.channelContextItem[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  width: max-content;
+  max-width: 250px;
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  z-index: 2;
+  transform: translateY(-50%);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  color: var(--on-background-0);
+  background: var(--background-0);
+  box-shadow: var(--box-shadow);
+  padding: 7px 9px;
+  white-space: normal;
+  pointer-events: none;
+}
+
+.channelContextMenu.submenuLeft .channelContextItem[data-tooltip]:hover::after {
+  right: calc(100% + 8px);
+  left: auto;
 }
 
 .graphViewport {

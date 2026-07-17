@@ -3,7 +3,9 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import {
   Activity,
   BarChart3,
+  Check,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Copy,
   Clock3,
@@ -82,6 +84,7 @@ import {
   UiAnalyzerInstance,
 } from "./lib/analyzers";
 import {
+  SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
   fitSaleaeDigitalRowsToViewport,
   makeSaleaeDigitalRowHeights,
   saleaeChannelContentHeight,
@@ -119,7 +122,9 @@ interface UiSession {
   deviceSettings: UiDeviceSettings;
   channelLabels: string[];
   channelHeights: number[];
+  hiddenDigitalChannels: boolean[];
   manualChannelLayout: boolean;
+  showInteractiveMeasurement: boolean;
   graphScrollTop: number;
   summary: CaptureSummary | null;
   progress: CaptureProgress | null;
@@ -247,6 +252,10 @@ function makeDigitalChannels(channelCount: number) {
   return Array.from({ length: 32 }, (_, index) => index < channelCount);
 }
 
+function makeHiddenDigitalChannels(existing: boolean[] = []) {
+  return Array.from({ length: 32 }, (_, index) => existing[index] ?? false);
+}
+
 function channelLabelsForCount(channelCount: number, existing: string[] = []) {
   return Array.from({ length: Math.max(1, channelCount) }, (_, index) => existing[index] ?? `D${index}`);
 }
@@ -267,7 +276,7 @@ function isDigitalChannelEnabled(session: UiSession, channelIndex: number) {
 function visibleDigitalChannelIndexes(session: UiSession) {
   const limit = captureChannelLimit(session);
   return Array.from({ length: limit }, (_, index) => index).filter((index) =>
-    isDigitalChannelEnabled(session, index),
+    isDigitalChannelEnabled(session, index) && !(session.hiddenDigitalChannels[index] ?? false),
   );
 }
 
@@ -419,7 +428,9 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     channelHeights: source
       ? makeSaleaeDigitalRowHeights(32, source.channelHeights ?? [])
       : makeSaleaeDigitalRowHeights(),
+    hiddenDigitalChannels: makeHiddenDigitalChannels(source?.hiddenDigitalChannels),
     manualChannelLayout: source?.manualChannelLayout ?? false,
+    showInteractiveMeasurement: source?.showInteractiveMeasurement ?? true,
     graphScrollTop: 0,
     summary: null,
     progress: null,
@@ -673,6 +684,7 @@ export default function App() {
     [
       activeSession?.channelLabels,
       activeSession?.deviceSettings.digitalChannels,
+      activeSession?.hiddenDigitalChannels,
       activeSession?.settings.channel_count,
       activeSession?.summary?.metadata.channel_count,
     ],
@@ -684,6 +696,20 @@ export default function App() {
   const visibleChannelLabels = useMemo(
     () => visibleChannelIndexes.map((channelIndex) => channelLabels[channelIndex] ?? `D${channelIndex}`),
     [channelLabels, visibleChannelIndexes],
+  );
+  const contextMenuChannelRows = useMemo(
+    () => {
+      if (!activeSession) return [];
+      const count = Math.max(32, captureChannelLimit(activeSession), activeSession.channelLabels.length);
+      const labels = channelLabelsForCount(count, activeSession.channelLabels);
+      return Array.from({ length: count }, (_, index) => ({
+        index,
+        isHidden: activeSession.hiddenDigitalChannels[index] ?? false,
+        isSelectable: isDigitalChannelEnabled(activeSession, index),
+        label: labels[index] ?? `D${index}`,
+      }));
+    },
+    [activeSession],
   );
   const visibleChannelHeights = useMemo(
     () =>
@@ -1038,6 +1064,7 @@ export default function App() {
         digitalChannels: makeDigitalChannels(summary.metadata.channel_count),
         triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, summary.metadata.channel_count - 1)),
       },
+      hiddenDigitalChannels: makeHiddenDigitalChannels(),
       channelLabels: labels,
       cursorState: defaultCursorState(summary.metadata.sample_count, summary.metadata.channel_count),
       summary: summaryWithLabels(summary, labels),
@@ -1162,8 +1189,10 @@ export default function App() {
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => {
       const digitalChannels = [...session.deviceSettings.digitalChannels];
+      const hiddenDigitalChannels = makeHiddenDigitalChannels(session.hiddenDigitalChannels);
       while (digitalChannels.length <= channelIndex) digitalChannels.push(false);
       digitalChannels[channelIndex] = enabled;
+      hiddenDigitalChannels[channelIndex] = false;
       const highestEnabled = highestEnabledDigitalChannel(digitalChannels);
       const channelCount = Math.max(1, highestEnabled + 1);
       return {
@@ -1175,7 +1204,66 @@ export default function App() {
           digitalChannels,
           triggerChannel: Math.min(session.deviceSettings.triggerChannel, highestEnabled),
         },
+        hiddenDigitalChannels,
         message: `D${channelIndex} ${digitalChannels[channelIndex] ? "shown and enabled" : "hidden and disabled"}`,
+      };
+    });
+  }
+
+  function hideChannelRow(channelIndex: number) {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const hiddenDigitalChannels = makeHiddenDigitalChannels(session.hiddenDigitalChannels);
+      hiddenDigitalChannels[channelIndex] = true;
+      return {
+        ...session,
+        hiddenDigitalChannels,
+        message: `D${channelIndex} hidden`,
+      };
+    });
+  }
+
+  function toggleChannelRowVisibility(channelIndex: number) {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const hiddenDigitalChannels = makeHiddenDigitalChannels(session.hiddenDigitalChannels);
+      hiddenDigitalChannels[channelIndex] = !hiddenDigitalChannels[channelIndex];
+      return {
+        ...session,
+        hiddenDigitalChannels,
+        message: `D${channelIndex} ${hiddenDigitalChannels[channelIndex] ? "hidden" : "shown"}`,
+      };
+    });
+  }
+
+  function showAllChannelRows() {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      hiddenDigitalChannels: makeHiddenDigitalChannels(),
+      message: "All channels shown",
+    }));
+  }
+
+  function resetChannelNames() {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const count = Math.max(32, captureChannelLimit(session), session.channelLabels.length);
+      const labels = Array.from({ length: count }, (_, index) => `D${index}`);
+      return {
+        ...session,
+        channelLabels: labels,
+        summary: session.summary ? summaryWithLabels(session.summary, labels) : session.summary,
+        tile: session.tile
+          ? {
+              ...session.tile,
+              channels: session.tile.channels.map((channel) => ({
+                ...channel,
+                label: labels[channel.channel] ?? `D${channel.channel}`,
+              })),
+            }
+          : session.tile,
+        message: "Channel names reset",
       };
     });
   }
@@ -1197,6 +1285,62 @@ export default function App() {
         manualChannelLayout: true,
       };
     });
+  }
+
+  function matchAllDigitalChannelHeights(channelIndex: number) {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const channelHeights = makeSaleaeDigitalRowHeights(32, session.channelHeights);
+      if (!session.manualChannelLayout) {
+        visibleChannelIndexes.forEach((visibleChannelIndex, rowIndex) => {
+          channelHeights[visibleChannelIndex] =
+            visibleChannelHeights[rowIndex] ?? channelHeights[visibleChannelIndex];
+        });
+      }
+      const sourceHeight =
+        channelHeights[channelIndex] ??
+        visibleChannelHeights[visibleChannelIndexes.indexOf(channelIndex)] ??
+        SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX;
+      session.deviceSettings.digitalChannels.forEach((enabled, index) => {
+        if (enabled) channelHeights[index] = sourceHeight;
+      });
+      return {
+        ...session,
+        channelHeights,
+        manualChannelLayout: true,
+        message: "Digital channel heights matched",
+      };
+    });
+  }
+
+  function fitAllRowsToWindowHeight() {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      manualChannelLayout: false,
+      message: "Rows fit to window height",
+    }));
+  }
+
+  function toggleAutoLayout() {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const autoLayout = session.manualChannelLayout;
+      return {
+        ...session,
+        manualChannelLayout: !autoLayout,
+        message: autoLayout ? "Auto Layout enabled" : "Auto Layout disabled",
+      };
+    });
+  }
+
+  function toggleInteractiveMeasurement() {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      showInteractiveMeasurement: !session.showInteractiveMeasurement,
+      message: `Interactive measurement ${session.showInteractiveMeasurement ? "hidden" : "shown"}`,
+    }));
   }
 
   function handleGraphScroll(event: ReactUIEvent<HTMLDivElement>) {
@@ -1267,8 +1411,10 @@ export default function App() {
     if (!editor) return;
     updateSession(editor.sessionId, (session) => {
       const digitalChannels = [...session.deviceSettings.digitalChannels];
+      const hiddenDigitalChannels = makeHiddenDigitalChannels(session.hiddenDigitalChannels);
       while (digitalChannels.length <= analyzer.channel) digitalChannels.push(false);
       digitalChannels[analyzer.channel] = true;
+      hiddenDigitalChannels[analyzer.channel] = false;
       const channelCount = Math.max(session.settings.channel_count, analyzer.channel + 1);
       const nextAnalyzers = editor.isNew
         ? [...session.analyzers, analyzer]
@@ -1277,6 +1423,7 @@ export default function App() {
         ...session,
         analyzers: nextAnalyzers,
         channelLabels: channelLabelsForCount(channelCount, session.channelLabels),
+        hiddenDigitalChannels,
         deviceSettings: { ...session.deviceSettings, digitalChannels },
         settings: { ...session.settings, channel_count: channelCount },
         message: `${analyzer.name} settings saved`,
@@ -1659,27 +1806,20 @@ export default function App() {
                     {channelContextMenu && (
                       <ChannelContextMenu
                         channelIndex={channelContextMenu.channelIndex}
-                        isEnabled={
-                          activeSession.deviceSettings.digitalChannels[channelContextMenu.channelIndex] ??
-                          channelContextMenu.channelIndex < activeSession.settings.channel_count
-                        }
-                        isTrigger={activeSession.deviceSettings.triggerChannel === channelContextMenu.channelIndex}
-                        onAddAnalyzer={() => addAnalyzerForChannel(channelContextMenu.channelIndex)}
+                        autoLayoutEnabled={!activeSession.manualChannelLayout}
+                        channelRows={contextMenuChannelRows}
+                        hasHiddenChannels={contextMenuChannelRows.some((row) => row.isSelectable && row.isHidden)}
+                        interactiveMeasurementVisible={activeSession.showInteractiveMeasurement}
                         onClose={() => setChannelContextMenu(null)}
-                        onRename={() => {
-                          setEditingChannel(channelContextMenu.channelIndex);
-                          setChannelContextMenu(null);
-                        }}
-                        onSetTrigger={() => setTriggerChannel(channelContextMenu.channelIndex)}
-                        onToggleChannel={() =>
-                          setChannelEnabled(
-                            channelContextMenu.channelIndex,
-                            !(
-                              activeSession.deviceSettings.digitalChannels[channelContextMenu.channelIndex] ??
-                              channelContextMenu.channelIndex < activeSession.settings.channel_count
-                            ),
-                          )
-                        }
+                        onFitAllRows={fitAllRowsToWindowHeight}
+                        onHideChannel={() => hideChannelRow(channelContextMenu.channelIndex)}
+                        onMatchAllHeights={() => matchAllDigitalChannelHeights(channelContextMenu.channelIndex)}
+                        onOpenSettings={() => openSidebarPanel("devices")}
+                        onResetChannelNames={resetChannelNames}
+                        onShowAllChannels={showAllChannelRows}
+                        onToggleAutoLayout={toggleAutoLayout}
+                        onToggleChannelVisibility={toggleChannelRowVisibility}
+                        onToggleInteractiveMeasurement={toggleInteractiveMeasurement}
                         refElement={channelContextMenuRef}
                         x={channelContextMenu.x}
                         y={channelContextMenu.y}
@@ -1694,6 +1834,7 @@ export default function App() {
                           updateSession(activeSession.id, (session) => ({ ...session, canvasWidth: width }))
                         }
                         sampleRateHz={activeSession.summary?.metadata.sample_rate_hz ?? activeSession.settings.sample_rate_hz}
+                        showInteractiveMeasurement={activeSession.showInteractiveMeasurement}
                         totalSamples={totalSamples}
                         viewportStart={activeSession.viewportStart}
                         viewportSamples={activeSession.viewportSamples}
@@ -2013,61 +2154,195 @@ function ChannelResizeHandle({
 }
 
 function ChannelContextMenu({
+  autoLayoutEnabled,
   channelIndex,
-  isEnabled,
-  isTrigger,
-  onAddAnalyzer,
+  channelRows,
+  hasHiddenChannels,
+  interactiveMeasurementVisible,
   onClose,
-  onRename,
-  onSetTrigger,
-  onToggleChannel,
+  onFitAllRows,
+  onHideChannel,
+  onMatchAllHeights,
+  onOpenSettings,
+  onResetChannelNames,
+  onShowAllChannels,
+  onToggleAutoLayout,
+  onToggleChannelVisibility,
+  onToggleInteractiveMeasurement,
   refElement,
   x,
   y,
 }: {
+  autoLayoutEnabled: boolean;
   channelIndex: number;
-  isEnabled: boolean;
-  isTrigger: boolean;
-  onAddAnalyzer: () => void;
+  channelRows: { index: number; isHidden: boolean; isSelectable: boolean; label: string }[];
+  hasHiddenChannels: boolean;
+  interactiveMeasurementVisible: boolean;
   onClose: () => void;
-  onRename: () => void;
-  onSetTrigger: () => void;
-  onToggleChannel: () => void;
+  onFitAllRows: () => void;
+  onHideChannel: () => void;
+  onMatchAllHeights: () => void;
+  onOpenSettings: () => void;
+  onResetChannelNames: () => void;
+  onShowAllChannels: () => void;
+  onToggleAutoLayout: () => void;
+  onToggleChannelVisibility: (channelIndex: number) => void;
+  onToggleInteractiveMeasurement: () => void;
   refElement: RefObject<HTMLDivElement>;
   x: number;
   y: number;
 }) {
-  const menuLeft = typeof window === "undefined" ? x : Math.max(8, Math.min(x, window.innerWidth - 230));
-  const menuTop = typeof window === "undefined" ? y : Math.max(8, Math.min(y, window.innerHeight - 190));
+  const menuWidth = 286;
+  const submenuWidth = 286;
+  const opensLeft = typeof window !== "undefined" && x + menuWidth + submenuWidth + 12 > window.innerWidth;
+  const menuLeft =
+    typeof window === "undefined" ? x : Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8));
+  const menuTop = typeof window === "undefined" ? y : Math.max(8, Math.min(y, window.innerHeight - 382));
 
-  function run(action: () => void) {
+  function run(action: () => void, close = true) {
     action();
-    onClose();
+    if (close) onClose();
   }
 
   return (
     <div
-      className="channelContextMenu"
+      className={`channelContextMenu saleaeContextMenu ${opensLeft ? "submenuLeft" : ""}`}
       onContextMenu={(event) => event.preventDefault()}
       ref={refElement}
       role="menu"
       style={{ left: menuLeft, top: menuTop }}
     >
-      <div className="channelContextHeader">D{channelIndex}</div>
-      <button onClick={() => run(onRename)} role="menuitem" type="button">
-        Rename
-      </button>
-      <button onClick={() => run(onToggleChannel)} role="menuitem" type="button">
-        {isEnabled ? "Disable Channel" : "Enable Channel"}
-      </button>
-      <button className={isTrigger ? "active" : ""} onClick={() => run(onSetTrigger)} role="menuitem" type="button">
-        Set as Trigger
-      </button>
-      <button onClick={() => run(onAddAnalyzer)} role="menuitem" type="button">
-        Add Analyzer
-      </button>
+      <ChannelMenuSelectionItem
+        label="Resize All Digital Channels to Match"
+        onClick={() => run(onMatchAllHeights)}
+        tooltip={`Resize the Y-height of all Digital Channels to match D${channelIndex}.`}
+      />
+      <ChannelMenuSelectionItem
+        label="Fit all Rows to Window Height"
+        onClick={() => run(onFitAllRows)}
+        tooltip="Fit Y-height of all channels to window height"
+      />
+      <ChannelMenuSelectionItem
+        label="Auto Layout"
+        onClick={() => run(onToggleAutoLayout)}
+        selected={autoLayoutEnabled}
+        tooltip="Automatically manage channel height to fit the window"
+      />
+      <ChannelMenuSeparator />
+      <ChannelMenuSelectionItem
+        label="Show Interactive Measurement"
+        onClick={() => run(onToggleInteractiveMeasurement, false)}
+        selected={interactiveMeasurementVisible}
+        tooltip="Display a measurement as the mouse moves over the waveform."
+      />
+      <ChannelMenuSeparator />
+      <ChannelMenuSelectionItem label="Hide Channel" onClick={() => run(onHideChannel)} />
+      <div className="channelContextSubmenu" role="none">
+        <button className="channelContextItem selectable submenuTrigger" role="menuitem" type="button">
+          <span className="channelContextCheckmark" />
+          <span className="channelContextLabel">Show/Hide Channels</span>
+          <ChevronRight aria-hidden size={14} />
+        </button>
+        <div className="channelContextSubmenuPanel" role="menu">
+          <ChannelMenuItem
+            disabled={!hasHiddenChannels}
+            label="Show All Channels"
+            onClick={() => run(onShowAllChannels, false)}
+          />
+          <ChannelMenuSeparator />
+          <div className="channelVisibilityRows">
+            {channelRows.map((row) => (
+              <ChannelMenuSelectionItem
+                disabled={!row.isSelectable}
+                key={row.index}
+                label={`${row.index}. ${row.label}`}
+                onClick={() => run(() => onToggleChannelVisibility(row.index), false)}
+                selected={row.isSelectable && !row.isHidden}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+      <ChannelMenuSeparator />
+      <ChannelMenuSelectionItem
+        label="Reset Channel Names"
+        onClick={() => run(onResetChannelNames)}
+        tooltip="Reset all the Channels Names to their default labels."
+      />
+      <ChannelMenuSeparator />
+      <ChannelMenuSelectionItem label="Settings" onClick={() => run(onOpenSettings)} />
     </div>
   );
+}
+
+function ChannelMenuItem({
+  disabled = false,
+  label,
+  onClick,
+  shortcut,
+  tooltip,
+}: {
+  disabled?: boolean;
+  label: string;
+  onClick: () => void;
+  shortcut?: string;
+  tooltip?: string;
+}) {
+  return (
+    <button
+      className="channelContextItem"
+      data-tooltip={tooltip}
+      disabled={disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (!disabled) onClick();
+      }}
+      role="menuitem"
+      type="button"
+    >
+      <span className="channelContextLabel">{label}</span>
+      {shortcut && <span className="channelContextShortcut">{shortcut}</span>}
+    </button>
+  );
+}
+
+function ChannelMenuSelectionItem({
+  disabled = false,
+  label,
+  onClick,
+  selected = false,
+  shortcut,
+  tooltip,
+}: {
+  disabled?: boolean;
+  label: string;
+  onClick: () => void;
+  selected?: boolean;
+  shortcut?: string;
+  tooltip?: string;
+}) {
+  return (
+    <button
+      className={`channelContextItem selectable ${selected ? "selected" : ""}`}
+      data-tooltip={tooltip}
+      disabled={disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (!disabled) onClick();
+      }}
+      role="menuitemcheckbox"
+      aria-checked={selected}
+      type="button"
+    >
+      <span className="channelContextCheckmark">{selected && <Check aria-hidden size={12} />}</span>
+      <span className="channelContextLabel">{label}</span>
+      {shortcut && <span className="channelContextShortcut">{shortcut}</span>}
+    </button>
+  );
+}
+
+function ChannelMenuSeparator() {
+  return <div className="channelContextSeparator" role="separator" />;
 }
 
 function CursorOverlay({
@@ -2907,10 +3182,15 @@ function DeviceSettingsPanel({
 
   function setChannelCount(channelCount: number) {
     onUpdateSettings({ channel_count: channelCount });
-    updateDeviceSettings({
-      digitalChannels: makeDigitalChannels(channelCount),
-      triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, channelCount - 1)),
-    });
+    onUpdateSession((current) => ({
+      ...current,
+      deviceSettings: {
+        ...current.deviceSettings,
+        digitalChannels: makeDigitalChannels(channelCount),
+        triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, channelCount - 1)),
+      },
+      hiddenDigitalChannels: makeHiddenDigitalChannels(),
+    }));
   }
 
   function toggleDigitalChannel(index: number) {
@@ -2925,6 +3205,11 @@ function DeviceSettingsPanel({
         digitalChannels: nextChannels,
         triggerChannel: Math.min(current.deviceSettings.triggerChannel, highestEnabled),
       },
+      hiddenDigitalChannels: nextChannels[index]
+        ? makeHiddenDigitalChannels(current.hiddenDigitalChannels).map((hidden, hiddenIndex) =>
+            hiddenIndex === index ? false : hidden,
+          )
+        : current.hiddenDigitalChannels,
       message: `D${index} ${nextChannels[index] ? "shown and enabled" : "hidden and disabled"}`,
     }));
   }
@@ -2939,6 +3224,7 @@ function DeviceSettingsPanel({
         digitalChannels: enabled ? Array.from({ length: 32 }, () => true) : Array.from({ length: 32 }, () => false),
         triggerChannel: 0,
       },
+      hiddenDigitalChannels: makeHiddenDigitalChannels(),
       message: enabled ? "All 32 digital channels shown and enabled" : "All digital channels hidden and disabled",
     }));
   }
