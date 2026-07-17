@@ -91,3 +91,5 @@ chore: 说明内容
   - 补齐图表区右键、Delete Data 子菜单、真实 sample 裁剪 API，以及 Screenshot 菜单占位。
 - `docs/ported-features/2026-07-17-add-range-measurement-placing.md`
   - Add Range Measurement 原版 placing 模式、通道绑定 range overlay、图上 tooltip 和 Measurements 右侧栏 RangeItem 深化。
+- `docs/ported-features/2026-07-17-range-measurement-runner.md`
+  - Range measurement 真实后端统计、Measurements2 风格 Add/Remove Measurements、逐项启用/删除与 copy 输出。

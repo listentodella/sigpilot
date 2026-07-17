@@ -14,7 +14,9 @@ use pxlogic_core::{
     DecodedFrame, DeviceInfo, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
     UartDecodeSettings,
 };
-use pxlogic_waveform::{WaveformRequest, WaveformTile};
+use pxlogic_waveform::{
+    DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -288,6 +290,23 @@ fn get_waveform_tile(
 }
 
 #[tauri::command]
+async fn measure_digital_range(
+    request: DigitalRangeMeasurementRequest,
+    state: State<'_, AppState>,
+) -> CommandResult<DigitalRangeMeasurementStats> {
+    let capture = state
+        .current_capture
+        .lock()
+        .clone()
+        .ok_or_else(|| "no capture is loaded".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        pxlogic_waveform::measure_digital_range(&capture, &request).map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn decode_uart_frames(
     settings: UartDecodeSettings,
     state: State<'_, AppState>,
@@ -432,6 +451,7 @@ fn main() {
             export_capture,
             trim_capture,
             get_waveform_tile,
+            measure_digital_range,
             decode_uart_frames,
             read_extension_package,
             create_extension_template,

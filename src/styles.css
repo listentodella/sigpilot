@@ -1592,9 +1592,26 @@ button:disabled {
   background: var(--background-40);
 }
 
+.rangeTooltipIconButton.selected {
+  color: var(--on-background-0);
+  background: var(--background-40);
+}
+
 .rangeTooltipIconButton:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.rangeTooltipPopoverHost,
+.rangeItemPopoverHost {
+  position: relative;
+  display: inline-flex;
+}
+
+.rangeTooltipPopoverHost .rangeMeasurementAddMenu,
+.rangeTooltipPopoverHost .rangeMeasurementSettingsMenu {
+  top: 25px;
+  right: 0;
 }
 
 .rangeTooltipCommentBox {
@@ -1643,6 +1660,171 @@ button:disabled {
 .rangeTooltipColorGrid button.selected {
   outline: 1px solid var(--on-background-0);
   outline-offset: 2px;
+}
+
+.rangeMeasurementAddMenu,
+.rangeMeasurementSettingsMenu {
+  position: absolute;
+  z-index: 60;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 5px;
+  color: var(--on-background-20);
+  background: var(--background-20);
+  box-shadow: var(--box-shadow);
+  pointer-events: auto;
+}
+
+.rangeMeasurementAddMenu {
+  width: 340px;
+  max-height: min(620px, 90vh);
+  display: flex;
+  flex-direction: column;
+}
+
+.rangeMeasurementAddSearch {
+  height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-20);
+  padding: 0 16px;
+  color: var(--on-background-30);
+}
+
+.rangeMeasurementAddSearch input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  color: var(--on-background-0);
+  background: transparent;
+  outline: none;
+  font-size: 13px;
+}
+
+.rangeMeasurementAddActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 8px 10px;
+}
+
+.rangeMeasurementAddActions button {
+  min-width: 40px;
+  height: 22px;
+  border: 1px solid var(--border-20);
+  border-radius: 12px;
+  color: var(--on-background-20);
+  background: var(--background-30);
+  cursor: pointer;
+}
+
+.rangeMeasurementAddList {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 0 8px;
+}
+
+.rangeMeasurementAddList section {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+}
+
+.rangeMeasurementAddList strong {
+  color: var(--on-background-30);
+  font-size: 10px;
+  letter-spacing: 0.4px;
+  padding: 0 16px 4px;
+  text-transform: uppercase;
+}
+
+.rangeMeasurementAddList button {
+  min-height: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 0 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rangeMeasurementAddList button:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.rangeMeasurementAddList button span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rangeMeasurementAddToggle {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+  border-radius: 10px;
+  color: var(--on-primary);
+  background: var(--selected-highlight);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.rangeMeasurementAddList button.enabled .rangeMeasurementAddToggle {
+  background: var(--red);
+}
+
+.rangeMeasurementMoreButton {
+  min-height: 45px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-top: 1px solid var(--border-20);
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 0 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rangeMeasurementMoreButton:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.rangeMeasurementSettingsMenu {
+  width: 289px;
+  padding: 16px;
+}
+
+.rangeMeasurementSettingsMenu label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--on-background-0);
+  font-size: 13px;
+}
+
+.rangeMeasurementError {
+  grid-column: label / contentEnd;
+  margin: 0 14px 8px 0;
+  border: 1px solid color-mix(in srgb, var(--red) 60%, transparent);
+  border-radius: 4px;
+  color: var(--on-background-0);
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+  padding: 7px 9px;
+  font-size: 11px;
 }
 
 .timingMarkerOverlay {
@@ -2893,7 +3075,7 @@ button:disabled {
   display: grid;
   grid-template-columns:
     [expandButton] 18px [icon] 6px 8px [label] minmax(0, auto) 4px [value] auto
-    [comment] minmax(0, 1fr) [contentEnd] 4px [goto] 18px [menu] 18px 14px;
+    [comment] minmax(0, 1fr) [contentEnd] 4px [actions] 90px 14px;
   grid-auto-rows: min-content;
   overflow: auto;
   padding: 0 0 12px;
@@ -3004,9 +3186,10 @@ button:disabled {
 }
 
 .rangeMeasurementActions {
-  grid-column: goto / menu;
+  grid-column: actions;
   position: relative;
   display: inline-flex;
+  justify-content: flex-end;
   gap: 0;
   opacity: 0;
 }
@@ -3063,12 +3246,72 @@ button:disabled {
   color: #b79cff;
 }
 
-.rangeMetricsGrid {
-  display: grid;
+.rangeItemPopoverHost .rangeMeasurementAddMenu,
+.rangeItemPopoverHost .rangeMeasurementSettingsMenu {
+  top: 22px;
+  right: 0;
+}
+
+.rangeMeasureTable {
   grid-column: label / contentEnd;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  padding: 0 14px 8px 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, [label-start] minmax(64px, 74px) [label-end] 4px [value-start] minmax(62px, 1fr) [value-end] 16px);
+  row-gap: 2px;
+  border-radius: 5px;
+  background: var(--background-0);
+  margin: 0 14px 8px 0;
+  padding: 12px 10px;
+}
+
+.rangeMeasureLabel,
+.rangeMeasureSeparator,
+.rangeMeasureValue {
+  min-width: 0;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  color: var(--on-background-20);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.rangeMeasureLabel {
+  text-overflow: ellipsis;
+}
+
+.rangeMeasureSeparator::before {
+  content: "";
+}
+
+.rangeMeasureValue {
+  color: var(--on-background-0);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+.rangeMeasureDelete {
+  width: 16px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  color: transparent;
+  background: transparent;
+  cursor: pointer;
+}
+
+.rangeMeasureTable:hover .rangeMeasureDelete:not(:disabled),
+.rangeMeasureDelete:focus-visible {
+  color: var(--on-background-30);
+}
+
+.rangeMeasureDelete:not(:disabled):hover {
+  color: var(--on-background-0);
 }
 
 .metricCell {

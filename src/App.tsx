@@ -67,11 +67,13 @@ import {
   CaptureSettings,
   CaptureSummary,
   DeviceInfo,
+  DigitalRangeMeasurementStats,
   DiagnosticEvent,
   exportCapture,
   getUartFrameWindow,
   getWaveformTile,
   listDevices,
+  measureDigitalRange,
   openCapture,
   saveCapture,
   startCapture,
@@ -117,6 +119,16 @@ import {
   findSaleaeGraphChannelIndexAtY,
   getSaleaeGraphChannelLayout,
 } from "./lib/saleaeGraphLayout";
+import {
+  copyRangeMeasurementValues,
+  DEFAULT_DIGITAL_RANGE_MEASUREMENTS,
+  DIGITAL_RANGE_MEASUREMENT_CATEGORIES,
+  DigitalRangeMeasurementId,
+  ensureRangeMeasurementIds,
+  formatDeltaTime,
+  formatRangeMeasurementValue,
+  rangeMeasurementDefinition,
+} from "./lib/rangeMeasurements";
 
 type FooterPopover = "devices" | "newSession" | "zoom" | null;
 
@@ -188,11 +200,17 @@ interface UiCursorState {
 }
 
 interface UiRangeMeasurement {
+  annotationsVisible: boolean;
   channelIndex: number;
   color: string;
   endSample: number;
   expanded: boolean;
   id: string;
+  measurementError: string | null;
+  measurements: DigitalRangeMeasurementId[];
+  measurementStats: DigitalRangeMeasurementStats | null;
+  measurementStatsBusy: boolean;
+  measurementStatsKey: string | null;
   name: string;
   note: string;
   selected: boolean;
@@ -413,6 +431,11 @@ function applyTrimmedCapture(
           ...range,
           startSample: Math.min(startSample, endSample),
           endSample: Math.max(startSample, endSample),
+          measurementError: null,
+          measurementStats: null,
+          measurementStatsBusy: false,
+          measurementStatsKey: null,
+          measurements: ensureRangeMeasurementIds(range.measurements),
         };
       })
       .filter((range) => range.endSample > range.startSample),
@@ -477,11 +500,17 @@ function createRangeMeasurement(
   const end = Math.max(start + 1, Math.min(totalSamples, Math.round(Math.max(startSample, endSample))));
   const index = session.rangeMeasurements.length;
   return {
+    annotationsVisible: true,
     channelIndex,
     color: RANGE_COLORS[index % RANGE_COLORS.length],
     endSample: end,
     expanded: true,
     id: `range-${Date.now()}-${index}`,
+    measurementError: null,
+    measurements: [...DEFAULT_DIGITAL_RANGE_MEASUREMENTS],
+    measurementStats: null,
+    measurementStatsBusy: false,
+    measurementStatsKey: null,
     name: `M${index}`,
     note: "",
     selected: true,
@@ -615,6 +644,7 @@ export default function App() {
   const sidebarShortcutRef = useRef<{ timeout: number | null; waiting: boolean }>({ timeout: null, waiting: false });
   const tileRequestSeq = useRef(0);
   const analyzerRequestSeq = useRef<Record<string, number>>({});
+  const rangeMeasurementRequestSeq = useRef<Record<string, number>>({});
   const viewportAnimationRef = useRef<number | null>(null);
   const sessionCounter = useRef(1);
 
@@ -966,6 +996,94 @@ export default function App() {
     activeSession?.summary,
     activeSession?.viewportSamples,
     activeSession?.viewportStart,
+    updateSession,
+  ]);
+
+  const rangeMeasurementSignature =
+    activeSession?.rangeMeasurements
+      .map((range) => `${range.id}:${range.channelIndex}:${range.startSample}:${range.endSample}`)
+      .join("|") ?? "";
+
+  useEffect(() => {
+    if (!activeSession?.summary || activeSession.rangeMeasurements.length === 0) return;
+    const sessionSnapshot = activeSession;
+    const timeout = window.setTimeout(() => {
+      sessionSnapshot.rangeMeasurements.forEach((range) => {
+        const statsKey = [
+          sessionSnapshot.summary!.metadata.captured_at,
+          sessionSnapshot.summary!.metadata.sample_count,
+          range.channelIndex,
+          range.startSample,
+          range.endSample,
+        ].join(":");
+        if (range.measurementStatsKey === statsKey && range.measurementStats && !range.measurementError) {
+          return;
+        }
+
+        const requestKey = `${sessionSnapshot.id}:${range.id}`;
+        const requestSeq = (rangeMeasurementRequestSeq.current[requestKey] ?? 0) + 1;
+        rangeMeasurementRequestSeq.current[requestKey] = requestSeq;
+        updateSession(sessionSnapshot.id, (current) => ({
+          ...current,
+          rangeMeasurements: current.rangeMeasurements.map((item) =>
+            item.id === range.id
+              ? {
+                  ...item,
+                  measurementError: null,
+                  measurementStatsBusy: true,
+                  measurements: ensureRangeMeasurementIds(item.measurements),
+                }
+              : item,
+          ),
+        }));
+
+        void measureDigitalRange({
+          channel: range.channelIndex,
+          start_sample: range.startSample,
+          end_sample: range.endSample,
+        })
+          .then((stats) => {
+            if (requestSeq !== rangeMeasurementRequestSeq.current[requestKey]) return;
+            updateSession(sessionSnapshot.id, (current) => ({
+              ...current,
+              rangeMeasurements: current.rangeMeasurements.map((item) =>
+                item.id === range.id
+                  ? {
+                      ...item,
+                      measurementError: null,
+                      measurementStats: stats,
+                      measurementStatsBusy: false,
+                      measurementStatsKey: statsKey,
+                      measurements: ensureRangeMeasurementIds(item.measurements),
+                    }
+                  : item,
+              ),
+            }));
+          })
+          .catch((error) => {
+            if (requestSeq !== rangeMeasurementRequestSeq.current[requestKey]) return;
+            updateSession(sessionSnapshot.id, (current) => ({
+              ...current,
+              rangeMeasurements: current.rangeMeasurements.map((item) =>
+                item.id === range.id
+                  ? {
+                      ...item,
+                      measurementError: String(error),
+                      measurementStatsBusy: false,
+                      measurementStatsKey: statsKey,
+                    }
+                  : item,
+              ),
+            }));
+          });
+      });
+    }, 45);
+    return () => window.clearTimeout(timeout);
+  }, [
+    activeSession?.id,
+    activeSession?.summary?.metadata.captured_at,
+    activeSession?.summary?.metadata.sample_count,
+    rangeMeasurementSignature,
     updateSession,
   ]);
 
@@ -2048,6 +2166,7 @@ export default function App() {
                         session={activeSession}
                       />
                       <RangeMeasurementsOverlay
+                        onOpenExtensions={() => setSelectedPanel("extensions")}
                         onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
                         rowHeights={visibleOuterRowHeights}
                         rowTopInsets={visibleAnalyzerInsets}
@@ -2685,12 +2804,14 @@ function CursorOverlay({
 }
 
 function RangeMeasurementsOverlay({
+  onOpenExtensions,
   onUpdateSession,
   rowHeights,
   rowTopInsets,
   session,
   visibleChannelIndexes,
 }: {
+  onOpenExtensions: () => void;
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   rowHeights: number[];
   rowTopInsets: number[];
@@ -2990,6 +3111,7 @@ function RangeMeasurementsOverlay({
               }))
             }
             onUpdate={(patch) => updateTooltipRange(range.id, patch)}
+            onOpenExtensions={onOpenExtensions}
             range={range}
             sampleRateHz={session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz}
             session={session}
@@ -3048,6 +3170,7 @@ function PlacingRangePreview({
 function RangeMeasurementTooltip({
   onClose,
   onDelete,
+  onOpenExtensions,
   onUpdate,
   range,
   sampleRateHz,
@@ -3056,16 +3179,28 @@ function RangeMeasurementTooltip({
 }: {
   onClose: () => void;
   onDelete: () => void;
+  onOpenExtensions: () => void;
   onUpdate: (patch: Partial<UiRangeMeasurement>) => void;
   range: UiRangeMeasurement;
   sampleRateHz: number;
   session: UiSession;
   style: CSSProperties;
 }) {
-  const metrics = computeRangeMetrics(session, range, sampleRateHz);
+  const [addOpen, setAddOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const measurementIds = ensureRangeMeasurementIds(range.measurements);
+  const stats = range.measurementStats;
 
   function copyRange() {
-    void navigator.clipboard?.writeText(rangeToClipboardString(range, metrics));
+    void navigator.clipboard?.writeText(
+      copyRangeMeasurementValues({
+        channelIndex: range.channelIndex,
+        measurementIds,
+        name: range.name,
+        note: range.note,
+        stats,
+      }),
+    );
   }
 
   return (
@@ -3081,30 +3216,54 @@ function RangeMeasurementTooltip({
       }
     >
       <div className="rangeTooltipGrid">
-        <MetricCell label="Delta T" value={metrics.duration} />
-        <MetricCell label="Edges" value={String(metrics.edges)} />
-        <MetricCell label="Frequency" value={metrics.frequency} />
-        <MetricCell label="Duty" value={metrics.duty} />
-        <MetricCell label="Width 1" value={metrics.width1} />
+        <MetricCell label="Delta T" value={formatDeltaTime(stats, sampleRateHz)} />
+        <MetricCell label="Edges" value={stats ? String(stats.edge_count) : range.measurementStatsBusy ? "..." : "N/A"} />
+        <MetricCell label="Frequency" value={formatRangeMeasurementValue("frequency", stats).value} />
+        <MetricCell label="Duty 1" value={formatRangeMeasurementValue("positive_duty", stats).value} />
+        <MetricCell label="Width 1" value={formatRangeMeasurementValue("positive_width", stats).value} />
         <MetricCell label="Channel" value={`D${range.channelIndex}`} />
       </div>
+      {range.measurementError && <div className="rangeMeasurementError">{range.measurementError}</div>}
       <div className="rangeTooltipDragBar">
-        <button
-          className="rangeTooltipIconButton placeholder"
-          disabled
-          title="Add or Remove Measurements - placeholder until the Measurements2 extension runner is ported"
-          type="button"
-        >
-          <Plus size={13} />
-        </button>
-        <button
-          className="rangeTooltipIconButton placeholder"
-          disabled
-          title="Annotation Setting - placeholder until full measurement settings are ported"
-          type="button"
-        >
-          <Settings2 size={13} />
-        </button>
+        <div className="rangeTooltipPopoverHost">
+          <button
+            className={`rangeTooltipIconButton ${addOpen ? "selected" : ""}`}
+            onClick={() => {
+              setSettingsOpen(false);
+              setAddOpen((open) => !open);
+            }}
+            title="Add or Remove Measurements"
+            type="button"
+          >
+            <Plus size={13} />
+          </button>
+          {addOpen && (
+            <RangeMeasurementAddMenu
+              measurementIds={measurementIds}
+              onChange={(measurements) => onUpdate({ measurements })}
+              onOpenExtensions={onOpenExtensions}
+            />
+          )}
+        </div>
+        <div className="rangeTooltipPopoverHost">
+          <button
+            className={`rangeTooltipIconButton ${settingsOpen ? "selected" : ""}`}
+            onClick={() => {
+              setAddOpen(false);
+              setSettingsOpen((open) => !open);
+            }}
+            title="Annotation Setting"
+            type="button"
+          >
+            <Settings2 size={13} />
+          </button>
+          {settingsOpen && (
+            <RangeMeasurementSettingsMenu
+              annotationsVisible={range.annotationsVisible}
+              onChange={(annotationsVisible) => onUpdate({ annotationsVisible })}
+            />
+          )}
+        </div>
         <button className="rangeTooltipIconButton" onClick={copyRange} title="Copy" type="button">
           <Copy size={13} />
         </button>
@@ -3139,6 +3298,107 @@ function RangeMeasurementTooltip({
         </div>
       </div>
     </section>
+  );
+}
+
+function RangeMeasurementAddMenu({
+  measurementIds,
+  onChange,
+  onOpenExtensions,
+}: {
+  measurementIds: DigitalRangeMeasurementId[];
+  onChange: (measurementIds: DigitalRangeMeasurementId[]) => void;
+  onOpenExtensions: () => void;
+}) {
+  const [search, setSearch] = useState("");
+  const selected = new Set(measurementIds);
+  const filteredCategories = DIGITAL_RANGE_MEASUREMENT_CATEGORIES.map((category) => ({
+    ...category,
+    measurements: category.measurements.filter((measurement) => {
+      const query = search.trim().toLowerCase();
+      if (!query) return true;
+      return (
+        measurement.label.toLowerCase().includes(query) ||
+        measurement.description.toLowerCase().includes(query)
+      );
+    }),
+  })).filter((category) => category.measurements.length > 0);
+
+  function toggle(id: DigitalRangeMeasurementId) {
+    if (selected.has(id)) {
+      onChange(measurementIds.filter((measurementId) => measurementId !== id));
+      return;
+    }
+    onChange([...measurementIds, id]);
+  }
+
+  return (
+    <div className="rangeMeasurementAddMenu" onClick={(event) => event.stopPropagation()}>
+      <div className="rangeMeasurementAddSearch">
+        <Search size={13} />
+        <input
+          autoFocus
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search..."
+          value={search}
+        />
+      </div>
+      <div className="rangeMeasurementAddActions">
+        <button onClick={() => onChange([...DEFAULT_DIGITAL_RANGE_MEASUREMENTS])} type="button">
+          All
+        </button>
+        <button onClick={() => onChange([])} type="button">
+          Clear
+        </button>
+      </div>
+      <div className="rangeMeasurementAddList">
+        {filteredCategories.map((category) => (
+          <section key={category.name}>
+            <strong>{category.name}</strong>
+            {category.measurements.map((measurement) => {
+              const enabled = selected.has(measurement.id);
+              return (
+                <button
+                  className={enabled ? "enabled" : ""}
+                  key={measurement.id}
+                  onClick={() => toggle(measurement.id)}
+                  title={measurement.description}
+                  type="button"
+                >
+                  <span>{measurement.label}</span>
+                  <span className="rangeMeasurementAddToggle">{enabled ? "−" : "+"}</span>
+                </button>
+              );
+            })}
+          </section>
+        ))}
+      </div>
+      <button className="rangeMeasurementMoreButton" onClick={onOpenExtensions} type="button">
+        <SaleaeSidebarIcon iconUrl={extensionsIcon} />
+        Install More Measurements
+      </button>
+    </div>
+  );
+}
+
+function RangeMeasurementSettingsMenu({
+  annotationsVisible,
+  onChange,
+}: {
+  annotationsVisible: boolean;
+  onChange: (annotationsVisible: boolean) => void;
+}) {
+  return (
+    <div className="rangeMeasurementSettingsMenu" onClick={(event) => event.stopPropagation()}>
+      <label>
+        <span>Display Annotations</span>
+        <input
+          checked={annotationsVisible}
+          onChange={(event) => onChange(event.target.checked)}
+          type="checkbox"
+        />
+      </label>
+    </div>
   );
 }
 
@@ -4765,7 +5025,9 @@ function MeasurementsPanel({
   session: UiSession;
 }) {
   const [addOpen, setAddOpen] = useState(false);
+  const [openAddFor, setOpenAddFor] = useState<string | null>(null);
   const [openMenuFor, setOpenMenuFor] = useState<string | null>(null);
+  const [openSettingsFor, setOpenSettingsFor] = useState<string | null>(null);
   const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
   const canAdd = Boolean(session.summary) && !session.busy;
 
@@ -4813,8 +5075,15 @@ function MeasurementsPanel({
   }
 
   function copyRange(range: UiRangeMeasurement) {
-    const metrics = computeRangeMetrics(session, range, sampleRateHz);
-    void navigator.clipboard?.writeText(rangeToClipboardString(range, metrics));
+    void navigator.clipboard?.writeText(
+      copyRangeMeasurementValues({
+        channelIndex: range.channelIndex,
+        measurementIds: ensureRangeMeasurementIds(range.measurements),
+        name: range.name,
+        note: range.note,
+        stats: range.measurementStats,
+      }),
+    );
   }
 
   function addRangeFromMenu() {
@@ -4856,7 +5125,8 @@ function MeasurementsPanel({
       ) : (
         <div className="rangeMeasurementList">
           {session.rangeMeasurements.map((range) => {
-            const metrics = computeRangeMetrics(session, range, sampleRateHz);
+            const measurementIds = ensureRangeMeasurementIds(range.measurements);
+            const stats = range.measurementStats;
             return (
               <section
                 className={`rangeMeasurementItem ${range.selected ? "selected" : ""}`}
@@ -4886,9 +5156,50 @@ function MeasurementsPanel({
                     />
                     <span>→</span>
                   </div>
-                  <strong className="rangeDeltaValue">Δ{metrics.duration}</strong>
+                  <strong className="rangeDeltaValue">Δ{formatDeltaTime(stats, sampleRateHz)}</strong>
                   <span className="rangeCommentPreview">{range.note}</span>
                   <div className="rangeMeasurementActions">
+                    <div className="rangeItemPopoverHost">
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenSettingsFor(null);
+                          setOpenMenuFor(null);
+                          setOpenAddFor((current) => (current === range.id ? null : range.id));
+                        }}
+                        title="Add or Remove Measurements"
+                        type="button"
+                      >
+                        <Plus size={12} />
+                      </button>
+                      {openAddFor === range.id && (
+                        <RangeMeasurementAddMenu
+                          measurementIds={measurementIds}
+                          onChange={(measurements) => updateRange(range.id, { measurements })}
+                          onOpenExtensions={onOpenExtensions}
+                        />
+                      )}
+                    </div>
+                    <div className="rangeItemPopoverHost">
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenAddFor(null);
+                          setOpenMenuFor(null);
+                          setOpenSettingsFor((current) => (current === range.id ? null : range.id));
+                        }}
+                        title="Annotation Setting"
+                        type="button"
+                      >
+                        <Settings2 size={12} />
+                      </button>
+                      {openSettingsFor === range.id && (
+                        <RangeMeasurementSettingsMenu
+                          annotationsVisible={range.annotationsVisible}
+                          onChange={(annotationsVisible) => updateRange(range.id, { annotationsVisible })}
+                        />
+                      )}
+                    </div>
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
@@ -4902,6 +5213,8 @@ function MeasurementsPanel({
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
+                        setOpenAddFor(null);
+                        setOpenSettingsFor(null);
                         setOpenMenuFor((current) => (current === range.id ? null : range.id));
                       }}
                       title="More"
@@ -4935,13 +5248,17 @@ function MeasurementsPanel({
                 </div>
                 {range.expanded && (
                   <>
-                    <div className="rangeMetricsGrid">
-                      <MetricCell label="Channel" value={`D${range.channelIndex}`} />
-                      <MetricCell label="Edges" value={String(metrics.edges)} />
-                      <MetricCell label="Frequency" value={metrics.frequency} />
-                      <MetricCell label="Duty" value={metrics.duty} />
-                      <MetricCell label="Width 1" value={metrics.width1} />
-                    </div>
+                    <RangeMeasurementTable
+                      measurementIds={measurementIds}
+                      onRemove={(measurementId) =>
+                        updateRange(range.id, {
+                          measurements: measurementIds.filter((id) => id !== measurementId),
+                        })
+                      }
+                      sampleRateHz={sampleRateHz}
+                      stats={stats}
+                    />
+                    {range.measurementError && <div className="rangeMeasurementError">{range.measurementError}</div>}
                     <textarea
                       className="rangeNote"
                       onChange={(event) => updateRange(range.id, { note: event.target.value })}
@@ -4960,6 +5277,81 @@ function MeasurementsPanel({
   );
 }
 
+function RangeMeasurementTable({
+  measurementIds,
+  onRemove,
+  sampleRateHz,
+  stats,
+}: {
+  measurementIds: DigitalRangeMeasurementId[];
+  onRemove: (measurementId: DigitalRangeMeasurementId) => void;
+  sampleRateHz: number;
+  stats: DigitalRangeMeasurementStats | null;
+}) {
+  return (
+    <div className="rangeMeasureTable">
+      <RangeMeasurementValueRow
+        canDelete={false}
+        fullValue={formatDeltaTime(stats, sampleRateHz)}
+        label="Delta T"
+        value={formatDeltaTime(stats, sampleRateHz)}
+      />
+      {measurementIds.map((measurementId) => {
+        const definition = rangeMeasurementDefinition(measurementId);
+        const measurementValue = formatRangeMeasurementValue(measurementId, stats);
+        if (!definition) return null;
+        return (
+          <RangeMeasurementValueRow
+            key={measurementId}
+            fullValue={measurementValue.fullValue}
+            label={definition.label}
+            onDelete={() => onRemove(measurementId)}
+            value={measurementValue.value}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function RangeMeasurementValueRow({
+  canDelete = true,
+  fullValue,
+  label,
+  onDelete,
+  value,
+}: {
+  canDelete?: boolean;
+  fullValue: string;
+  label: string;
+  onDelete?: () => void;
+  value: string;
+}) {
+  return (
+    <>
+      <div className="rangeMeasureLabel" title={label}>
+        {label}
+      </div>
+      <div className="rangeMeasureSeparator" />
+      <div className="rangeMeasureValue" title={fullValue}>
+        {value}
+      </div>
+      <button
+        className="rangeMeasureDelete"
+        disabled={!canDelete}
+        onClick={(event) => {
+          event.stopPropagation();
+          onDelete?.();
+        }}
+        title={canDelete ? "Remove" : undefined}
+        type="button"
+      >
+        {canDelete ? <X size={10} /> : null}
+      </button>
+    </>
+  );
+}
+
 function MetricCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="metricCell">
@@ -4967,63 +5359,6 @@ function MetricCell({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
-}
-
-function computeRangeMetrics(session: UiSession, range: UiRangeMeasurement, sampleRateHz: number) {
-  const start = Math.min(range.startSample, range.endSample);
-  const end = Math.max(range.startSample, range.endSample);
-  const durationSamples = Math.max(1, end - start);
-  const channel = session.tile?.channels.find((item) => item.channel === range.channelIndex);
-  const edges = channel
-    ? [...channel.rising_edges, ...channel.falling_edges].filter((sample) => sample >= start && sample <= end).length
-    : 0;
-  const risingEdges = channel?.rising_edges.filter((sample) => sample >= start && sample <= end) ?? [];
-  const periodSamples =
-    risingEdges.length >= 2
-      ? risingEdges[1] - risingEdges[0]
-      : channel
-        ? [...channel.rising_edges, ...channel.falling_edges]
-            .filter((sample) => sample >= start && sample <= end)
-            .sort((a, b) => a - b)
-            .slice(0, 2)
-            .reduce((delta, sample, index, samples) => (index === 1 ? sample - samples[0] : delta), 0)
-        : 0;
-
-  let highSamples = 0;
-  let width1Samples = 0;
-  if (channel) {
-    channel.segments.forEach((segment) => {
-      if (!segment.high) return;
-      const overlapStart = Math.max(start, segment.start_sample);
-      const overlapEnd = Math.min(end, segment.end_sample);
-      const overlap = Math.max(0, overlapEnd - overlapStart);
-      highSamples += overlap;
-      width1Samples = Math.max(width1Samples, overlap);
-    });
-  }
-
-  const duty = durationSamples > 0 ? (highSamples / durationSamples) * 100 : 0;
-  return {
-    duration: formatSeconds(durationSamples / Math.max(1, sampleRateHz)),
-    duty: highSamples > 0 ? `${trimNumber(duty)}%` : "-",
-    edges,
-    frequency: periodSamples > 0 ? formatRate(sampleRateHz / periodSamples) : "-",
-    width1: width1Samples > 0 ? formatSeconds(width1Samples / Math.max(1, sampleRateHz)) : "-",
-  };
-}
-
-function rangeToClipboardString(range: UiRangeMeasurement, metrics: ReturnType<typeof computeRangeMetrics>) {
-  return [
-    `${range.name}\tD${range.channelIndex}`,
-    `Delta T\t${metrics.duration}`,
-    `Edges\t${metrics.edges}`,
-    `Frequency\t${metrics.frequency}`,
-    `Duty\t${metrics.duty}`,
-    `Width 1\t${metrics.width1}`,
-    range.note ? `Comment\t${range.note}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
 }
 
 function TimingMarkersPanel({

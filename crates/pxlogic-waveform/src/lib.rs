@@ -20,6 +20,43 @@ pub struct WaveformRequest {
     pub channels: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DigitalRangeMeasurementRequest {
+    pub channel: u8,
+    pub start_sample: u64,
+    pub end_sample: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DigitalRangeMeasurementStats {
+    pub channel: u8,
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub sample_rate_hz: u64,
+    pub duration_samples: u64,
+    pub high_samples: u64,
+    pub low_samples: u64,
+    pub rising_edges: u64,
+    pub falling_edges: u64,
+    pub edge_count: u64,
+    pub high_width_count: u64,
+    pub low_width_count: u64,
+    pub avg_high_width_samples: Option<f64>,
+    pub avg_low_width_samples: Option<f64>,
+    pub cycle_count: u64,
+    pub avg_period_samples: Option<f64>,
+    pub min_period_samples: Option<u64>,
+    pub max_period_samples: Option<u64>,
+    pub period_std_dev_samples: Option<f64>,
+    pub avg_frequency_hz: Option<f64>,
+    pub min_frequency_hz: Option<f64>,
+    pub max_frequency_hz: Option<f64>,
+    pub positive_duty: Option<f64>,
+    pub negative_duty: Option<f64>,
+    pub first_sample_high: bool,
+    pub last_sample_high: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WaveformTile {
     pub start_sample: u64,
@@ -138,6 +175,203 @@ pub fn build_tile(capture: &CaptureData, request: &WaveformRequest) -> Result<Wa
         samples_per_pixel: samples_per_bin,
         channels,
     })
+}
+
+pub fn measure_digital_range(
+    capture: &CaptureData,
+    request: &DigitalRangeMeasurementRequest,
+) -> Result<DigitalRangeMeasurementStats> {
+    let metadata = &capture.metadata;
+    if request.channel >= metadata.channel_count {
+        return Err(WaveformError::InvalidRequest);
+    }
+
+    let total_samples = metadata.sample_count;
+    let start = request.start_sample.min(total_samples);
+    let end = request.end_sample.min(total_samples);
+    if end <= start {
+        return Err(WaveformError::InvalidRequest);
+    }
+
+    let mask = 1u32 << request.channel;
+    let first_word = read_sample_word(&capture.samples, metadata.unitsize, start)
+        .ok_or(WaveformError::InvalidCapture)?;
+    let mut previous_high = first_word & mask != 0;
+    let first_sample_high = previous_high;
+    let mut run_start = start;
+    let mut high_samples = 0u64;
+    let mut high_widths = SampleStats::default();
+    let mut low_widths = SampleStats::default();
+    let mut rising_periods = SampleStats::default();
+    let mut falling_periods = SampleStats::default();
+    let mut last_rising: Option<u64> = None;
+    let mut last_falling: Option<u64> = None;
+    let mut rising_edges = 0u64;
+    let mut falling_edges = 0u64;
+
+    if start > 0 {
+        let before_word = read_sample_word(&capture.samples, metadata.unitsize, start - 1)
+            .ok_or(WaveformError::InvalidCapture)?;
+        let before_high = before_word & mask != 0;
+        if before_high != previous_high {
+            if previous_high {
+                rising_edges = rising_edges.saturating_add(1);
+                last_rising = Some(start);
+            } else {
+                falling_edges = falling_edges.saturating_add(1);
+                last_falling = Some(start);
+            }
+        }
+    }
+
+    for sample in start + 1..end {
+        let word = read_sample_word(&capture.samples, metadata.unitsize, sample)
+            .ok_or(WaveformError::InvalidCapture)?;
+        let current_high = word & mask != 0;
+        if current_high == previous_high {
+            continue;
+        }
+
+        let run_width = sample.saturating_sub(run_start);
+        if previous_high {
+            high_samples = high_samples.saturating_add(run_width);
+            high_widths.push(run_width);
+            falling_edges = falling_edges.saturating_add(1);
+            if let Some(previous_falling) = last_falling {
+                falling_periods.push(sample.saturating_sub(previous_falling));
+            }
+            last_falling = Some(sample);
+        } else {
+            low_widths.push(run_width);
+            rising_edges = rising_edges.saturating_add(1);
+            if let Some(previous_rising) = last_rising {
+                rising_periods.push(sample.saturating_sub(previous_rising));
+            }
+            last_rising = Some(sample);
+        }
+
+        run_start = sample;
+        previous_high = current_high;
+    }
+
+    let trailing_width = end.saturating_sub(run_start);
+    if previous_high {
+        high_samples = high_samples.saturating_add(trailing_width);
+        high_widths.push(trailing_width);
+    } else {
+        low_widths.push(trailing_width);
+    }
+
+    if end < total_samples {
+        let after_word = read_sample_word(&capture.samples, metadata.unitsize, end)
+            .ok_or(WaveformError::InvalidCapture)?;
+        let after_high = after_word & mask != 0;
+        if after_high != previous_high {
+            if after_high {
+                rising_edges = rising_edges.saturating_add(1);
+                if let Some(previous_rising) = last_rising {
+                    rising_periods.push(end.saturating_sub(previous_rising));
+                }
+            } else {
+                falling_edges = falling_edges.saturating_add(1);
+                if let Some(previous_falling) = last_falling {
+                    falling_periods.push(end.saturating_sub(previous_falling));
+                }
+            }
+        }
+    }
+
+    let duration_samples = end.saturating_sub(start);
+    let low_samples = duration_samples.saturating_sub(high_samples);
+    let period_stats = if rising_periods.count > 0 {
+        &rising_periods
+    } else {
+        &falling_periods
+    };
+    let avg_period_samples = period_stats.average();
+    let avg_frequency_hz = avg_period_samples
+        .filter(|period| *period > 0.0)
+        .map(|period| metadata.sample_rate_hz as f64 / period);
+    let min_frequency_hz = period_stats
+        .max
+        .filter(|period| *period > 0)
+        .map(|period| metadata.sample_rate_hz as f64 / period as f64);
+    let max_frequency_hz = period_stats
+        .min
+        .filter(|period| *period > 0)
+        .map(|period| metadata.sample_rate_hz as f64 / period as f64);
+
+    Ok(DigitalRangeMeasurementStats {
+        channel: request.channel,
+        start_sample: start,
+        end_sample: end,
+        sample_rate_hz: metadata.sample_rate_hz,
+        duration_samples,
+        high_samples,
+        low_samples,
+        rising_edges,
+        falling_edges,
+        edge_count: rising_edges.saturating_add(falling_edges),
+        high_width_count: high_widths.count,
+        low_width_count: low_widths.count,
+        avg_high_width_samples: high_widths.average(),
+        avg_low_width_samples: low_widths.average(),
+        cycle_count: period_stats.count,
+        avg_period_samples,
+        min_period_samples: period_stats.min,
+        max_period_samples: period_stats.max,
+        period_std_dev_samples: period_stats.std_dev(),
+        avg_frequency_hz,
+        min_frequency_hz,
+        max_frequency_hz,
+        positive_duty: if duration_samples > 0 {
+            Some(high_samples as f64 * 100.0 / duration_samples as f64)
+        } else {
+            None
+        },
+        negative_duty: if duration_samples > 0 {
+            Some(low_samples as f64 * 100.0 / duration_samples as f64)
+        } else {
+            None
+        },
+        first_sample_high,
+        last_sample_high: previous_high,
+    })
+}
+
+#[derive(Default)]
+struct SampleStats {
+    count: u64,
+    sum: f64,
+    sum_squares: f64,
+    min: Option<u64>,
+    max: Option<u64>,
+}
+
+impl SampleStats {
+    fn push(&mut self, value: u64) {
+        if value == 0 {
+            return;
+        }
+        self.count = self.count.saturating_add(1);
+        self.sum += value as f64;
+        self.sum_squares += (value as f64) * (value as f64);
+        self.min = Some(self.min.map_or(value, |current| current.min(value)));
+        self.max = Some(self.max.map_or(value, |current| current.max(value)));
+    }
+
+    fn average(&self) -> Option<f64> {
+        (self.count > 0).then(|| self.sum / self.count as f64)
+    }
+
+    fn std_dev(&self) -> Option<f64> {
+        if self.count == 0 {
+            return None;
+        }
+        let average = self.sum / self.count as f64;
+        let variance = (self.sum_squares / self.count as f64) - average * average;
+        Some(variance.max(0.0).sqrt())
+    }
 }
 
 fn summarize_bin(
@@ -325,5 +559,39 @@ mod tests {
         .unwrap();
         assert_eq!(tile.sample_count, 4);
         assert_eq!(tile.channels.len(), 4);
+    }
+
+    #[test]
+    fn measures_digital_range_edges_and_duty() {
+        let capture = generate_sample_words(&CaptureSettings {
+            sample_rate_hz: 10_000,
+            duration_ms: 100,
+            channel_count: 4,
+            ..CaptureSettings::default()
+        })
+        .unwrap();
+
+        let stats = measure_digital_range(
+            &capture,
+            &DigitalRangeMeasurementRequest {
+                channel: 1,
+                start_sample: 0,
+                end_sample: capture.metadata.sample_count.min(100_000),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(stats.channel, 1);
+        assert!(stats.duration_samples > 0);
+        assert_eq!(
+            stats.edge_count,
+            stats.rising_edges + stats.falling_edges
+        );
+        assert_eq!(
+            stats.duration_samples,
+            stats.high_samples + stats.low_samples
+        );
+        assert!(stats.positive_duty.unwrap_or_default() >= 0.0);
+        assert!(stats.negative_duty.unwrap_or_default() >= 0.0);
     }
 }

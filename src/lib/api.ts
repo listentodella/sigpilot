@@ -76,6 +76,41 @@ export interface WaveformRequest {
   channels: number[];
 }
 
+export interface DigitalRangeMeasurementRequest {
+  channel: number;
+  start_sample: number;
+  end_sample: number;
+}
+
+export interface DigitalRangeMeasurementStats {
+  channel: number;
+  start_sample: number;
+  end_sample: number;
+  sample_rate_hz: number;
+  duration_samples: number;
+  high_samples: number;
+  low_samples: number;
+  rising_edges: number;
+  falling_edges: number;
+  edge_count: number;
+  high_width_count: number;
+  low_width_count: number;
+  avg_high_width_samples: number | null;
+  avg_low_width_samples: number | null;
+  cycle_count: number;
+  avg_period_samples: number | null;
+  min_period_samples: number | null;
+  max_period_samples: number | null;
+  period_std_dev_samples: number | null;
+  avg_frequency_hz: number | null;
+  min_frequency_hz: number | null;
+  max_frequency_hz: number | null;
+  positive_duty: number | null;
+  negative_duty: number | null;
+  first_sample_high: boolean;
+  last_sample_high: boolean;
+}
+
 export interface WaveformBin {
   x: number;
   first: boolean;
@@ -315,6 +350,13 @@ export function trimCapture(request: TrimCaptureRequest): Promise<CaptureSummary
 export function getWaveformTile(request: WaveformRequest): Promise<WaveformTile> {
   if (!isTauriRuntime()) return Promise.resolve(buildPreviewTile(request));
   return callBackend("get_waveform_tile", { request });
+}
+
+export function measureDigitalRange(
+  request: DigitalRangeMeasurementRequest,
+): Promise<DigitalRangeMeasurementStats> {
+  if (!isTauriRuntime()) return Promise.resolve(measurePreviewDigitalRange(request));
+  return callBackend("measure_digital_range", { request });
 }
 
 export function decodeUartFrames(settings: UartDecodeSettings): Promise<DecodedFrame[]> {
@@ -786,9 +828,218 @@ interface PreviewDigitalData {
   falling_edges: number[];
 }
 
+interface PreviewSampleStats {
+  count: number;
+  max: number | null;
+  min: number | null;
+  sum: number;
+  sumSquares: number;
+}
+
 const PREVIEW_EXACT_SEGMENT_LIMIT = 12_000;
 const PREVIEW_BIN_SEGMENT_LIMIT = 180_000;
+const PREVIEW_MEASUREMENT_SEGMENT_LIMIT = 2_000_000;
 const PREVIEW_UART_BAUD = 115_200;
+
+function measurePreviewDigitalRange(request: DigitalRangeMeasurementRequest): DigitalRangeMeasurementStats {
+  const metadata = previewCapture.metadata;
+  if (request.channel < 0 || request.channel >= metadata.channel_count) {
+    throw new Error("invalid digital range channel");
+  }
+  const maxStart = Math.max(0, metadata.sample_count - 1);
+  const startSample = Math.max(0, Math.min(maxStart, Math.round(request.start_sample)));
+  const endSample = Math.max(startSample + 1, Math.min(metadata.sample_count, Math.round(request.end_sample)));
+  const data = buildPreviewDigitalSegments(
+    startSample,
+    endSample,
+    request.channel,
+    metadata.sample_rate_hz,
+    PREVIEW_MEASUREMENT_SEGMENT_LIMIT,
+  );
+  if (!data) {
+    return emptyPreviewDigitalRangeStats(request.channel, startSample, endSample, metadata.sample_rate_hz);
+  }
+  const boundaryAdjustedData = addPreviewRangeBoundaryEdges(
+    data,
+    request.channel,
+    startSample,
+    endSample,
+    metadata.sample_count,
+    metadata.sample_rate_hz,
+  );
+  return measurePreviewDigitalSegments(
+    request.channel,
+    startSample,
+    endSample,
+    metadata.sample_rate_hz,
+    boundaryAdjustedData,
+  );
+}
+
+function addPreviewRangeBoundaryEdges(
+  data: PreviewDigitalData,
+  channel: number,
+  startSample: number,
+  endSample: number,
+  totalSamples: number,
+  sampleRateHz: number,
+): PreviewDigitalData {
+  const rising_edges = [...data.rising_edges];
+  const falling_edges = [...data.falling_edges];
+  const firstHigh = previewDigitalLevelAt(startSample, channel, sampleRateHz);
+  if (startSample > 0) {
+    const beforeHigh = previewDigitalLevelAt(startSample - 1, channel, sampleRateHz);
+    if (beforeHigh !== firstHigh) {
+      (firstHigh ? rising_edges : falling_edges).push(startSample);
+    }
+  }
+  if (endSample < totalSamples) {
+    const lastHigh = previewDigitalLevelAt(endSample - 1, channel, sampleRateHz);
+    const afterHigh = previewDigitalLevelAt(endSample, channel, sampleRateHz);
+    if (lastHigh !== afterHigh) {
+      (afterHigh ? rising_edges : falling_edges).push(endSample);
+    }
+  }
+  rising_edges.sort((a, b) => a - b);
+  falling_edges.sort((a, b) => a - b);
+  return { ...data, rising_edges, falling_edges };
+}
+
+function emptyPreviewDigitalRangeStats(
+  channel: number,
+  startSample: number,
+  endSample: number,
+  sampleRateHz: number,
+): DigitalRangeMeasurementStats {
+  const durationSamples = Math.max(1, endSample - startSample);
+  return {
+    channel,
+    start_sample: startSample,
+    end_sample: endSample,
+    sample_rate_hz: sampleRateHz,
+    duration_samples: durationSamples,
+    high_samples: 0,
+    low_samples: durationSamples,
+    rising_edges: 0,
+    falling_edges: 0,
+    edge_count: 0,
+    high_width_count: 0,
+    low_width_count: 0,
+    avg_high_width_samples: null,
+    avg_low_width_samples: null,
+    cycle_count: 0,
+    avg_period_samples: null,
+    min_period_samples: null,
+    max_period_samples: null,
+    period_std_dev_samples: null,
+    avg_frequency_hz: null,
+    min_frequency_hz: null,
+    max_frequency_hz: null,
+    positive_duty: null,
+    negative_duty: null,
+    first_sample_high: false,
+    last_sample_high: false,
+  };
+}
+
+function measurePreviewDigitalSegments(
+  channel: number,
+  startSample: number,
+  endSample: number,
+  sampleRateHz: number,
+  data: PreviewDigitalData,
+): DigitalRangeMeasurementStats {
+  const durationSamples = Math.max(1, endSample - startSample);
+  const highWidths = makePreviewSampleStats();
+  const lowWidths = makePreviewSampleStats();
+  const risingPeriods = makePreviewSampleStats();
+  const fallingPeriods = makePreviewSampleStats();
+  let highSamples = 0;
+  let lastRising: number | null = null;
+  let lastFalling: number | null = null;
+  let firstSampleHigh = false;
+  let lastSampleHigh = false;
+
+  data.segments.forEach((segment, index) => {
+    const width = Math.max(0, Math.min(endSample, segment.end_sample) - Math.max(startSample, segment.start_sample));
+    if (index === 0) firstSampleHigh = segment.high;
+    lastSampleHigh = segment.high;
+    if (width <= 0) return;
+    if (segment.high) {
+      highSamples += width;
+      pushPreviewSampleStats(highWidths, width);
+    } else {
+      pushPreviewSampleStats(lowWidths, width);
+    }
+  });
+
+  data.rising_edges.forEach((edge) => {
+    if (lastRising !== null) pushPreviewSampleStats(risingPeriods, edge - lastRising);
+    lastRising = edge;
+  });
+  data.falling_edges.forEach((edge) => {
+    if (lastFalling !== null) pushPreviewSampleStats(fallingPeriods, edge - lastFalling);
+    lastFalling = edge;
+  });
+
+  const periodStats = risingPeriods.count > 0 ? risingPeriods : fallingPeriods;
+  const avgPeriod = averagePreviewSampleStats(periodStats);
+  const maxPeriod = periodStats.max;
+  const minPeriod = periodStats.min;
+  const lowSamples = Math.max(0, durationSamples - highSamples);
+
+  return {
+    channel,
+    start_sample: startSample,
+    end_sample: endSample,
+    sample_rate_hz: sampleRateHz,
+    duration_samples: durationSamples,
+    high_samples: highSamples,
+    low_samples: lowSamples,
+    rising_edges: data.rising_edges.length,
+    falling_edges: data.falling_edges.length,
+    edge_count: data.rising_edges.length + data.falling_edges.length,
+    high_width_count: highWidths.count,
+    low_width_count: lowWidths.count,
+    avg_high_width_samples: averagePreviewSampleStats(highWidths),
+    avg_low_width_samples: averagePreviewSampleStats(lowWidths),
+    cycle_count: periodStats.count,
+    avg_period_samples: avgPeriod,
+    min_period_samples: minPeriod,
+    max_period_samples: maxPeriod,
+    period_std_dev_samples: stdDevPreviewSampleStats(periodStats),
+    avg_frequency_hz: avgPeriod && avgPeriod > 0 ? sampleRateHz / avgPeriod : null,
+    min_frequency_hz: maxPeriod && maxPeriod > 0 ? sampleRateHz / maxPeriod : null,
+    max_frequency_hz: minPeriod && minPeriod > 0 ? sampleRateHz / minPeriod : null,
+    positive_duty: (highSamples / durationSamples) * 100,
+    negative_duty: (lowSamples / durationSamples) * 100,
+    first_sample_high: firstSampleHigh,
+    last_sample_high: lastSampleHigh,
+  };
+}
+
+function makePreviewSampleStats(): PreviewSampleStats {
+  return { count: 0, max: null, min: null, sum: 0, sumSquares: 0 };
+}
+
+function pushPreviewSampleStats(stats: PreviewSampleStats, value: number) {
+  if (!Number.isFinite(value) || value <= 0) return;
+  stats.count += 1;
+  stats.sum += value;
+  stats.sumSquares += value * value;
+  stats.min = stats.min === null ? value : Math.min(stats.min, value);
+  stats.max = stats.max === null ? value : Math.max(stats.max, value);
+}
+
+function averagePreviewSampleStats(stats: PreviewSampleStats) {
+  return stats.count > 0 ? stats.sum / stats.count : null;
+}
+
+function stdDevPreviewSampleStats(stats: PreviewSampleStats) {
+  if (stats.count === 0) return null;
+  const average = stats.sum / stats.count;
+  return Math.sqrt(Math.max(0, stats.sumSquares / stats.count - average * average));
+}
 
 function buildPreviewExactDigitalData(
   startSample: number,

@@ -6,7 +6,7 @@
 
 - `src/App.tsx`
   - 当前 React 工作台主体。
-  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口、通道右键菜单状态、Add Range Measurement 放置状态和 Measurements range overlay/tooltip。
+  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口、通道右键菜单状态、Add Range Measurement 放置状态、Measurements range overlay/tooltip 和 range measurement runner 结果绑定。
 - `src/styles.css`
   - 全局视觉样式。
   - 包含 Saleae 风格顶部工具栏、启动页、右侧栏、底栏、session tab、popover、波形区域样式。
@@ -49,7 +49,7 @@
 
 - `src/lib/api.ts`
   - Tauri 命令封装。
-  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、sample 裁剪、UART decode、viewport UART frame window、Saleae 风格 protocol bubble window，以及浏览器变脉宽 Demo tile。
+  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、sample 裁剪、digital range measurement、UART decode、viewport UART frame window、Saleae 风格 protocol bubble window，以及浏览器变脉宽 Demo tile/measurement fallback。
 - `src/lib/analyzers.ts`
   - Analyzer UI 状态类型、Saleae analyzer 色板、protocol bubble 状态、bubble strip 尺寸常量和 Async Serial decode 支持判断。
 - `src/lib/format.ts`
@@ -67,6 +67,8 @@
 - `src/lib/saleaeTimingDisplay.ts`
   - 从 Logic 2.4.43 `timingDisplay.ts` 搬运的高精度 major/minor 时间刻度算法。
   - 包含原版 DarkTheme `border-10` / `border-20` GridLines 色值。
+- `src/lib/rangeMeasurements.ts`
+  - Measurements2 风格数字 range measurement id、默认列表、分类、文案、格式化和 copy 输出 helper。
 
 ## 已搬入的小型 Saleae 视觉资源
 
@@ -87,7 +89,7 @@
 
 - `src-tauri/src/main.rs`
   - Tauri 命令层和事件转发。
-  - 包含读取本地扩展 package、创建扩展模板目录和当前 capture sample 裁剪的命令。
+  - 包含读取本地扩展 package、创建扩展模板目录、当前 capture sample 裁剪和 digital range measurement 的命令。
 - `src-tauri/src/bin/usb_smoke.rs`
   - USB smoke test 工具。
 - `src-tauri/tauri.conf.json`
@@ -106,7 +108,7 @@
 - `crates/pxlogic-file`
   - `.pxcap`、`.sr`、VCD 读写。
 - `crates/pxlogic-waveform`
-  - 波形 tile 生成。
+  - 波形 tile 生成和数字 range measurement scanner。
 
 ## 项目配置
 
