@@ -1092,7 +1092,7 @@ button:disabled {
 }
 
 .channelContextItem:hover:not(:disabled),
-.channelContextSubmenu:hover > .channelContextItem {
+.channelContextSubmenu:not(.disabled):hover > .channelContextItem {
   background: var(--hover-background);
 }
 
@@ -1134,6 +1134,10 @@ button:disabled {
 
 .channelContextSubmenu {
   position: relative;
+}
+
+.channelContextSubmenu.disabled {
+  opacity: 0.62;
 }
 
 .channelContextSubmenuPanel {

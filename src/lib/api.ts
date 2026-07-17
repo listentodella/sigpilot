@@ -48,6 +48,11 @@ export interface CaptureSummary {
   bytes: number;
 }
 
+export interface TrimCaptureRequest {
+  trim_before_sample?: number;
+  trim_after_sample?: number;
+}
+
 export interface CaptureProgress {
   bytes_read: number;
   bytes_expected: number;
@@ -283,6 +288,28 @@ export function saveCapture(path: string): Promise<void> {
 export function exportCapture(path: string, format: ExportFormat): Promise<void> {
   if (!isTauriRuntime()) return Promise.resolve();
   return callBackend("export_capture", { path, format });
+}
+
+export function trimCapture(request: TrimCaptureRequest): Promise<CaptureSummary> {
+  if (!isTauriRuntime()) {
+    const totalSamples = previewCapture.metadata.sample_count;
+    const safeTotal = Math.max(1, totalSamples);
+    const startSample = Math.max(0, Math.min(safeTotal - 1, Math.round(request.trim_before_sample ?? 0)));
+    const endSample = Math.max(
+      startSample + 1,
+      Math.min(safeTotal, Math.round(request.trim_after_sample ?? safeTotal)),
+    );
+    const sampleCount = Math.max(1, endSample - startSample);
+    previewCapture = {
+      metadata: {
+        ...previewCapture.metadata,
+        sample_count: sampleCount,
+      },
+      bytes: sampleCount * previewCapture.metadata.unitsize,
+    };
+    return Promise.resolve(previewCapture);
+  }
+  return callBackend("trim_capture", { request });
 }
 
 export function getWaveformTile(request: WaveformRequest): Promise<WaveformTile> {

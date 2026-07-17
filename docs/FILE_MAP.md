@@ -30,7 +30,7 @@
   - 包含搜索、管理菜单、扩展项动作、创建对话框和扩展详情覆盖页。
 - `src/components/WaveformCanvas.tsx`
   - 数字波形 Canvas 渲染。
-  - 包含平滑数字波形绘制、原版 8px 上下 gutter、边沿吸附、周期/占空比/脉宽 hover 测量显示，以及右键菜单控制的交互测量开关。
+  - 包含平滑数字波形绘制、原版 8px 上下 gutter、边沿吸附、周期/占空比/脉宽 hover 测量显示、右键菜单控制的交互测量开关，以及波形区右键菜单定位。
 - `src/components/TimingDisplayCanvas.tsx`
   - 独立于通道滚动区的 30px Saleae 时间标尺。
   - 搬运原版 major/minor tick、离屏 major 箭头和标尺背景绘制规则。
@@ -48,7 +48,7 @@
 
 - `src/lib/api.ts`
   - Tauri 命令封装。
-  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、UART decode、viewport UART frame window、Saleae 风格 protocol bubble window，以及浏览器变脉宽 Demo tile。
+  - 覆盖设备列表、捕获、停止、tile 获取、文件打开保存、导出、sample 裁剪、UART decode、viewport UART frame window、Saleae 风格 protocol bubble window，以及浏览器变脉宽 Demo tile。
 - `src/lib/analyzers.ts`
   - Analyzer UI 状态类型、Saleae analyzer 色板、protocol bubble 状态、bubble strip 尺寸常量和 Async Serial decode 支持判断。
 - `src/lib/format.ts`
@@ -83,7 +83,7 @@
 
 - `src-tauri/src/main.rs`
   - Tauri 命令层和事件转发。
-  - 包含读取本地扩展 package 和创建扩展模板目录的命令。
+  - 包含读取本地扩展 package、创建扩展模板目录和当前 capture sample 裁剪的命令。
 - `src-tauri/src/bin/usb_smoke.rs`
   - USB smoke test 工具。
 - `src-tauri/tauri.conf.json`

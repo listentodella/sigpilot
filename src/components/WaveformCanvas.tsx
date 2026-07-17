@@ -1,4 +1,4 @@
-import { PointerEvent, useEffect, useRef, useState } from "react";
+import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useState } from "react";
 import type { WaveformTile } from "../lib/api";
 import {
   SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
@@ -23,6 +23,12 @@ interface WaveformCanvasProps {
   totalSamples: number;
   viewportStart: number;
   viewportSamples: number;
+  onOpenContextMenu?: (event: {
+    channelIndex: number;
+    clientX: number;
+    clientY: number;
+    sample: number;
+  }) => void;
   onViewportChange: (start: number, samples: number) => void;
 }
 
@@ -69,6 +75,7 @@ export function WaveformCanvas({
   totalSamples,
   viewportStart,
   viewportSamples,
+  onOpenContextMenu,
   onViewportChange,
 }: WaveformCanvasProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -283,6 +290,7 @@ export function WaveformCanvas({
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (!totalSamplesRef.current) return;
+    if (event.button !== 0) return;
     cancelViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
     hoverRef.current = null;
@@ -307,7 +315,9 @@ export function WaveformCanvas({
 
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
     dragRef.current = null;
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
     updateHover(event);
   }
 
@@ -327,6 +337,30 @@ export function WaveformCanvas({
         rowTopInsetsRef.current,
       );
     }
+  }
+
+  function handleContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!onOpenContextMenu) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const tileSnapshot = tileRef.current;
+    if (!tileSnapshot || tileSnapshot.channels.length === 0) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const channelIndex = findChannelIndexAtY(
+      getChannelLayout(rowHeightsRef.current, tileSnapshot.channels.length, 1, rowTopInsetsRef.current),
+      event.clientY - rect.top,
+    );
+    if (channelIndex === null) return;
+
+    const xRatio = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+    const sample = Math.round(viewportRef.current.start + xRatio * viewportRef.current.samples);
+    onOpenContextMenu({
+      channelIndex: tileSnapshot.channels[channelIndex]?.channel ?? channelIndex,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      sample,
+    });
   }
 
   function updateHover(event: PointerEvent<HTMLDivElement>) {
@@ -402,6 +436,7 @@ export function WaveformCanvas({
     <div
       ref={hostRef}
       className="waveformCanvasHost"
+      onContextMenu={handleContextMenu}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}

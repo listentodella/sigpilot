@@ -87,3 +87,5 @@ chore: 说明内容
   - Analyzer overlay 改为独立 `protocolBubbles` 模型，Fit Capture 下 multi bubble 覆盖完整 graph，并按原版像素阈值拆合。
 - `docs/ported-features/2026-07-17-channel-context-menu.md`
   - 通道标签右键菜单、Show/Hide Channels 子菜单、隐藏行状态、Auto Layout 和交互测量开关。
+- `docs/ported-features/2026-07-17-channel-context-menu-completion.md`
+  - 补齐图表区右键、Delete Data 子菜单、真实 sample 裁剪 API，以及 Screenshot 菜单占位。

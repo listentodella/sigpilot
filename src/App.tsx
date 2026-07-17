@@ -74,6 +74,7 @@ import {
   openCapture,
   saveCapture,
   startCapture,
+  trimCapture,
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
@@ -198,6 +199,16 @@ interface UiTimingMarker {
   sample: number;
   selected: boolean;
   type: "pair" | "single";
+}
+
+type ChannelContextMenuSource = "label" | "graph";
+
+interface ChannelContextMenuState {
+  channelIndex: number;
+  sample?: number;
+  source: ChannelContextMenuSource;
+  x: number;
+  y: number;
 }
 
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
@@ -344,6 +355,65 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     viewportStart,
     viewportSamples,
     message: "Capturing",
+  };
+}
+
+function applyTrimmedCapture(
+  session: UiSession,
+  summary: CaptureSummary,
+  trimStart: number,
+  mode: "before" | "after" | "offscreen",
+): UiSession {
+  const labels = channelLabelsForCount(summary.metadata.channel_count, session.channelLabels);
+  const totalSamples = Math.max(1, summary.metadata.sample_count);
+  const shiftSample = (sample: number) => Math.max(0, Math.min(totalSamples, Math.round(sample - trimStart)));
+  const shiftPoint = (sample: number) => Math.max(0, Math.min(totalSamples - 1, Math.round(sample - trimStart)));
+  const viewportSamples = Math.max(1, Math.min(totalSamples, session.viewportSamples));
+
+  return {
+    ...session,
+    analyzers: session.analyzers.map((analyzer) => ({
+      ...analyzer,
+      protocolBubbles: [],
+      decodedFrames: [],
+      previousFrame: null,
+      nextFrame: null,
+      highlightedFrameIndex: null,
+    })),
+    channelLabels: labels,
+    cursorState: defaultCursorState(totalSamples, summary.metadata.channel_count),
+    message:
+      mode === "before"
+        ? "Deleted data before point"
+        : mode === "after"
+          ? "Deleted data after point"
+          : "Deleted off-screen data",
+    rangeMeasurements: session.rangeMeasurements
+      .map((range) => {
+        const startSample = shiftSample(range.startSample);
+        const endSample = shiftSample(range.endSample);
+        return {
+          ...range,
+          startSample: Math.min(startSample, endSample),
+          endSample: Math.max(startSample, endSample),
+        };
+      })
+      .filter((range) => range.endSample > range.startSample),
+    summary: summaryWithLabels(summary, labels),
+    tile: null,
+    timingMarkers: session.timingMarkers
+      .map((marker) => {
+        const sample = shiftPoint(marker.sample);
+        const endSample = marker.endSample == null ? undefined : Math.max(sample + 1, shiftSample(marker.endSample));
+        return {
+          ...marker,
+          sample,
+          endSample: endSample == null ? undefined : Math.min(totalSamples, endSample),
+        };
+      })
+      .filter((marker) => marker.type === "single" || (marker.endSample ?? marker.sample + 1) > marker.sample),
+    viewportSamples,
+    viewportStart: 0,
   };
 }
 
@@ -504,7 +574,7 @@ export default function App() {
   const [selectedPanel, setSelectedPanel] = useState<SidebarPanel | undefined>(undefined);
   const [footerPopover, setFooterPopover] = useState<FooterPopover>(null);
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
-  const [channelContextMenu, setChannelContextMenu] = useState<{ channelIndex: number; x: number; y: number } | null>(null);
+  const [channelContextMenu, setChannelContextMenu] = useState<ChannelContextMenuState | null>(null);
   const [analyzerInEdit, setAnalyzerInEdit] = useState<AnalyzerEditState | null>(null);
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [startupMessage, setStartupMessage] = useState("Ready");
@@ -1343,6 +1413,38 @@ export default function App() {
     }));
   }
 
+  async function deleteDataFromContext(mode: "before" | "after" | "offscreen") {
+    const menu = channelContextMenu;
+    if (!activeSession?.summary || !menu) return;
+
+    const total = activeSession.summary.metadata.sample_count;
+    if (total <= 1) return;
+
+    const clickedSample = Math.max(0, Math.min(total, Math.round(menu.sample ?? activeSession.viewportStart)));
+    const trimStart =
+      mode === "before"
+        ? Math.min(total - 1, clickedSample)
+        : mode === "offscreen"
+          ? Math.max(0, Math.min(total - 1, activeSession.viewportStart))
+          : 0;
+    const trimEnd =
+      mode === "after"
+        ? Math.max(1, Math.min(total, clickedSample))
+        : mode === "offscreen"
+          ? Math.max(trimStart + 1, Math.min(total, activeSession.viewportStart + activeSession.viewportSamples))
+          : total;
+
+    try {
+      const nextSummary = await trimCapture({
+        trim_before_sample: trimStart,
+        trim_after_sample: trimEnd,
+      });
+      updateSession(activeSession.id, (session) => applyTrimmedCapture(session, nextSummary, trimStart, mode));
+    } catch (error) {
+      updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
+    }
+  }
+
   function handleGraphScroll(event: ReactUIEvent<HTMLDivElement>) {
     if (!activeSession) return;
     pendingGraphScrollRef.current = {
@@ -1792,7 +1894,7 @@ export default function App() {
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setEditingChannel(null);
-                            setChannelContextMenu({ channelIndex, x: event.clientX, y: event.clientY });
+                            setChannelContextMenu({ channelIndex, source: "label", x: event.clientX, y: event.clientY });
                           }}
                           onEditEnd={() => setEditingChannel(null)}
                           onEditStart={() => {
@@ -1808,9 +1910,14 @@ export default function App() {
                         channelIndex={channelContextMenu.channelIndex}
                         autoLayoutEnabled={!activeSession.manualChannelLayout}
                         channelRows={contextMenuChannelRows}
+                        hasCapture={Boolean(activeSession.summary)}
                         hasHiddenChannels={contextMenuChannelRows.some((row) => row.isSelectable && row.isHidden)}
                         interactiveMeasurementVisible={activeSession.showInteractiveMeasurement}
+                        isChannelLabel={channelContextMenu.source === "label"}
                         onClose={() => setChannelContextMenu(null)}
+                        onDeleteDataAfter={() => void deleteDataFromContext("after")}
+                        onDeleteDataBefore={() => void deleteDataFromContext("before")}
+                        onDeleteDataOffscreen={() => void deleteDataFromContext("offscreen")}
                         onFitAllRows={fitAllRowsToWindowHeight}
                         onHideChannel={() => hideChannelRow(channelContextMenu.channelIndex)}
                         onMatchAllHeights={() => matchAllDigitalChannelHeights(channelContextMenu.channelIndex)}
@@ -1838,6 +1945,16 @@ export default function App() {
                         totalSamples={totalSamples}
                         viewportStart={activeSession.viewportStart}
                         viewportSamples={activeSession.viewportSamples}
+                        onOpenContextMenu={({ channelIndex, clientX, clientY, sample }) => {
+                          setEditingChannel(null);
+                          setChannelContextMenu({
+                            channelIndex,
+                            sample,
+                            source: "graph",
+                            x: clientX,
+                            y: clientY,
+                          });
+                        }}
                         onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
                       />
                       <AnalyzerBubblesOverlay
@@ -2157,9 +2274,14 @@ function ChannelContextMenu({
   autoLayoutEnabled,
   channelIndex,
   channelRows,
+  hasCapture,
   hasHiddenChannels,
   interactiveMeasurementVisible,
+  isChannelLabel,
   onClose,
+  onDeleteDataAfter,
+  onDeleteDataBefore,
+  onDeleteDataOffscreen,
   onFitAllRows,
   onHideChannel,
   onMatchAllHeights,
@@ -2176,9 +2298,14 @@ function ChannelContextMenu({
   autoLayoutEnabled: boolean;
   channelIndex: number;
   channelRows: { index: number; isHidden: boolean; isSelectable: boolean; label: string }[];
+  hasCapture: boolean;
   hasHiddenChannels: boolean;
   interactiveMeasurementVisible: boolean;
+  isChannelLabel: boolean;
   onClose: () => void;
+  onDeleteDataAfter: () => void;
+  onDeleteDataBefore: () => void;
+  onDeleteDataOffscreen: () => void;
   onFitAllRows: () => void;
   onHideChannel: () => void;
   onMatchAllHeights: () => void;
@@ -2197,7 +2324,7 @@ function ChannelContextMenu({
   const opensLeft = typeof window !== "undefined" && x + menuWidth + submenuWidth + 12 > window.innerWidth;
   const menuLeft =
     typeof window === "undefined" ? x : Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8));
-  const menuTop = typeof window === "undefined" ? y : Math.max(8, Math.min(y, window.innerHeight - 382));
+  const menuTop = typeof window === "undefined" ? y : Math.max(8, Math.min(y, window.innerHeight - 540));
 
   function run(action: () => void, close = true) {
     action();
@@ -2236,33 +2363,42 @@ function ChannelContextMenu({
         tooltip="Display a measurement as the mouse moves over the waveform."
       />
       <ChannelMenuSeparator />
+      <ChannelMenuSubmenu
+        disabled={!hasCapture || isChannelLabel}
+        label="Delete Data"
+        tooltip={
+          isChannelLabel
+            ? "Logic exposes Delete Data from the graph area context menu."
+            : hasCapture
+              ? undefined
+              : "Load or capture data before deleting samples."
+        }
+      >
+        <ChannelMenuSelectionItem label="Before This Point" onClick={() => run(onDeleteDataBefore)} />
+        <ChannelMenuSelectionItem label="After This Point" onClick={() => run(onDeleteDataAfter)} />
+        <ChannelMenuSelectionItem label="Off Screen" onClick={() => run(onDeleteDataOffscreen)} />
+      </ChannelMenuSubmenu>
+      <ChannelMenuSeparator />
       <ChannelMenuSelectionItem label="Hide Channel" onClick={() => run(onHideChannel)} />
-      <div className="channelContextSubmenu" role="none">
-        <button className="channelContextItem selectable submenuTrigger" role="menuitem" type="button">
-          <span className="channelContextCheckmark" />
-          <span className="channelContextLabel">Show/Hide Channels</span>
-          <ChevronRight aria-hidden size={14} />
-        </button>
-        <div className="channelContextSubmenuPanel" role="menu">
-          <ChannelMenuItem
-            disabled={!hasHiddenChannels}
-            label="Show All Channels"
-            onClick={() => run(onShowAllChannels, false)}
-          />
-          <ChannelMenuSeparator />
-          <div className="channelVisibilityRows">
-            {channelRows.map((row) => (
-              <ChannelMenuSelectionItem
-                disabled={!row.isSelectable}
-                key={row.index}
-                label={`${row.index}. ${row.label}`}
-                onClick={() => run(() => onToggleChannelVisibility(row.index), false)}
-                selected={row.isSelectable && !row.isHidden}
-              />
-            ))}
-          </div>
+      <ChannelMenuSubmenu label="Show/Hide Channels">
+        <ChannelMenuItem
+          disabled={!hasHiddenChannels}
+          label="Show All Channels"
+          onClick={() => run(onShowAllChannels, false)}
+        />
+        <ChannelMenuSeparator />
+        <div className="channelVisibilityRows">
+          {channelRows.map((row) => (
+            <ChannelMenuSelectionItem
+              disabled={!row.isSelectable}
+              key={row.index}
+              label={`${row.index}. ${row.label}`}
+              onClick={() => run(() => onToggleChannelVisibility(row.index), false)}
+              selected={row.isSelectable && !row.isHidden}
+            />
+          ))}
         </div>
-      </div>
+      </ChannelMenuSubmenu>
       <ChannelMenuSeparator />
       <ChannelMenuSelectionItem
         label="Reset Channel Names"
@@ -2271,6 +2407,56 @@ function ChannelContextMenu({
       />
       <ChannelMenuSeparator />
       <ChannelMenuSelectionItem label="Settings" onClick={() => run(onOpenSettings)} />
+      <ChannelMenuSeparator />
+      <ChannelMenuSelectionItem
+        disabled
+        label={`Screenshot D${channelIndex}`}
+        onClick={() => undefined}
+        tooltip="Placeholder for Logic's Electron capturePage screenshot action; requires a Tauri screenshot backend."
+      />
+      <ChannelMenuSelectionItem
+        disabled
+        label="Screenshot Window"
+        onClick={() => undefined}
+        tooltip="Placeholder for Logic's Electron capturePage screenshot action; requires a Tauri screenshot backend."
+      />
+      <ChannelMenuSubmenu disabled label="Screenshot Destination [File]" tooltip="Screenshot destination is waiting for Tauri screenshot support.">
+        <ChannelMenuSelectionItem disabled label="File" onClick={() => undefined} selected />
+        <ChannelMenuSelectionItem disabled label="Clipboard" onClick={() => undefined} />
+      </ChannelMenuSubmenu>
+    </div>
+  );
+}
+
+function ChannelMenuSubmenu({
+  children,
+  disabled = false,
+  label,
+  tooltip,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  label: string;
+  tooltip?: string;
+}) {
+  return (
+    <div className={`channelContextSubmenu ${disabled ? "disabled" : ""}`} role="none">
+      <button
+        className="channelContextItem selectable submenuTrigger"
+        data-tooltip={tooltip}
+        disabled={disabled}
+        role="menuitem"
+        type="button"
+      >
+        <span className="channelContextCheckmark" />
+        <span className="channelContextLabel">{label}</span>
+        <ChevronRight aria-hidden size={14} />
+      </button>
+      {!disabled && (
+        <div className="channelContextSubmenuPanel" role="menu">
+          {children}
+        </div>
+      )}
     </div>
   );
 }

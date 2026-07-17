@@ -35,6 +35,12 @@ struct CaptureSummary {
     bytes: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct TrimCaptureRequest {
+    trim_before_sample: Option<u64>,
+    trim_after_sample: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExtensionTemplateRequest {
@@ -221,6 +227,54 @@ fn export_capture(
 }
 
 #[tauri::command]
+fn trim_capture(
+    request: TrimCaptureRequest,
+    state: State<'_, AppState>,
+) -> CommandResult<CaptureSummary> {
+    let mut guard = state.current_capture.lock();
+    let capture = guard
+        .as_mut()
+        .ok_or_else(|| "no capture is loaded".to_string())?;
+    let total_samples = capture.metadata.sample_count;
+    if total_samples == 0 {
+        return Err("capture is empty".to_string());
+    }
+
+    let start = request.trim_before_sample.unwrap_or(0).min(total_samples);
+    let end = request
+        .trim_after_sample
+        .unwrap_or(total_samples)
+        .min(total_samples);
+    if end <= start {
+        return Err("delete data interval would remove the entire capture".to_string());
+    }
+
+    let unit_size = usize::from(capture.metadata.unitsize);
+    if unit_size == 0 {
+        return Err("capture has invalid unit size".to_string());
+    }
+    let byte_start = usize::try_from(start)
+        .map_err(|_| "trim start is too large".to_string())?
+        .checked_mul(unit_size)
+        .ok_or_else(|| "trim start byte offset overflowed".to_string())?;
+    let byte_end = usize::try_from(end)
+        .map_err(|_| "trim end is too large".to_string())?
+        .checked_mul(unit_size)
+        .ok_or_else(|| "trim end byte offset overflowed".to_string())?;
+    if byte_end > capture.samples.len() || byte_start > byte_end {
+        return Err("capture sample buffer is shorter than metadata".to_string());
+    }
+
+    capture.samples = capture.samples[byte_start..byte_end].to_vec();
+    capture.metadata.sample_count = end - start;
+
+    Ok(CaptureSummary {
+        metadata: capture.metadata.clone(),
+        bytes: capture.samples.len(),
+    })
+}
+
+#[tauri::command]
 fn get_waveform_tile(
     request: WaveformRequest,
     state: State<'_, AppState>,
@@ -376,6 +430,7 @@ fn main() {
             open_capture,
             save_capture,
             export_capture,
+            trim_capture,
             get_waveform_tile,
             decode_uart_frames,
             read_extension_package,
