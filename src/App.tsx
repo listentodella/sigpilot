@@ -127,7 +127,6 @@ import {
   ensureRangeMeasurementIds,
   formatDeltaTime,
   formatRangeMeasurementValue,
-  rangeMeasurementDefinition,
 } from "./lib/rangeMeasurements";
 
 type FooterPopover = "devices" | "newSession" | "zoom" | null;
@@ -216,6 +215,7 @@ interface UiRangeMeasurement {
   selected: boolean;
   showTooltip: boolean;
   startSample: number;
+  tooltipPosition: { x: number; y: number } | null;
 }
 
 interface UiRangePlacement {
@@ -436,6 +436,7 @@ function applyTrimmedCapture(
           measurementStatsBusy: false,
           measurementStatsKey: null,
           measurements: ensureRangeMeasurementIds(range.measurements),
+          tooltipPosition: range.tooltipPosition ?? null,
         };
       })
       .filter((range) => range.endSample > range.startSample),
@@ -516,6 +517,7 @@ function createRangeMeasurement(
     selected: true,
     showTooltip: true,
     startSample: start,
+    tooltipPosition: null,
   };
 }
 
@@ -2842,6 +2844,26 @@ function RangeMeasurementsOverlay({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onUpdateSession, session.rangePlacement]);
 
+  useEffect(() => {
+    if (!session.rangeMeasurements.some((range) => range.showTooltip)) return;
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(
+          ".rangeMeasurementTooltip, .rangeBand, .rangeMeasurementItem, .measurementAddPopover, .rangeMeasurementAddMenu, .rangeMeasurementSettingsMenu, .rangeItemMenu",
+        )
+      ) {
+        return;
+      }
+      onUpdateSession((current) => ({
+        ...current,
+        rangeMeasurements: current.rangeMeasurements.map((range) => ({ ...range, showTooltip: false })),
+      }));
+    }
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [onUpdateSession, session.rangeMeasurements]);
+
   if (!session.summary || totalSamples <= 0 || (session.rangeMeasurements.length === 0 && !session.rangePlacement)) {
     return null;
   }
@@ -2968,7 +2990,7 @@ function RangeMeasurementsOverlay({
     event.currentTarget.setPointerCapture(event.pointerId);
 
     if (session.rangePlacement.startSample !== null) {
-      finishPlacement(next.channelIndex, session.rangePlacement.startSample, next.sample);
+      finishPlacement(session.rangePlacement.channelIndex ?? next.channelIndex, session.rangePlacement.startSample, next.sample);
       return;
     }
 
@@ -3116,10 +3138,16 @@ function RangeMeasurementsOverlay({
             sampleRateHz={session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz}
             session={session}
             style={
-              {
-                left: `clamp(236px, ${(sampleToPercent(range.startSample) + sampleToPercent(range.endSample)) / 2}%, calc(100% - 236px))`,
-                top: row.top + 10,
-              } as CSSProperties
+              range.tooltipPosition
+                ? ({
+                    left: range.tooltipPosition.x,
+                    top: range.tooltipPosition.y,
+                    transform: "none",
+                  } as CSSProperties)
+                : ({
+                    left: `clamp(236px, ${(sampleToPercent(range.startSample) + sampleToPercent(range.endSample)) / 2}%, calc(100% - 236px))`,
+                    top: row.top + 10,
+                  } as CSSProperties)
             }
           />
         );
@@ -3146,6 +3174,22 @@ function PlacingRangePreview({
   const start = placement.startSample ?? placement.currentSample;
   const startPct = sampleToPercent(start);
   const endPct = sampleToPercent(placement.currentSample);
+  if (placement.startSample === null) {
+    if (startPct < 0 || startPct > 100) return null;
+    return (
+      <div
+        className="placingRangeIndicator"
+        style={
+          {
+            height: row.height,
+            left: `${startPct}%`,
+            top: row.top,
+            "--range-color": RANGE_COLORS[0],
+          } as CSSProperties
+        }
+      />
+    );
+  }
   const left = Math.max(0, Math.min(100, Math.min(startPct, endPct)));
   const right = Math.max(0, Math.min(100, Math.max(startPct, endPct)));
   const width = Math.max(0.25, right - left);
@@ -3188,6 +3232,8 @@ function RangeMeasurementTooltip({
 }) {
   const [addOpen, setAddOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const dragRef = useRef<{ offsetX: number; offsetY: number; pointerId: number } | null>(null);
+  const tooltipRef = useRef<HTMLElement | null>(null);
   const measurementIds = ensureRangeMeasurementIds(range.measurements);
   const stats = range.measurementStats;
 
@@ -3203,8 +3249,95 @@ function RangeMeasurementTooltip({
     );
   }
 
+  function boundedTooltipPosition(clientX: number, clientY: number, tooltip: HTMLElement) {
+    const overlay = tooltip.closest(".rangeOverlay") as HTMLElement | null;
+    const drag = dragRef.current;
+    if (!overlay || !drag) return null;
+    const overlayRect = overlay.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const maxX = Math.max(0, overlayRect.width - tooltipRect.width);
+    const maxY = Math.max(0, overlayRect.height - tooltipRect.height);
+    return {
+      x: Math.max(0, Math.min(maxX, clientX - overlayRect.left - drag.offsetX)),
+      y: Math.max(0, Math.min(maxY, clientY - overlayRect.top - drag.offsetY)),
+    };
+  }
+
+  function isTooltipDragTargetBlocked(target: EventTarget | null) {
+    return Boolean(
+      (target as HTMLElement | null)?.closest(
+        "button, input, textarea, .rangeMeasurementAddMenu, .rangeMeasurementSettingsMenu",
+      ),
+    );
+  }
+
+  function beginTooltipDrag(clientX: number, clientY: number, tooltip: HTMLElement, pointerId: number) {
+    const tooltipRect = tooltip.getBoundingClientRect();
+    dragRef.current = {
+      offsetX: clientX - tooltipRect.left,
+      offsetY: clientY - tooltipRect.top,
+      pointerId,
+    };
+  }
+
+  function handleDragPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (isTooltipDragTargetBlocked(event.target)) return;
+    const tooltip = event.currentTarget.closest(".rangeMeasurementTooltip") as HTMLElement | null;
+    const overlay = tooltip?.closest(".rangeOverlay") as HTMLElement | null;
+    if (!tooltip || !overlay || event.button !== 0) return;
+    beginTooltipDrag(event.clientX, event.clientY, tooltip, event.pointerId);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleDragMouseDown(event: ReactMouseEvent<HTMLDivElement>) {
+    if (isTooltipDragTargetBlocked(event.target) || event.button !== 0) return;
+    const tooltip = tooltipRef.current;
+    if (!tooltip) return;
+    beginTooltipDrag(event.clientX, event.clientY, tooltip, -1);
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const position = boundedTooltipPosition(moveEvent.clientX, moveEvent.clientY, tooltip);
+      if (position) onUpdate({ tooltipPosition: position });
+      moveEvent.preventDefault();
+    };
+    const handleMouseUp = (upEvent: MouseEvent) => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+      dragRef.current = null;
+      upEvent.preventDefault();
+    };
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleDragPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const tooltip = event.currentTarget.closest(".rangeMeasurementTooltip") as HTMLElement | null;
+    if (!tooltip) return;
+    const position = boundedTooltipPosition(event.clientX, event.clientY, tooltip);
+    if (position) onUpdate({ tooltipPosition: position });
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleDragPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   return (
     <section
+      ref={tooltipRef}
       className="rangeMeasurementTooltip"
       onPointerDown={(event) => event.stopPropagation()}
       onDoubleClick={(event) => event.stopPropagation()}
@@ -3224,7 +3357,15 @@ function RangeMeasurementTooltip({
         <MetricCell label="Channel" value={`D${range.channelIndex}`} />
       </div>
       {range.measurementError && <div className="rangeMeasurementError">{range.measurementError}</div>}
-      <div className="rangeTooltipDragBar">
+      <div
+        className="rangeTooltipDragBar"
+        onMouseDown={handleDragMouseDown}
+        onPointerDown={handleDragPointerDown}
+        onPointerMove={handleDragPointerMove}
+        onPointerUp={handleDragPointerUp}
+        onPointerCancel={handleDragPointerUp}
+        title="Drag to move"
+      >
         <div className="rangeTooltipPopoverHost">
           <button
             className={`rangeTooltipIconButton ${addOpen ? "selected" : ""}`}
@@ -5025,9 +5166,7 @@ function MeasurementsPanel({
   session: UiSession;
 }) {
   const [addOpen, setAddOpen] = useState(false);
-  const [openAddFor, setOpenAddFor] = useState<string | null>(null);
   const [openMenuFor, setOpenMenuFor] = useState<string | null>(null);
-  const [openSettingsFor, setOpenSettingsFor] = useState<string | null>(null);
   const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
   const canAdd = Boolean(session.summary) && !session.busy;
 
@@ -5046,7 +5185,7 @@ function MeasurementsPanel({
       rangeMeasurements: current.rangeMeasurements.map((range) => ({
         ...range,
         selected: range.id === id,
-        showTooltip: range.id === id ? range.showTooltip : false,
+        showTooltip: range.id === id,
       })),
     }));
   }
@@ -5125,7 +5264,6 @@ function MeasurementsPanel({
       ) : (
         <div className="rangeMeasurementList">
           {session.rangeMeasurements.map((range) => {
-            const measurementIds = ensureRangeMeasurementIds(range.measurements);
             const stats = range.measurementStats;
             return (
               <section
@@ -5136,16 +5274,7 @@ function MeasurementsPanel({
                 style={{ "--range-color": range.color } as CSSProperties}
               >
                 <div className="rangeMeasurementHeader">
-                  <button
-                    className={`rangeExpandButton ${range.expanded ? "expanded" : ""}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      updateRange(range.id, { expanded: !range.expanded });
-                    }}
-                    type="button"
-                  >
-                    <ChevronRight size={13} />
-                  </button>
+                  <span className="rangeExpandSpacer" />
                   <span className="rangeColorSwatch" />
                   <div className="rangeLabelContainer" title={range.name}>
                     <input
@@ -5159,47 +5288,6 @@ function MeasurementsPanel({
                   <strong className="rangeDeltaValue">Δ{formatDeltaTime(stats, sampleRateHz)}</strong>
                   <span className="rangeCommentPreview">{range.note}</span>
                   <div className="rangeMeasurementActions">
-                    <div className="rangeItemPopoverHost">
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setOpenSettingsFor(null);
-                          setOpenMenuFor(null);
-                          setOpenAddFor((current) => (current === range.id ? null : range.id));
-                        }}
-                        title="Add or Remove Measurements"
-                        type="button"
-                      >
-                        <Plus size={12} />
-                      </button>
-                      {openAddFor === range.id && (
-                        <RangeMeasurementAddMenu
-                          measurementIds={measurementIds}
-                          onChange={(measurements) => updateRange(range.id, { measurements })}
-                          onOpenExtensions={onOpenExtensions}
-                        />
-                      )}
-                    </div>
-                    <div className="rangeItemPopoverHost">
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setOpenAddFor(null);
-                          setOpenMenuFor(null);
-                          setOpenSettingsFor((current) => (current === range.id ? null : range.id));
-                        }}
-                        title="Annotation Setting"
-                        type="button"
-                      >
-                        <Settings2 size={12} />
-                      </button>
-                      {openSettingsFor === range.id && (
-                        <RangeMeasurementSettingsMenu
-                          annotationsVisible={range.annotationsVisible}
-                          onChange={(annotationsVisible) => updateRange(range.id, { annotationsVisible })}
-                        />
-                      )}
-                    </div>
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
@@ -5213,8 +5301,6 @@ function MeasurementsPanel({
                     <button
                       onClick={(event) => {
                         event.stopPropagation();
-                        setOpenAddFor(null);
-                        setOpenSettingsFor(null);
                         setOpenMenuFor((current) => (current === range.id ? null : range.id));
                       }}
                       title="More"
@@ -5246,109 +5332,12 @@ function MeasurementsPanel({
                     )}
                   </div>
                 </div>
-                {range.expanded && (
-                  <>
-                    <RangeMeasurementTable
-                      measurementIds={measurementIds}
-                      onRemove={(measurementId) =>
-                        updateRange(range.id, {
-                          measurements: measurementIds.filter((id) => id !== measurementId),
-                        })
-                      }
-                      sampleRateHz={sampleRateHz}
-                      stats={stats}
-                    />
-                    {range.measurementError && <div className="rangeMeasurementError">{range.measurementError}</div>}
-                    <textarea
-                      className="rangeNote"
-                      onChange={(event) => updateRange(range.id, { note: event.target.value })}
-                      onClick={(event) => event.stopPropagation()}
-                      placeholder="Comment here"
-                      value={range.note}
-                    />
-                  </>
-                )}
               </section>
             );
           })}
         </div>
       )}
     </div>
-  );
-}
-
-function RangeMeasurementTable({
-  measurementIds,
-  onRemove,
-  sampleRateHz,
-  stats,
-}: {
-  measurementIds: DigitalRangeMeasurementId[];
-  onRemove: (measurementId: DigitalRangeMeasurementId) => void;
-  sampleRateHz: number;
-  stats: DigitalRangeMeasurementStats | null;
-}) {
-  return (
-    <div className="rangeMeasureTable">
-      <RangeMeasurementValueRow
-        canDelete={false}
-        fullValue={formatDeltaTime(stats, sampleRateHz)}
-        label="Delta T"
-        value={formatDeltaTime(stats, sampleRateHz)}
-      />
-      {measurementIds.map((measurementId) => {
-        const definition = rangeMeasurementDefinition(measurementId);
-        const measurementValue = formatRangeMeasurementValue(measurementId, stats);
-        if (!definition) return null;
-        return (
-          <RangeMeasurementValueRow
-            key={measurementId}
-            fullValue={measurementValue.fullValue}
-            label={definition.label}
-            onDelete={() => onRemove(measurementId)}
-            value={measurementValue.value}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function RangeMeasurementValueRow({
-  canDelete = true,
-  fullValue,
-  label,
-  onDelete,
-  value,
-}: {
-  canDelete?: boolean;
-  fullValue: string;
-  label: string;
-  onDelete?: () => void;
-  value: string;
-}) {
-  return (
-    <>
-      <div className="rangeMeasureLabel" title={label}>
-        {label}
-      </div>
-      <div className="rangeMeasureSeparator" />
-      <div className="rangeMeasureValue" title={fullValue}>
-        {value}
-      </div>
-      <button
-        className="rangeMeasureDelete"
-        disabled={!canDelete}
-        onClick={(event) => {
-          event.stopPropagation();
-          onDelete?.();
-        }}
-        title={canDelete ? "Remove" : undefined}
-        type="button"
-      >
-        {canDelete ? <X size={10} /> : null}
-      </button>
-    </>
   );
 }
 

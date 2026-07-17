@@ -1545,6 +1545,16 @@ button:disabled {
   border-bottom: 2px solid var(--selected-highlight);
 }
 
+.placingRangeIndicator {
+  width: 11px;
+  position: absolute;
+  min-width: 11px;
+  border-right: 1px solid var(--range-color);
+  background: color-mix(in srgb, var(--range-color) 16%, transparent);
+  pointer-events: none;
+  transform: translateX(-6px);
+}
+
 .rangeMeasurementTooltip {
   width: 470px;
   position: absolute;
@@ -1572,6 +1582,8 @@ button:disabled {
   justify-content: flex-end;
   gap: 4px;
   padding: 0 10px 6px;
+  cursor: move;
+  touch-action: none;
 }
 
 .rangeTooltipIconButton {
@@ -3075,7 +3087,7 @@ button:disabled {
   display: grid;
   grid-template-columns:
     [expandButton] 18px [icon] 6px 8px [label] minmax(0, auto) 4px [value] auto
-    [comment] minmax(0, 1fr) [contentEnd] 4px [actions] 90px 14px;
+    [comment] minmax(0, 1fr) [contentEnd] 4px [actions] 40px 14px;
   grid-auto-rows: min-content;
   overflow: auto;
   padding: 0 0 12px;
@@ -3124,6 +3136,10 @@ button:disabled {
 
 .rangeExpandButton.expanded svg {
   transform: rotate(90deg);
+}
+
+.rangeExpandSpacer {
+  grid-column: expandButton;
 }
 
 .rangeColorSwatch {

@@ -93,3 +93,5 @@ chore: 说明内容
   - Add Range Measurement 原版 placing 模式、通道绑定 range overlay、图上 tooltip 和 Measurements 右侧栏 RangeItem 深化。
 - `docs/ported-features/2026-07-17-range-measurement-runner.md`
   - Range measurement 真实后端统计、Measurements2 风格 Add/Remove Measurements、逐项启用/删除与 copy 输出。
+- `docs/ported-features/2026-07-17-range-measurement-interaction-parity.md`
+  - Range placing 竖条预览、主图 tooltip 可拖动/隐藏恢复，以及 Measurements 右栏轻量 RangeItem 对齐。

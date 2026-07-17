@@ -6,10 +6,10 @@
 
 - `src/App.tsx`
   - 当前 React 工作台主体。
-  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口、通道右键菜单状态、Add Range Measurement 放置状态、Measurements range overlay/tooltip 和 range measurement runner 结果绑定。
+  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口、通道右键菜单状态、Add Range Measurement 放置状态、Measurements range overlay/tooltip、tooltip 拖动位置和 range measurement runner 结果绑定。
 - `src/styles.css`
   - 全局视觉样式。
-  - 包含 Saleae 风格顶部工具栏、启动页、右侧栏、底栏、session tab、popover、波形区域样式。
+  - 包含 Saleae 风格顶部工具栏、启动页、右侧栏、底栏、session tab、popover、波形区域、range placing 竖条和 draggable measurement tooltip 样式。
 - `src/main.tsx`
   - React 入口。
 - `src/vite-env.d.ts`
