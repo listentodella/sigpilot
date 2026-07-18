@@ -2253,7 +2253,7 @@ export default function App() {
             }}
             onUpdateSettings={updateActiveSettings}
             onViewportChange={(start, samples) => {
-              if (activeSession) updateViewport(activeSession.id, start, samples);
+              if (activeSession) animateViewport(activeSession.id, start, samples);
             }}
             selectedDevice={selectedDevice}
             selectedPanel={selectedPanel}
@@ -5326,7 +5326,7 @@ function MeasurementsPanel({
             });
             return (
               <section
-                className={`rangeMeasurementItem ${range.selected ? "selected" : ""}`}
+                className="rangeMeasurementItem"
                 key={range.id}
                 onClick={() => selectRange(range.id)}
                 onDoubleClick={() => goToRange(range)}
