@@ -134,6 +134,12 @@ import {
 
 type FooterPopover = "devices" | "newSession" | "zoom" | null;
 
+const GRAPH_MIN_WIDTH = 50;
+const GRAPH_ROW_LABEL_MAX_WIDTH = 293;
+const SIDEBAR_DEFAULT_WIDTH = 300;
+const SIDEBAR_MIN_WIDTH = 300;
+const SIDEBAR_TABS_CHANGER_WIDTH = 47;
+
 interface UiSession {
   id: string;
   name: string;
@@ -260,6 +266,17 @@ const RANGE_COLORS = [
   "hsl(198, 70%, 50%)",
   "hsl(7, 69%, 54%)",
 ];
+
+function clampSidebarPanelWidth(width: number) {
+  const maxWidth =
+    typeof window === "undefined"
+      ? SIDEBAR_DEFAULT_WIDTH
+      : Math.max(
+          SIDEBAR_MIN_WIDTH,
+          window.innerWidth - SIDEBAR_TABS_CHANGER_WIDTH - GRAPH_ROW_LABEL_MAX_WIDTH - GRAPH_MIN_WIDTH,
+        );
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(maxWidth, Math.round(width)));
+}
 
 const panelMeta: Record<
   SidebarPanel,
@@ -636,6 +653,7 @@ export default function App() {
   const [extensions, setExtensions] = useState<UiExtensionRecord[]>(loadUiExtensions);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedPanel, setSelectedPanel] = useState<SidebarPanel | undefined>(undefined);
+  const [sidebarPanelWidth, setSidebarPanelWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [footerPopover, setFooterPopover] = useState<FooterPopover>(null);
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
   const [channelContextMenu, setChannelContextMenu] = useState<ChannelContextMenuState | null>(null);
@@ -669,6 +687,14 @@ export default function App() {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    function handleResize() {
+      setSidebarPanelWidth((width) => clampSidebarPanelWidth(width));
+    }
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
@@ -2248,6 +2274,7 @@ export default function App() {
             onRefreshDevices={refreshDevices}
             onSelectDevice={setSelectedDeviceForActive}
             onSelectPanel={toggleSidebarPanel}
+            onSidebarPanelWidthChange={(width) => setSidebarPanelWidth(clampSidebarPanelWidth(width))}
             onUpdateSession={(updater) => {
               if (activeSession) updateSession(activeSession.id, updater);
             }}
@@ -2257,6 +2284,7 @@ export default function App() {
             }}
             selectedDevice={selectedDevice}
             selectedPanel={selectedPanel}
+            sidebarPanelWidth={sidebarPanelWidth}
             session={activeSession}
           />
         </section>
@@ -3988,11 +4016,13 @@ function RightSidebar({
   onRefreshDevices,
   onSelectDevice,
   onSelectPanel,
+  onSidebarPanelWidthChange,
   onUpdateSession,
   onUpdateSettings,
   onViewportChange,
   selectedDevice,
   selectedPanel,
+  sidebarPanelWidth,
   session,
 }: {
   devices: DeviceInfo[];
@@ -4008,17 +4038,84 @@ function RightSidebar({
   onRefreshDevices: () => void;
   onSelectDevice: (deviceId: string) => void;
   onSelectPanel: (panel: SidebarPanel | undefined) => void;
+  onSidebarPanelWidthChange: (width: number) => void;
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   onViewportChange: (start: number, samples: number) => void;
   selectedDevice: string;
   selectedPanel: SidebarPanel | undefined;
+  sidebarPanelWidth: number;
   session: UiSession | null;
 }) {
+  const resizeHandleRef = useRef<HTMLDivElement | null>(null);
+  const resizeDragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const resizeListenersCleanupRef = useRef<(() => void) | null>(null);
+
+  function stopResize() {
+    resizeListenersCleanupRef.current?.();
+    resizeListenersCleanupRef.current = null;
+    const drag = resizeDragRef.current;
+    const handle = resizeHandleRef.current;
+    if (drag && handle?.hasPointerCapture(drag.pointerId)) {
+      handle.releasePointerCapture(drag.pointerId);
+    }
+    resizeDragRef.current = null;
+    document.body.classList.remove("sidebar-resizing");
+  }
+
+  useEffect(() => stopResize, []);
+
+  function handleResizePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!selectedPanel || event.button !== 0) return;
+    const handle = resizeHandleRef.current;
+    if (!handle) return;
+    event.preventDefault();
+    event.stopPropagation();
+    resizeListenersCleanupRef.current?.();
+    handle.setPointerCapture(event.pointerId);
+    resizeDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: sidebarPanelWidth,
+    };
+    document.body.classList.add("sidebar-resizing");
+
+    const handlePointerMove = (nativeEvent: PointerEvent) => {
+      const drag = resizeDragRef.current;
+      if (!drag || nativeEvent.pointerId !== drag.pointerId) return;
+      onSidebarPanelWidthChange(drag.startWidth + (drag.startX - nativeEvent.clientX));
+    };
+
+    const handlePointerUp = (nativeEvent: PointerEvent) => {
+      const drag = resizeDragRef.current;
+      if (!drag || nativeEvent.pointerId !== drag.pointerId) return;
+      stopResize();
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    resizeListenersCleanupRef.current = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    };
+  }
+
   return (
-    <aside className="saleaeSidebarRoot">
+    <aside
+      className="saleaeSidebarRoot"
+      style={{ "--sidebar-panel-width": `${sidebarPanelWidth}px` } as CSSProperties}
+    >
       {selectedPanel && (
         <section className="sidebarActiveComponent">
+          <div
+            ref={resizeHandleRef}
+            aria-label="Resize sidebar"
+            className="sidebarResizeHandle"
+            onPointerDown={handleResizePointerDown}
+            role="separator"
+          />
           <SidebarPanelContent
             devices={devices}
             extensions={extensions}

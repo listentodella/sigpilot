@@ -107,3 +107,5 @@ chore: 说明内容
   - Range item 背景状态改回原版暗色常量、右侧操作按钮常显、edge count 明细恢复 `N` 加文字下标。
 - `docs/ported-features/2026-07-18-range-measurement-sidebar-hover-animation.md`
   - Measurements 侧栏 item 不再渲染持久 selected 高亮，右侧 goto/zoom 复用 animated viewport 路径。
+- `docs/ported-features/2026-07-18-sidebar-resize-handle.md`
+  - 右侧 Sidebar active panel 复用原版 300px 最小宽度、47px rail 和 5px `ew-resize` 热区，支持横向拖拽调整。

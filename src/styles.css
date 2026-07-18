@@ -2396,6 +2396,7 @@ button:disabled {
 }
 
 .sidebarActiveComponent {
+  position: relative;
   width: var(--sidebar-panel-width);
   min-width: var(--sidebar-panel-width);
   min-height: 0;
@@ -2406,6 +2407,25 @@ button:disabled {
   border-left: 1px solid var(--border-20);
   background: var(--background-10);
   box-shadow: var(--box-shadow);
+}
+
+.sidebarResizeHandle {
+  width: 5px;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 3;
+  cursor: ew-resize;
+  background: transparent;
+  touch-action: none;
+  user-select: none;
+}
+
+.sidebar-resizing,
+.sidebar-resizing * {
+  cursor: ew-resize !important;
+  user-select: none !important;
 }
 
 .panelSwitcher {
