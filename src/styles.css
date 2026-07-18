@@ -3211,12 +3211,19 @@ button:disabled {
   text-align: center;
 }
 
+.emptyMeasurementState img {
+  width: min(237px, calc(100% - 28px));
+  height: auto;
+  opacity: 0.95;
+}
+
 .rangeMeasurementList {
   min-height: 0;
   display: grid;
   grid-template-columns:
-    [expandButton] 18px [icon] 6px 8px [label] minmax(0, auto) 4px [value] auto
-    [comment] minmax(0, 1fr) [contentEnd] 4px [actions] 40px 14px;
+    [expandButton] 18px [icon] 6px 8px [label] minmax(0, auto) 4px [equals] 0px 4px
+    [value] auto [comment] minmax(0, auto) [contentEnd] 4px [goto] 18px [menu] 18px
+    [endGutter] 14px;
   grid-auto-rows: min-content;
   overflow: auto;
   padding: 0 0 12px;
@@ -3224,13 +3231,23 @@ button:disabled {
 
 .rangeMeasurementItem {
   position: relative;
+  width: 100%;
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: subgrid;
+  grid-auto-rows: 18px;
+  align-items: center;
+  justify-items: center;
+  row-gap: 5px;
+  padding: 8px 0;
   border: 0;
   border-radius: 0;
   background: transparent;
   cursor: pointer;
+}
+
+.rangeMeasurementItem:hover {
+  background: var(--hover-background);
 }
 
 .rangeMeasurementItem.selected {
@@ -3282,26 +3299,32 @@ button:disabled {
 .rangeLabelContainer {
   grid-column: label;
   min-width: 0;
+  max-width: 100%;
+  justify-self: flex-start;
   display: flex;
   align-items: center;
-  overflow: hidden;
+  overflow-x: clip;
+  text-overflow: ellipsis;
 }
 
 .rangeLabelContainer input {
   min-width: 0;
-  height: 24px;
+  max-width: 100%;
+  height: 18px;
   border: 0;
   color: var(--on-background-10);
   background: transparent;
   padding: 0 6px;
   outline: none;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 400;
+  text-overflow: ellipsis;
 }
 
 .rangeMeasurementItem.selected .rangeLabelContainer input,
 .rangeMeasurementItem.selected .rangeDeltaValue,
-.rangeMeasurementItem.selected .rangeCommentPreview,
+.rangeMeasurementItem.selected .rangeSidebarMetricLabel,
+.rangeMeasurementItem.selected .rangeSidebarMetricValue,
 .rangeMeasurementItem.selected .rangeExpandButton {
   color: var(--on-primary);
 }
@@ -3320,35 +3343,43 @@ button:disabled {
   color: currentColor;
 }
 
-.rangeDeltaValue {
-  grid-column: value;
-  color: var(--on-background-20);
-  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.rangeCommentPreview {
-  grid-column: comment;
+.rangeValueContainer {
+  grid-column: value / comment;
+  width: 100%;
   min-width: 0;
-  max-width: 100%;
   display: flex;
   align-items: center;
-  overflow: visible;
-  color: var(--on-background-30);
-  font-size: 11px;
+  justify-content: flex-start;
+  overflow: hidden;
 }
 
-.rangeCommentPreview:empty {
+.rangeDeltaValue {
+  color: var(--on-background-20);
   display: block;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.rangeCommentContainer {
+  grid-column: comment / contentEnd;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  overflow: hidden;
 }
 
 .rangeCommentBubble {
   min-width: 0;
   max-width: 100%;
   position: relative;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   margin-left: 8px;
   border-radius: 999px;
@@ -3359,6 +3390,8 @@ button:disabled {
   font-size: 12px;
   line-height: 1.2;
   user-select: text;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .rangeCommentBubble::before {
@@ -3374,26 +3407,53 @@ button:disabled {
   border-bottom-color: var(--hover-background);
 }
 
-.rangeCommentBubble > span {
+.rangeCommentBubble > div {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.rangeMeasurementActions {
-  grid-column: actions;
+.rangeSidebarMetricLabel,
+.rangeSidebarMetricValue {
+  min-width: 0;
+  max-width: 100%;
+  display: block;
+  overflow: hidden;
+  color: var(--on-background-20);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rangeSidebarMetricLabel {
+  grid-column: label;
+  justify-self: start;
+}
+
+.rangeSidebarMetricValue {
+  grid-column: value / contentEnd;
+  justify-self: start;
+  color: var(--on-background-10);
+  user-select: text;
+}
+
+.rangeMeasurementItem .rangeMeasurementActions {
+  grid-column: goto / endGutter;
   position: relative;
   display: inline-flex;
   justify-content: flex-end;
   gap: 0;
   opacity: 0;
+  pointer-events: none;
 }
 
 .rangeMeasurementItem:hover .rangeMeasurementActions,
-.rangeMeasurementActions:focus-within,
-.rangeMeasurementItem.selected .rangeMeasurementActions {
+.rangeMeasurementActions:focus-within {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .rangeMeasurementActions button {

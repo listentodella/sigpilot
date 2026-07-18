@@ -99,3 +99,5 @@ chore: 说明内容
   - Range tooltip 原版两段式视觉、完整默认统计项、HTML/math 标签、固定 fuchsia 默认色、原版小图标和右栏 RangeItem 视觉补齐。
 - `docs/ported-features/2026-07-18-range-measurement-comment-bubble.md`
   - Range tooltip comment 在右侧 Measurements item 中同步显示为原版 Note 风格气泡。
+- `docs/ported-features/2026-07-18-range-measurement-sidebar-layout.md`
+  - Measurements 右侧栏 RangeItem subgrid、comment 气泡省略、展开 measurement 行、hover-only actions 和原版空态图。

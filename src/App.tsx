@@ -2,7 +2,6 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
-  BarChart3,
   Check,
   ChevronDown,
   ChevronRight,
@@ -32,6 +31,7 @@ import {
 } from "lucide-react";
 import {
   CSSProperties,
+  Fragment,
   KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -52,6 +52,7 @@ import measurementsIcon from "./assets/saleae/sidebar/measurements.svg";
 import notesIcon from "./assets/saleae/sidebar/notes.svg";
 import recordingSettingsIcon from "./assets/saleae/sidebar/recordingSettings.svg";
 import timingMarkersIcon from "./assets/saleae/sidebar/timingMarkers.svg";
+import emptyMeasurementArt from "./assets/saleae/empty_measurement.svg";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
@@ -5310,13 +5311,19 @@ function MeasurementsPanel({
 
       {session.rangeMeasurements.length === 0 ? (
         <div className="emptyMeasurementState">
-          <BarChart3 size={24} />
+          <img alt="" draggable={false} src={emptyMeasurementArt} />
           <span>Click "+" to add Measurements</span>
         </div>
       ) : (
         <div className="rangeMeasurementList">
           {session.rangeMeasurements.map((range) => {
             const stats = range.measurementStats;
+            const measurementIds = ensureRangeMeasurementIds(range.measurements);
+            const displayedMeasurements = measurementIds.flatMap((id) => {
+              const definition = rangeMeasurementDefinition(id);
+              if (!definition) return [];
+              return [{ definition, formatted: formatRangeMeasurementValue(id, stats) }];
+            });
             return (
               <section
                 className={`rangeMeasurementItem ${range.selected ? "selected" : ""}`}
@@ -5325,75 +5332,92 @@ function MeasurementsPanel({
                 onDoubleClick={() => goToRange(range)}
                 style={{ "--range-color": range.color } as CSSProperties}
               >
-                <div className="rangeMeasurementHeader">
+                <button
+                  className={`rangeExpandButton ${range.expanded ? "expanded" : ""}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    updateRange(range.id, { expanded: !range.expanded });
+                  }}
+                  title={range.expanded ? "Collapse" : "Expand"}
+                  type="button"
+                >
+                  <SaleaeIcon name="arrowHead" size={6} />
+                </button>
+                <span className="rangeColorSwatch" />
+                <div className="rangeLabelContainer" title={range.name}>
+                  <input
+                    aria-label="Range name"
+                    onChange={(event) => updateRange(range.id, { name: event.target.value })}
+                    onClick={(event) => event.stopPropagation()}
+                    style={{ width: `${Math.min(14, Math.max(2, range.name.length + 1))}ch` }}
+                    value={range.name}
+                  />
+                  <span className="rangeDirectionArrow"><SaleaeIcon name="arrow" /></span>
+                </div>
+                <div className="rangeValueContainer">
+                  <strong className="rangeDeltaValue">Δ{formatDeltaTime(stats, sampleRateHz)}</strong>
+                </div>
+                <div className="rangeCommentContainer">
+                  <RangeCommentBubble note={range.note} />
+                </div>
+                <div className="rangeMeasurementActions">
                   <button
-                    className={`rangeExpandButton ${range.expanded ? "expanded" : ""}`}
                     onClick={(event) => {
                       event.stopPropagation();
-                      updateRange(range.id, { expanded: !range.expanded });
+                      goToRange(range);
                     }}
-                    title={range.expanded ? "Collapse" : "Expand"}
+                    title="Go to range. Double click to zoom."
                     type="button"
                   >
-                    <SaleaeIcon name="arrowHead" size={6} />
+                    <SaleaeIcon name="goto" />
                   </button>
-                  <span className="rangeColorSwatch" />
-                  <div className="rangeLabelContainer" title={range.name}>
-                    <input
-                      aria-label="Range name"
-                      onChange={(event) => updateRange(range.id, { name: event.target.value })}
-                      onClick={(event) => event.stopPropagation()}
-                      value={range.name}
-                    />
-                    <span className="rangeDirectionArrow"><SaleaeIcon name="arrow" /></span>
-                  </div>
-                  <strong className="rangeDeltaValue">Δ{formatDeltaTime(stats, sampleRateHz)}</strong>
-                  <RangeCommentBubble note={range.note} />
-                  <div className="rangeMeasurementActions">
-                    <button
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        goToRange(range);
-                      }}
-                      title="Go to range. Double click to zoom."
-                      type="button"
-                    >
-                      <SaleaeIcon name="goto" />
-                    </button>
-                    <button
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setOpenMenuFor((current) => (current === range.id ? null : range.id));
-                      }}
-                      title="More"
-                      type="button"
-                    >
-                      <SaleaeIcon name="verticalThreeDots" size={16} />
-                    </button>
-                    {openMenuFor === range.id && (
-                      <div className="rangeItemMenu" onClick={(event) => event.stopPropagation()}>
-                        <button className="purple" onClick={onOpenExtensions} type="button">
-                          Find More Measurements
-                        </button>
-                        <button onClick={() => goToRange(range)} type="button">
-                          Go to Range
-                        </button>
-                        <button onClick={() => goToRange(range, true)} type="button">
-                          Zoom on Range
-                        </button>
-                        <button onClick={() => copyRange(range)} type="button">
-                          Copy
-                        </button>
-                        <button onClick={() => deleteRange(range.id)} type="button">
-                          {range.selected ? "Delete Selected" : "Delete"}
-                        </button>
-                        <button onClick={deleteAll} type="button">
-                          Delete All
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setOpenMenuFor((current) => (current === range.id ? null : range.id));
+                    }}
+                    title="More"
+                    type="button"
+                  >
+                    <SaleaeIcon name="verticalThreeDots" size={16} />
+                  </button>
+                  {openMenuFor === range.id && (
+                    <div className="rangeItemMenu" onClick={(event) => event.stopPropagation()}>
+                      <button className="purple" onClick={onOpenExtensions} type="button">
+                        Find More Measurements
+                      </button>
+                      <button onClick={() => goToRange(range)} type="button">
+                        Go to Range
+                      </button>
+                      <button onClick={() => goToRange(range, true)} type="button">
+                        Zoom on Range
+                      </button>
+                      <button onClick={() => copyRange(range)} type="button">
+                        Copy
+                      </button>
+                      <button onClick={() => deleteRange(range.id)} type="button">
+                        {range.selected ? "Delete Selected" : "Delete"}
+                      </button>
+                      <button onClick={deleteAll} type="button">
+                        Delete All
+                      </button>
+                    </div>
+                  )}
                 </div>
+                {range.expanded &&
+                  displayedMeasurements.map(({ definition, formatted }) => (
+                    <Fragment key={definition.id}>
+                      <span
+                        aria-label={definition.label}
+                        className="rangeSidebarMetricLabel"
+                        dangerouslySetInnerHTML={{ __html: definition.labelHtml }}
+                        title={definition.label}
+                      />
+                      <span className="rangeSidebarMetricValue" title={formatted.fullValue}>
+                        {range.measurementStatsBusy && !stats ? "..." : formatted.value}
+                      </span>
+                    </Fragment>
+                  ))}
               </section>
             );
           })}
@@ -5404,13 +5428,11 @@ function MeasurementsPanel({
 }
 
 function RangeCommentBubble({ note }: { note: string }) {
-  if (!note) return <span className="rangeCommentPreview" />;
+  if (!note) return null;
   return (
-    <span className="rangeCommentPreview">
-      <span className="rangeCommentBubble" title={note}>
-        <span>{note}</span>
-      </span>
-    </span>
+    <div className="rangeCommentBubble" title={note}>
+      <div>{note}</div>
+    </div>
   );
 }
 
