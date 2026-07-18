@@ -3332,15 +3332,53 @@ button:disabled {
 .rangeCommentPreview {
   grid-column: comment;
   min-width: 0;
-  overflow: hidden;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  overflow: visible;
   color: var(--on-background-30);
   font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .rangeCommentPreview:empty {
   display: block;
+}
+
+.rangeCommentBubble {
+  min-width: 0;
+  max-width: 100%;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  border-radius: 999px;
+  border-bottom-left-radius: 0;
+  color: var(--on-background-0);
+  background: var(--hover-background);
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+  user-select: text;
+}
+
+.rangeCommentBubble::before {
+  content: "";
+  width: 0;
+  height: 0;
+  position: absolute;
+  bottom: 0;
+  left: -4px;
+  border-style: solid;
+  border-width: 0 0 5px 4px;
+  border-color: transparent;
+  border-bottom-color: var(--hover-background);
+}
+
+.rangeCommentBubble > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rangeMeasurementActions {

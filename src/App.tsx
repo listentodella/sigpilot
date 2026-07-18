@@ -5348,7 +5348,7 @@ function MeasurementsPanel({
                     <span className="rangeDirectionArrow"><SaleaeIcon name="arrow" /></span>
                   </div>
                   <strong className="rangeDeltaValue">Δ{formatDeltaTime(stats, sampleRateHz)}</strong>
-                  <span className="rangeCommentPreview">{range.note}</span>
+                  <RangeCommentBubble note={range.note} />
                   <div className="rangeMeasurementActions">
                     <button
                       onClick={(event) => {
@@ -5400,6 +5400,17 @@ function MeasurementsPanel({
         </div>
       )}
     </div>
+  );
+}
+
+function RangeCommentBubble({ note }: { note: string }) {
+  if (!note) return <span className="rangeCommentPreview" />;
+  return (
+    <span className="rangeCommentPreview">
+      <span className="rangeCommentBubble" title={note}>
+        <span>{note}</span>
+      </span>
+    </span>
   );
 }
 
