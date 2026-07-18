@@ -58,6 +58,7 @@ import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
+import { SaleaeIcon } from "./components/SaleaeIcon";
 import { StripChartScrollbar } from "./components/StripChartScrollbar";
 import { TimingDisplayCanvas } from "./components/TimingDisplayCanvas";
 import { WaveformCanvas } from "./components/WaveformCanvas";
@@ -127,6 +128,7 @@ import {
   ensureRangeMeasurementIds,
   formatDeltaTime,
   formatRangeMeasurementValue,
+  rangeMeasurementDefinition,
 } from "./lib/rangeMeasurements";
 
 type FooterPopover = "devices" | "newSession" | "zoom" | null;
@@ -251,7 +253,12 @@ const DEFAULT_DEMO_BUFFER_SIZE_MB = 4096;
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
 const BUILT_IN_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
-const RANGE_COLORS = ["#43baeb", "#ffcb46", "#00b140", "#f52a66"];
+const RANGE_COLORS = [
+  "hsl(334, 58%, 53%)",
+  "hsl(150, 100%, 30%)",
+  "hsl(198, 70%, 50%)",
+  "hsl(7, 69%, 54%)",
+];
 
 const panelMeta: Record<
   SidebarPanel,
@@ -503,7 +510,7 @@ function createRangeMeasurement(
   return {
     annotationsVisible: true,
     channelIndex,
-    color: RANGE_COLORS[index % RANGE_COLORS.length],
+    color: RANGE_COLORS[0],
     endSample: end,
     expanded: true,
     id: `range-${Date.now()}-${index}`,
@@ -3125,7 +3132,6 @@ function RangeMeasurementsOverlay({
         return (
           <RangeMeasurementTooltip
             key={`${range.id}-tooltip`}
-            onClose={() => updateTooltipRange(range.id, { showTooltip: false })}
             onDelete={() =>
               onUpdateSession((current) => ({
                 ...current,
@@ -3136,7 +3142,6 @@ function RangeMeasurementsOverlay({
             onOpenExtensions={onOpenExtensions}
             range={range}
             sampleRateHz={session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz}
-            session={session}
             style={
               range.tooltipPosition
                 ? ({
@@ -3212,22 +3217,18 @@ function PlacingRangePreview({
 }
 
 function RangeMeasurementTooltip({
-  onClose,
   onDelete,
   onOpenExtensions,
   onUpdate,
   range,
   sampleRateHz,
-  session,
   style,
 }: {
-  onClose: () => void;
   onDelete: () => void;
   onOpenExtensions: () => void;
   onUpdate: (patch: Partial<UiRangeMeasurement>) => void;
   range: UiRangeMeasurement;
   sampleRateHz: number;
-  session: UiSession;
   style: CSSProperties;
 }) {
   const [addOpen, setAddOpen] = useState(false);
@@ -3236,6 +3237,14 @@ function RangeMeasurementTooltip({
   const tooltipRef = useRef<HTMLElement | null>(null);
   const measurementIds = ensureRangeMeasurementIds(range.measurements);
   const stats = range.measurementStats;
+  const deltaSeconds = stats
+    ? stats.duration_samples / Math.max(1, stats.sample_rate_hz || sampleRateHz)
+    : null;
+  const displayedMeasurements = measurementIds.flatMap((id) => {
+    const definition = rangeMeasurementDefinition(id);
+    if (!definition) return [];
+    return [{ definition, formatted: formatRangeMeasurementValue(id, stats) }];
+  });
 
   function copyRange() {
     void navigator.clipboard?.writeText(
@@ -3349,12 +3358,21 @@ function RangeMeasurementTooltip({
       }
     >
       <div className="rangeTooltipGrid">
-        <MetricCell label="Delta T" value={formatDeltaTime(stats, sampleRateHz)} />
-        <MetricCell label="Edges" value={stats ? String(stats.edge_count) : range.measurementStatsBusy ? "..." : "N/A"} />
-        <MetricCell label="Frequency" value={formatRangeMeasurementValue("frequency", stats).value} />
-        <MetricCell label="Duty 1" value={formatRangeMeasurementValue("positive_duty", stats).value} />
-        <MetricCell label="Width 1" value={formatRangeMeasurementValue("positive_width", stats).value} />
-        <MetricCell label="Channel" value={`D${range.channelIndex}`} />
+        <RangeMetricCell
+          fullValue={deltaSeconds == null ? "Measurement pending" : `${deltaSeconds} s`}
+          label="Delta T"
+          labelHtml="&Delta;T"
+          value={formatDeltaTime(stats, sampleRateHz)}
+        />
+        {displayedMeasurements.map(({ definition, formatted }) => (
+          <RangeMetricCell
+            fullValue={formatted.fullValue}
+            key={definition.id}
+            label={definition.label}
+            labelHtml={definition.labelHtml}
+            value={range.measurementStatsBusy && !stats ? "..." : formatted.value}
+          />
+        ))}
       </div>
       {range.measurementError && <div className="rangeMeasurementError">{range.measurementError}</div>}
       <div
@@ -3376,7 +3394,7 @@ function RangeMeasurementTooltip({
             title="Add or Remove Measurements"
             type="button"
           >
-            <Plus size={13} />
+            <SaleaeIcon name="plus" size={12} />
           </button>
           {addOpen && (
             <RangeMeasurementAddMenu
@@ -3396,7 +3414,7 @@ function RangeMeasurementTooltip({
             title="Annotation Setting"
             type="button"
           >
-            <Settings2 size={13} />
+            <SaleaeIcon name="gear" size={13} />
           </button>
           {settingsOpen && (
             <RangeMeasurementSettingsMenu
@@ -3406,16 +3424,14 @@ function RangeMeasurementTooltip({
           )}
         </div>
         <button className="rangeTooltipIconButton" onClick={copyRange} title="Copy" type="button">
-          <Copy size={13} />
-        </button>
-        <button className="rangeTooltipIconButton" onClick={onClose} title="Close" type="button">
-          <X size={13} />
+          <SaleaeIcon name="copy" size={13} />
         </button>
       </div>
       <div className="rangeTooltipCommentBox">
         <textarea
           onChange={(event) => onUpdate({ note: event.target.value })}
           placeholder="Comment here"
+          rows={1}
           value={range.note}
         />
         <div className="rangeTooltipLowerPart">
@@ -3429,16 +3445,35 @@ function RangeMeasurementTooltip({
                 style={{ "--range-color": color } as CSSProperties}
                 type="button"
               >
-                {color === range.color ? <Check size={12} /> : null}
+                {color === range.color ? <SaleaeIcon name="checkmark" size={10} /> : null}
               </button>
             ))}
           </div>
           <button className="rangeTooltipIconButton" onClick={onDelete} title="Delete" type="button">
-            <Trash2 size={13} />
+            <SaleaeIcon name="trash" size={14} />
           </button>
         </div>
       </div>
     </section>
+  );
+}
+
+function RangeMetricCell({
+  fullValue,
+  label,
+  labelHtml,
+  value,
+}: {
+  fullValue: string;
+  label: string;
+  labelHtml: string;
+  value: string;
+}) {
+  return (
+    <div className="rangeMetricCell">
+      <span aria-label={label} dangerouslySetInnerHTML={{ __html: labelHtml }} title={label} />
+      <strong title={fullValue}>{value}</strong>
+    </div>
   );
 }
 
@@ -3506,8 +3541,14 @@ function RangeMeasurementAddMenu({
                   title={measurement.description}
                   type="button"
                 >
-                  <span>{measurement.label}</span>
-                  <span className="rangeMeasurementAddToggle">{enabled ? "−" : "+"}</span>
+                  <span
+                    aria-label={measurement.label}
+                    dangerouslySetInnerHTML={{ __html: measurement.labelHtml }}
+                    title={measurement.label}
+                  />
+                  <span className="rangeMeasurementAddToggle">
+                    <SaleaeIcon name={enabled ? "minus" : "plus"} size={8} />
+                  </span>
                 </button>
               );
             })}
@@ -3533,11 +3574,22 @@ function RangeMeasurementSettingsMenu({
     <div className="rangeMeasurementSettingsMenu" onClick={(event) => event.stopPropagation()}>
       <label>
         <span>Display Annotations</span>
-        <input
-          checked={annotationsVisible}
-          onChange={(event) => onChange(event.target.checked)}
-          type="checkbox"
-        />
+        <span className={`saleaeSwitch ${annotationsVisible ? "checked" : ""}`}>
+          <input
+            checked={annotationsVisible}
+            onChange={(event) => onChange(event.target.checked)}
+            type="checkbox"
+          />
+          <span className="saleaeSwitchTrack">
+            <span className="saleaeSwitchIcon checkedIcon">
+              <SaleaeIcon name="checkmark" size={8} />
+            </span>
+            <span className="saleaeSwitchIcon uncheckedIcon">
+              <SaleaeIcon name="cross" size={8} />
+            </span>
+            <span className="saleaeSwitchHandle" />
+          </span>
+        </span>
       </label>
     </div>
   );
@@ -5274,7 +5326,17 @@ function MeasurementsPanel({
                 style={{ "--range-color": range.color } as CSSProperties}
               >
                 <div className="rangeMeasurementHeader">
-                  <span className="rangeExpandSpacer" />
+                  <button
+                    className={`rangeExpandButton ${range.expanded ? "expanded" : ""}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      updateRange(range.id, { expanded: !range.expanded });
+                    }}
+                    title={range.expanded ? "Collapse" : "Expand"}
+                    type="button"
+                  >
+                    <SaleaeIcon name="arrowHead" size={6} />
+                  </button>
                   <span className="rangeColorSwatch" />
                   <div className="rangeLabelContainer" title={range.name}>
                     <input
@@ -5283,7 +5345,7 @@ function MeasurementsPanel({
                       onClick={(event) => event.stopPropagation()}
                       value={range.name}
                     />
-                    <span>→</span>
+                    <span className="rangeDirectionArrow"><SaleaeIcon name="arrow" /></span>
                   </div>
                   <strong className="rangeDeltaValue">Δ{formatDeltaTime(stats, sampleRateHz)}</strong>
                   <span className="rangeCommentPreview">{range.note}</span>
@@ -5296,7 +5358,7 @@ function MeasurementsPanel({
                       title="Go to range. Double click to zoom."
                       type="button"
                     >
-                      <LocateFixed size={12} />
+                      <SaleaeIcon name="goto" />
                     </button>
                     <button
                       onClick={(event) => {
@@ -5306,7 +5368,7 @@ function MeasurementsPanel({
                       title="More"
                       type="button"
                     >
-                      <MoreVertical size={13} />
+                      <SaleaeIcon name="verticalThreeDots" size={16} />
                     </button>
                     {openMenuFor === range.id && (
                       <div className="rangeItemMenu" onClick={(event) => event.stopPropagation()}>

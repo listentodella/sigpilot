@@ -19,6 +19,7 @@ export interface DigitalRangeMeasurementDefinition {
   description: string;
   id: DigitalRangeMeasurementId;
   label: string;
+  labelHtml: string;
 }
 
 export interface FormattedRangeMeasurementValue {
@@ -37,36 +38,42 @@ export const DIGITAL_RANGE_MEASUREMENT_CATEGORIES: {
         id: "frequency",
         category: "Time",
         label: "Frequency",
+        labelHtml: "<i>f</i>",
         description: "Average frequency from complete same-edge cycles inside the range.",
       },
       {
         id: "period",
         category: "Time",
         label: "Period",
+        labelHtml: "<i>T</i>",
         description: "Average cycle period from same-edge transitions inside the range.",
       },
       {
         id: "positive_width",
         category: "Time",
         label: "Width 1",
+        labelHtml: "<i>t</i><sub>high</sub>",
         description: "Average high pulse width inside the selected range.",
       },
       {
         id: "negative_width",
         category: "Time",
         label: "Width 0",
+        labelHtml: "<i>t</i><sub>low</sub>",
         description: "Average low pulse width inside the selected range.",
       },
       {
         id: "positive_duty",
         category: "Time",
         label: "Duty 1",
+        labelHtml: "<i>D</i><sub>high</sub>",
         description: "Percent of the range spent high.",
       },
       {
         id: "negative_duty",
         category: "Time",
         label: "Duty 0",
+        labelHtml: "<i>D</i><sub>low</sub>",
         description: "Percent of the range spent low.",
       },
     ],
@@ -78,36 +85,42 @@ export const DIGITAL_RANGE_MEASUREMENT_CATEGORIES: {
         id: "frequencyMax",
         category: "Digital",
         label: "Maximum Frequency",
+        labelHtml: "<i>f</i><sub>max</sub>",
         description: "Frequency of the highest-frequency single cycle.",
       },
       {
         id: "frequencyAvg",
         category: "Digital",
         label: "Average Frequency",
+        labelHtml: "<i>f</i><sub>avg</sub>",
         description: "Average frequency of each cycle.",
       },
       {
         id: "frequencyMin",
         category: "Digital",
         label: "Minimum Frequency",
+        labelHtml: "<i>f</i><sub>min</sub>",
         description: "Frequency of the lowest-frequency single cycle.",
       },
       {
         id: "edgesFalling",
         category: "Digital",
         label: "No. Falling Edges",
+        labelHtml: "N<sub>&darr;</sub>",
         description: "Count of falling edges.",
       },
       {
         id: "edgesRising",
         category: "Digital",
         label: "No. Rising Edges",
+        labelHtml: "N<sub>&uarr;</sub>",
         description: "Count of rising edges.",
       },
       {
         id: "periodStdDev",
         category: "Digital",
         label: "Period Std. Deviation",
+        labelHtml: "&sigma;<sub>T</sub>",
         description: "Standard deviation of the periods of each cycle.",
       },
     ],
@@ -245,5 +258,5 @@ function formatSeconds(value: number) {
 function trimNumber(value: number) {
   if (!Number.isFinite(value)) return "N/A";
   if (Number.isInteger(value)) return String(value);
-  return value.toPrecision(4).replace(/\.?0+($|e)/, "$1");
+  return value.toPrecision(3).replace(/\.?0+($|e)/, "$1");
 }

@@ -25,6 +25,9 @@
 - `src/components/LogicToolbar.tsx`
   - 顶部工具栏骨架。
   - 当前负责 Start、Add Analyzer、Range Measurements、Marker 操作入口。
+- `src/components/SaleaeIcon.tsx`
+  - 从 Logic 2.4.43 `uikit/elements/Icon` 搬运的小型 SVG path 集合。
+  - 当前用于 Range Measurement tooltip、Add/Settings menu、右侧 Measurements RangeItem 的 icon parity。
 - `src/components/ExtensionsPanel.tsx`
   - Saleae 风格 Extensions 右栏。
   - 包含搜索、管理菜单、扩展项动作、创建对话框和扩展详情覆盖页。
@@ -68,7 +71,7 @@
   - 从 Logic 2.4.43 `timingDisplay.ts` 搬运的高精度 major/minor 时间刻度算法。
   - 包含原版 DarkTheme `border-10` / `border-20` GridLines 色值。
 - `src/lib/rangeMeasurements.ts`
-  - Measurements2 风格数字 range measurement id、默认列表、分类、文案、格式化和 copy 输出 helper。
+  - Measurements2 风格数字 range measurement id、默认列表、分类、HTML/math 标签、文案、格式化和 copy 输出 helper。
 
 ## 已搬入的小型 Saleae 视觉资源
 

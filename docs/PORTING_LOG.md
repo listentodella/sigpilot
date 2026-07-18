@@ -95,3 +95,5 @@ chore: 说明内容
   - Range measurement 真实后端统计、Measurements2 风格 Add/Remove Measurements、逐项启用/删除与 copy 输出。
 - `docs/ported-features/2026-07-17-range-measurement-interaction-parity.md`
   - Range placing 竖条预览、主图 tooltip 可拖动/隐藏恢复，以及 Measurements 右栏轻量 RangeItem 对齐。
+- `docs/ported-features/2026-07-18-range-measurement-tooltip-polish.md`
+  - Range tooltip 原版两段式视觉、完整默认统计项、HTML/math 标签、固定 fuchsia 默认色、原版小图标和右栏 RangeItem 视觉补齐。
