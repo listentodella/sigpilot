@@ -106,14 +106,14 @@ export const DIGITAL_RANGE_MEASUREMENT_CATEGORIES: {
         id: "edgesFalling",
         category: "Digital",
         label: "No. Falling Edges",
-        labelHtml: "No. Falling Edges",
+        labelHtml: "<i>N</i><sub>falling</sub>",
         description: "Count of falling edges.",
       },
       {
         id: "edgesRising",
         category: "Digital",
         label: "No. Rising Edges",
-        labelHtml: "No. Rising Edges",
+        labelHtml: "<i>N</i><sub>rising</sub>",
         description: "Count of rising edges.",
       },
       {

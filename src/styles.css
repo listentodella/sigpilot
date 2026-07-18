@@ -3242,16 +3242,16 @@ button:disabled {
   padding: 8px 0;
   border: 0;
   border-radius: 0;
-  background: transparent;
+  background: var(--background-10);
   cursor: pointer;
 }
 
 .rangeMeasurementItem:hover {
-  background: var(--hover-background);
+  background: var(--background-0);
 }
 
 .rangeMeasurementItem.selected {
-  background: var(--selected-highlight);
+  background: var(--hover-background);
 }
 
 .rangeMeasurementHeader {
@@ -3326,7 +3326,7 @@ button:disabled {
 .rangeMeasurementItem.selected .rangeSidebarMetricLabel,
 .rangeMeasurementItem.selected .rangeSidebarMetricValue,
 .rangeMeasurementItem.selected .rangeExpandButton {
-  color: var(--on-primary);
+  color: var(--on-background-0);
 }
 
 .rangeLabelContainer span {
@@ -3447,12 +3447,6 @@ button:disabled {
   align-items: center;
   justify-content: flex-end;
   gap: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.rangeMeasurementItem:hover .rangeMeasurementActions,
-.rangeMeasurementActions:focus-within {
   opacity: 1;
   pointer-events: auto;
 }

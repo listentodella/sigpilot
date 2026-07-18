@@ -103,3 +103,5 @@ chore: 说明内容
   - Measurements 右侧栏 RangeItem subgrid、comment 气泡省略、展开 measurement 行、hover-only actions 和原版空态图。
 - `docs/ported-features/2026-07-18-range-measurement-sidebar-polish.md`
   - Range measurement 默认折叠、count 文案回到原版可读文本、goto/menu 尺寸与颜色收紧。
+- `docs/ported-features/2026-07-18-range-measurement-sidebar-parity-fix.md`
+  - Range item 背景状态改回原版暗色常量、右侧操作按钮常显、edge count 明细恢复 `N` 加文字下标。
