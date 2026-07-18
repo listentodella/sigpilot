@@ -3444,6 +3444,7 @@ button:disabled {
   grid-column: goto / endGutter;
   position: relative;
   display: inline-flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 0;
   opacity: 0;
@@ -3457,21 +3458,33 @@ button:disabled {
 }
 
 .rangeMeasurementActions button {
-  width: 18px;
-  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 3px;
-  color: var(--on-background-30);
+  border-radius: 0;
+  color: var(--on-background-20);
   background: transparent;
   cursor: pointer;
+  padding: 0;
+}
+
+.rangeGotoButton {
+  width: 18px;
+  height: 18px;
+  margin-right: 5px;
+  padding: 4px;
+}
+
+.rangeMenuButton {
+  width: 14px;
+  height: 14px;
+  padding: 0;
 }
 
 .rangeMeasurementActions button:hover {
   color: var(--on-background-0);
-  background: var(--background-30);
+  background: transparent;
 }
 
 .rangeItemMenu {

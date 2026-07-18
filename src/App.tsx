@@ -513,7 +513,7 @@ function createRangeMeasurement(
     channelIndex,
     color: RANGE_COLORS[0],
     endSample: end,
-    expanded: true,
+    expanded: false,
     id: `range-${Date.now()}-${index}`,
     measurementError: null,
     measurements: [...DEFAULT_DIGITAL_RANGE_MEASUREMENTS],
@@ -5362,6 +5362,7 @@ function MeasurementsPanel({
                 </div>
                 <div className="rangeMeasurementActions">
                   <button
+                    className="rangeGotoButton"
                     onClick={(event) => {
                       event.stopPropagation();
                       goToRange(range);
@@ -5369,9 +5370,10 @@ function MeasurementsPanel({
                     title="Go to range. Double click to zoom."
                     type="button"
                   >
-                    <SaleaeIcon name="goto" />
+                    <SaleaeIcon name="goto" size={10} />
                   </button>
                   <button
+                    className="rangeMenuButton"
                     onClick={(event) => {
                       event.stopPropagation();
                       setOpenMenuFor((current) => (current === range.id ? null : range.id));
@@ -5379,7 +5381,7 @@ function MeasurementsPanel({
                     title="More"
                     type="button"
                   >
-                    <SaleaeIcon name="verticalThreeDots" size={16} />
+                    <SaleaeIcon name="verticalThreeDots" size={14} />
                   </button>
                   {openMenuFor === range.id && (
                     <div className="rangeItemMenu" onClick={(event) => event.stopPropagation()}>

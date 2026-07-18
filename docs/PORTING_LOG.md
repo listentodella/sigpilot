@@ -101,3 +101,5 @@ chore: 说明内容
   - Range tooltip comment 在右侧 Measurements item 中同步显示为原版 Note 风格气泡。
 - `docs/ported-features/2026-07-18-range-measurement-sidebar-layout.md`
   - Measurements 右侧栏 RangeItem subgrid、comment 气泡省略、展开 measurement 行、hover-only actions 和原版空态图。
+- `docs/ported-features/2026-07-18-range-measurement-sidebar-polish.md`
+  - Range measurement 默认折叠、count 文案回到原版可读文本、goto/menu 尺寸与颜色收紧。
