@@ -173,12 +173,20 @@ export type AnalyzerDecodeSettings =
   | { protocol: "I2c"; settings: I2cDecodeSettings }
   | { protocol: "Spi"; settings: SpiDecodeSettings };
 
+export interface DecodedChannelValue {
+  channel: number;
+  role: string;
+  label: string;
+  value: number;
+}
+
 export interface DecodedFrame {
   frame_id: number;
   start_sample: number;
   end_sample: number;
   label: string;
   value: number;
+  channel_values: DecodedChannelValue[];
 }
 
 export interface AnalyzerBubble {
@@ -455,6 +463,7 @@ function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFr
       settings.protocol === "I2c"
         ? [0xa0, 0x2a, 0x55][byteIndex]
         : [0xa5, 0x3c, 0x5a, 0xf0][sourceFrameId % 4];
+    const misoValue = (value ^ 0x99) & 0xff;
     const endSample =
       settings.protocol === "I2c"
         ? startSample + halfPeriod * 16 + 1
@@ -467,11 +476,42 @@ function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFr
               : `MOSI 0x${value.toString(16).padStart(2, "0").toUpperCase()}`,
             settings.settings.miso_channel === null
               ? null
-              : `MISO 0x${((value ^ 0x99) & 0xff).toString(16).padStart(2, "0").toUpperCase()}`,
+              : `MISO ${labelForPreviewByte(misoValue)}`,
           ]
             .filter((label): label is string => label !== null)
             .join(" / ")
         : "";
+    const channelValues: DecodedChannelValue[] =
+      settings.protocol === "I2c"
+        ? [
+            {
+              channel: settings.settings.sda_channel,
+              role: "SDA",
+              label:
+                byteIndex === 0
+                  ? `0x${(value >> 1).toString(16).padStart(2, "0").toUpperCase()} ${value & 1 ? "R" : "W"}`
+                  : labelForPreviewByte(value),
+              value,
+            },
+          ]
+        : [
+            settings.settings.mosi_channel === null
+              ? null
+              : {
+                  channel: settings.settings.mosi_channel,
+                  role: "MOSI",
+                  label: labelForPreviewByte(value),
+                  value,
+                },
+            settings.settings.miso_channel === null
+              ? null
+              : {
+                  channel: settings.settings.miso_channel,
+                  role: "MISO",
+                  label: labelForPreviewByte(misoValue),
+                  value: misoValue,
+                },
+          ].filter((entry): entry is DecodedChannelValue => entry !== null);
     return {
       frame_id: sourceFrameId,
       start_sample: startSample,
@@ -483,6 +523,7 @@ function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFr
             : `Data 0x${value.toString(16).padStart(2, "0").toUpperCase()} ACK`
           : spiLabel,
       value,
+      channel_values: channelValues,
     };
   }).filter((frame) => frame.start_sample < metadata.sample_count && frame.end_sample > frame.start_sample);
 }
@@ -873,6 +914,14 @@ function previewUartFrame(cycle: number, byteIndex: number, bitPeriod: number): 
     end_sample: endSample,
     label: labelForPreviewByte(value),
     value,
+    channel_values: [
+      {
+        channel: 0,
+        role: "Input",
+        label: labelForPreviewByte(value),
+        value,
+      },
+    ],
   };
 }
 

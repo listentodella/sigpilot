@@ -114,3 +114,5 @@ chore: 说明内容
   - Timing Markers temp placement、Pair/Single、图上/右侧菜单、编辑弹窗、原版时间格式和选择/删除快捷键的完整交互搬运。
 - `docs/ported-features/2026-07-20-analyzer-protocols-cache-trigger-view.md`
   - UART 之外的 I2C/SPI 电平解码、长捕获有界 frame/bubble 缓存、viewport 本地投影，以及 Analyzers 侧栏 Trigger View 结构占位。
+- `docs/ported-features/2026-07-20-analyzer-channel-roles-markers.md`
+  - Analyzer 通道角色副标题、I2C/SPI 分通道短气泡、SCL/Clock 有效边沿 marker，以及原版风格通道下拉控件。

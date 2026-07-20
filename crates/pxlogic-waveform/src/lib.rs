@@ -583,10 +583,7 @@ mod tests {
 
         assert_eq!(stats.channel, 1);
         assert!(stats.duration_samples > 0);
-        assert_eq!(
-            stats.edge_count,
-            stats.rising_edges + stats.falling_edges
-        );
+        assert_eq!(stats.edge_count, stats.rising_edges + stats.falling_edges);
         assert_eq!(
             stats.duration_samples,
             stats.high_samples + stats.low_samples

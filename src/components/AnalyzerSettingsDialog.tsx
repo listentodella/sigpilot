@@ -1,7 +1,9 @@
 import { X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { UiAnalyzerInstance } from "../lib/analyzers";
 import { analyzerSupportsDecoding } from "../lib/analyzers";
+import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
+import { SaleaeIcon } from "./SaleaeIcon";
 
 interface AnalyzerSettingsDialogProps {
   analyzer: UiAnalyzerInstance;
@@ -233,7 +235,7 @@ export function AnalyzerSettingsDialog({
                 onChange={() => setDraft((current) => ({ ...current, showInDataTable: !current.showInDataTable }))}
                 type="checkbox"
               />
-              <span>Show in Data Table</span>
+              <span>Show in protocol results table</span>
             </label>
           </AnalyzerSettingRow>
           <AnalyzerSettingRow>
@@ -243,7 +245,7 @@ export function AnalyzerSettingsDialog({
                 onChange={() => setDraft((current) => ({ ...current, streamToTerminal: !current.streamToTerminal }))}
                 type="checkbox"
               />
-              <span>Stream to Terminal</span>
+              <span>Stream to terminal</span>
             </label>
           </AnalyzerSettingRow>
         </div>
@@ -286,34 +288,180 @@ function ChannelSelect({
   optional?: boolean;
   value: number | null;
 }) {
-  const readyChannels = Array.from({ length: channelCount }, (_, index) => index).filter(
-    (index) => channelEnabled[index] ?? false,
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const readyChannels = useMemo(
+    () =>
+      Array.from({ length: channelCount }, (_, index) => index).filter(
+        (index) => channelEnabled[index] ?? false,
+      ),
+    [channelCount, channelEnabled],
   );
-  const disabledChannels = Array.from({ length: channelCount }, (_, index) => index).filter(
-    (index) => !(channelEnabled[index] ?? false),
+  const disabledChannels = useMemo(
+    () =>
+      Array.from({ length: channelCount }, (_, index) => index).filter(
+        (index) => !(channelEnabled[index] ?? false),
+      ),
+    [channelCount, channelEnabled],
   );
+
+  useEffect(() => {
+    if (!autoFocus) return;
+    const frame = window.requestAnimationFrame(() => buttonRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFocus]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        buttonRef.current?.focus();
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  function choose(channel: number | null) {
+    onChange(channel);
+    setOpen(false);
+    window.requestAnimationFrame(() => buttonRef.current?.focus());
+  }
+
   return (
-    <select
-      autoFocus={autoFocus}
-      value={value === null ? "none" : value}
-      onChange={(event) => onChange(event.target.value === "none" ? null : Number(event.target.value))}
-    >
-      {optional && <option value="none">None</option>}
-      {readyChannels.map((channel) => (
-        <option key={channel} value={channel}>
-          {channelLabels[channel] ?? `D${channel}`}{capturedChannelCount > 0 && channel >= capturedChannelCount ? " (empty)" : ""}
-        </option>
-      ))}
-      {disabledChannels.length > 0 && (
-        <optgroup label="Disabled Channels">
-          {disabledChannels.map((channel) => (
-            <option key={channel} value={channel}>
-              {channelLabels[channel] ?? `D${channel}`}
-            </option>
+    <div className="analyzerChannelDropdown">
+      <button
+        aria-expanded={open}
+        className={`analyzerChannelDropdownButton ${open ? "open" : ""}`}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
+        ref={buttonRef}
+        type="button"
+      >
+        {value === null ? (
+          <span className="analyzerChannelOptionText">None</span>
+        ) : (
+          <ChannelOptionContent
+            capturedChannelCount={capturedChannelCount}
+            channel={value}
+            channelLabels={channelLabels}
+          />
+        )}
+        <SaleaeIcon className="analyzerChannelDropdownCaret" name="arrowHead" />
+      </button>
+      {open && (
+        <div className="analyzerChannelDropdownMenu" ref={menuRef} role="listbox">
+          {optional && (
+            <ChannelOptionButton
+              label="None"
+              onClick={() => choose(null)}
+              selected={value === null}
+            />
+          )}
+          {readyChannels.map((channel) => (
+            <ChannelOptionButton
+              capturedChannelCount={capturedChannelCount}
+              channel={channel}
+              channelLabels={channelLabels}
+              key={channel}
+              onClick={() => choose(channel)}
+              selected={value === channel}
+            />
           ))}
-        </optgroup>
+          {disabledChannels.length > 0 && (
+            <>
+              <div className="analyzerChannelDropdownGroup">Disabled Channels</div>
+              {disabledChannels.map((channel) => (
+                <ChannelOptionButton
+                  channel={channel}
+                  channelLabels={channelLabels}
+                  key={channel}
+                  onClick={() => choose(channel)}
+                  selected={value === channel}
+                />
+              ))}
+            </>
+          )}
+        </div>
       )}
-    </select>
+    </div>
+  );
+}
+
+function ChannelOptionButton({
+  capturedChannelCount = 0,
+  channel,
+  channelLabels = [],
+  label,
+  onClick,
+  selected,
+}: {
+  capturedChannelCount?: number;
+  channel?: number;
+  channelLabels?: string[];
+  label?: string;
+  onClick: () => void;
+  selected: boolean;
+}) {
+  return (
+    <button
+      aria-selected={selected}
+      className={`analyzerChannelDropdownOption ${selected ? "selected" : ""}`}
+      onClick={onClick}
+      role="option"
+      type="button"
+    >
+      {channel === undefined ? (
+        <span className="analyzerChannelOptionText">{label}</span>
+      ) : (
+        <ChannelOptionContent
+          capturedChannelCount={capturedChannelCount}
+          channel={channel}
+          channelLabels={channelLabels}
+        />
+      )}
+      {selected && <SaleaeIcon className="analyzerChannelDropdownCheck" name="checkmark" />}
+    </button>
+  );
+}
+
+function ChannelOptionContent({
+  capturedChannelCount,
+  channel,
+  channelLabels,
+}: {
+  capturedChannelCount: number;
+  channel: number;
+  channelLabels: string[];
+}) {
+  const name = channelLabels[channel] ?? `D${channel}`;
+  const suffix = capturedChannelCount > 0 && channel >= capturedChannelCount ? " (empty)" : "";
+  return (
+    <span className="analyzerChannelOptionContent">
+      <span
+        className="analyzerChannelOptionSwatch"
+        style={{ background: saleaeLegacyChannelColor(channel) }}
+      />
+      <span className="analyzerChannelOptionText">{name}{suffix}</span>
+    </span>
   );
 }
 

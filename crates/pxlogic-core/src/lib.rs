@@ -17,8 +17,8 @@ pub use capture::{
     RegisterWrite,
 };
 pub use decode::{
-    decode_analyzer, decode_i2c, decode_spi, decode_uart, AnalyzerDecodeSettings, DecodedFrame,
-    I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings,
+    decode_analyzer, decode_i2c, decode_spi, decode_uart, AnalyzerDecodeSettings,
+    DecodedChannelValue, DecodedFrame, I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings,
 };
 pub use error::{CoreError, Result};
 pub use fake::FakeBackend;

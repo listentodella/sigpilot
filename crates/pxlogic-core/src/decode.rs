@@ -78,12 +78,21 @@ pub enum AnalyzerDecodeSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecodedChannelValue {
+    pub channel: u8,
+    pub role: String,
+    pub label: String,
+    pub value: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecodedFrame {
     pub frame_id: u64,
     pub start_sample: u64,
     pub end_sample: u64,
     pub label: String,
     pub value: u64,
+    pub channel_values: Vec<DecodedChannelValue>,
 }
 
 struct FrameCollector {
@@ -201,6 +210,12 @@ pub fn decode_uart(
                     end_sample: sample + ((bit_period * 10.0).ceil() as u64),
                     label: label_for_value(u64::from(value), 8),
                     value: u64::from(value),
+                    channel_values: vec![DecodedChannelValue {
+                        channel: settings.channel,
+                        role: "Input".to_string(),
+                        label: label_for_value(u64::from(value), 8),
+                        value: u64::from(value),
+                    }],
                 });
                 sample += ((bit_period * 9.0).floor() as u64).max(1);
                 continue;
@@ -262,6 +277,15 @@ pub fn decode_i2c(
                 bit_count += 1;
             } else {
                 let acknowledged = !sda;
+                let bubble_label = if byte_index == 0 {
+                    format!(
+                        "0x{:02X} {}",
+                        byte >> 1,
+                        if byte & 1 == 0 { "W" } else { "R" }
+                    )
+                } else {
+                    label_for_value(u64::from(byte), 8)
+                };
                 let label = if byte_index == 0 {
                     format!(
                         "Address 0x{:02X} {} {}",
@@ -282,6 +306,12 @@ pub fn decode_i2c(
                     end_sample: sample.saturating_add(1),
                     label,
                     value: u64::from(byte),
+                    channel_values: vec![DecodedChannelValue {
+                        channel: settings.sda_channel,
+                        role: "SDA".to_string(),
+                        label: bubble_label,
+                        value: u64::from(byte),
+                    }],
                 });
                 byte = 0;
                 bit_count = 0;
@@ -384,6 +414,23 @@ pub fn decode_spi(
             bit_count += 1;
 
             if bit_count == settings.bits_per_transfer {
+                let mut channel_values = Vec::new();
+                if let Some(channel) = settings.mosi_channel {
+                    channel_values.push(DecodedChannelValue {
+                        channel,
+                        role: "MOSI".to_string(),
+                        label: label_for_value(mosi_value, settings.bits_per_transfer),
+                        value: mosi_value,
+                    });
+                }
+                if let Some(channel) = settings.miso_channel {
+                    channel_values.push(DecodedChannelValue {
+                        channel,
+                        role: "MISO".to_string(),
+                        label: label_for_value(miso_value, settings.bits_per_transfer),
+                        value: miso_value,
+                    });
+                }
                 let label = match (settings.mosi_channel, settings.miso_channel) {
                     (Some(_), Some(_)) => format!(
                         "MOSI {} / MISO {}",
@@ -406,6 +453,7 @@ pub fn decode_spi(
                     end_sample: sample.saturating_add(1),
                     label,
                     value: settings.mosi_channel.map_or(miso_value, |_| mosi_value),
+                    channel_values,
                 });
                 bit_count = 0;
                 mosi_value = 0;
@@ -552,6 +600,10 @@ mod tests {
             labels,
             ["Address 0x50 Write ACK", "Data 0x2A ACK", "Data 0x55 ACK"]
         );
+        assert_eq!(frames[0].channel_values.len(), 1);
+        assert_eq!(frames[0].channel_values[0].channel, 1);
+        assert_eq!(frames[0].channel_values[0].role, "SDA");
+        assert_eq!(frames[0].channel_values[0].label, "0x50 W");
     }
 
     #[test]
@@ -578,6 +630,12 @@ mod tests {
             frames.first().map(|frame| frame.label.as_str()),
             Some("MOSI 0xA5 / MISO 0x3C")
         );
+        let first_values = &frames[0].channel_values;
+        assert_eq!(first_values.len(), 2);
+        assert_eq!(first_values[0].role, "MOSI");
+        assert_eq!(first_values[0].label, "0xA5");
+        assert_eq!(first_values[1].role, "MISO");
+        assert_eq!(first_values[1].label, "0x3C");
         assert!(frames.len() > 100);
     }
 
@@ -603,7 +661,9 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].value, 0xA0);
         assert_eq!(frames[0].label, "Address 0x50 Write ACK");
+        assert_eq!(frames[0].channel_values[0].label, "0x50 W");
         assert_eq!(frames[1].label, "Data 0x5A ACK");
+        assert_eq!(frames[1].channel_values[0].label, "0x5A");
     }
 
     #[test]
@@ -632,5 +692,13 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].value, 0xA5);
         assert_eq!(frames[0].label, "MOSI 0xA5 / MISO 0x3C");
+        assert_eq!(
+            frames[0]
+                .channel_values
+                .iter()
+                .map(|value| (value.channel, value.role.as_str(), value.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "MOSI", "0xA5"), (1, "MISO", "0x3C")]
+        );
     }
 }

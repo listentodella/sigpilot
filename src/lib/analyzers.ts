@@ -46,6 +46,13 @@ export interface UiAnalyzerInstance {
   highlightedFrameIndex: number | null;
 }
 
+export interface AnalyzerChannelRole {
+  channel: number;
+  hasBubbles: boolean;
+  hasMarkers: boolean;
+  title: string;
+}
+
 export function analyzerDisplayName(type: string, analyzers: UiAnalyzerInstance[]) {
   const matching = analyzers.filter((analyzer) => analyzer.type === type);
   if (matching.length === 0) return type;
@@ -92,8 +99,87 @@ export function createAnalyzerInstance(
   };
 }
 
+export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChannelRole[] {
+  if (analyzer.type === "I2C") {
+    return [
+      {
+        channel: analyzer.i2cSdaChannel,
+        hasBubbles: true,
+        hasMarkers: false,
+        title: "SDA",
+      },
+      {
+        channel: analyzer.i2cSclChannel,
+        hasBubbles: false,
+        hasMarkers: true,
+        title: "SCL",
+      },
+    ];
+  }
+
+  if (analyzer.type === "SPI") {
+    return [
+      analyzer.spiMosiChannel === null
+        ? null
+        : {
+            channel: analyzer.spiMosiChannel,
+            hasBubbles: true,
+            hasMarkers: false,
+            title: "MOSI",
+          },
+      analyzer.spiMisoChannel === null
+        ? null
+        : {
+            channel: analyzer.spiMisoChannel,
+            hasBubbles: true,
+            hasMarkers: false,
+            title: "MISO",
+          },
+      {
+        channel: analyzer.spiClockChannel,
+        hasBubbles: false,
+        hasMarkers: true,
+        title: "Clock",
+      },
+      analyzer.spiEnableChannel === null
+        ? null
+        : {
+            channel: analyzer.spiEnableChannel,
+            hasBubbles: false,
+            hasMarkers: false,
+            title: "Enable",
+          },
+    ].filter((role): role is AnalyzerChannelRole => role !== null);
+  }
+
+  return [
+    {
+      channel: analyzer.channel,
+      hasBubbles: true,
+      hasMarkers: false,
+      title: "Input",
+    },
+  ];
+}
+
+export function analyzerBubbleRoles(analyzer: UiAnalyzerInstance) {
+  return analyzerChannelRoles(analyzer).filter((role) => role.hasBubbles);
+}
+
+export function analyzerMarkerRoles(analyzer: UiAnalyzerInstance) {
+  return analyzerChannelRoles(analyzer).filter((role) => role.hasMarkers);
+}
+
+export function analyzerChannelRoleLabel(analyzer: UiAnalyzerInstance, role: AnalyzerChannelRole) {
+  return `${analyzer.name} - ${role.title}`;
+}
+
 export function analyzerStripInsetForChannel(analyzers: UiAnalyzerInstance[], channel: number) {
-  return analyzers.filter((analyzer) => analyzer.channel === channel).length * ANALYZER_STRIP_HEIGHT_PX;
+  return analyzers.reduce(
+    (height, analyzer) =>
+      height + analyzerBubbleRoles(analyzer).filter((role) => role.channel === channel).length * ANALYZER_STRIP_HEIGHT_PX,
+    0,
+  );
 }
 
 export function analyzerSupportsDecoding(analyzer: Pick<UiAnalyzerInstance, "type">) {
@@ -140,18 +226,7 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
 }
 
 export function analyzerChannelIndexes(analyzer: UiAnalyzerInstance) {
-  const channels =
-    analyzer.type === "I2C"
-      ? [analyzer.i2cSdaChannel, analyzer.i2cSclChannel]
-      : analyzer.type === "SPI"
-        ? [
-            analyzer.spiMosiChannel,
-            analyzer.spiMisoChannel,
-            analyzer.spiClockChannel,
-            analyzer.spiEnableChannel,
-          ]
-        : [analyzer.channel];
-  return [...new Set(channels.filter((channel): channel is number => channel !== null))];
+  return [...new Set(analyzerChannelRoles(analyzer).map((role) => role.channel))];
 }
 
 export function analyzerDecodeSignature(analyzer: UiAnalyzerInstance) {

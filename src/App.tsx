@@ -89,6 +89,8 @@ import {
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
 import {
   analyzerChannelIndexes,
+  analyzerChannelRoleLabel,
+  analyzerChannelRoles,
   analyzerDecodeSettings,
   analyzerDecodeSignature as getAnalyzerDecodeSignature,
   analyzerStripInsetForChannel,
@@ -2305,7 +2307,7 @@ export default function App() {
                           isTrigger={activeSession.deviceSettings.triggerChannel === channelIndex}
                           key={channelIndex}
                           label={visibleChannelLabels[rowIndex]}
-                          analyzers={activeSession.analyzers.filter((analyzer) => analyzer.channel === channelIndex)}
+                          analyzers={activeSession.analyzers}
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setEditingChannel(null);
@@ -2381,6 +2383,8 @@ export default function App() {
                         }
                         onZoomBubble={zoomAnalyzerBubble}
                         rowHeights={visibleOuterRowHeights}
+                        rowTopInsets={visibleAnalyzerInsets}
+                        tile={visibleTile}
                         viewportSamples={activeSession.viewportSamples}
                         viewportStart={activeSession.viewportStart}
                         visibleChannelIndexes={visibleChannelIndexes}
@@ -2587,6 +2591,19 @@ function ChannelLabelRow({
 }) {
   const [draft, setDraft] = useState(label);
   const inputRef = useRef<HTMLInputElement>(null);
+  const analyzerRoleRows = useMemo(
+    () =>
+      analyzers.flatMap((analyzer) =>
+        analyzerChannelRoles(analyzer)
+          .filter((role) => role.channel === index)
+          .map((role) => ({
+            color: analyzer.color,
+            id: `${analyzer.id}-${role.title}`,
+            label: analyzerChannelRoleLabel(analyzer, role),
+          })),
+      ),
+    [analyzers, index],
+  );
 
   useEffect(() => {
     if (!isEditing) {
@@ -2652,12 +2669,12 @@ function ChannelLabelRow({
           D{index}
           {isTrigger ? " - trigger" : ""}
         </small>
-        {analyzers.length > 0 && (
+        {analyzerRoleRows.length > 0 && (
           <span className="channelAnalyzerSubtitle">
-            {analyzers.map((analyzer) => (
-              <span className="channelAnalyzerSubtitleRow" key={analyzer.id}>
-                <span className="channelAnalyzerSquare" style={{ background: analyzer.color }} />
-                <span>{analyzer.name}</span>
+            {analyzerRoleRows.map((row) => (
+              <span className="channelAnalyzerSubtitleRow" key={row.id}>
+                <span className="channelAnalyzerSquare" style={{ background: row.color }} />
+                <span>{row.label}</span>
               </span>
             ))}
           </span>

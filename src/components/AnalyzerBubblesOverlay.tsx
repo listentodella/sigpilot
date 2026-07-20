@@ -1,20 +1,42 @@
 import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AnalyzerBubble, buildAnalyzerFrameWindow } from "../lib/api";
+import { AnalyzerBubble, DecodedFrame, WaveformTile, buildAnalyzerFrameWindow } from "../lib/api";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
   ANALYZER_STRIP_HEIGHT_PX,
+  AnalyzerChannelRole,
   UiAnalyzerInstance,
+  analyzerBubbleRoles,
+  analyzerMarkerRoles,
 } from "../lib/analyzers";
+import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
+import { SaleaeIcon } from "./SaleaeIcon";
 
 const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
 const MAX_MULTI_BUBBLE_COUNT = 99;
 const MAX_MULTI_BUBBLE_TEXT_LENGTH = 200;
+const MAX_MARKERS_PER_TRACK = 400;
+
+interface AnalyzerBubbleTrack {
+  analyzer: UiAnalyzerInstance;
+  frames: DecodedFrame[];
+  key: string;
+  role: AnalyzerChannelRole;
+}
+
+interface AnalyzerMarkerTrack {
+  analyzer: UiAnalyzerInstance;
+  edgeType: "rising" | "falling";
+  key: string;
+  role: AnalyzerChannelRole;
+}
 
 interface AnalyzerBubblesOverlayProps {
   analyzers: UiAnalyzerInstance[];
   rowHeights: number[];
+  rowTopInsets: number[];
+  tile: WaveformTile | null;
   viewportSamples: number;
   viewportStart: number;
   visibleChannelIndexes: number[];
@@ -27,6 +49,8 @@ interface AnalyzerBubblesOverlayProps {
 export function AnalyzerBubblesOverlay({
   analyzers,
   rowHeights,
+  rowTopInsets,
+  tile,
   viewportSamples,
   viewportStart,
   visibleChannelIndexes,
@@ -37,7 +61,7 @@ export function AnalyzerBubblesOverlay({
 }: AnalyzerBubblesOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const [overlayWidth, setOverlayWidth] = useState(1);
-  const [hoveredAnalyzerId, setHoveredAnalyzerId] = useState<string | null>(null);
+  const [hoveredTrackKey, setHoveredTrackKey] = useState<string | null>(null);
   const rowTops = useMemo(() => {
     let top = 0;
     return rowHeights.map((height) => {
@@ -47,20 +71,43 @@ export function AnalyzerBubblesOverlay({
     });
   }, [rowHeights]);
   const viewportEnd = viewportStart + viewportSamples;
+  const bubbleTracks = useMemo<AnalyzerBubbleTrack[]>(
+    () =>
+      analyzers.flatMap((analyzer) =>
+        analyzerBubbleRoles(analyzer).map((role) => ({
+          analyzer,
+          frames: framesForAnalyzerRole(analyzer.decodedFrames, role),
+          key: `${analyzer.id}:${role.title}:${role.channel}:bubbles`,
+          role,
+        })),
+      ),
+    [analyzers],
+  );
+  const markerTracks = useMemo<AnalyzerMarkerTrack[]>(
+    () =>
+      analyzers.flatMap((analyzer) =>
+        analyzerMarkerRoles(analyzer).map((role) => ({
+          analyzer,
+          edgeType: analyzerMarkerEdgeType(analyzer),
+          key: `${analyzer.id}:${role.title}:${role.channel}:markers`,
+          role,
+        })),
+      ),
+    [analyzers],
+  );
+  const tileChannels = useMemo(
+    () => new Map((tile?.channels ?? []).map((channel) => [channel.channel, channel])),
+    [tile],
+  );
   const frameWindows = useMemo(
     () =>
       new Map(
-        analyzers.map((analyzer) => [
-          analyzer.id,
-          buildAnalyzerFrameWindow(
-            analyzer.decodedFrames,
-            viewportStart,
-            viewportSamples,
-            overlayWidth,
-          ),
+        bubbleTracks.map((track) => [
+          track.key,
+          buildAnalyzerFrameWindow(track.frames, viewportStart, viewportSamples, overlayWidth),
         ]),
       ),
-    [analyzers, overlayWidth, viewportSamples, viewportStart],
+    [bubbleTracks, overlayWidth, viewportSamples, viewportStart],
   );
 
   useEffect(() => {
@@ -74,12 +121,12 @@ export function AnalyzerBubblesOverlay({
   }, []);
 
   useEffect(() => {
-    if (!hoveredAnalyzerId) return;
+    if (!hoveredTrackKey) return;
     function handleKeyDown(event: KeyboardEvent) {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      const analyzer = analyzers.find((item) => item.id === hoveredAnalyzerId);
-      if (!analyzer) return;
-      const frameWindow = frameWindows.get(analyzer.id);
+      const track = bubbleTracks.find((item) => item.key === hoveredTrackKey);
+      if (!track) return;
+      const frameWindow = frameWindows.get(track.key);
       const frameIndex =
         event.key === "ArrowLeft"
           ? frameWindow?.previous_frame?.frame_id ?? null
@@ -88,31 +135,37 @@ export function AnalyzerBubblesOverlay({
             : null;
       if (frameIndex === null) return;
       event.preventDefault();
-      onGoToFrame(analyzer.id, frameIndex);
+      onGoToFrame(track.analyzer.id, frameIndex);
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [analyzers, frameWindows, hoveredAnalyzerId, onGoToFrame, viewportEnd, viewportStart]);
+  }, [bubbleTracks, frameWindows, hoveredTrackKey, onGoToFrame]);
 
   return (
     <div className="analyzerBubblesOverlay" ref={overlayRef}>
       {visibleChannelIndexes.flatMap((channel, rowIndex) => {
-        const channelAnalyzers = analyzers.filter((analyzer) => analyzer.channel === channel);
-        return channelAnalyzers.map((analyzer, analyzerIndex) => {
-          const frameWindow = frameWindows.get(analyzer.id);
+        const channelTracks = bubbleTracks.filter((track) => track.role.channel === channel);
+        return channelTracks.map((track, trackIndex) => {
+          const { analyzer } = track;
+          const frameWindow = frameWindows.get(track.key);
           const bubbles = frameWindow?.bubbles ?? [];
           const previousIndex = frameWindow?.previous_frame?.frame_id ?? null;
           const nextIndex = frameWindow?.next_frame?.frame_id ?? null;
-          const hovered = hoveredAnalyzerId === analyzer.id;
+          const hovered = hoveredTrackKey === track.key;
 
           return (
             <div
               className="analyzerBubbleStrip"
-              key={analyzer.id}
-              onMouseEnter={() => setHoveredAnalyzerId(analyzer.id)}
-              onMouseLeave={() => setHoveredAnalyzerId((current) => current === analyzer.id ? null : current)}
+              key={track.key}
+              onMouseEnter={() => setHoveredTrackKey(track.key)}
+              onMouseLeave={() =>
+                setHoveredTrackKey((current) => (current === track.key ? null : current))
+              }
               style={{
-                top: rowTops[rowIndex] + analyzerIndex * ANALYZER_STRIP_HEIGHT_PX + ANALYZER_BUBBLES_PADDING_PX,
+                top:
+                  rowTops[rowIndex] +
+                  trackIndex * ANALYZER_STRIP_HEIGHT_PX +
+                  ANALYZER_BUBBLES_PADDING_PX,
               }}
             >
               {bubbles.map((bubble) => {
@@ -140,9 +193,7 @@ export function AnalyzerBubblesOverlay({
                 const text = multi
                   ? multiBubbleText(bubble, bubbleWidth - 28)
                   : bestFrameText(bubble.display_text, bubbleWidth - arrowWidth - 6);
-                const tooltip = multi
-                  ? bubbleTooltipText(bubble, text)
-                  : bubble.display_text[0] ?? "";
+                const tooltip = multi ? bubbleTooltipText(bubble, text) : bubble.display_text[0] ?? "";
 
                 function handleClick(event: MouseEvent<HTMLButtonElement>) {
                   event.stopPropagation();
@@ -198,8 +249,71 @@ export function AnalyzerBubblesOverlay({
           );
         });
       })}
+      {markerTracks.flatMap((track) => {
+        const rowIndex = visibleChannelIndexes.indexOf(track.role.channel);
+        if (rowIndex < 0) return [];
+        const channel = tileChannels.get(track.role.channel);
+        if (!channel) return [];
+        const edgeSamples = track.edgeType === "rising" ? channel.rising_edges : channel.falling_edges;
+        const visibleEdges = edgeSamples
+          .filter((sample) => sample >= viewportStart && sample <= viewportEnd)
+          .slice(0, MAX_MARKERS_PER_TRACK);
+        if (visibleEdges.length === 0) return [];
+        const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
+        const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
+        return [
+          <div
+            className="analyzerMarkerTrack"
+            key={track.key}
+            style={{
+              height: trackHeight,
+              top: rowTops[rowIndex] + inset,
+            }}
+          >
+            {visibleEdges.map((sample, index) => {
+              const left = ((sample - viewportStart) / Math.max(1, viewportSamples)) * overlayWidth;
+              if (left < -10 || left > overlayWidth + 10) return null;
+              return (
+                <span
+                  className={`analyzerMarker ${track.edgeType}`}
+                  key={`${track.key}:${sample}:${index}`}
+                  style={{
+                    left,
+                    "--marker-color": saleaeLegacyChannelColor(track.role.channel),
+                  } as CSSProperties}
+                >
+                  <SaleaeIcon name={track.edgeType === "rising" ? "markerUpArrow" : "markerDownArrow"} />
+                </span>
+              );
+            })}
+          </div>,
+        ];
+      })}
     </div>
   );
+}
+
+function framesForAnalyzerRole(frames: DecodedFrame[], role: AnalyzerChannelRole): DecodedFrame[] {
+  const hasChannelValues = frames.some((frame) => (frame.channel_values?.length ?? 0) > 0);
+  if (!hasChannelValues) return frames;
+  return frames.flatMap((frame) => {
+    const value = frame.channel_values.find((item) => item.channel === role.channel && item.role === role.title);
+    if (!value) return [];
+    return [
+      {
+        ...frame,
+        label: value.label,
+        value: value.value,
+      },
+    ];
+  });
+}
+
+function analyzerMarkerEdgeType(analyzer: UiAnalyzerInstance): "rising" | "falling" {
+  if (analyzer.type === "SPI") {
+    return analyzer.spiClockPolarity === analyzer.spiClockPhase ? "rising" : "falling";
+  }
+  return "rising";
 }
 
 function AnalyzerBubbleNavigationButton({
