@@ -8,8 +8,11 @@ export type SaleaeIconName =
   | "cross"
   | "gear"
   | "goto"
+  | "markerBullet"
+  | "markerStop"
   | "minus"
   | "plus"
+  | "timeMarker"
   | "trash"
   | "verticalThreeDots";
 
@@ -26,8 +29,11 @@ const iconSizes: Record<SaleaeIconName, { height: number; viewBox: string; width
   cross: { width: 12, height: 12, viewBox: "0 0 12 12" },
   gear: { width: 13, height: 13, viewBox: "0 0 13 13" },
   goto: { width: 9, height: 8, viewBox: "0 0 9 8" },
+  markerBullet: { width: 8, height: 8, viewBox: "0 0 8 8" },
+  markerStop: { width: 7, height: 7, viewBox: "0 0 7 7" },
   minus: { width: 12, height: 2, viewBox: "0 0 12 2" },
   plus: { width: 12, height: 12, viewBox: "0 0 12 12" },
+  timeMarker: { width: 21, height: 24, viewBox: "0 0 21 24" },
   trash: { width: 16, height: 16, viewBox: "0 0 16 16" },
   verticalThreeDots: { width: 20, height: 20, viewBox: "0 0 20 20" },
 };
@@ -111,10 +117,30 @@ function SaleaeIconPath({ name }: { name: SaleaeIconName }) {
           fillRule="evenodd"
         />
       );
+    case "markerBullet":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M0 1C0 0.447715 0.447715 0 1 0H7C7.55228 0 8 0.447715 8 1V5L4 8L0 5V1Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
+    case "markerStop":
+      return <rect fill="currentColor" height="7" width="7" />;
     case "minus":
       return <path clipRule="evenodd" d="M0 2V0H12V2H0Z" fill="currentColor" fillRule="evenodd" />;
     case "plus":
       return <path d="M7 0H5V5H0V7H5V12H7V7H12V5H7V0Z" fill="currentColor" fillRule="evenodd" />;
+    case "timeMarker":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M0 3C0 1.34315 1.34315 0 3 0H18C19.6569 0 21 1.34315 21 3V17.0625L10.043 23.625L0 17.0625V3Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
     case "trash":
       return (
         <>

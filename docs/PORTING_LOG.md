@@ -109,3 +109,5 @@ chore: 说明内容
   - Measurements 侧栏 item 不再渲染持久 selected 高亮，右侧 goto/zoom 复用 animated viewport 路径。
 - `docs/ported-features/2026-07-18-sidebar-resize-handle.md`
   - 右侧 Sidebar active panel 复用原版 300px 最小宽度、47px rail 和 5px `ew-resize` 热区，支持横向拖拽调整。
+- `docs/ported-features/2026-07-20-timing-markers-interaction-parity.md`
+  - Timing Markers temp placement、Pair/Single、图上/右侧菜单、编辑弹窗、原版时间格式和选择/删除快捷键的完整交互搬运。

@@ -46,8 +46,8 @@
 
 ## 已知差距 / 后续任务
 
-- 原版 marker summary popup、edit popup、off-screen indicator、全选删除还未搬入。
-- 当前 Go To / Zoom 在前端直接更新 viewport，后续可统一到 rendering manager 行为。
+- 本文记录的是首版骨架。marker summary/edit popup、temp placement、原版格式、菜单和全选删除已经在 `2026-07-20-timing-markers-interaction-parity.md` 中补齐。
+- `Set as T0` 与完整 marker Trim 仍等待本地 TimeApi / TrimApi 状态服务。
 
 ## 对应 Git 提交
 

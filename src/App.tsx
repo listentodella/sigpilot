@@ -62,6 +62,10 @@ import { LogicToolbar } from "./components/LogicToolbar";
 import { SaleaeIcon } from "./components/SaleaeIcon";
 import { StripChartScrollbar } from "./components/StripChartScrollbar";
 import { TimingDisplayCanvas } from "./components/TimingDisplayCanvas";
+import {
+  TimingMarkersOverlay,
+  TimingMarkersPanel,
+} from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import {
   cancelCapture,
@@ -131,6 +135,14 @@ import {
   formatRangeMeasurementValue,
   rangeMeasurementDefinition,
 } from "./lib/rangeMeasurements";
+import {
+  getDefaultTimingMarkerColor,
+  getNextTimingMarkerNumber,
+  normalizeTimingMarker,
+  TimingMarkerKind,
+  UiTimingMarker,
+  UiTimingMarkerPlacement,
+} from "./lib/timingMarkers";
 
 type FooterPopover = "devices" | "newSession" | "zoom" | null;
 
@@ -166,6 +178,7 @@ interface UiSession {
   analyzerDataPane: "table" | "terminal";
   rangePlacement: UiRangePlacement | null;
   rangeMeasurements: UiRangeMeasurement[];
+  timingMarkerPlacement: UiTimingMarkerPlacement | null;
   timingMarkers: UiTimingMarker[];
   notes: string;
 }
@@ -234,16 +247,6 @@ interface UiRangePlacement {
   startSample: number | null;
 }
 
-interface UiTimingMarker {
-  endSample?: number;
-  id: string;
-  name: string;
-  note: string;
-  sample: number;
-  selected: boolean;
-  type: "pair" | "single";
-}
-
 type ChannelContextMenuSource = "label" | "graph";
 
 interface ChannelContextMenuState {
@@ -260,7 +263,7 @@ const DEFAULT_DEMO_BUFFER_SIZE_MB = 4096;
 const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
 const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
 const BUILT_IN_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
-const RANGE_COLORS = [
+  const RANGE_COLORS = [
   "hsl(334, 58%, 53%)",
   "hsl(150, 100%, 30%)",
   "hsl(198, 70%, 50%)",
@@ -448,6 +451,7 @@ function applyTrimmedCapture(
           ? "Deleted data after point"
           : "Deleted off-screen data",
     rangePlacement: null,
+    timingMarkerPlacement: null,
     rangeMeasurements: session.rangeMeasurements
       .map((range) => {
         const startSample = shiftSample(range.startSample);
@@ -472,9 +476,10 @@ function applyTrimmedCapture(
         const sample = shiftPoint(marker.sample);
         const endSample = marker.endSample == null ? undefined : Math.max(sample + 1, shiftSample(marker.endSample));
         return {
-          ...marker,
+          ...normalizeTimingMarker(marker, Number(marker.label) || 0),
           sample,
           endSample: endSample == null ? undefined : Math.min(totalSamples, endSample),
+          graphPopupOpen: null,
         };
       })
       .filter((marker) => marker.type === "single" || (marker.endSample ?? marker.sample + 1) > marker.sample),
@@ -546,20 +551,58 @@ function createRangeMeasurement(
   };
 }
 
-function createTimingMarker(session: UiSession, type: "pair" | "single"): UiTimingMarker {
+function createTimingMarker(
+  session: UiSession,
+  type: TimingMarkerKind,
+  sample?: number,
+  endSample?: number,
+): UiTimingMarker {
   const totalSamples = session.summary?.metadata.sample_count ?? Math.max(1, session.viewportSamples);
-  const center = Math.max(0, Math.min(totalSamples - 1, Math.round(session.viewportStart + session.viewportSamples * 0.5)));
+  const center = clampSamplePoint(
+    sample ?? Math.round(session.viewportStart + session.viewportSamples * 0.5),
+    totalSamples,
+  );
   const width = Math.max(16, Math.round(session.viewportSamples * 0.22));
-  const index = session.timingMarkers.filter((marker) => marker.type === type).length + 1;
+  const labelNumber = getNextTimingMarkerNumber(session.timingMarkers);
+  const pairEndSample = clampSamplePoint(endSample ?? center + width, totalSamples);
+  const pairStart = Math.min(type === "pair" && endSample == null ? center - width : center, pairEndSample);
+  const pairEnd = Math.max(type === "pair" && endSample == null ? center - width : center, pairEndSample);
   return {
-    endSample: type === "pair" ? Math.min(totalSamples, center + width) : undefined,
-    id: `marker-${Date.now()}-${type}-${index}`,
-    name: type === "pair" ? `Pair ${index}` : `Marker ${index}`,
+    color: getDefaultTimingMarkerColor(labelNumber),
+    endSample: type === "pair" ? clampSamplePoint(pairEnd, totalSamples) : undefined,
+    graphPopupOpen: null,
+    id: `marker-${Date.now()}-${type}-${labelNumber}`,
+    isExpanded: false,
+    label: `${labelNumber}`,
     note: "",
-    sample: type === "pair" ? Math.max(0, center - width) : center,
+    sample: type === "pair" ? clampSamplePoint(pairStart, totalSamples) : center,
     selected: true,
     type,
   };
+}
+
+function createTimingMarkerPlacement(
+  session: UiSession,
+  type: TimingMarkerKind,
+  sample?: number,
+): UiTimingMarkerPlacement {
+  const labelNumber = getNextTimingMarkerNumber(session.timingMarkers);
+  const totalSamples = session.summary?.metadata.sample_count ?? Math.max(1, session.viewportSamples);
+  return {
+    color: getDefaultTimingMarkerColor(labelNumber),
+    id: `marker-temp-${Date.now()}-${type}-${labelNumber}`,
+    label: `${labelNumber}`,
+    placingSide: "start",
+    sample: clampSamplePoint(
+      sample ?? Math.round(session.viewportStart + session.viewportSamples * 0.5),
+      totalSamples,
+    ),
+    type,
+  };
+}
+
+function clampSamplePoint(sample: number, totalSamples: number) {
+  return Math.max(0, Math.min(Math.max(0, totalSamples - 1), Math.round(sample)));
 }
 
 function makeSession(id: string, name: string, deviceId: string, source?: UiSession): UiSession {
@@ -598,6 +641,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     analyzerDataPane: "table",
     rangePlacement: null,
     rangeMeasurements: [],
+    timingMarkerPlacement: null,
     timingMarkers: [],
     notes: "",
   };
@@ -669,11 +713,15 @@ export default function App() {
   const sessionsRef = useRef<UiSession[]>([]);
   const activeSessionIdRef = useRef<string | null>(null);
   const captureSessionRef = useRef<string | null>(null);
-  const sidebarShortcutRef = useRef<{ timeout: number | null; waiting: boolean }>({ timeout: null, waiting: false });
+  const sidebarShortcutRef = useRef<{ prefix: "m" | "n" | null; timeout: number | null }>({
+    prefix: null,
+    timeout: null,
+  });
   const tileRequestSeq = useRef(0);
   const analyzerRequestSeq = useRef<Record<string, number>>({});
   const rangeMeasurementRequestSeq = useRef<Record<string, number>>({});
   const viewportAnimationRef = useRef<number | null>(null);
+  const lastPointerXRef = useRef<number | null>(null);
   const sessionCounter = useRef(1);
 
   useEffect(() => {
@@ -687,6 +735,14 @@ export default function App() {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    const rememberPointerPosition = (event: PointerEvent) => {
+      lastPointerXRef.current = event.clientX;
+    };
+    document.addEventListener("pointermove", rememberPointerPosition, { passive: true });
+    return () => document.removeEventListener("pointermove", rememberPointerPosition);
+  }, []);
 
   useEffect(() => {
     function handleResize() {
@@ -797,6 +853,7 @@ export default function App() {
           ...session,
           channelLabels: channelLabelsForCount(event.payload.metadata.channel_count, session.channelLabels),
           rangePlacement: null,
+          timingMarkerPlacement: null,
           summary: summaryWithLabels(event.payload, session.channelLabels),
           viewportStart: 0,
           viewportSamples: Math.min(event.payload.metadata.sample_count, 100_000),
@@ -1140,6 +1197,7 @@ export default function App() {
       busy: true,
       progress: null,
       rangePlacement: null,
+      timingMarkerPlacement: null,
       analyzers: current.analyzers.map((analyzer) => ({
         ...analyzer,
         protocolBubbles: [],
@@ -1319,6 +1377,7 @@ export default function App() {
       channelLabels: labels,
       cursorState: defaultCursorState(summary.metadata.sample_count, summary.metadata.channel_count),
       rangePlacement: null,
+      timingMarkerPlacement: null,
       summary: summaryWithLabels(summary, labels),
       tile: null,
       viewportStart: 0,
@@ -1861,24 +1920,81 @@ export default function App() {
   function handleAddMarkerPair() {
     openSidebarPanel("timingMarkers");
     if (!activeSession) return;
+    if (!activeSession.summary) {
+      updateSession(activeSession.id, (session) => ({
+        ...session,
+        message: "Capture data before adding a marker pair",
+      }));
+      return;
+    }
+    if (activeSession.busy) {
+      updateSession(activeSession.id, (session) => ({
+        ...session,
+        message: "Timing markers are disabled while recording",
+      }));
+      return;
+    }
+    if (activeSession.timingMarkerPlacement) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
-      timingMarkers: [
-        ...session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
-        createTimingMarker(session, "pair"),
-      ],
-      message: "Marker pair added",
+      timingMarkerPlacement: createTimingMarkerPlacement(
+        session,
+        "pair",
+        initialTimingMarkerSample(session),
+      ),
+      timingMarkers: session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
+      message: "Click twice on the graph to place a marker pair",
     }));
   }
 
   function handleAddSingleMarker() {
     openSidebarPanel("timingMarkers");
     if (!activeSession) return;
+    if (!activeSession.summary) {
+      updateSession(activeSession.id, (session) => ({
+        ...session,
+        message: "Capture data before adding a single marker",
+      }));
+      return;
+    }
+    if (activeSession.busy) {
+      updateSession(activeSession.id, (session) => ({
+        ...session,
+        message: "Timing markers are disabled while recording",
+      }));
+      return;
+    }
+    if (activeSession.timingMarkerPlacement) return;
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      timingMarkerPlacement: createTimingMarkerPlacement(
+        session,
+        "single",
+        initialTimingMarkerSample(session),
+      ),
+      timingMarkers: session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
+      message: "Click on the graph to place a single marker",
+    }));
+  }
+
+  function initialTimingMarkerSample(session: UiSession) {
+    const pointerX = lastPointerXRef.current;
+    const stage = document.querySelector<HTMLElement>(".timingMarkerStage");
+    if (pointerX == null || !stage) return undefined;
+    const rect = stage.getBoundingClientRect();
+    if (pointerX < rect.left || pointerX > rect.right) return undefined;
+    const ratio = (pointerX - rect.left) / Math.max(1, rect.width);
+    const total = session.summary?.metadata.sample_count ?? session.viewportSamples;
+    return clampSamplePoint(session.viewportStart + ratio * session.viewportSamples, total);
+  }
+
+  function addSingleMarkerAtSample(sample: number) {
+    if (!activeSession?.summary || activeSession.busy || activeSession.timingMarkerPlacement) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
       timingMarkers: [
-        ...session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
-        createTimingMarker(session, "single"),
+        ...session.timingMarkers.map((marker) => ({ ...marker, graphPopupOpen: null, selected: false })),
+        createTimingMarker(session, "single", sample),
       ],
       message: "Single marker added",
     }));
@@ -1919,8 +2035,8 @@ export default function App() {
 
   useEffect(() => {
     const shortcutState = sidebarShortcutRef.current;
-    function clearSidebarSequence() {
-      shortcutState.waiting = false;
+    function clearShortcutSequence() {
+      shortcutState.prefix = null;
       if (shortcutState.timeout !== null) {
         window.clearTimeout(shortcutState.timeout);
         shortcutState.timeout = null;
@@ -1938,17 +2054,63 @@ export default function App() {
 
       const key = event.key.toLowerCase();
       const hasCommandModifier = event.metaKey || event.ctrlKey;
+      const hasSelectedTimingMarker = Boolean(activeSession?.timingMarkers.some((marker) => marker.selected));
+
+      if (key === "escape" && activeSession?.timingMarkerPlacement) {
+        event.preventDefault();
+        updateSession(activeSession.id, (session) => ({
+          ...session,
+          timingMarkerPlacement: null,
+          message: "Timing marker placement canceled",
+        }));
+        return;
+      }
+
+      if (key === "escape" && hasSelectedTimingMarker && activeSession) {
+        event.preventDefault();
+        updateSession(activeSession.id, (session) => ({
+          ...session,
+          timingMarkers: session.timingMarkers.map((marker) => ({
+            ...marker,
+            graphPopupOpen: null,
+            selected: false,
+          })),
+        }));
+        return;
+      }
+
+      if (!hasCommandModifier && !event.altKey && (key === "backspace" || key === "delete") && hasSelectedTimingMarker && activeSession) {
+        event.preventDefault();
+        updateSession(activeSession.id, (session) => {
+          const deleted = session.timingMarkers.filter((marker) => marker.selected).length;
+          return {
+            ...session,
+            timingMarkers: session.timingMarkers.filter((marker) => !marker.selected),
+            message: `${deleted} timing marker${deleted === 1 ? "" : "s"} deleted`,
+          };
+        });
+        return;
+      }
+
+      if (hasCommandModifier && !event.altKey && key === "a" && hasSelectedTimingMarker && activeSession) {
+        event.preventDefault();
+        updateSession(activeSession.id, (session) => ({
+          ...session,
+          timingMarkers: session.timingMarkers.map((marker) => ({ ...marker, selected: true })),
+        }));
+        return;
+      }
 
       if (hasCommandModifier && !event.altKey && key === "g") {
         event.preventDefault();
-        clearSidebarSequence();
+        clearShortcutSequence();
         invokeCommand(MeasurementCommands.AddRange);
         return;
       }
 
       if (hasCommandModifier && !event.altKey && key === "t") {
         event.preventDefault();
-        clearSidebarSequence();
+        clearShortcutSequence();
         invokeCommand(event.shiftKey ? MarkerCommands.AddMarker : MarkerCommands.AddPair);
         return;
       }
@@ -1969,9 +2131,22 @@ export default function App() {
 
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
-      if (shortcutState.waiting) {
-        const command = SIDEBAR_SHORTCUT_TO_COMMAND[key];
-        clearSidebarSequence();
+      if (shortcutState.prefix) {
+        const prefix = shortcutState.prefix;
+        clearShortcutSequence();
+        if (prefix === "m" && key === "d" && hasSelectedTimingMarker && activeSession) {
+          event.preventDefault();
+          updateSession(activeSession.id, (session) => {
+            const deleted = session.timingMarkers.filter((marker) => marker.selected).length;
+            return {
+              ...session,
+              timingMarkers: session.timingMarkers.filter((marker) => !marker.selected),
+              message: `${deleted} timing marker${deleted === 1 ? "" : "s"} deleted`,
+            };
+          });
+          return;
+        }
+        const command = prefix === "n" ? SIDEBAR_SHORTCUT_TO_COMMAND[key] : undefined;
         if (command) {
           event.preventDefault();
           invokeCommand(command);
@@ -1990,8 +2165,15 @@ export default function App() {
 
       if (key === "n") {
         event.preventDefault();
-        shortcutState.waiting = true;
-        shortcutState.timeout = window.setTimeout(clearSidebarSequence, 900);
+        shortcutState.prefix = "n";
+        shortcutState.timeout = window.setTimeout(clearShortcutSequence, 900);
+        return;
+      }
+
+      if (key === "m" && hasSelectedTimingMarker) {
+        event.preventDefault();
+        shortcutState.prefix = "m";
+        shortcutState.timeout = window.setTimeout(clearShortcutSequence, 900);
       }
     }
 
@@ -2010,7 +2192,7 @@ export default function App() {
     document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("keyup", handleKeyUp);
     return () => {
-      clearSidebarSequence();
+      clearShortcutSequence();
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("keyup", handleKeyUp);
     };
@@ -2209,10 +2391,6 @@ export default function App() {
                         session={activeSession}
                         visibleChannelIndexes={visibleChannelIndexes}
                       />
-                      <TimingMarkersOverlay
-                        onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
-                        session={activeSession}
-                      />
                     </div>
                     {visibleChannelIndexes.slice(0, -1).map((channelIndex, rowIndex) => (
                       <ChannelResizeHandle
@@ -2238,6 +2416,37 @@ export default function App() {
                     />
                   </div>
                 )}
+                {activeSession.summary && (
+                  <TimingMarkersOverlay
+                    markers={activeSession.timingMarkers}
+                    onChangeMarkers={(updater) =>
+                      updateSession(activeSession.id, (session) => ({
+                        ...session,
+                        timingMarkers: updater(session.timingMarkers),
+                      }))
+                    }
+                    onChangePlacement={(updater) =>
+                      updateSession(activeSession.id, (session) => ({
+                        ...session,
+                        timingMarkerPlacement: updater(session.timingMarkerPlacement),
+                      }))
+                    }
+                    onMessage={(message) =>
+                      updateSession(activeSession.id, (session) => ({ ...session, message }))
+                    }
+                    onAddSingleMarker={addSingleMarkerAtSample}
+                    onOpenSidebar={() => openSidebarPanel("timingMarkers")}
+                    onViewportChange={(start, samples) =>
+                      animateViewport(activeSession.id, start, samples)
+                    }
+                    placement={activeSession.timingMarkerPlacement}
+                    sampleRateHz={activeSession.summary.metadata.sample_rate_hz}
+                    tile={visibleTile}
+                    totalSamples={totalSamples}
+                    viewportSamples={activeSession.viewportSamples}
+                    viewportStart={activeSession.viewportStart}
+                  />
+                )}
               </>
             ) : (
               <DeviceStartScreen
@@ -2259,6 +2468,8 @@ export default function App() {
             onCreateSession={createSessionFromFooter}
             onAddAnalyzer={beginAddAnalyzer}
             onAddRangeMeasurement={handleAddRangeMeasurement}
+            onAddMarkerPair={handleAddMarkerPair}
+            onAddSingleMarker={handleAddSingleMarker}
             onDecodeAnalyzer={(analyzerId) => activeSession && handleDecodeAnalyzer(activeSession.id, analyzerId)}
             onEditAnalyzer={beginEditAnalyzer}
             onGoToAnalyzerFrame={(analyzerId, frameIndex, zoom) =>
@@ -3624,7 +3835,7 @@ function RangeMeasurementSettingsMenu({
   );
 }
 
-function TimingMarkersOverlay({
+function LegacyTimingMarkersOverlay({
   onUpdateSession,
   session,
 }: {
@@ -3717,7 +3928,7 @@ function TimingMarkersOverlay({
             style={{ left: `${start}%`, width: `${marker.type === "pair" ? width : 0}%` }}
           >
             <button
-              aria-label={`${marker.name} start`}
+              aria-label={`${marker.label} start`}
               className="timingMarkerLine start"
               onPointerDown={(event) => handlePointerDown(marker.id, "start", event)}
               onPointerMove={handlePointerMove}
@@ -3729,7 +3940,7 @@ function TimingMarkersOverlay({
             </button>
             {marker.type === "pair" && (
               <button
-                aria-label={`${marker.name} end`}
+                aria-label={`${marker.label} end`}
                 className="timingMarkerLine end"
                 onPointerDown={(event) => handlePointerDown(marker.id, "end", event)}
                 onPointerMove={handlePointerMove}
@@ -4008,6 +4219,8 @@ function RightSidebar({
   onChangeExtensions,
   onAddAnalyzer,
   onAddRangeMeasurement,
+  onAddMarkerPair,
+  onAddSingleMarker,
   onCreateSession,
   onDecodeAnalyzer,
   onEditAnalyzer,
@@ -4030,6 +4243,8 @@ function RightSidebar({
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
   onAddAnalyzer: (name: string) => void;
   onAddRangeMeasurement: () => void;
+  onAddMarkerPair: () => void;
+  onAddSingleMarker: () => void;
   onCreateSession: (deviceId?: string) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
@@ -4122,6 +4337,8 @@ function RightSidebar({
             onChangeExtensions={onChangeExtensions}
             onAddAnalyzer={onAddAnalyzer}
             onAddRangeMeasurement={onAddRangeMeasurement}
+            onAddMarkerPair={onAddMarkerPair}
+            onAddSingleMarker={onAddSingleMarker}
             onCreateSession={onCreateSession}
             onDecodeAnalyzer={onDecodeAnalyzer}
             onEditAnalyzer={onEditAnalyzer}
@@ -4178,6 +4395,8 @@ function SidebarPanelContent({
   onChangeExtensions,
   onAddAnalyzer,
   onAddRangeMeasurement,
+  onAddMarkerPair,
+  onAddSingleMarker,
   onCreateSession,
   onDecodeAnalyzer,
   onEditAnalyzer,
@@ -4198,6 +4417,8 @@ function SidebarPanelContent({
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
   onAddAnalyzer: (name: string) => void;
   onAddRangeMeasurement: () => void;
+  onAddMarkerPair: () => void;
+  onAddSingleMarker: () => void;
   onCreateSession: (deviceId?: string) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
@@ -4216,7 +4437,7 @@ function SidebarPanelContent({
   const meta = panelMeta[panel];
   return (
     <div className="sidebarPanelContent">
-      {panel !== "extensions" && panel !== "notes" && (
+      {panel !== "extensions" && panel !== "notes" && panel !== "timingMarkers" && (
         <header className="sidebarPanelHeader">
           <span>
             <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
@@ -4278,7 +4499,24 @@ function SidebarPanelContent({
           session={session}
         />
       )}
-      {panel === "timingMarkers" && session && <TimingMarkersPanel onUpdateSession={onUpdateSession} session={session} />}
+      {panel === "timingMarkers" && session && (
+        <TimingMarkersPanel
+          busy={session.busy}
+          hasCapture={Boolean(session.summary)}
+          markers={session.timingMarkers}
+          onAddMarkerPair={onAddMarkerPair}
+          onAddSingleMarker={onAddSingleMarker}
+          onChangeMarkers={(updater) =>
+            onUpdateSession((current) => ({ ...current, timingMarkers: updater(current.timingMarkers) }))
+          }
+          onMessage={(message) => onUpdateSession((current) => ({ ...current, message }))}
+          onViewportChange={onViewportChange}
+          placementActive={Boolean(session.timingMarkerPlacement)}
+          sampleRateHz={session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz}
+          totalSamples={session.summary?.metadata.sample_count ?? 0}
+          viewportSamples={session.viewportSamples}
+        />
+      )}
       {panel === "extensions" && (
         <ExtensionsPanel
           busy={Boolean(session?.busy)}
@@ -5544,7 +5782,7 @@ function MetricCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TimingMarkersPanel({
+function LegacyTimingMarkersPanel({
   onUpdateSession,
   session,
 }: {
@@ -5633,8 +5871,8 @@ function TimingMarkersPanel({
                   <span className={`markerTypeBadge ${marker.type}`}>{marker.type === "pair" ? "A" : "T"}</span>
                   <input
                     aria-label="Marker name"
-                    onChange={(event) => updateMarker(marker.id, { name: event.target.value })}
-                    value={marker.name}
+                    onChange={(event) => updateMarker(marker.id, { label: event.target.value })}
+                    value={marker.label}
                   />
                   <div className="rangeMeasurementActions">
                     <button

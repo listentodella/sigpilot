@@ -6,10 +6,10 @@
 
 - `src/App.tsx`
   - 当前 React 工作台主体。
-  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口、通道右键菜单状态、Add Range Measurement 放置状态、Measurements range overlay/tooltip、tooltip 拖动位置和 range measurement runner 结果绑定。
+  - 包含 session 状态、底栏、右侧栏、捕获入口、文件导入导出、UART analyzer 面板、缩放、hover 测量入口、通道右键菜单状态、Range Measurement 与 Timing Marker 放置状态，以及对应 overlay/runner 绑定。
 - `src/styles.css`
   - 全局视觉样式。
-  - 包含 Saleae 风格顶部工具栏、启动页、右侧栏、底栏、session tab、popover、波形区域、range placing 竖条、draggable measurement tooltip 和 Measurements RangeItem subgrid 样式。
+  - 包含 Saleae 风格顶部工具栏、启动页、右侧栏、底栏、session tab、popover、波形区域、Range Measurement 与 Timing Marker graph/sidebar/popup 样式。
 - `src/main.tsx`
   - React 入口。
 - `src/vite-env.d.ts`
@@ -27,7 +27,9 @@
   - 当前负责 Start、Add Analyzer、Range Measurements、Marker 操作入口。
 - `src/components/SaleaeIcon.tsx`
   - 从 Logic 2.4.43 `uikit/elements/Icon` 搬运的小型 SVG path 集合。
-  - 当前用于 Range Measurement tooltip、Add/Settings menu、右侧 Measurements RangeItem 的 icon parity。
+  - 当前用于 Range Measurement tooltip、Timing Marker graph/sidebar、Add/Settings menu 和右侧 item 的 icon parity。
+- `src/components/timingMarkers/TimingMarkers.tsx`
+  - 从 Logic 2.4.43 `services/timingMarkers` 搬运的 Graph Marker、temp placement、hover/edit popup、右侧 Marker/Pair item 与菜单交互。
 - `src/components/ExtensionsPanel.tsx`
   - Saleae 风格 Extensions 右栏。
   - 包含搜索、管理菜单、扩展项动作、创建对话框和扩展详情覆盖页。
@@ -72,6 +74,8 @@
   - 包含原版 DarkTheme `border-10` / `border-20` GridLines 色值。
 - `src/lib/rangeMeasurements.ts`
   - Measurements2 风格数字 range measurement id、默认列表、分类、HTML/math 标签、文案、格式化和 copy 输出 helper。
+- `src/lib/timingMarkers.ts`
+  - Timing Marker / Pair 状态类型、原版 markerColors、label/value 规则和 1ns 分辨率时间/频率格式算法。
 
 ## 已搬入的小型 Saleae 视觉资源
 
