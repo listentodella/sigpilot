@@ -1,5 +1,5 @@
 import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { AnalyzerBubble } from "../lib/api";
+import { AnalyzerBubble, buildAnalyzerFrameWindow } from "../lib/api";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
   ANALYZER_STRIP_HEIGHT_PX,
@@ -47,6 +47,21 @@ export function AnalyzerBubblesOverlay({
     });
   }, [rowHeights]);
   const viewportEnd = viewportStart + viewportSamples;
+  const frameWindows = useMemo(
+    () =>
+      new Map(
+        analyzers.map((analyzer) => [
+          analyzer.id,
+          buildAnalyzerFrameWindow(
+            analyzer.decodedFrames,
+            viewportStart,
+            viewportSamples,
+            overlayWidth,
+          ),
+        ]),
+      ),
+    [analyzers, overlayWidth, viewportSamples, viewportStart],
+  );
 
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -64,11 +79,12 @@ export function AnalyzerBubblesOverlay({
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const analyzer = analyzers.find((item) => item.id === hoveredAnalyzerId);
       if (!analyzer) return;
+      const frameWindow = frameWindows.get(analyzer.id);
       const frameIndex =
         event.key === "ArrowLeft"
-          ? analyzer.previousFrame?.frame_id ?? null
+          ? frameWindow?.previous_frame?.frame_id ?? null
           : event.key === "ArrowRight"
-            ? analyzer.nextFrame?.frame_id ?? null
+            ? frameWindow?.next_frame?.frame_id ?? null
             : null;
       if (frameIndex === null) return;
       event.preventDefault();
@@ -76,18 +92,17 @@ export function AnalyzerBubblesOverlay({
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [analyzers, hoveredAnalyzerId, onGoToFrame, viewportEnd, viewportStart]);
+  }, [analyzers, frameWindows, hoveredAnalyzerId, onGoToFrame, viewportEnd, viewportStart]);
 
   return (
     <div className="analyzerBubblesOverlay" ref={overlayRef}>
       {visibleChannelIndexes.flatMap((channel, rowIndex) => {
         const channelAnalyzers = analyzers.filter((analyzer) => analyzer.channel === channel);
         return channelAnalyzers.map((analyzer, analyzerIndex) => {
-          const bubbles = analyzer.protocolBubbles.filter(
-            (bubble) => bubble.end_sample >= viewportStart && bubble.start_sample <= viewportEnd,
-          );
-          const previousIndex = analyzer.previousFrame?.frame_id ?? null;
-          const nextIndex = analyzer.nextFrame?.frame_id ?? null;
+          const frameWindow = frameWindows.get(analyzer.id);
+          const bubbles = frameWindow?.bubbles ?? [];
+          const previousIndex = frameWindow?.previous_frame?.frame_id ?? null;
+          const nextIndex = frameWindow?.next_frame?.frame_id ?? null;
           const hovered = hoveredAnalyzerId === analyzer.id;
 
           return (

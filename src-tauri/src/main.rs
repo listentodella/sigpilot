@@ -10,9 +10,9 @@ use std::{
 
 use parking_lot::Mutex;
 use pxlogic_core::{
-    decode_uart, CaptureBackend, CaptureData, CaptureMetadata, CaptureProgress, CaptureSettings,
-    DecodedFrame, DeviceInfo, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
-    UartDecodeSettings,
+    decode_analyzer, AnalyzerDecodeSettings, CaptureBackend, CaptureData, CaptureMetadata,
+    CaptureProgress, CaptureSettings, DecodedFrame, DeviceInfo, DiagnosticEvent, DiagnosticLevel,
+    ExportFormat, FakeBackend,
 };
 use pxlogic_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
@@ -277,16 +277,20 @@ fn trim_capture(
 }
 
 #[tauri::command]
-fn get_waveform_tile(
+async fn get_waveform_tile(
     request: WaveformRequest,
     state: State<'_, AppState>,
 ) -> CommandResult<WaveformTile> {
-    let capture = state
-        .current_capture
-        .lock()
-        .clone()
-        .ok_or_else(|| "no capture is loaded".to_string())?;
-    pxlogic_waveform::build_tile(&capture, &request).map_err(to_string)
+    let current_capture = state.current_capture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let capture = current_capture.lock();
+        let capture = capture
+            .as_ref()
+            .ok_or_else(|| "no capture is loaded".to_string())?;
+        pxlogic_waveform::build_tile(capture, &request).map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -307,16 +311,20 @@ async fn measure_digital_range(
 }
 
 #[tauri::command]
-fn decode_uart_frames(
-    settings: UartDecodeSettings,
+async fn decode_analyzer_frames(
+    settings: AnalyzerDecodeSettings,
     state: State<'_, AppState>,
 ) -> CommandResult<Vec<DecodedFrame>> {
-    let capture = state
-        .current_capture
-        .lock()
-        .clone()
-        .ok_or_else(|| "no capture is loaded".to_string())?;
-    decode_uart(&capture, &settings).map_err(to_string)
+    let current_capture = state.current_capture.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let capture = current_capture.lock();
+        let capture = capture
+            .as_ref()
+            .ok_or_else(|| "no capture is loaded".to_string())?;
+        decode_analyzer(capture, &settings).map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -452,7 +460,7 @@ fn main() {
             trim_capture,
             get_waveform_tile,
             measure_digital_range,
-            decode_uart_frames,
+            decode_analyzer_frames,
             read_extension_package,
             create_extension_template,
         ])

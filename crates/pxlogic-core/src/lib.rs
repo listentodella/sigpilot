@@ -16,7 +16,10 @@ pub use capture::{
     sample_count_from_settings, supported_samplerates, unitsize_for_channel_count, CaptureProfile,
     RegisterWrite,
 };
-pub use decode::{decode_uart, DecodedFrame, UartDecodeSettings};
+pub use decode::{
+    decode_analyzer, decode_i2c, decode_spi, decode_uart, AnalyzerDecodeSettings, DecodedFrame,
+    I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings,
+};
 pub use error::{CoreError, Result};
 pub use fake::FakeBackend;
 pub use models::{

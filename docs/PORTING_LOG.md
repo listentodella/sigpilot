@@ -112,3 +112,5 @@ chore: 说明内容
   - Sidebar 子树改为直接继承 Logic 2.4.43 `builtin.ts` DarkTheme 色值，避免同名本地 token 造成视觉偏差。
 - `docs/ported-features/2026-07-20-timing-markers-interaction-parity.md`
   - Timing Markers temp placement、Pair/Single、图上/右侧菜单、编辑弹窗、原版时间格式和选择/删除快捷键的完整交互搬运。
+- `docs/ported-features/2026-07-20-analyzer-protocols-cache-trigger-view.md`
+  - UART 之外的 I2C/SPI 电平解码、长捕获有界 frame/bubble 缓存、viewport 本地投影，以及 Analyzers 侧栏 Trigger View 结构占位。

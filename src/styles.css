@@ -2881,7 +2881,7 @@ button:disabled {
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-rows: minmax(0, auto) minmax(180px, 1fr);
+  grid-template-rows: minmax(0, auto) auto minmax(180px, 1fr);
   overflow: hidden;
 }
 
@@ -3056,6 +3056,118 @@ button:disabled {
   border: 1px solid var(--border-20);
   border-radius: 4px;
   background: var(--background-20);
+}
+
+.analyzerTriggerView {
+  flex: 0 0 auto;
+  margin: 0 16px 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  background: var(--background-30);
+}
+
+.analyzerTriggerHeader {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 8px;
+}
+
+.analyzerTriggerExpandButton {
+  min-width: 0;
+  min-height: 32px;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+  color: var(--on-background-10);
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.analyzerTriggerExpandButton > svg:first-child {
+  flex: 0 0 auto;
+  transition: transform 200ms ease;
+}
+
+.analyzerTriggerView.expanded .analyzerTriggerExpandButton > svg:first-child {
+  transform: rotate(90deg);
+}
+
+.analyzerTriggerExpandButton strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analyzerTriggerExpandButton > svg:last-child {
+  color: var(--on-background-20);
+}
+
+.analyzerTriggerSwitch {
+  opacity: 0.42;
+  cursor: not-allowed;
+  transform: scale(0.78);
+  transform-origin: right center;
+}
+
+.analyzerTriggerSwitch input {
+  cursor: not-allowed;
+}
+
+.analyzerTriggerBody {
+  max-height: 0;
+  display: grid;
+  gap: 10px;
+  overflow: hidden;
+  padding: 0 8px;
+  opacity: 0;
+  transition: max-height 200ms ease, opacity 160ms ease, padding 200ms ease;
+}
+
+.analyzerTriggerView.expanded .analyzerTriggerBody {
+  max-height: 190px;
+  padding: 8px;
+  opacity: 1;
+}
+
+.analyzerTriggerBody .stack-field {
+  gap: 5px;
+}
+
+.analyzerTriggerBody .stack-field > span {
+  color: var(--on-background-10);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.analyzerTriggerBody select,
+.analyzerTriggerBody input {
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-10);
+  background: transparent;
+  padding: 0 8px;
+}
+
+.analyzerTriggerBody input:disabled,
+.analyzerTriggerBody select:disabled {
+  color: var(--on-background-40);
+}
+
+.analyzerTriggerQueryGrid {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 8px;
 }
 
 .activeAnalyzerHeader {
@@ -5783,6 +5895,16 @@ body.timing-marker-col-resize * {
   border-left: 2px solid var(--yellow);
   color: var(--on-background-20);
   padding: 7px 10px;
+  font-size: 11px;
+}
+
+.analyzerDialogNote {
+  margin: 12px 0 8px 132px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-20);
+  background: var(--background-30);
+  padding: 9px 10px;
   font-size: 11px;
 }
 

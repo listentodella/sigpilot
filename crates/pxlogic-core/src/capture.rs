@@ -495,6 +495,12 @@ pub fn generate_sample_words_with_count(
             let high = if channel == 0 {
                 demo_uart_level(sample_index, settings.sample_rate_hz)
                     .unwrap_or_else(|| demo_channels[usize::from(channel)].level_at(sample_index))
+            } else if (1..=2).contains(&channel) {
+                demo_i2c_level(sample_index, settings.sample_rate_hz, channel)
+                    .unwrap_or_else(|| demo_channels[usize::from(channel)].level_at(sample_index))
+            } else if (3..=6).contains(&channel) {
+                demo_spi_level(sample_index, settings.sample_rate_hz, channel)
+                    .unwrap_or_else(|| demo_channels[usize::from(channel)].level_at(sample_index))
             } else {
                 demo_channels[usize::from(channel)].level_at(sample_index)
             };
@@ -589,6 +595,62 @@ fn demo_uart_level(sample_index: u64, sample_rate_hz: u64) -> Option<bool> {
         9 => Some(true),
         _ => Some(true),
     }
+}
+
+fn demo_i2c_level(sample_index: u64, sample_rate_hz: u64, channel: u8) -> Option<bool> {
+    if !matches!(channel, 1 | 2) {
+        return None;
+    }
+    let half_period = (sample_rate_hz / 200_000).max(2);
+    let phase = (sample_index / half_period) % 60;
+    if phase < 2 {
+        return Some(true);
+    }
+    if phase == 2 {
+        return Some(channel == 2);
+    }
+    let data_phase = phase - 3;
+    if data_phase < 54 {
+        let byte_index = data_phase / 18;
+        let bit_index = (data_phase % 18) / 2;
+        let byte = [0xA0u8, 0x2A, 0x55][byte_index as usize];
+        if channel == 2 {
+            return Some(data_phase % 2 == 1);
+        }
+        if bit_index == 8 {
+            return Some(false);
+        }
+        return Some(byte & (1 << (7 - bit_index)) != 0);
+    }
+    Some(match (phase, channel) {
+        (57, _) => false,
+        (58, 2) => true,
+        (58, _) => false,
+        _ => true,
+    })
+}
+
+fn demo_spi_level(sample_index: u64, sample_rate_hz: u64, channel: u8) -> Option<bool> {
+    if !(3..=6).contains(&channel) {
+        return None;
+    }
+    let half_period = (sample_rate_hz / 2_000_000).max(2);
+    let phase = (sample_index / half_period) % 20;
+    let active = (2..18).contains(&phase);
+    if channel == 6 {
+        return Some(!active);
+    }
+    if channel == 5 {
+        return Some(active && phase % 2 == 1);
+    }
+    if !active {
+        return Some(false);
+    }
+    let bit_index = (phase - 2) / 2;
+    let word_index = (sample_index / (half_period * 20)) as usize % 4;
+    let word = [0xA5u8, 0x3C, 0x5A, 0xF0][word_index];
+    let value = if channel == 3 { word } else { word ^ 0x99 };
+    Some(value & (1 << (7 - bit_index)) != 0)
 }
 
 pub fn read_sample_word(samples: &[u8], unitsize: u8, sample_index: u64) -> Option<u32> {

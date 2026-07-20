@@ -151,6 +151,28 @@ export interface UartDecodeSettings {
   inverted: boolean;
 }
 
+export interface I2cDecodeSettings {
+  sda_channel: number;
+  scl_channel: number;
+}
+
+export interface SpiDecodeSettings {
+  mosi_channel: number | null;
+  miso_channel: number | null;
+  clock_channel: number;
+  enable_channel: number | null;
+  enable_active_low: boolean;
+  clock_polarity: boolean;
+  clock_phase: boolean;
+  bits_per_transfer: number;
+  msb_first: boolean;
+}
+
+export type AnalyzerDecodeSettings =
+  | { protocol: "Uart"; settings: UartDecodeSettings }
+  | { protocol: "I2c"; settings: I2cDecodeSettings }
+  | { protocol: "Spi"; settings: SpiDecodeSettings };
+
 export interface DecodedFrame {
   frame_id: number;
   start_sample: number;
@@ -183,6 +205,8 @@ export interface UartFrameWindow {
   previous_frame: DecodedFrame | null;
   next_frame: DecodedFrame | null;
 }
+
+export type AnalyzerFrameWindow = UartFrameWindow;
 
 export interface CaptureCallbacks {
   onProgress?: (progress: CaptureProgress) => void;
@@ -359,25 +383,108 @@ export function measureDigitalRange(
   return callBackend("measure_digital_range", { request });
 }
 
-export function decodeUartFrames(settings: UartDecodeSettings): Promise<DecodedFrame[]> {
+export function decodeAnalyzerFrames(settings: AnalyzerDecodeSettings): Promise<DecodedFrame[]> {
   if (!isTauriRuntime()) {
-    return Promise.resolve(buildPreviewUartFrames(settings));
+    return Promise.resolve(buildPreviewAnalyzerFrames(settings));
   }
-  return callBackend("decode_uart_frames", { settings });
+  return callBackend("decode_analyzer_frames", { settings });
+}
+
+export function decodeUartFrames(settings: UartDecodeSettings): Promise<DecodedFrame[]> {
+  return decodeAnalyzerFrames({ protocol: "Uart", settings });
 }
 
 export async function getUartFrameWindow(request: UartFrameWindowRequest): Promise<UartFrameWindow> {
-  if (!isTauriRuntime()) {
-    return Promise.resolve(buildPreviewUartFrameWindow(request));
+  const frames = await decodeUartFrames(request);
+  return buildAnalyzerFrameWindow(frames, request.start_sample, request.sample_count, request.width_px);
+}
+
+function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFrame[] {
+  if (settings.protocol === "Uart") return buildPreviewUartFrames(settings.settings);
+  const metadata = previewCapture.metadata;
+  const requestedChannels =
+    settings.protocol === "I2c"
+      ? [settings.settings.sda_channel, settings.settings.scl_channel]
+      : [
+          settings.settings.mosi_channel,
+          settings.settings.miso_channel,
+          settings.settings.clock_channel,
+          settings.settings.enable_channel,
+        ].filter((channel): channel is number => channel !== null);
+  if (requestedChannels.some((channel) => channel < 0 || channel >= metadata.channel_count)) return [];
+  if (settings.protocol === "I2c") {
+    if (settings.settings.sda_channel !== 1 || settings.settings.scl_channel !== 2) return [];
+  } else if (
+    settings.settings.clock_channel !== 5 ||
+    settings.settings.bits_per_transfer !== 8 ||
+    !settings.settings.msb_first ||
+    settings.settings.clock_polarity ||
+    settings.settings.clock_phase ||
+    (settings.settings.mosi_channel !== null && settings.settings.mosi_channel !== 3) ||
+    (settings.settings.miso_channel !== null && settings.settings.miso_channel !== 4) ||
+    (settings.settings.enable_channel !== null && settings.settings.enable_channel !== 6) ||
+    (settings.settings.enable_channel === 6 && !settings.settings.enable_active_low)
+  ) {
+    return [];
   }
-  const frames = await callBackend<DecodedFrame[]>("decode_uart_frames", {
-    settings: {
-      channel: request.channel,
-      baud_rate: request.baud_rate,
-      inverted: request.inverted,
-    },
-  });
-  return buildFrameWindowFromFrames(frames, request.start_sample, request.sample_count, request.width_px);
+  const halfPeriod = Math.max(
+    2,
+    Math.round(metadata.sample_rate_hz / (settings.protocol === "I2c" ? 200_000 : 2_000_000)),
+  );
+  const framePeriod =
+    settings.protocol === "I2c"
+      ? halfPeriod * 18
+      : halfPeriod * (settings.settings.bits_per_transfer * 2 + 4);
+  const transactionPeriod =
+    settings.protocol === "I2c" ? halfPeriod * 60 : halfPeriod * (settings.settings.bits_per_transfer * 2 + 4);
+  const sourceFrameCount =
+    settings.protocol === "I2c"
+      ? Math.ceil(metadata.sample_count / transactionPeriod) * 3
+      : Math.ceil(metadata.sample_count / framePeriod);
+  const frameStride = Math.max(1, Math.ceil(sourceFrameCount / 100_000));
+  const count = Math.min(100_000, Math.ceil(sourceFrameCount / frameStride));
+  return Array.from({ length: count }, (_, frameId) => {
+    const sourceFrameId = Math.min(sourceFrameCount - 1, frameId * frameStride);
+    const byteIndex = sourceFrameId % 3;
+    const transaction = Math.floor(sourceFrameId / (settings.protocol === "I2c" ? 3 : 1));
+    const startSample =
+      settings.protocol === "I2c"
+        ? transaction * transactionPeriod + halfPeriod * (4 + byteIndex * 18)
+        : transaction * transactionPeriod + halfPeriod * 3;
+    const value =
+      settings.protocol === "I2c"
+        ? [0xa0, 0x2a, 0x55][byteIndex]
+        : [0xa5, 0x3c, 0x5a, 0xf0][sourceFrameId % 4];
+    const endSample =
+      settings.protocol === "I2c"
+        ? startSample + halfPeriod * 16 + 1
+        : startSample + halfPeriod * (settings.settings.bits_per_transfer - 1) * 2 + 1;
+    const spiLabel =
+      settings.protocol === "Spi"
+        ? [
+            settings.settings.mosi_channel === null
+              ? null
+              : `MOSI 0x${value.toString(16).padStart(2, "0").toUpperCase()}`,
+            settings.settings.miso_channel === null
+              ? null
+              : `MISO 0x${((value ^ 0x99) & 0xff).toString(16).padStart(2, "0").toUpperCase()}`,
+          ]
+            .filter((label): label is string => label !== null)
+            .join(" / ")
+        : "";
+    return {
+      frame_id: sourceFrameId,
+      start_sample: startSample,
+      end_sample: Math.min(metadata.sample_count, endSample),
+      label:
+        settings.protocol === "I2c"
+          ? byteIndex === 0
+            ? `Address 0x${(value >> 1).toString(16).padStart(2, "0").toUpperCase()} Write ACK`
+            : `Data 0x${value.toString(16).padStart(2, "0").toUpperCase()} ACK`
+          : spiLabel,
+      value,
+    };
+  }).filter((frame) => frame.start_sample < metadata.sample_count && frame.end_sample > frame.start_sample);
 }
 
 function buildPreviewUartFrames(settings: UartDecodeSettings): DecodedFrame[] {
@@ -475,28 +582,83 @@ function buildPreviewUartFrameWindow(request: UartFrameWindowRequest): UartFrame
   };
 }
 
-function buildFrameWindowFromFrames(
+export function buildAnalyzerFrameWindow(
   frames: DecodedFrame[],
   startSample: number,
   sampleCount: number,
   widthPx: number,
-): UartFrameWindow {
+): AnalyzerFrameWindow {
   const endSample = startSample + sampleCount;
-  const normalized = frames.map((frame, index) => ({
-    ...frame,
-    frame_id: frame.frame_id ?? index,
-  }));
-  const visible = normalized.filter((frame) => frame.end_sample >= startSample && frame.start_sample <= endSample);
-  const limited = visible.slice(0, PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
+  const firstCandidate = lowerBoundFrameEnd(frames, startSample);
+  const visibleEnd = upperBoundFrameStart(frames, endSample, firstCandidate);
+  const visibleCount = Math.max(0, visibleEnd - firstCandidate);
+  const limitedEnd = Math.min(visibleEnd, firstCandidate + PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
+  const limited = frames.slice(firstCandidate, limitedEnd);
+  const bubbles =
+    visibleCount > PREVIEW_MAX_ANALYZER_MARKER_RESULTS * 4
+      ? buildDenseAnalyzerBubbles(frames, firstCandidate, visibleEnd)
+      : buildAnalyzerBubblesFromFrames(
+          frames.slice(firstCandidate, visibleEnd),
+          sampleCount,
+          widthPx,
+        );
   return {
-    bubbles: buildAnalyzerBubblesFromFrames(visible, sampleCount, widthPx),
+    bubbles,
     frames: limited,
-    previous_frame: [...normalized].reverse().find((frame) => frame.end_sample < startSample) ?? null,
+    previous_frame: firstCandidate > 0 ? frames[firstCandidate - 1] : null,
     next_frame:
-      visible.length > PREVIEW_MAX_ANALYZER_MARKER_RESULTS
-        ? visible[PREVIEW_MAX_ANALYZER_MARKER_RESULTS]
-      : normalized.find((frame) => frame.start_sample > endSample) ?? null,
+      visibleCount > PREVIEW_MAX_ANALYZER_MARKER_RESULTS
+        ? frames[firstCandidate + PREVIEW_MAX_ANALYZER_MARKER_RESULTS]
+        : visibleEnd < frames.length
+          ? frames[visibleEnd]
+          : null,
   };
+}
+
+function buildDenseAnalyzerBubbles(frames: DecodedFrame[], begin: number, end: number): AnalyzerBubble[] {
+  const count = Math.max(0, end - begin);
+  if (count === 0) return [];
+  const bucketSize = Math.ceil(count / PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
+  const bubbles: AnalyzerBubble[] = [];
+  for (let bucketBegin = begin; bucketBegin < end; bucketBegin += bucketSize) {
+    const bucketEnd = Math.min(end, bucketBegin + bucketSize);
+    const first = frames[bucketBegin];
+    const last = frames[bucketEnd - 1];
+    const displayText = frames
+      .slice(bucketBegin, Math.min(bucketEnd, bucketBegin + 12))
+      .map((frame) => frame.label);
+    bubbles.push({
+      type: bucketEnd - bucketBegin === 1 ? "SingleBubble" : "MultiBubble",
+      frame_id_interval: { begin: first.frame_id, end: last.frame_id + 1 },
+      start_sample: first.start_sample,
+      end_sample: last.end_sample,
+      display_text: displayText,
+      result_count: bucketEnd - bucketBegin,
+    });
+  }
+  return bubbles;
+}
+
+function lowerBoundFrameEnd(frames: DecodedFrame[], sample: number) {
+  let low = 0;
+  let high = frames.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (frames[middle].end_sample < sample) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function upperBoundFrameStart(frames: DecodedFrame[], sample: number, low = 0) {
+  let start = low;
+  let high = frames.length;
+  while (start < high) {
+    const middle = (start + high) >>> 1;
+    if (frames[middle].start_sample <= sample) start = middle + 1;
+    else high = middle;
+  }
+  return start;
 }
 
 interface BubbleAccumulator extends AnalyzerBubble {
@@ -1100,7 +1262,112 @@ function buildPreviewDigitalSegments(
   if (channel === 0) {
     return buildPreviewUartDigitalSegments(startSample, endSample, sampleRateHz, maxSegments);
   }
+  if (channel === 1 || channel === 2) {
+    return buildPreviewI2cDigitalSegments(startSample, endSample, channel, sampleRateHz, maxSegments);
+  }
+  if (channel >= 3 && channel <= 6) {
+    return buildPreviewSpiDigitalSegments(startSample, endSample, channel, sampleRateHz, maxSegments);
+  }
   return buildPreviewPulseDigitalSegments(startSample, endSample, channel, maxSegments);
+}
+
+function buildPreviewI2cDigitalSegments(
+  startSample: number,
+  endSample: number,
+  channel: number,
+  sampleRateHz: number,
+  maxSegments: number,
+): PreviewDigitalData | null {
+  const halfPeriod = Math.max(2, Math.round(sampleRateHz / 200_000));
+  return buildPreviewPeriodicDigitalSegments(
+    startSample,
+    endSample,
+    halfPeriod,
+    maxSegments,
+    (sample) => previewI2cLevelAt(sample, channel, sampleRateHz),
+  );
+}
+
+function buildPreviewSpiDigitalSegments(
+  startSample: number,
+  endSample: number,
+  channel: number,
+  sampleRateHz: number,
+  maxSegments: number,
+): PreviewDigitalData | null {
+  const halfPeriod = Math.max(2, Math.round(sampleRateHz / 2_000_000));
+  return buildPreviewPeriodicDigitalSegments(
+    startSample,
+    endSample,
+    halfPeriod,
+    maxSegments,
+    (sample) => previewSpiLevelAt(sample, channel, sampleRateHz),
+  );
+}
+
+function buildPreviewPeriodicDigitalSegments(
+  startSample: number,
+  endSample: number,
+  halfPeriod: number,
+  maxSegments: number,
+  levelAt: (sample: number) => boolean,
+): PreviewDigitalData | null {
+  if (endSample <= startSample) return { segments: [], rising_edges: [], falling_edges: [] };
+  const firstBoundary = (Math.floor(startSample / halfPeriod) + 1) * halfPeriod;
+  const boundaryCount = Math.max(0, Math.ceil((endSample - firstBoundary) / halfPeriod));
+  if (boundaryCount > maxSegments) return null;
+
+  const segments: DigitalSegment[] = [];
+  const rising_edges: number[] = [];
+  const falling_edges: number[] = [];
+  let previous = levelAt(startSample);
+  let runStart = startSample;
+  for (let boundary = firstBoundary; boundary < endSample; boundary += halfPeriod) {
+    const current = levelAt(boundary);
+    if (current === previous) continue;
+    segments.push({ start_sample: runStart, end_sample: boundary, high: previous });
+    (current ? rising_edges : falling_edges).push(boundary);
+    if (segments.length > maxSegments) return null;
+    runStart = boundary;
+    previous = current;
+  }
+  segments.push({ start_sample: runStart, end_sample: endSample, high: previous });
+  return { segments, rising_edges, falling_edges };
+}
+
+function previewI2cByte(frame: number) {
+  return [0xa0, 0x2a, 0x55][positiveModulo(frame, 3)];
+}
+
+function previewI2cLevelAt(sample: number, channel: number, sampleRateHz: number) {
+  const halfPeriod = Math.max(2, Math.round(sampleRateHz / 200_000));
+  const phase = positiveModulo(Math.floor(sample / halfPeriod), 60);
+  if (phase < 2) return true;
+  if (phase === 2) return channel === 2;
+  const dataPhase = phase - 3;
+  if (dataPhase < 54) {
+    const byteIndex = Math.floor(dataPhase / 18);
+    const bitIndex = Math.floor((dataPhase % 18) / 2);
+    const byte = previewI2cByte(byteIndex);
+    if (channel === 2) return dataPhase % 2 === 1;
+    return bitIndex === 8 ? false : (byte & (1 << (7 - bitIndex))) !== 0;
+  }
+  if (phase === 57) return false;
+  if (phase === 58) return channel === 2;
+  return true;
+}
+
+function previewSpiLevelAt(sample: number, channel: number, sampleRateHz: number) {
+  const halfPeriod = Math.max(2, Math.round(sampleRateHz / 2_000_000));
+  const phase = positiveModulo(Math.floor(sample / halfPeriod), 20);
+  const active = phase >= 2 && phase < 18;
+  if (channel === 6) return !active;
+  if (channel === 5) return active && phase % 2 === 1;
+  if (!active) return false;
+  const bitIndex = Math.floor((phase - 2) / 2);
+  const word = [0xa5, 0x3c, 0x5a, 0xf0][Math.floor(sample / (halfPeriod * 20)) % 4];
+  const value = channel === 3 ? word : word ^ 0x99;
+  return (value & (1 << (7 - bitIndex))) !== 0;
 }
 
 function buildPreviewUartDigitalSegments(
@@ -1317,6 +1584,9 @@ function previewDigitalLevelAt(sample: number, channel: number, sampleRateHz: nu
     const bitPeriod = sampleRateHz / PREVIEW_UART_BAUD;
     if (bitPeriod >= 2) return previewUartLevelAtBit(Math.floor(sample / bitPeriod));
   }
+
+  if (channel === 1 || channel === 2) return previewI2cLevelAt(sample, channel, sampleRateHz);
+  if (channel >= 3 && channel <= 6) return previewSpiLevelAt(sample, channel, sampleRateHz);
 
   const profile = previewPulseProfile(channel);
   const offset = positiveModulo(Math.floor(sample), profile.cycleSamples);
