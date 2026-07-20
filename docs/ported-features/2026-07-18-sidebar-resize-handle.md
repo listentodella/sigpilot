@@ -27,6 +27,11 @@
   - `GRAPH_MIN_WIDTH = 50`
   - `GRAPH_ROW_LABEL_MAX_WIDTH = 293`
 - 复用原版 Resizer 的垂直线拖拽语义：面板左侧 5px 热区、`ew-resize` 光标、拖动时根据左移距离增大 sidebar width。
+- 复用 `services/themes/builtin.ts` 的 DarkTheme token，并限定在 Sidebar 子树：
+  - `background-0/10/20/30`
+  - `hover-background`
+  - `border-10/20/focused/hover/highlight`
+  - `on-background-0/10/20/30/40`
 - 没有引入原版 `react-draggable` / MobX SidebarManager 依赖树；使用当前 React 状态模型承载 `sidebarPanelWidth`。
 
 ## 用户可见行为
@@ -42,3 +47,4 @@
   - 打开任意右侧面板，拖动左边缘可调整宽度。
   - 面板宽度不能小于 300px。
   - icon rail 宽度保持 47px，布局无文字重叠。
+  - 计算样式应与原版 DarkTheme 一致：panel `#1B1B1C`、rail `#3A3A3E`、border `#57575E`。
