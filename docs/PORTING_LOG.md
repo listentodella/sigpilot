@@ -116,3 +116,5 @@ chore: 说明内容
   - UART 之外的 I2C/SPI 电平解码、长捕获有界 frame/bubble 缓存、viewport 本地投影，以及 Analyzers 侧栏 Trigger View 结构占位。
 - `docs/ported-features/2026-07-20-analyzer-channel-roles-markers.md`
   - Analyzer 通道角色副标题、I2C/SPI 分通道短气泡、SCL/Clock 有效边沿 marker，以及原版风格通道下拉控件。
+- `docs/ported-features/2026-07-21-analyzer-bubbles-lazy-computation.md`
+  - Analyzer 气泡从 useMemo 预计算改为渲染时懒加载 + 缓存，解决滚轮缩放卡顿问题。

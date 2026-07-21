@@ -1,5 +1,5 @@
 import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AnalyzerBubble, DecodedFrame, WaveformTile, buildAnalyzerFrameWindow } from "../lib/api";
+import { AnalyzerBubble, AnalyzerFrameWindow, DecodedFrame, WaveformTile, buildAnalyzerFrameWindow } from "../lib/api";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
   ANALYZER_STRIP_HEIGHT_PX,
@@ -99,16 +99,20 @@ export function AnalyzerBubblesOverlay({
     () => new Map((tile?.channels ?? []).map((channel) => [channel.channel, channel])),
     [tile],
   );
-  const frameWindows = useMemo(
-    () =>
-      new Map(
-        bubbleTracks.map((track) => [
-          track.key,
-          buildAnalyzerFrameWindow(track.frames, viewportStart, viewportSamples, overlayWidth),
-        ]),
-      ),
-    [bubbleTracks, overlayWidth, viewportSamples, viewportStart],
-  );
+  // Don't pre-compute frameWindows in useMemo - it's expensive and runs on every viewport change
+  // Instead, compute them lazily during render, and cache with a Map
+  const frameWindowCache = useRef(new Map<string, { viewport: string; window: AnalyzerFrameWindow }>());
+
+  const getFrameWindow = (track: AnalyzerBubbleTrack): AnalyzerFrameWindow => {
+    const viewportKey = `${viewportStart}:${viewportSamples}:${overlayWidth}`;
+    const cached = frameWindowCache.current.get(track.key);
+    if (cached && cached.viewport === viewportKey) {
+      return cached.window;
+    }
+    const window = buildAnalyzerFrameWindow(track.frames, viewportStart, viewportSamples, overlayWidth);
+    frameWindowCache.current.set(track.key, { viewport: viewportKey, window });
+    return window;
+  };
 
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -126,7 +130,7 @@ export function AnalyzerBubblesOverlay({
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const track = bubbleTracks.find((item) => item.key === hoveredTrackKey);
       if (!track) return;
-      const frameWindow = frameWindows.get(track.key);
+      const frameWindow = getFrameWindow(track);
       const frameIndex =
         event.key === "ArrowLeft"
           ? frameWindow?.previous_frame?.frame_id ?? null
@@ -139,7 +143,7 @@ export function AnalyzerBubblesOverlay({
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [bubbleTracks, frameWindows, hoveredTrackKey, onGoToFrame]);
+  }, [bubbleTracks, hoveredTrackKey, onGoToFrame]);
 
   return (
     <div className="analyzerBubblesOverlay" ref={overlayRef}>
@@ -147,7 +151,7 @@ export function AnalyzerBubblesOverlay({
         const channelTracks = bubbleTracks.filter((track) => track.role.channel === channel);
         return channelTracks.map((track, trackIndex) => {
           const { analyzer } = track;
-          const frameWindow = frameWindows.get(track.key);
+          const frameWindow = getFrameWindow(track);
           const bubbles = frameWindow?.bubbles ?? [];
           const previousIndex = frameWindow?.previous_frame?.frame_id ?? null;
           const nextIndex = frameWindow?.next_frame?.frame_id ?? null;
