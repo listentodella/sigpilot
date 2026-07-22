@@ -4,13 +4,18 @@ use std::{
     time::Duration,
 };
 
+use chrono::Utc;
+
 use crate::{
     capture::{
-        generate_sample_words_with_count, sample_count_from_duration, sample_count_from_settings,
-        unitsize_for_channel_count,
+        sample_count_from_duration, sample_count_from_settings, unitsize_for_channel_count,
+        DemoSampleGenerator,
     },
     error::{CoreError, Result},
-    models::{CaptureData, CaptureMode, CaptureProgress, CaptureSettings, DeviceInfo, DeviceKind},
+    models::{
+        CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings, DeviceInfo,
+        DeviceKind,
+    },
     protocol::{PXLOGIC_WCH_PID, PXLOGIC_WCH_VID},
     transport::CaptureBackend,
 };
@@ -22,7 +27,7 @@ impl FakeBackend {
     pub const DEVICE_ID: &'static str = "fake:pxlogic-demo";
 }
 
-const MAX_FAKE_STREAM_BYTES: u64 = 64 * 1024 * 1024;
+const INITIAL_CAPTURE_RESERVE_BYTES: usize = 8 * 1024 * 1024;
 
 impl CaptureBackend for FakeBackend {
     fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
@@ -56,15 +61,25 @@ impl CaptureBackend for FakeBackend {
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(CaptureProgress),
     ) -> Result<CaptureData> {
+        self.capture_streaming(settings, cancel, progress, &mut |_| {}, &mut |_| {})
+    }
+
+    fn capture_streaming(
+        &self,
+        settings: &CaptureSettings,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(CaptureProgress),
+        started: &mut dyn FnMut(&CaptureMetadata),
+        on_samples: &mut dyn FnMut(&[u8]),
+    ) -> Result<CaptureData> {
         if settings.device_id != Self::DEVICE_ID {
             return Err(CoreError::UnsupportedDevice);
         }
 
         let unitsize_u8 = unitsize_for_channel_count(settings.channel_count)?;
         let unitsize = u64::from(unitsize_u8);
-        let configured_sample_count = sample_count_from_settings(settings, unitsize_u8)?;
         let sample_count = if matches!(settings.mode, CaptureMode::Stream) {
-            configured_sample_count.min(MAX_FAKE_STREAM_BYTES / unitsize)
+            sample_count_from_settings(settings, unitsize_u8)?
         } else {
             sample_count_from_duration(
                 settings.sample_rate_hz,
@@ -73,25 +88,56 @@ impl CaptureBackend for FakeBackend {
             )?
         };
         let bytes_expected = sample_count * unitsize;
-        let started = std::time::Instant::now();
+        let started_at = std::time::Instant::now();
+        let captured_at = Utc::now();
         let mut samples_read = 0u64;
+        let mut samples = Vec::with_capacity(
+            usize::try_from(bytes_expected)
+                .unwrap_or(INITIAL_CAPTURE_RESERVE_BYTES)
+                .min(INITIAL_CAPTURE_RESERVE_BYTES),
+        );
+        let mut generator = DemoSampleGenerator::new(settings, unitsize_u8);
+        let metadata = CaptureMetadata {
+            version: 1,
+            source_device: settings.device_id.clone(),
+            sample_rate_hz: settings.sample_rate_hz,
+            channel_count: settings.channel_count,
+            unitsize: unitsize_u8,
+            sample_count: 0,
+            captured_at,
+            labels: (0..settings.channel_count)
+                .map(|channel| format!("D{channel}"))
+                .collect(),
+        };
+        started(&metadata);
 
         loop {
             if cancel.load(Ordering::Acquire) {
                 let partial_samples = samples_read.max(1).min(sample_count);
+                if samples_read == 0 {
+                    let chunk = generator.generate(1);
+                    on_samples(&chunk);
+                    samples.extend_from_slice(&chunk);
+                }
                 progress(CaptureProgress {
                     bytes_read: partial_samples * unitsize,
                     bytes_expected,
                     samples_read: partial_samples,
                 });
-                return generate_sample_words_with_count(settings, partial_samples, unitsize_u8);
+                return Ok(CaptureData {
+                    metadata: CaptureMetadata {
+                        sample_count: partial_samples,
+                        ..metadata
+                    },
+                    samples,
+                });
             }
-            samples_read = if matches!(settings.mode, CaptureMode::Stream) {
+            let next_samples = if matches!(settings.mode, CaptureMode::Stream) {
                 let elapsed_samples =
-                    (started.elapsed().as_secs_f64() * settings.sample_rate_hz as f64) as u64;
+                    (started_at.elapsed().as_secs_f64() * settings.sample_rate_hz as f64) as u64;
                 elapsed_samples.max(1).min(sample_count)
             } else {
-                let elapsed = started.elapsed().as_millis() as u64;
+                let elapsed = started_at.elapsed().as_millis() as u64;
                 let duration = settings.duration_ms.max(1);
                 sample_count
                     .saturating_mul(elapsed.min(duration))
@@ -100,6 +146,15 @@ impl CaptureBackend for FakeBackend {
                     .max(1)
                     .min(sample_count)
             };
+            let mut remaining = next_samples.saturating_sub(samples_read);
+            while remaining > 0 {
+                let chunk_samples = remaining.min(1_048_576);
+                let chunk = generator.generate(chunk_samples);
+                on_samples(&chunk);
+                samples.extend_from_slice(&chunk);
+                samples_read += chunk_samples;
+                remaining -= chunk_samples;
+            }
             progress(CaptureProgress {
                 bytes_read: samples_read * unitsize,
                 bytes_expected,
@@ -108,9 +163,15 @@ impl CaptureBackend for FakeBackend {
             if samples_read >= sample_count {
                 break;
             }
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(33));
         }
 
-        generate_sample_words_with_count(settings, sample_count, unitsize_u8)
+        Ok(CaptureData {
+            metadata: CaptureMetadata {
+                sample_count,
+                ..metadata
+            },
+            samples,
+        })
     }
 }

@@ -34,7 +34,7 @@
   - Saleae 风格 Extensions 右栏。
   - 包含搜索、管理菜单、扩展项动作、创建对话框和扩展详情覆盖页。
 - `src/components/WaveformCanvas.tsx`
-  - 数字波形 Canvas 渲染。
+  - 数字波形 Canvas 渲染，并直接消费 Graph Server 风格 16-byte packed digital bins。
   - 包含平滑数字波形绘制、原版 8px 上下 gutter、边沿吸附、周期/占空比/脉宽 hover 测量显示、右键菜单控制的交互测量开关，以及波形区右键菜单定位。
   - 与 range overlay 共用 `src/lib/saleaeGraphLayout.ts` 计算 row 几何。
 - `src/components/TimingDisplayCanvas.tsx`
@@ -45,7 +45,7 @@
   - thumb 宽度表示可视时间范围，位置表示当前 viewport 起点。
 - `src/components/AnalyzerBubblesOverlay.tsx`
   - Saleae 风格 analyzer bubble overlay。
-  - 消费独立 `protocolBubbles` 模型渲染 Async Serial bubbles、multi bubble 聚合、像素裁剪和 previous/next data 按钮。
+  - 消费 Rust GraphSession 返回的 analyzer track windows，渲染分通道 bubbles、multi bubble、像素裁剪和 previous/next data 按钮。
 - `src/components/AnalyzerSettingsDialog.tsx`
   - Async Serial analyzer 设置对话框。
   - 包含输入通道、bit rate、inverted、Data Table / Terminal 开关。
@@ -98,7 +98,7 @@
 
 - `src-tauri/src/main.rs`
   - Tauri 命令层和事件转发。
-  - 包含读取本地扩展 package、创建扩展模板目录、当前 capture sample 裁剪和 digital range measurement 的命令。
+  - 包含 session 独立 GraphSession、组合 `render_graph_frame`、capture stream 更新、文件/裁剪/measurement 和 extension 命令。
 - `src-tauri/src/bin/usb_smoke.rs`
   - USB smoke test 工具。
 - `src-tauri/tauri.conf.json`
@@ -118,6 +118,9 @@
   - `.pxcap`、`.sr`、VCD 读写。
 - `crates/pxlogic-waveform`
   - 波形 tile 生成和数字 range measurement scanner。
+- `crates/pxlogic-graph`
+  - 参考 Logic 2 Graph Server 职责实现的原生 32 通道 graph kernel。
+  - 包含增量 edge index、packed viewport tile、UART/I2C/SPI analyzer cache 和 protocol bubble aggregation。
 
 ## 项目配置
 
@@ -148,3 +151,5 @@
 - `debug-captures`
   - 本地调试采集文件。
   - 如需作为测试样本，应复制到明确命名的 fixture 目录，并在文档中说明来源。
+- `/Users/leo/work/logic2-anti/ele-gpt`
+  - Electron 架构参考版本；本轮用于核对 packed waveform WebGL renderer、GraphClient analyzer response 和气泡聚合职责。

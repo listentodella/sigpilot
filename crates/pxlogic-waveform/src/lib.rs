@@ -71,6 +71,8 @@ pub struct ChannelTile {
     pub channel: u8,
     pub label: String,
     pub bins: Vec<WaveformBin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packed_bins: Option<String>,
     pub segments: Vec<DigitalSegment>,
     pub rising_edges: Vec<u64>,
     pub falling_edges: Vec<u64>,
@@ -162,6 +164,7 @@ pub fn build_tile(capture: &CaptureData, request: &WaveformRequest) -> Result<Wa
             channel,
             label,
             bins: std::mem::take(&mut channel_bins[index]),
+            packed_bins: None,
             segments: exact.segments,
             rising_edges: exact.rising_edges,
             falling_edges: exact.falling_edges,
@@ -461,7 +464,7 @@ fn build_exact_digital_data(
     pixels: u32,
 ) -> Result<ExactDigitalData> {
     let visible_samples = end.saturating_sub(start);
-    let exact_limit = u64::from(pixels).saturating_mul(96).max(4096);
+    let exact_limit = u64::from(pixels).saturating_mul(8).max(4096);
     if visible_samples == 0 || visible_samples > exact_limit {
         return Ok(ExactDigitalData::default());
     }

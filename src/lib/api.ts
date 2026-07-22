@@ -126,6 +126,7 @@ export interface ChannelTile {
   channel: number;
   label: string;
   bins: WaveformBin[];
+  packed_bins?: string | null;
   segments: DigitalSegment[];
   rising_edges: number[];
   falling_edges: number[];
@@ -216,6 +217,42 @@ export interface UartFrameWindow {
 
 export type AnalyzerFrameWindow = UartFrameWindow;
 
+export interface AnalyzerTrackRequest {
+  channel: number;
+  role: string;
+}
+
+export interface AnalyzerRenderRequest {
+  analyzer_id: string;
+  settings: AnalyzerDecodeSettings;
+  tracks: AnalyzerTrackRequest[];
+}
+
+export interface AnalyzerTrackWindow extends AnalyzerFrameWindow {
+  channel: number;
+  role: string;
+}
+
+export interface AnalyzerRenderResult {
+  analyzer_id: string;
+  tracks: AnalyzerTrackWindow[];
+}
+
+export interface GraphFrameRequest {
+  frame_id: number;
+  waveform: WaveformRequest;
+  analyzer_view?: WaveformRequest | null;
+  analyzers: AnalyzerRenderRequest[];
+}
+
+export interface GraphFrameResponse {
+  frame_id: number;
+  revision: number;
+  sample_count: number;
+  tile: WaveformTile;
+  analyzers: AnalyzerRenderResult[];
+}
+
 export interface CaptureCallbacks {
   onProgress?: (progress: CaptureProgress) => void;
   onSummary?: (summary: CaptureSummary) => void;
@@ -237,6 +274,9 @@ let previewCapture: CaptureSummary = {
   bytes: 500_000,
 };
 let previewCaptureRun: { cancelled: boolean } | null = null;
+const previewCaptures = new Map<string, CaptureSummary>();
+const previewCaptureRevisions = new Map<string, number>();
+const previewAnalyzerFrameCache = new Map<string, DecodedFrame[]>();
 
 // Ported from Logic 2.4.43 BaseAnalyzerManager.maximumMarkerResults.
 const PREVIEW_MAX_ANALYZER_MARKER_RESULTS = 300;
@@ -250,6 +290,20 @@ async function callBackend<T>(command: string, args?: Record<string, unknown>): 
     throw new Error("Tauri runtime is not available");
   }
   return invoke<T>(command, args);
+}
+
+function previewCaptureForSession(sessionId: string) {
+  return previewCaptures.get(sessionId) ?? previewCapture;
+}
+
+function withPreviewCapture<T>(sessionId: string, callback: () => T): T {
+  const previous = previewCapture;
+  previewCapture = previewCaptureForSession(sessionId);
+  try {
+    return callback();
+  } finally {
+    previewCapture = previous;
+  }
 }
 
 export function listDevices(): Promise<DeviceInfo[]> {
@@ -276,6 +330,7 @@ export function prepareDevice(deviceId: string): Promise<void> {
 }
 
 export function startCapture(
+  sessionId: string,
   settings: CaptureSettings,
   callbacks: CaptureCallbacks = {},
 ): Promise<CaptureSummary> {
@@ -314,6 +369,8 @@ export function startCapture(
           },
           bytes: sampleCount * unitsize,
         };
+        previewCaptures.set(sessionId, previewCapture);
+        previewCaptureRevisions.set(sessionId, (previewCaptureRevisions.get(sessionId) ?? 0) + 1);
         callbacks.onProgress?.({
           bytes_read: previewCapture.bytes,
           bytes_expected: targetBytes,
@@ -331,7 +388,7 @@ export function startCapture(
       window.setTimeout(update, PREVIEW_CAPTURE_UPDATE_MS);
     });
   }
-  return callBackend("start_capture", { settings });
+  return callBackend("start_capture", { sessionId, settings });
 }
 
 export function cancelCapture(): Promise<void> {
@@ -342,24 +399,29 @@ export function cancelCapture(): Promise<void> {
   return callBackend("cancel_capture");
 }
 
-export function openCapture(path: string): Promise<CaptureSummary> {
-  if (!isTauriRuntime()) return Promise.resolve(previewCapture);
-  return callBackend("open_capture", { path });
-}
-
-export function saveCapture(path: string): Promise<void> {
-  if (!isTauriRuntime()) return Promise.resolve();
-  return callBackend("save_capture", { path });
-}
-
-export function exportCapture(path: string, format: ExportFormat): Promise<void> {
-  if (!isTauriRuntime()) return Promise.resolve();
-  return callBackend("export_capture", { path, format });
-}
-
-export function trimCapture(request: TrimCaptureRequest): Promise<CaptureSummary> {
+export function openCapture(sessionId: string, path: string): Promise<CaptureSummary> {
   if (!isTauriRuntime()) {
-    const totalSamples = previewCapture.metadata.sample_count;
+    previewCaptures.set(sessionId, previewCapture);
+    previewCaptureRevisions.set(sessionId, (previewCaptureRevisions.get(sessionId) ?? 0) + 1);
+    return Promise.resolve(previewCapture);
+  }
+  return callBackend("open_capture", { sessionId, path });
+}
+
+export function saveCapture(sessionId: string, path: string): Promise<void> {
+  if (!isTauriRuntime()) return Promise.resolve();
+  return callBackend("save_capture", { sessionId, path });
+}
+
+export function exportCapture(sessionId: string, path: string, format: ExportFormat): Promise<void> {
+  if (!isTauriRuntime()) return Promise.resolve();
+  return callBackend("export_capture", { sessionId, path, format });
+}
+
+export function trimCapture(sessionId: string, request: TrimCaptureRequest): Promise<CaptureSummary> {
+  if (!isTauriRuntime()) {
+    const current = previewCaptureForSession(sessionId);
+    const totalSamples = current.metadata.sample_count;
     const safeTotal = Math.max(1, totalSamples);
     const startSample = Math.max(0, Math.min(safeTotal - 1, Math.round(request.trim_before_sample ?? 0)));
     const endSample = Math.max(
@@ -367,44 +429,155 @@ export function trimCapture(request: TrimCaptureRequest): Promise<CaptureSummary
       Math.min(safeTotal, Math.round(request.trim_after_sample ?? safeTotal)),
     );
     const sampleCount = Math.max(1, endSample - startSample);
-    previewCapture = {
+    const nextCapture = {
       metadata: {
-        ...previewCapture.metadata,
+        ...current.metadata,
         sample_count: sampleCount,
       },
-      bytes: sampleCount * previewCapture.metadata.unitsize,
+      bytes: sampleCount * current.metadata.unitsize,
     };
-    return Promise.resolve(previewCapture);
+    previewCapture = nextCapture;
+    previewCaptures.set(sessionId, nextCapture);
+    previewCaptureRevisions.set(sessionId, (previewCaptureRevisions.get(sessionId) ?? 0) + 1);
+    return Promise.resolve(nextCapture);
   }
-  return callBackend("trim_capture", { request });
+  return callBackend("trim_capture", { sessionId, request });
 }
 
-export function getWaveformTile(request: WaveformRequest): Promise<WaveformTile> {
-  if (!isTauriRuntime()) return Promise.resolve(buildPreviewTile(request));
-  return callBackend("get_waveform_tile", { request });
+export function getWaveformTile(sessionId: string, request: WaveformRequest): Promise<WaveformTile> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(withPreviewCapture(sessionId, () => buildPreviewTile(request)));
+  }
+  return callBackend("get_waveform_tile", { sessionId, request });
 }
 
 export function measureDigitalRange(
+  sessionId: string,
   request: DigitalRangeMeasurementRequest,
 ): Promise<DigitalRangeMeasurementStats> {
-  if (!isTauriRuntime()) return Promise.resolve(measurePreviewDigitalRange(request));
-  return callBackend("measure_digital_range", { request });
-}
-
-export function decodeAnalyzerFrames(settings: AnalyzerDecodeSettings): Promise<DecodedFrame[]> {
   if (!isTauriRuntime()) {
-    return Promise.resolve(buildPreviewAnalyzerFrames(settings));
+    return Promise.resolve(withPreviewCapture(sessionId, () => measurePreviewDigitalRange(request)));
   }
-  return callBackend("decode_analyzer_frames", { settings });
+  return callBackend("measure_digital_range", { sessionId, request });
 }
 
-export function decodeUartFrames(settings: UartDecodeSettings): Promise<DecodedFrame[]> {
-  return decodeAnalyzerFrames({ protocol: "Uart", settings });
+export function decodeAnalyzerFrames(
+  sessionId: string,
+  settings: AnalyzerDecodeSettings,
+): Promise<DecodedFrame[]> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(withPreviewCapture(sessionId, () => cachedPreviewAnalyzerFrames(settings)));
+  }
+  return callBackend("decode_analyzer_frames", { sessionId, settings });
 }
 
-export async function getUartFrameWindow(request: UartFrameWindowRequest): Promise<UartFrameWindow> {
-  const frames = await decodeUartFrames(request);
+export function decodeUartFrames(
+  settings: UartDecodeSettings,
+  sessionId = "preview",
+): Promise<DecodedFrame[]> {
+  return decodeAnalyzerFrames(sessionId, { protocol: "Uart", settings });
+}
+
+export async function getUartFrameWindow(
+  request: UartFrameWindowRequest,
+  sessionId = "preview",
+): Promise<UartFrameWindow> {
+  const frames = await decodeUartFrames(request, sessionId);
   return buildAnalyzerFrameWindow(frames, request.start_sample, request.sample_count, request.width_px);
+}
+
+export function renderGraphFrame(
+  sessionId: string,
+  request: GraphFrameRequest,
+): Promise<GraphFrameResponse> {
+  if (isTauriRuntime()) {
+    return callBackend("render_graph_frame", { sessionId, request });
+  }
+  return Promise.resolve(
+    withPreviewCapture(sessionId, () => {
+      const analyzerView = request.analyzer_view ?? request.waveform;
+      return {
+        frame_id: request.frame_id,
+        revision: previewCaptureRevisions.get(sessionId) ?? 0,
+        sample_count: previewCapture.metadata.sample_count,
+        tile: buildPreviewTile(request.waveform),
+        analyzers: request.analyzers.map((analyzer) => {
+          return {
+            analyzer_id: analyzer.analyzer_id,
+            tracks: analyzer.tracks.map((track) =>
+              buildPreviewAnalyzerTrackWindow(analyzer.settings, track, analyzerView),
+            ),
+          };
+        }),
+      };
+    }),
+  );
+}
+
+function buildPreviewAnalyzerTrackWindow(
+  settings: AnalyzerDecodeSettings,
+  track: AnalyzerTrackRequest,
+  view: WaveformRequest,
+): AnalyzerTrackWindow {
+  const window =
+    settings.protocol === "Uart"
+      ? buildPreviewUartFrameWindow({
+          ...settings.settings,
+          start_sample: view.start_sample,
+          sample_count: view.sample_count,
+          width_px: view.pixels,
+        })
+      : buildAnalyzerFrameWindow(
+          framesForAnalyzerTrack(cachedPreviewAnalyzerFrames(settings), track),
+          view.start_sample,
+          view.sample_count,
+          view.pixels,
+        );
+  return {
+    channel: track.channel,
+    role: track.role,
+    ...window,
+  };
+}
+
+function cachedPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings) {
+  const key = JSON.stringify([
+    previewCapture.metadata.captured_at,
+    previewCapture.metadata.sample_count,
+    settings,
+  ]);
+  const cached = previewAnalyzerFrameCache.get(key);
+  if (cached) return cached;
+  const frames = buildPreviewAnalyzerFrames(settings);
+  if (previewAnalyzerFrameCache.size >= 32) previewAnalyzerFrameCache.clear();
+  previewAnalyzerFrameCache.set(key, frames);
+  return frames;
+}
+
+function framesForAnalyzerTrack(frames: DecodedFrame[], track: AnalyzerTrackRequest) {
+  const hasChannelValues = frames.some((frame) => frame.channel_values.length > 0);
+  if (!hasChannelValues) return frames;
+  return frames.flatMap((frame) => {
+    const value = frame.channel_values.find(
+      (item) => item.channel === track.channel && item.role === track.role,
+    );
+    if (!value) return [];
+    return [
+      {
+        ...frame,
+        label: value.label,
+        value: value.value,
+        channel_values: [value],
+      },
+    ];
+  });
+}
+
+export function releaseGraphSession(sessionId: string): Promise<void> {
+  previewCaptures.delete(sessionId);
+  previewCaptureRevisions.delete(sessionId);
+  if (!isTauriRuntime()) return Promise.resolve();
+  return callBackend("release_graph_session", { sessionId });
 }
 
 function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFrame[] {
@@ -1259,7 +1432,7 @@ function buildPreviewExactDigitalData(
   channel: number,
   sampleRateHz: number,
 ): PreviewDigitalData {
-  const exactLimit = Math.max(4096, pixels * 96);
+  const exactLimit = Math.max(4096, pixels * 8);
   if (endSample <= startSample || endSample - startSample > exactLimit) {
     return { segments: [], rising_edges: [], falling_edges: [] };
   }

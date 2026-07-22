@@ -13,6 +13,7 @@ rusb-transport = ["pxlogic-core/rusb-transport"]
 [dependencies]
 pxlogic-core = { path = "../crates/pxlogic-core" }
 pxlogic-file = { path = "../crates/pxlogic-file" }
+pxlogic-graph = { path = "../crates/pxlogic-graph" }
 pxlogic-waveform = { path = "../crates/pxlogic-waveform" }
 parking_lot.workspace = true
 serde.workspace = true

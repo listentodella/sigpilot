@@ -2,6 +2,7 @@
 members = [
     "crates/pxlogic-core",
     "crates/pxlogic-file",
+    "crates/pxlogic-graph",
     "crates/pxlogic-waveform",
     "src-tauri",
 ]

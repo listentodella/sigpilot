@@ -77,10 +77,11 @@ import {
   DigitalRangeMeasurementStats,
   DiagnosticEvent,
   exportCapture,
-  getWaveformTile,
   listDevices,
   measureDigitalRange,
   openCapture,
+  releaseGraphSession,
+  renderGraphFrame,
   saveCapture,
   startCapture,
   trimCapture,
@@ -91,6 +92,7 @@ import {
   analyzerChannelIndexes,
   analyzerChannelRoleLabel,
   analyzerChannelRoles,
+  analyzerBubbleRoles,
   analyzerDecodeSettings,
   analyzerDecodeSignature as getAnalyzerDecodeSignature,
   analyzerStripInsetForChannel,
@@ -187,6 +189,11 @@ interface UiSession {
   timingMarkerPlacement: UiTimingMarkerPlacement | null;
   timingMarkers: UiTimingMarker[];
   notes: string;
+}
+
+interface CaptureUpdatedEvent {
+  session_id: string;
+  summary: CaptureSummary;
 }
 
 interface UiAnalyzerTriggerState {
@@ -454,6 +461,7 @@ function applyTrimmedCapture(
       decodedFrames: [],
       previousFrame: null,
       nextFrame: null,
+      renderedTracks: [],
       highlightedFrameIndex: null,
     })),
     channelLabels: labels,
@@ -724,6 +732,7 @@ export default function App() {
   const [channelContextMenu, setChannelContextMenu] = useState<ChannelContextMenuState | null>(null);
   const [analyzerInEdit, setAnalyzerInEdit] = useState<AnalyzerEditState | null>(null);
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
+  const [graphRequestEpoch, setGraphRequestEpoch] = useState(0);
   const [startupMessage, setStartupMessage] = useState("Ready");
 
   const footerRef = useRef<HTMLElement>(null);
@@ -739,7 +748,8 @@ export default function App() {
     timeout: null,
   });
   const tileRequestSeq = useRef(0);
-  const tileLastRequestAtRef = useRef(0);
+  const graphRequestInFlightRef = useRef(false);
+  const graphRequestPendingRef = useRef(false);
   const analyzerRequestSeq = useRef<Record<string, number>>({});
   const rangeMeasurementRequestSeq = useRef<Record<string, number>>({});
   const viewportAnimationRef = useRef<number | null>(null);
@@ -868,6 +878,10 @@ export default function App() {
         if (!targetId) return;
         updateSession(targetId, (session) => ({ ...session, progress: event.payload }));
       }).catch(() => () => {}),
+      listen<CaptureUpdatedEvent>("capture_updated", (event) => {
+        const { session_id: sessionId, summary } = event.payload;
+        updateSession(sessionId, (session) => applyLiveCaptureSummary(session, summary));
+      }).catch(() => () => {}),
       listen<CaptureSummary>("capture_completed", (event) => {
         const targetId = captureSessionRef.current;
         if (!targetId) return;
@@ -889,6 +903,7 @@ export default function App() {
             decodedFrames: [],
             previousFrame: null,
             nextFrame: null,
+            renderedTracks: [],
             highlightedFrameIndex: null,
           })),
           message: "Capture complete",
@@ -1060,6 +1075,12 @@ export default function App() {
     updateViewport(activeSession.id, 0, activeSession.summary.metadata.sample_count);
   }, [activeSession, updateViewport]);
 
+  const graphAnalyzerDecodeSignature =
+    activeSession?.analyzers
+      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}`)
+      .join("|") ?? "";
+  const visibleChannelSignature = visibleChannelIndexes.join(",");
+
   useEffect(() => {
     if (!activeSession?.summary) {
       tileRequestSeq.current += 1;
@@ -1067,11 +1088,15 @@ export default function App() {
     }
 
     const sessionSnapshot = activeSession;
-    const requestDelay = Math.max(0, 42 - (performance.now() - tileLastRequestAtRef.current));
-    const timeout = window.setTimeout(async () => {
-      tileLastRequestAtRef.current = performance.now();
-      const requestSeq = tileRequestSeq.current + 1;
-      tileRequestSeq.current = requestSeq;
+    const requestSeq = tileRequestSeq.current + 1;
+    tileRequestSeq.current = requestSeq;
+    const animationFrame = window.requestAnimationFrame(() => {
+      if (graphRequestInFlightRef.current) {
+        graphRequestPendingRef.current = true;
+        return;
+      }
+      graphRequestInFlightRef.current = true;
+      void (async () => {
       try {
         const overscan = Math.max(64, sessionSnapshot.viewportSamples);
         const requestStart = Math.max(0, sessionSnapshot.viewportStart - overscan);
@@ -1082,38 +1107,79 @@ export default function App() {
         const requestSamples = Math.max(1, requestEnd - requestStart);
         const pixelScale = requestSamples / Math.max(1, sessionSnapshot.viewportSamples);
         const maxPixels = sessionSnapshot.summary!.metadata.channel_count > 16 ? 1800 : 2600;
-        const next = await getWaveformTile({
-          start_sample: requestStart,
-          sample_count: requestSamples,
-          pixels: Math.max(480, Math.min(maxPixels, Math.round(sessionSnapshot.canvasWidth * pixelScale))),
-          channels: [],
+        const analyzerRequests = sessionSnapshot.analyzers.flatMap((analyzer) => {
+              const settings = analyzerDecodeSettings(analyzer);
+              if (!settings || !analyzerSupportsDecoding(analyzer)) return [];
+              return [
+                {
+                  analyzer_id: analyzer.id,
+                  settings,
+                  tracks: analyzerBubbleRoles(analyzer).map((role) => ({
+                    channel: role.channel,
+                    role: role.title,
+                  })),
+                },
+              ];
+            });
+        const next = await renderGraphFrame(sessionSnapshot.id, {
+          frame_id: requestSeq,
+          waveform: {
+            start_sample: requestStart,
+            sample_count: requestSamples,
+            pixels: Math.max(480, Math.min(maxPixels, Math.round(sessionSnapshot.canvasWidth * pixelScale))),
+            channels: visibleChannelIndexes.length > 0 ? visibleChannelIndexes : [255],
+          },
+          analyzer_view: {
+            start_sample: sessionSnapshot.viewportStart,
+            sample_count: sessionSnapshot.viewportSamples,
+            pixels: Math.max(1, sessionSnapshot.canvasWidth),
+            channels: [],
+          },
+          analyzers: analyzerRequests,
         });
-        if (requestSeq === tileRequestSeq.current) {
+        if (requestSeq === tileRequestSeq.current && next.frame_id === requestSeq) {
+          const analyzerResults = new Map(next.analyzers.map((result) => [result.analyzer_id, result]));
           updateSession(sessionSnapshot.id, (session) => ({
             ...session,
             tile: {
-              ...next,
-              channels: next.channels.map((channel) => ({
+              ...next.tile,
+              channels: next.tile.channels.map((channel) => ({
                 ...channel,
                 label: session.channelLabels[channel.channel] ?? channel.label,
               })),
             },
+            analyzers: session.analyzers.map((analyzer) => ({
+              ...analyzer,
+              renderedTracks: analyzerResults.get(analyzer.id)?.tracks ?? [],
+            })),
           }));
         }
       } catch (error) {
         if (requestSeq === tileRequestSeq.current) {
           updateSession(sessionSnapshot.id, (session) => ({ ...session, message: String(error) }));
         }
+      } finally {
+        graphRequestInFlightRef.current = false;
+        if (graphRequestPendingRef.current) {
+          graphRequestPendingRef.current = false;
+          setGraphRequestEpoch((epoch) => epoch + 1);
+        }
       }
-    }, requestDelay);
-    return () => window.clearTimeout(timeout);
+      })();
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
   }, [
     activeSession?.canvasWidth,
+    activeSession?.busy,
     activeSession?.id,
-    activeSession?.summary,
+    activeSession?.summary?.metadata.captured_at,
+    activeSession?.summary?.metadata.sample_count,
     activeSession?.viewportSamples,
     activeSession?.viewportStart,
+    graphAnalyzerDecodeSignature,
+    graphRequestEpoch,
     updateSession,
+    visibleChannelSignature,
   ]);
 
   const rangeMeasurementSignature =
@@ -1154,7 +1220,7 @@ export default function App() {
           ),
         }));
 
-        void measureDigitalRange({
+        void measureDigitalRange(sessionSnapshot.id, {
           channel: range.channelIndex,
           start_sample: range.startSample,
           end_sample: range.endSample,
@@ -1228,13 +1294,14 @@ export default function App() {
         decodedFrames: [],
         previousFrame: null,
         nextFrame: null,
+        renderedTracks: [],
         highlightedFrameIndex: null,
       })),
       diagnostics: [],
       message: captureDevice?.kind === "Usb" ? "Preparing device and capturing" : "Capturing",
     }));
     try {
-      const next = await startCapture(nextSettings, {
+      const next = await startCapture(session.id, nextSettings, {
         onProgress: (progress) => {
           updateSession(session.id, (current) => ({ ...current, progress }));
         },
@@ -1254,6 +1321,7 @@ export default function App() {
           decodedFrames: [],
           previousFrame: null,
           nextFrame: null,
+          renderedTracks: [],
           highlightedFrameIndex: null,
         })),
         message: "Capture complete",
@@ -1294,7 +1362,7 @@ export default function App() {
       ),
     }));
     try {
-      const frames = (await decodeAnalyzerFrames(settings)).sort(
+      const frames = (await decodeAnalyzerFrames(session.id, settings)).sort(
         (left, right) => left.start_sample - right.start_sample || left.frame_id - right.frame_id,
       );
       if (requestSeq !== analyzerRequestSeq.current[requestKey]) return;
@@ -1335,7 +1403,12 @@ export default function App() {
       .join("|") ?? "";
 
   useEffect(() => {
-    if (!activeSession?.summary || activeSession.busy || activeSession.analyzers.length === 0) return;
+    if (
+      selectedPanel !== "analyzers" ||
+      !activeSession?.summary ||
+      activeSession.busy ||
+      activeSession.analyzers.length === 0
+    ) return;
     const timeout = window.setTimeout(() => {
       activeSession.analyzers.forEach((analyzer) => {
         if (analyzerSupportsDecoding(analyzer)) {
@@ -1351,6 +1424,7 @@ export default function App() {
     activeSession?.summary?.metadata.captured_at,
     activeSession?.summary?.metadata.sample_count,
     analyzerDecodeSignature,
+    selectedPanel,
   ]);
 
   async function handleCancel() {
@@ -1361,11 +1435,12 @@ export default function App() {
     }
   }
 
-  async function loadCaptureIntoSession(summary: CaptureSummary) {
+  async function loadCaptureIntoSession(summary: CaptureSummary, targetSession?: UiSession) {
     const target =
-      activeSession && !activeSession.summary
+      targetSession ??
+      (activeSession && !activeSession.summary
         ? activeSession
-        : createSession(summary.metadata.source_device || selectedDevice, activeSession ?? undefined);
+        : createSession(summary.metadata.source_device || selectedDevice, activeSession ?? undefined));
     const labels = channelLabelsForCount(summary.metadata.channel_count, summary.metadata.labels);
     updateSession(target.id, (session) => ({
       ...session,
@@ -1396,6 +1471,7 @@ export default function App() {
         decodedFrames: [],
         previousFrame: null,
         nextFrame: null,
+        renderedTracks: [],
         highlightedFrameIndex: null,
       })),
       message: "Capture opened",
@@ -1404,19 +1480,28 @@ export default function App() {
   }
 
   async function handleOpen() {
+    let target: UiSession | null = null;
     try {
       const path = await openDialog({
         multiple: false,
         filters: [{ name: "PXLogic Capture", extensions: ["pxcap"] }],
       });
       if (typeof path !== "string") return;
-      const next = await openCapture(path);
-      await loadCaptureIntoSession(next);
+      target =
+        activeSession && !activeSession.summary
+          ? activeSession
+          : createSession(selectedDevice, activeSession ?? undefined);
+      const next = await openCapture(target.id, path);
+      await loadCaptureIntoSession(next, target);
     } catch (error) {
       try {
-        const next = await openCapture("preview");
-        await loadCaptureIntoSession(next);
-        updateSession(activeSessionIdRef.current ?? "", (session) => ({ ...session, message: "Preview capture loaded" }));
+        target ??=
+          activeSession && !activeSession.summary
+            ? activeSession
+            : createSession(selectedDevice, activeSession ?? undefined);
+        const next = await openCapture(target.id, "preview");
+        await loadCaptureIntoSession(next, target);
+        updateSession(target.id, (session) => ({ ...session, message: "Preview capture loaded" }));
       } catch {
         if (activeSession) {
           updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
@@ -1435,7 +1520,7 @@ export default function App() {
         filters: [{ name: "PXLogic Capture", extensions: ["pxcap"] }],
       });
       if (!path) return;
-      await saveCapture(path);
+      await saveCapture(activeSession.id, path);
       updateSession(activeSession.id, (session) => ({ ...session, message: "Capture saved" }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
@@ -1451,7 +1536,7 @@ export default function App() {
         filters: [{ name: format === "Sr" ? "Sigrok Session" : "Value Change Dump", extensions: [ext] }],
       });
       if (!path) return;
-      await exportCapture(path, format);
+      await exportCapture(activeSession.id, path, format);
       updateSession(activeSession.id, (session) => ({ ...session, message: `${ext.toUpperCase()} exported` }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
@@ -1684,7 +1769,7 @@ export default function App() {
           : total;
 
     try {
-      const nextSummary = await trimCapture({
+      const nextSummary = await trimCapture(activeSession.id, {
         trim_before_sample: trimStart,
         trim_after_sample: trimEnd,
       });
@@ -1801,7 +1886,12 @@ export default function App() {
   function goToAnalyzerFrame(analyzerId: string, frameId: number, zoom: boolean) {
     const session = sessionsRef.current.find((item) => item.id === activeSessionIdRef.current);
     const analyzer = session?.analyzers.find((item) => item.id === analyzerId);
-    const frame = analyzer?.decodedFrames.find((item) => item.frame_id === frameId);
+    const frame =
+      analyzer?.decodedFrames.find((item) => item.frame_id === frameId) ??
+      analyzer?.renderedTracks
+        .flatMap((track) => [track.previous_frame, ...track.frames, track.next_frame])
+        .find((item) => item?.frame_id === frameId) ??
+      null;
     if (!session || !frame) return;
     selectAnalyzerFrame(session.id, analyzerId, frameId);
     const frameSamples = Math.max(1, frame.end_sample - frame.start_sample);
@@ -2013,6 +2103,7 @@ export default function App() {
     if (!target || target.busy) return;
     const nextSessions = sessions.filter((session) => session.id !== sessionId);
     const targetIndex = sessions.findIndex((session) => session.id === sessionId);
+    void releaseGraphSession(sessionId);
     setSessions(nextSessions);
     if (activeSessionId === sessionId) {
       const nextActive = nextSessions[Math.min(targetIndex, nextSessions.length - 1)] ?? null;

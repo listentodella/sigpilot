@@ -118,3 +118,5 @@ chore: 说明内容
   - Analyzer 通道角色副标题、I2C/SPI 分通道短气泡、SCL/Clock 有效边沿 marker，以及原版风格通道下拉控件。
 - `docs/ported-features/2026-07-21-analyzer-bubbles-lazy-computation.md`
   - Analyzer 气泡从 useMemo 预计算改为渲染时懒加载 + 缓存，解决滚轮缩放卡顿问题。
+- `docs/ported-features/2026-07-22-graph-server-32-channel-pipeline.md`
+  - 参考 Electron packed waveform 与原版 Graph Server 边界，落地 Rust 32 通道增量 graph、固定预算波形传输、实时 analyzer cache 和有界气泡聚合。

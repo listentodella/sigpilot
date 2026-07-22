@@ -37,6 +37,8 @@ const digitalGraphGutterPx = 8;
 const digitalGraphLabelHeightPx = 16;
 const digitalMeasurementBoxMinWidthPx = 110;
 const panningAnimationDurationMs = 300;
+const packedDigitalBinBytes = 16;
+const packedDigitalBinCache = new WeakMap<object, DataView>();
 
 type EdgeKind = "rising" | "falling";
 
@@ -628,7 +630,7 @@ function draw(
         viewStart,
         tileStart: tile.start_sample,
         samplesPerPixel: tile.samples_per_pixel,
-        bins: channel.bins,
+        channel,
         dpr,
       });
     }
@@ -659,7 +661,7 @@ interface DigitalChannelDrawArgs {
   viewStart: number;
   tileStart: number;
   samplesPerPixel: number;
-  bins: WaveformTile["channels"][number]["bins"];
+  channel: WaveformTile["channels"][number];
   dpr: number;
 }
 
@@ -714,7 +716,7 @@ function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelD
     viewStart,
     tileStart,
     samplesPerPixel,
-    bins,
+    channel,
     dpr,
   } = args;
   const lineWidth = Math.max(1.25 * dpr, 1);
@@ -727,7 +729,7 @@ function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelD
   const stablePath = new Path2D();
   const edgePath = new Path2D();
 
-  bins.forEach((bin, binIndex) => {
+  forEachDigitalBin(channel, (binIndex, first, last, hasHigh, hasLow, edges, firstEdgeOffset) => {
     const sample0 = tileStart + binIndex * samplesPerPixel;
     const sample1 = sample0 + samplesPerPixel;
     const x0 = xForSample(sample0, left, right, viewStart, viewSamples);
@@ -736,13 +738,13 @@ function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelD
 
     const clippedX0 = Math.max(left, x0);
     const clippedX1 = Math.min(right, x1);
-    const y0 = crispY(bin.first ? highY : lowY);
-    const y1 = crispY(bin.last ? highY : lowY);
+    const y0 = crispY(first ? highY : lowY);
+    const y1 = crispY(last ? highY : lowY);
     const binWidth = Math.max(1, clippedX1 - clippedX0);
 
-    if (bin.has_high && bin.has_low) {
-      if (bin.edges <= 1 && bin.first_edge_offset != null) {
-        const edgeX = Math.max(left, Math.min(right, xForSample(sample0 + bin.first_edge_offset, left, right, viewStart, viewSamples)));
+    if (hasHigh && hasLow) {
+      if (edges <= 1 && firstEdgeOffset != null) {
+        const edgeX = Math.max(left, Math.min(right, xForSample(sample0 + firstEdgeOffset, left, right, viewStart, viewSamples)));
         stablePath.moveTo(clippedX0, y0);
         stablePath.lineTo(edgeX, y0);
         edgePath.moveTo(crispX(edgeX), y0);
@@ -1164,16 +1166,71 @@ function collectDigitalEdges(tile: WaveformTile, channelIndex: number): DigitalE
     ].sort((a, b) => a.sample - b.sample);
   }
   const edges: DigitalEdge[] = [];
-  channel.bins.forEach((bin, binIndex) => {
-    if (!bin.edges || !(bin.has_high && bin.has_low)) return;
+  forEachDigitalBin(channel, (binIndex, firstHigh, lastHigh, hasHigh, hasLow, edgeCount, firstEdgeOffset, lastEdgeOffset) => {
+    if (!edgeCount || !(hasHigh && hasLow)) return;
     const sample0 = tile.start_sample + binIndex * tile.samples_per_pixel;
-    const first = bin.first_edge_offset == null ? tile.samples_per_pixel / 2 : bin.first_edge_offset;
-    edges.push({ sample: sample0 + first, kind: bin.first ? "falling" : "rising" });
-    if (bin.edges > 1 && bin.last_edge_offset != null && bin.last_edge_offset !== bin.first_edge_offset) {
-      edges.push({ sample: sample0 + bin.last_edge_offset, kind: bin.last ? "rising" : "falling" });
+    const first = firstEdgeOffset == null ? tile.samples_per_pixel / 2 : firstEdgeOffset;
+    edges.push({ sample: sample0 + first, kind: firstHigh ? "falling" : "rising" });
+    if (edgeCount > 1 && lastEdgeOffset != null && lastEdgeOffset !== firstEdgeOffset) {
+      edges.push({ sample: sample0 + lastEdgeOffset, kind: lastHigh ? "rising" : "falling" });
     }
   });
   return edges.sort((a, b) => a.sample - b.sample);
+}
+
+type DigitalBinVisitor = (
+  index: number,
+  first: boolean,
+  last: boolean,
+  hasHigh: boolean,
+  hasLow: boolean,
+  edges: number,
+  firstEdgeOffset: number | null,
+  lastEdgeOffset: number | null,
+) => void;
+
+function forEachDigitalBin(channel: WaveformTile["channels"][number], visit: DigitalBinVisitor) {
+  if (!channel.packed_bins) {
+    channel.bins.forEach((bin, index) =>
+      visit(
+        index,
+        bin.first,
+        bin.last,
+        bin.has_high,
+        bin.has_low,
+        bin.edges,
+        bin.first_edge_offset,
+        bin.last_edge_offset,
+      ),
+    );
+    return;
+  }
+
+  let view = packedDigitalBinCache.get(channel);
+  if (!view) {
+    const binary = atob(channel.packed_bins);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    view = new DataView(bytes.buffer);
+    packedDigitalBinCache.set(channel, view);
+  }
+  const count = Math.floor(view.byteLength / packedDigitalBinBytes);
+  for (let index = 0; index < count; index += 1) {
+    const offset = index * packedDigitalBinBytes;
+    const flags = view.getUint32(offset, true);
+    const firstEdgeOffset = view.getUint32(offset + 8, true);
+    const lastEdgeOffset = view.getUint32(offset + 12, true);
+    visit(
+      index,
+      (flags & 1) !== 0,
+      (flags & 2) !== 0,
+      (flags & 4) !== 0,
+      (flags & 8) !== 0,
+      view.getUint32(offset + 4, true),
+      firstEdgeOffset !== 0xffffffff ? firstEdgeOffset : null,
+      lastEdgeOffset !== 0xffffffff ? lastEdgeOffset : null,
+    );
+  }
 }
 
 function findPreviousEdge(edges: DigitalEdge[], sample: number) {

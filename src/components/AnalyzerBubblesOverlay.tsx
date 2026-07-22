@@ -1,5 +1,5 @@
 import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AnalyzerBubble, AnalyzerFrameWindow, DecodedFrame, WaveformTile, buildAnalyzerFrameWindow } from "../lib/api";
+import { AnalyzerBubble, AnalyzerTrackWindow, WaveformTile } from "../lib/api";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
   ANALYZER_STRIP_HEIGHT_PX,
@@ -20,9 +20,9 @@ const MAX_MARKERS_PER_TRACK = 400;
 
 interface AnalyzerBubbleTrack {
   analyzer: UiAnalyzerInstance;
-  frames: DecodedFrame[];
   key: string;
   role: AnalyzerChannelRole;
+  window: AnalyzerTrackWindow | null;
 }
 
 interface AnalyzerMarkerTrack {
@@ -76,9 +76,12 @@ export function AnalyzerBubblesOverlay({
       analyzers.flatMap((analyzer) =>
         analyzerBubbleRoles(analyzer).map((role) => ({
           analyzer,
-          frames: framesForAnalyzerRole(analyzer.decodedFrames, role),
           key: `${analyzer.id}:${role.title}:${role.channel}:bubbles`,
           role,
+          window:
+            analyzer.renderedTracks.find(
+              (track) => track.channel === role.channel && track.role === role.title,
+            ) ?? null,
         })),
       ),
     [analyzers],
@@ -99,21 +102,6 @@ export function AnalyzerBubblesOverlay({
     () => new Map((tile?.channels ?? []).map((channel) => [channel.channel, channel])),
     [tile],
   );
-  // Don't pre-compute frameWindows in useMemo - it's expensive and runs on every viewport change
-  // Instead, compute them lazily during render, and cache with a Map
-  const frameWindowCache = useRef(new Map<string, { viewport: string; window: AnalyzerFrameWindow }>());
-
-  const getFrameWindow = (track: AnalyzerBubbleTrack): AnalyzerFrameWindow => {
-    const viewportKey = `${viewportStart}:${viewportSamples}:${overlayWidth}`;
-    const cached = frameWindowCache.current.get(track.key);
-    if (cached && cached.viewport === viewportKey) {
-      return cached.window;
-    }
-    const window = buildAnalyzerFrameWindow(track.frames, viewportStart, viewportSamples, overlayWidth);
-    frameWindowCache.current.set(track.key, { viewport: viewportKey, window });
-    return window;
-  };
-
   useEffect(() => {
     const overlay = overlayRef.current;
     if (!overlay) return;
@@ -130,7 +118,7 @@ export function AnalyzerBubblesOverlay({
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const track = bubbleTracks.find((item) => item.key === hoveredTrackKey);
       if (!track) return;
-      const frameWindow = getFrameWindow(track);
+      const frameWindow = track.window;
       const frameIndex =
         event.key === "ArrowLeft"
           ? frameWindow?.previous_frame?.frame_id ?? null
@@ -151,7 +139,7 @@ export function AnalyzerBubblesOverlay({
         const channelTracks = bubbleTracks.filter((track) => track.role.channel === channel);
         return channelTracks.map((track, trackIndex) => {
           const { analyzer } = track;
-          const frameWindow = getFrameWindow(track);
+          const frameWindow = track.window;
           const bubbles = frameWindow?.bubbles ?? [];
           const previousIndex = frameWindow?.previous_frame?.frame_id ?? null;
           const nextIndex = frameWindow?.next_frame?.frame_id ?? null;
@@ -160,6 +148,13 @@ export function AnalyzerBubblesOverlay({
           return (
             <div
               className="analyzerBubbleStrip"
+              data-analyzer-track={track.key}
+              data-bubble-count={bubbles.length}
+              data-first-bubble-start={bubbles[0]?.start_sample ?? ""}
+              data-last-bubble-end={bubbles[bubbles.length - 1]?.end_sample ?? ""}
+              data-viewport-end={viewportStart + viewportSamples}
+              data-viewport-start={viewportStart}
+              data-window-state={frameWindow ? "ready" : "pending"}
               key={track.key}
               onMouseEnter={() => setHoveredTrackKey(track.key)}
               onMouseLeave={() =>
@@ -295,22 +290,6 @@ export function AnalyzerBubblesOverlay({
       })}
     </div>
   );
-}
-
-function framesForAnalyzerRole(frames: DecodedFrame[], role: AnalyzerChannelRole): DecodedFrame[] {
-  const hasChannelValues = frames.some((frame) => (frame.channel_values?.length ?? 0) > 0);
-  if (!hasChannelValues) return frames;
-  return frames.flatMap((frame) => {
-    const value = frame.channel_values.find((item) => item.channel === role.channel && item.role === role.title);
-    if (!value) return [];
-    return [
-      {
-        ...frame,
-        label: value.label,
-        value: value.value,
-      },
-    ];
-  });
 }
 
 function analyzerMarkerEdgeType(analyzer: UiAnalyzerInstance): "rising" | "falling" {

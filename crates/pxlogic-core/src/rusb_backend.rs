@@ -160,6 +160,25 @@ impl RusbBackend {
         progress: &mut dyn FnMut(CaptureProgress),
         sink: &mut TraceSink<'_>,
     ) -> Result<CaptureData> {
+        self.capture_with_trace_streaming(
+            settings,
+            cancel,
+            progress,
+            sink,
+            &mut |_| {},
+            &mut |_| {},
+        )
+    }
+
+    pub fn capture_with_trace_streaming(
+        &self,
+        settings: &CaptureSettings,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(CaptureProgress),
+        sink: &mut TraceSink<'_>,
+        started: &mut dyn FnMut(&CaptureMetadata),
+        on_samples: &mut dyn FnMut(&[u8]),
+    ) -> Result<CaptureData> {
         trace(sink, "capture", format!("opening {}", settings.device_id));
         let mut handle = self.open_device(&settings.device_id)?;
         let speed = handle.device().speed();
@@ -177,6 +196,20 @@ impl RusbBackend {
         let unitsize = unitsize_for_channel_count(channel_count)?;
         let sample_count = sample_count_from_settings(settings, unitsize)?;
         let target_bytes = sample_count * u64::from(unitsize);
+        let captured_at = Utc::now();
+        let stream_metadata = CaptureMetadata {
+            version: 1,
+            source_device: settings.device_id.clone(),
+            sample_rate_hz: settings.sample_rate_hz,
+            channel_count,
+            unitsize,
+            sample_count: 0,
+            captured_at,
+            labels: (0..channel_count)
+                .map(|index| format!("D{index}"))
+                .collect(),
+        };
+        started(&stream_metadata);
         let transfer_size =
             pxview_capture_transfer_size(settings.sample_rate_hz, channel_count, superspeed)?;
         trace(
@@ -223,19 +256,34 @@ impl RusbBackend {
         }
         Self::trace_control_status(&mut handle, sink, "after start");
 
-        let target_len = target_bytes as usize;
-        let mut raw = Vec::with_capacity(target_len.saturating_add(transfer_size));
+        let target_len =
+            usize::try_from(target_bytes).map_err(|_| CoreError::InvalidCaptureDuration)?;
+        let initial_capacity = target_len
+            .min(8 * 1024 * 1024)
+            .saturating_add(transfer_size);
+        let decode_cross = settings.decode_cross && matches!(channel_count, 16 | 32);
+        let mut raw = Vec::with_capacity(if decode_cross { 0 } else { initial_capacity });
+        let mut decoded_samples = Vec::with_capacity(initial_capacity.min(target_len));
+        let mut published_raw_len = 0usize;
+        let mut pending_cross = Vec::with_capacity(if decode_cross {
+            usize::from(channel_count) * 8 + transfer_size
+        } else {
+            0
+        });
+        let mut bytes_read = 0usize;
         let mut buffer = vec![0u8; transfer_size];
         let mut timeout_count = 0u32;
+        let mut cancelled = false;
         trace(sink, "bulk", "starting data IN reads");
-        while raw.len() < target_len {
+        while bytes_read < target_len {
             if cancel.load(Ordering::Acquire) {
                 let _ = Self::write_register(
                     &mut handle,
                     protocol::REG_STREAM_START,
                     protocol::STREAM_STOP_FLAGS,
                 );
-                return Err(CoreError::Cancelled);
+                cancelled = true;
+                break;
             }
             match handle.read_bulk(
                 protocol::BULK_EP_DATA_IN,
@@ -247,21 +295,39 @@ impl RusbBackend {
                         timeout_count = timeout_count.saturating_add(1);
                         trace_warn(sink, "bulk", "read returned 0 bytes");
                     } else {
-                        raw.extend_from_slice(&buffer[..read]);
+                        let accepted = read.min(target_len.saturating_sub(bytes_read));
+                        bytes_read = bytes_read.saturating_add(accepted);
+                        if decode_cross {
+                            publish_cross_stream_samples(
+                                &buffer[..accepted],
+                                channel_count,
+                                &mut pending_cross,
+                                &mut decoded_samples,
+                                on_samples,
+                            )?;
+                        } else {
+                            raw.extend_from_slice(&buffer[..accepted]);
+                            publish_aligned_stream_samples(
+                                &raw,
+                                unitsize,
+                                &mut published_raw_len,
+                                on_samples,
+                            )?;
+                        }
                         timeout_count = 0;
                         trace(
                             sink,
                             "bulk",
                             format!(
                                 "read {read} bytes, total {}/{}",
-                                raw.len().min(target_len),
+                                bytes_read.min(target_len),
                                 target_bytes
                             ),
                         );
                         progress(CaptureProgress {
-                            bytes_read: raw.len().min(target_len) as u64,
+                            bytes_read: bytes_read.min(target_len) as u64,
                             bytes_expected: target_bytes,
-                            samples_read: raw.len().min(target_len) as u64 / u64::from(unitsize),
+                            samples_read: bytes_read.min(target_len) as u64 / u64::from(unitsize),
                         });
                     }
                 }
@@ -298,16 +364,8 @@ impl RusbBackend {
                 }
             }
         }
-        if raw.len() > target_len {
-            trace(
-                sink,
-                "bulk",
-                format!(
-                    "trimming {} excess DMA bytes from final block",
-                    raw.len() - target_len
-                ),
-            );
-            raw.truncate(target_len);
+        if cancelled && bytes_read == 0 {
+            return Err(CoreError::Cancelled);
         }
 
         trace(sink, "capture", "stopping capture registers");
@@ -316,10 +374,19 @@ impl RusbBackend {
             protocol::REG_STREAM_START,
             protocol::STREAM_STOP_FLAGS,
         );
-        let samples = if settings.decode_cross && matches!(channel_count, 16 | 32) {
-            trace(sink, "decode", format!("decoding {} raw bytes", raw.len()));
-            decode_cross_data(channel_count, &raw)?
+        let samples = if decode_cross {
+            trace(
+                sink,
+                "decode",
+                format!(
+                    "decoded {} raw bytes incrementally ({} byte tail discarded)",
+                    bytes_read,
+                    pending_cross.len()
+                ),
+            );
+            decoded_samples
         } else {
+            raw.truncate(raw.len() / usize::from(unitsize) * usize::from(unitsize));
             raw
         };
         trace(
@@ -335,8 +402,8 @@ impl RusbBackend {
                 sample_rate_hz: settings.sample_rate_hz,
                 channel_count,
                 unitsize,
-                sample_count,
-                captured_at: Utc::now(),
+                sample_count: samples.len() as u64 / u64::from(unitsize),
+                captured_at,
                 labels: (0..channel_count)
                     .map(|index| format!("D{index}"))
                     .collect(),
@@ -573,6 +640,42 @@ impl RusbBackend {
     }
 }
 
+fn publish_aligned_stream_samples(
+    raw: &[u8],
+    unitsize: u8,
+    published_raw_len: &mut usize,
+    on_samples: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
+    let unit_size = usize::from(unitsize);
+    let aligned_end = raw.len() / unit_size * unit_size;
+    if aligned_end > *published_raw_len {
+        on_samples(&raw[*published_raw_len..aligned_end]);
+        *published_raw_len = aligned_end;
+    }
+    Ok(())
+}
+
+fn publish_cross_stream_samples(
+    input: &[u8],
+    channel_count: u8,
+    pending: &mut Vec<u8>,
+    decoded_samples: &mut Vec<u8>,
+    on_samples: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
+    let stripe_bytes = usize::from(channel_count) * 8;
+    pending.extend_from_slice(input);
+    let aligned_end = pending.len() / stripe_bytes * stripe_bytes;
+    if aligned_end == 0 {
+        return Ok(());
+    }
+
+    let decoded = decode_cross_data(channel_count, &pending[..aligned_end])?;
+    on_samples(&decoded);
+    decoded_samples.extend_from_slice(&decoded);
+    pending.drain(..aligned_end);
+    Ok(())
+}
+
 impl CaptureBackend for RusbBackend {
     fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
         let context = Self::context()?;
@@ -613,6 +716,18 @@ impl CaptureBackend for RusbBackend {
     ) -> Result<CaptureData> {
         let mut sink = |_event: DiagnosticEvent| {};
         self.capture_with_trace(settings, cancel, progress, &mut sink)
+    }
+
+    fn capture_streaming(
+        &self,
+        settings: &CaptureSettings,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(CaptureProgress),
+        started: &mut dyn FnMut(&CaptureMetadata),
+        samples: &mut dyn FnMut(&[u8]),
+    ) -> Result<CaptureData> {
+        let mut sink = |_event: DiagnosticEvent| {};
+        self.capture_with_trace_streaming(settings, cancel, progress, &mut sink, started, samples)
     }
 
     fn stop_capture(&self, device_id: &str) -> Result<()> {
@@ -735,5 +850,35 @@ mod tests {
         assert_eq!(bitstreams.main, vec![4, 5, 6]);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fragmented_cross_stream_keeps_only_the_incomplete_stripe() {
+        let channel_count = 32;
+        let stripe_bytes = usize::from(channel_count) * 8;
+        let raw = (0..stripe_bytes * 3)
+            .map(|index| (index.wrapping_mul(17) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let expected = decode_cross_data(channel_count, &raw).unwrap();
+        let mut pending = Vec::new();
+        let mut decoded = Vec::new();
+        let mut published = Vec::new();
+        let mut sink = |chunk: &[u8]| published.extend_from_slice(chunk);
+
+        for chunk in raw.chunks(73) {
+            publish_cross_stream_samples(
+                chunk,
+                channel_count,
+                &mut pending,
+                &mut decoded,
+                &mut sink,
+            )
+            .unwrap();
+            assert!(pending.len() < stripe_bytes);
+        }
+
+        assert!(pending.is_empty());
+        assert_eq!(decoded, expected);
+        assert_eq!(published, expected);
     }
 }

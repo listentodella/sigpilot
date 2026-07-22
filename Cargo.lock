@@ -2308,6 +2308,7 @@ dependencies = [
  "parking_lot",
  "pxlogic-core",
  "pxlogic-file",
+ "pxlogic-graph",
  "pxlogic-waveform",
  "serde",
  "serde_json",
@@ -2326,6 +2327,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "zip",
+]
+
+[[package]]
+name = "pxlogic-graph"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "parking_lot",
+ "pxlogic-core",
+ "pxlogic-waveform",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

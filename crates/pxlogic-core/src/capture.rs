@@ -485,31 +485,8 @@ pub fn generate_sample_words_with_count(
     sample_count: u64,
     unitsize: u8,
 ) -> Result<CaptureData> {
-    let mut samples = Vec::with_capacity(sample_count as usize * usize::from(unitsize));
-    let mut demo_channels: Vec<_> = (0..settings.channel_count)
-        .map(SaleaeDemoPulseChannel::new)
-        .collect();
-    for sample_index in 0..sample_count {
-        let mut word = 0u32;
-        for channel in 0..settings.channel_count {
-            let high = if channel == 0 {
-                demo_uart_level(sample_index, settings.sample_rate_hz)
-                    .unwrap_or_else(|| demo_channels[usize::from(channel)].level_at(sample_index))
-            } else if (1..=2).contains(&channel) {
-                demo_i2c_level(sample_index, settings.sample_rate_hz, channel)
-                    .unwrap_or_else(|| demo_channels[usize::from(channel)].level_at(sample_index))
-            } else if (3..=6).contains(&channel) {
-                demo_spi_level(sample_index, settings.sample_rate_hz, channel)
-                    .unwrap_or_else(|| demo_channels[usize::from(channel)].level_at(sample_index))
-            } else {
-                demo_channels[usize::from(channel)].level_at(sample_index)
-            };
-            if high {
-                word |= 1u32 << channel;
-            }
-        }
-        write_sample_word(&mut samples, word, usize::from(unitsize));
-    }
+    let mut generator = DemoSampleGenerator::new(settings, unitsize);
+    let samples = generator.generate(sample_count);
 
     Ok(CaptureData {
         metadata: CaptureMetadata {
@@ -526,6 +503,64 @@ pub fn generate_sample_words_with_count(
         },
         samples,
     })
+}
+
+pub(crate) struct DemoSampleGenerator {
+    settings: CaptureSettings,
+    unitsize: u8,
+    channels: Vec<SaleaeDemoPulseChannel>,
+    next_sample: u64,
+}
+
+impl DemoSampleGenerator {
+    pub(crate) fn new(settings: &CaptureSettings, unitsize: u8) -> Self {
+        Self {
+            settings: settings.clone(),
+            unitsize,
+            channels: (0..settings.channel_count)
+                .map(SaleaeDemoPulseChannel::new)
+                .collect(),
+            next_sample: 0,
+        }
+    }
+
+    pub(crate) fn generate(&mut self, sample_count: u64) -> Vec<u8> {
+        let capacity = usize::try_from(sample_count)
+            .ok()
+            .and_then(|count| count.checked_mul(usize::from(self.unitsize)))
+            .unwrap_or(0);
+        let mut samples = Vec::with_capacity(capacity);
+        let end = self.next_sample.saturating_add(sample_count);
+        while self.next_sample < end {
+            let sample_index = self.next_sample;
+            let mut word = 0u32;
+            for channel in 0..self.settings.channel_count {
+                let high = if channel == 0 {
+                    demo_uart_level(sample_index, self.settings.sample_rate_hz).unwrap_or_else(
+                        || self.channels[usize::from(channel)].level_at(sample_index),
+                    )
+                } else if (1..=2).contains(&channel) {
+                    demo_i2c_level(sample_index, self.settings.sample_rate_hz, channel)
+                        .unwrap_or_else(|| {
+                            self.channels[usize::from(channel)].level_at(sample_index)
+                        })
+                } else if (3..=6).contains(&channel) {
+                    demo_spi_level(sample_index, self.settings.sample_rate_hz, channel)
+                        .unwrap_or_else(|| {
+                            self.channels[usize::from(channel)].level_at(sample_index)
+                        })
+                } else {
+                    self.channels[usize::from(channel)].level_at(sample_index)
+                };
+                if high {
+                    word |= 1u32 << channel;
+                }
+            }
+            write_sample_word(&mut samples, word, usize::from(self.unitsize));
+            self.next_sample += 1;
+        }
+        samples
+    }
 }
 
 // Logic Pro 16 demo captures use independent runs of 1..32768 samples per channel.

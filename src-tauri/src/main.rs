@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::Path,
     path::PathBuf,
@@ -6,14 +7,16 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use pxlogic_core::{
-    decode_analyzer, AnalyzerDecodeSettings, CaptureBackend, CaptureData, CaptureMetadata,
-    CaptureProgress, CaptureSettings, DecodedFrame, DeviceInfo, DiagnosticEvent, DiagnosticLevel,
-    ExportFormat, FakeBackend,
+    AnalyzerDecodeSettings, CaptureBackend, CaptureData, CaptureMetadata, CaptureProgress,
+    CaptureSettings, DecodedFrame, DeviceInfo, DiagnosticEvent, DiagnosticLevel, ExportFormat,
+    FakeBackend,
 };
+use pxlogic_graph::{GraphFrameRequest, GraphFrameResponse, GraphSession};
 use pxlogic_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
@@ -27,14 +30,41 @@ type CommandResult<T> = Result<T, String>;
 
 #[derive(Clone, Default)]
 struct AppState {
-    current_capture: Arc<Mutex<Option<CaptureData>>>,
+    sessions: Arc<RwLock<HashMap<String, Arc<GraphSession>>>>,
     cancel: Arc<AtomicBool>,
+}
+
+impl AppState {
+    fn session(&self, session_id: &str) -> Arc<GraphSession> {
+        if let Some(session) = self.sessions.read().get(session_id).cloned() {
+            return session;
+        }
+        let mut sessions = self.sessions.write();
+        sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(GraphSession::default()))
+            .clone()
+    }
+
+    fn existing_session(&self, session_id: &str) -> CommandResult<Arc<GraphSession>> {
+        self.sessions
+            .read()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| format!("session {session_id} has no capture data"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct CaptureSummary {
     metadata: CaptureMetadata,
     bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CaptureUpdatedEvent {
+    session_id: String,
+    summary: CaptureSummary,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,22 +133,74 @@ fn prepare_device(device_id: String) -> CommandResult<()> {
 async fn start_capture(
     app: AppHandle,
     state: State<'_, AppState>,
+    session_id: String,
     settings: CaptureSettings,
 ) -> CommandResult<CaptureSummary> {
     state.cancel.store(false, Ordering::Release);
     let cancel = state.cancel.clone();
-    let current_capture = state.current_capture.clone();
+    let graph = state.session(&session_id);
 
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let progress_app = app.clone();
         let mut progress = |event: CaptureProgress| {
-            let _ = app.emit("capture_progress", &event);
+            let _ = progress_app.emit("capture_progress", &event);
         };
+        let diagnostics_app = app.clone();
         let mut diagnostics = |event: DiagnosticEvent| {
-            let _ = app.emit("usb_diagnostic", &event);
+            let _ = diagnostics_app.emit("usb_diagnostic", &event);
+        };
+        let graph_error = Arc::new(Mutex::new(None::<String>));
+        let started_graph = graph.clone();
+        let started_error = graph_error.clone();
+        let mut started = move |metadata: &CaptureMetadata| {
+            if let Err(error) = started_graph.begin_capture(metadata.clone()) {
+                *started_error.lock() = Some(error.to_string());
+            }
+        };
+        let samples_graph = graph.clone();
+        let samples_error = graph_error.clone();
+        let update_app = app.clone();
+        let update_session_id = session_id.clone();
+        let mut last_update = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        let mut samples = move |chunk: &[u8]| {
+            if samples_error.lock().is_some() {
+                return;
+            }
+            if let Err(error) = samples_graph.append_samples(chunk) {
+                *samples_error.lock() = Some(error.to_string());
+                return;
+            }
+            if last_update.elapsed() < Duration::from_millis(33) {
+                return;
+            }
+            last_update = Instant::now();
+            if let Some(metadata) = samples_graph.metadata() {
+                let summary = CaptureSummary {
+                    bytes: usize::try_from(metadata.sample_count)
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(usize::from(metadata.unitsize)),
+                    metadata,
+                };
+                let _ = update_app.emit(
+                    "capture_updated",
+                    &CaptureUpdatedEvent {
+                        session_id: update_session_id.clone(),
+                        summary,
+                    },
+                );
+            }
         };
 
         let capture = if settings.device_id == FakeBackend::DEVICE_ID {
-            FakeBackend::default().capture(&settings, &cancel, &mut progress)
+            FakeBackend::default().capture_streaming(
+                &settings,
+                &cancel,
+                &mut progress,
+                &mut started,
+                &mut samples,
+            )
         } else {
             #[cfg(feature = "rusb-transport")]
             {
@@ -134,11 +216,13 @@ async fn start_capture(
                         bitstreams.as_ref(),
                         &mut diagnostics,
                     ) {
-                        Ok(()) => real.capture_with_trace(
+                        Ok(()) => real.capture_with_trace_streaming(
                             &settings,
                             &cancel,
                             &mut progress,
                             &mut diagnostics,
+                            &mut started,
+                            &mut samples,
                         ),
                         Err(error) => Err(error),
                     },
@@ -153,11 +237,14 @@ async fn start_capture(
 
         match capture {
             Ok(capture) => {
+                if let Some(error) = graph_error.lock().take() {
+                    return Err(error);
+                }
                 let summary = CaptureSummary {
                     metadata: capture.metadata.clone(),
                     bytes: capture.samples.len(),
                 };
-                *current_capture.lock() = Some(capture);
+                graph.finish_capture(capture).map_err(to_string)?;
                 let _ = app.emit("capture_completed", &summary);
                 Ok(summary)
             }
@@ -189,36 +276,42 @@ fn cancel_capture(state: State<'_, AppState>) -> CommandResult<()> {
 }
 
 #[tauri::command]
-fn open_capture(path: String, state: State<'_, AppState>) -> CommandResult<CaptureSummary> {
+fn open_capture(
+    session_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> CommandResult<CaptureSummary> {
     let capture = pxlogic_file::open_pxcap(PathBuf::from(path)).map_err(to_string)?;
     let summary = CaptureSummary {
         metadata: capture.metadata.clone(),
         bytes: capture.samples.len(),
     };
-    *state.current_capture.lock() = Some(capture);
+    state
+        .session(&session_id)
+        .replace_capture(capture)
+        .map_err(to_string)?;
     Ok(summary)
 }
 
 #[tauri::command]
-fn save_capture(path: String, state: State<'_, AppState>) -> CommandResult<()> {
+fn save_capture(session_id: String, path: String, state: State<'_, AppState>) -> CommandResult<()> {
     let capture = state
-        .current_capture
-        .lock()
-        .clone()
+        .existing_session(&session_id)?
+        .capture()
         .ok_or_else(|| "no capture is loaded".to_string())?;
     pxlogic_file::save_pxcap(PathBuf::from(path), &capture).map_err(to_string)
 }
 
 #[tauri::command]
 fn export_capture(
+    session_id: String,
     path: String,
     format: ExportFormat,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     let capture = state
-        .current_capture
-        .lock()
-        .clone()
+        .existing_session(&session_id)?
+        .capture()
         .ok_or_else(|| "no capture is loaded".to_string())?;
     match format {
         ExportFormat::Pxcap => pxlogic_file::save_pxcap(PathBuf::from(path), &capture),
@@ -230,12 +323,13 @@ fn export_capture(
 
 #[tauri::command]
 fn trim_capture(
+    session_id: String,
     request: TrimCaptureRequest,
     state: State<'_, AppState>,
 ) -> CommandResult<CaptureSummary> {
-    let mut guard = state.current_capture.lock();
-    let capture = guard
-        .as_mut()
+    let session = state.existing_session(&session_id)?;
+    let capture = session
+        .capture()
         .ok_or_else(|| "no capture is loaded".to_string())?;
     let total_samples = capture.metadata.sample_count;
     if total_samples == 0 {
@@ -267,27 +361,38 @@ fn trim_capture(
         return Err("capture sample buffer is shorter than metadata".to_string());
     }
 
-    capture.samples = capture.samples[byte_start..byte_end].to_vec();
-    capture.metadata.sample_count = end - start;
-
-    Ok(CaptureSummary {
+    let mut metadata = capture.metadata.clone();
+    metadata.sample_count = end - start;
+    let capture = CaptureData {
+        metadata,
+        samples: capture.samples[byte_start..byte_end].to_vec(),
+    };
+    let summary = CaptureSummary {
         metadata: capture.metadata.clone(),
         bytes: capture.samples.len(),
-    })
+    };
+    session.replace_capture(capture).map_err(to_string)?;
+
+    Ok(summary)
 }
 
 #[tauri::command]
 async fn get_waveform_tile(
+    session_id: String,
     request: WaveformRequest,
     state: State<'_, AppState>,
 ) -> CommandResult<WaveformTile> {
-    let current_capture = state.current_capture.clone();
+    let session = state.existing_session(&session_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let capture = current_capture.lock();
-        let capture = capture
-            .as_ref()
-            .ok_or_else(|| "no capture is loaded".to_string())?;
-        pxlogic_waveform::build_tile(capture, &request).map_err(to_string)
+        session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 0,
+                waveform: request,
+                analyzer_view: None,
+                analyzers: Vec::new(),
+            })
+            .map(|frame| frame.tile)
+            .map_err(to_string)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -295,13 +400,13 @@ async fn get_waveform_tile(
 
 #[tauri::command]
 async fn measure_digital_range(
+    session_id: String,
     request: DigitalRangeMeasurementRequest,
     state: State<'_, AppState>,
 ) -> CommandResult<DigitalRangeMeasurementStats> {
     let capture = state
-        .current_capture
-        .lock()
-        .clone()
+        .existing_session(&session_id)?
+        .capture()
         .ok_or_else(|| "no capture is loaded".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         pxlogic_waveform::measure_digital_range(&capture, &request).map_err(to_string)
@@ -312,19 +417,37 @@ async fn measure_digital_range(
 
 #[tauri::command]
 async fn decode_analyzer_frames(
+    session_id: String,
     settings: AnalyzerDecodeSettings,
     state: State<'_, AppState>,
 ) -> CommandResult<Vec<DecodedFrame>> {
-    let current_capture = state.current_capture.clone();
+    let session = state.existing_session(&session_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let capture = current_capture.lock();
-        let capture = capture
-            .as_ref()
-            .ok_or_else(|| "no capture is loaded".to_string())?;
-        decode_analyzer(capture, &settings).map_err(to_string)
+        session
+            .decode_frames(&settings)
+            .map(|frames| frames.as_ref().clone())
+            .map_err(to_string)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn render_graph_frame(
+    session_id: String,
+    request: GraphFrameRequest,
+    state: State<'_, AppState>,
+) -> CommandResult<GraphFrameResponse> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || session.render_frame(&request).map_err(to_string))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn release_graph_session(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
+    state.sessions.write().remove(&session_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -459,8 +582,10 @@ fn main() {
             export_capture,
             trim_capture,
             get_waveform_tile,
+            render_graph_frame,
             measure_digital_range,
             decode_analyzer_frames,
+            release_graph_session,
             read_extension_package,
             create_extension_template,
         ])
