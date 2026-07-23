@@ -1,17 +1,24 @@
 use std::{
+    cell::{Cell, RefCell},
     env,
     error::Error,
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use pxlogic_core::{
     capture::{decode_cross_data_with_map, read_sample_word},
-    CaptureBackend, CaptureMode, CaptureProgress, CaptureSettings, DeviceInfo, DiagnosticEvent,
-    DiagnosticLevel, RusbBackend,
+    enabled_channel_mask, resolve_enabled_channels, CaptureBackend, CaptureMode, CaptureProgress,
+    CaptureSettings, CaptureTriggerKind, CaptureTriggerMetadata, DeviceInfo, DiagnosticEvent,
+    DiagnosticLevel, ExternalTriggerMode, PwmSettings, RusbBackend,
 };
+use pxlogic_graph::{GraphFrameRequest, GraphSession};
+use pxlogic_waveform::WaveformRequest;
 
 #[derive(Debug)]
 struct Options {
@@ -19,11 +26,28 @@ struct Options {
     sample_rate_hz: u64,
     duration_ms: u64,
     channel_count: u8,
+    enabled_channels: Option<Vec<u8>>,
     decode_cross: bool,
     compare_mappings: bool,
     threshold_volts: f64,
+    external_trigger_mode: ExternalTriggerMode,
+    clock_negedge: bool,
+    trigger_out_enabled: bool,
     mode: CaptureMode,
+    buffer_size_mb: u64,
+    list_only: bool,
+    prepare_only: bool,
     output: Option<PathBuf>,
+    trigger_channel: Option<u8>,
+    trigger_kind: CaptureTriggerKind,
+    glitch_filter_enabled: bool,
+    cancel_after_ms: Option<u64>,
+    graph_smoke: bool,
+    pwm_configure: bool,
+    pwm_enabled: bool,
+    pwm_frequency_hz: f64,
+    pwm_duty_percent: f64,
+    pwm_only: bool,
 }
 
 impl Default for Options {
@@ -33,11 +57,28 @@ impl Default for Options {
             sample_rate_hz: 25_000_000,
             duration_ms: 10,
             channel_count: 16,
+            enabled_channels: None,
             decode_cross: true,
             compare_mappings: false,
             threshold_volts: 2.0,
+            external_trigger_mode: ExternalTriggerMode::Close,
+            clock_negedge: false,
+            trigger_out_enabled: false,
             mode: CaptureMode::Buffer,
+            buffer_size_mb: 16,
+            list_only: false,
+            prepare_only: false,
             output: None,
+            trigger_channel: None,
+            trigger_kind: CaptureTriggerKind::Rising,
+            glitch_filter_enabled: false,
+            cancel_after_ms: None,
+            graph_smoke: false,
+            pwm_configure: false,
+            pwm_enabled: false,
+            pwm_frequency_hz: 1_000.0,
+            pwm_duty_percent: 50.0,
+            pwm_only: false,
         }
     }
 }
@@ -47,19 +88,44 @@ fn main() -> Result<(), Box<dyn Error>> {
     let backend = RusbBackend::default();
     let devices = backend.list_devices()?;
     if devices.is_empty() {
+        if options.list_only {
+            println!("devices: none");
+            return Ok(());
+        }
         return Err("no PXLogic USB devices found".into());
     }
 
     println!("devices:");
     for device in &devices {
-        println!("  {}", describe_device(device));
+        print_device(device);
+    }
+    if options.list_only {
+        return Ok(());
     }
 
-    let device_id = match options.device_id {
+    let device_id = match &options.device_id {
         Some(device_id) => device_id,
-        None => devices[0].id.clone(),
+        None => {
+            &devices
+                .iter()
+                .find(|device| device.ready)
+                .unwrap_or(&devices[0])
+                .id
+        }
     };
     println!("selected: {device_id}");
+    if let Some(selected) = devices.iter().find(|device| device.id == *device_id) {
+        if !selected.ready {
+            return Err(format!(
+                "selected device is not ready: {}",
+                selected
+                    .probe_error
+                    .as_deref()
+                    .unwrap_or("PX identity probe did not complete")
+            )
+            .into());
+        }
+    }
 
     let bitstreams = RusbBackend::load_bitstreams()?
         .ok_or("missing FPGA bitstreams; expected resources/bitstreams/*.bin")?;
@@ -72,9 +138,45 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("[{}:{level}] {}", event.phase, event.message);
     };
 
-    backend.prepare_device_with_trace(&device_id, Some(&bitstreams), &mut trace)?;
+    backend.prepare_device_with_trace(device_id, Some(&bitstreams), &mut trace)?;
+    if options.pwm_configure || options.pwm_only {
+        let configuration = backend.configure_pwm0_with_trace(
+            device_id,
+            &PwmSettings {
+                enabled: options.pwm_enabled,
+                frequency_hz: options.pwm_frequency_hz,
+                duty_percent: options.pwm_duty_percent,
+            },
+            &mut trace,
+        )?;
+        println!(
+            "pwm0: enabled={}, requested={:.3} Hz at {:.3}%, effective={:.3} Hz at {:.3}%, period_ticks={}, high_ticks={}",
+            configuration.enabled,
+            configuration.requested_frequency_hz,
+            configuration.requested_duty_percent,
+            configuration.effective_frequency_hz,
+            configuration.effective_duty_percent,
+            configuration.period_ticks,
+            configuration.high_ticks,
+        );
+    }
+    if options.pwm_only {
+        println!("PWM0 configuration completed without starting capture");
+        return Ok(());
+    }
+    if options.prepare_only {
+        println!("prepare completed");
+        return Ok(());
+    }
 
-    let cancel = AtomicBool::new(false);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_timer = options.cancel_after_ms.map(|delay_ms| {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            cancel.store(true, Ordering::Release);
+        })
+    });
     let mut progress = |event: CaptureProgress| {
         println!(
             "[progress] bytes={}/{} samples={}",
@@ -82,26 +184,113 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     };
     let settings = CaptureSettings {
-        device_id,
+        device_id: device_id.to_string(),
         sample_rate_hz: options.sample_rate_hz,
         channel_count: options.channel_count,
+        enabled_channels: options.enabled_channels.clone().unwrap_or_default(),
         duration_ms: options.duration_ms,
-        buffer_size_mb: 16,
+        buffer_size_mb: options.buffer_size_mb,
         decode_cross: options.decode_cross && !options.compare_mappings,
         threshold_volts: options.threshold_volts,
+        external_trigger_mode: options.external_trigger_mode,
         mode: options.mode,
+        trigger_enabled: options.trigger_channel.is_some(),
+        trigger_channel: options.trigger_channel.unwrap_or(0),
+        trigger_kind: options.trigger_kind,
+        glitch_filter_enabled: options.glitch_filter_enabled,
+        clock_edge: options.clock_negedge,
+        trigger_out_enabled: options.trigger_out_enabled,
+        ..CaptureSettings::default()
     };
-    let capture = backend.capture_with_trace(&settings, &cancel, &mut progress, &mut trace)?;
+    let requested_enabled_channels =
+        resolve_enabled_channels(settings.channel_count, &settings.enabled_channels)?;
+    let requested_channel_mask =
+        enabled_channel_mask(settings.channel_count, &requested_enabled_channels)?;
+    println!(
+        "requested channels: physical_span={}, enabled={requested_enabled_channels:?}, lanes={}, mask=0x{requested_channel_mask:08x}",
+        settings.channel_count,
+        requested_enabled_channels.len(),
+    );
+    let graph = options.graph_smoke.then(GraphSession::default);
+    let capture = if let Some(graph) = graph.as_ref() {
+        let graph_error = RefCell::new(None::<String>);
+        let streamed_chunks = Cell::new(0u64);
+        let streamed_bytes = Cell::new(0u64);
+        let mut started = |metadata: &pxlogic_core::CaptureMetadata| {
+            if let Err(error) = graph.begin_capture(metadata.clone()) {
+                *graph_error.borrow_mut() = Some(error.to_string());
+            }
+        };
+        let mut samples = |chunk: &[u8]| {
+            if graph_error.borrow().is_some() {
+                return;
+            }
+            match graph.append_samples(chunk) {
+                Ok(_) => {
+                    streamed_chunks.set(streamed_chunks.get().saturating_add(1));
+                    streamed_bytes.set(
+                        streamed_bytes
+                            .get()
+                            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX)),
+                    );
+                }
+                Err(error) => *graph_error.borrow_mut() = Some(error.to_string()),
+            }
+        };
+        let mut triggered = |trigger: &CaptureTriggerMetadata| {
+            println!(
+                "[trigger] D{} {:?} at sample {}",
+                trigger.channel, trigger.kind, trigger.sample_index
+            );
+            if let Err(error) = graph.set_trigger(trigger.clone()) {
+                *graph_error.borrow_mut() = Some(error.to_string());
+            }
+        };
+        let capture = backend.capture_with_trace_streaming(
+            &settings,
+            cancel.as_ref(),
+            &mut progress,
+            &mut trace,
+            &mut started,
+            &mut samples,
+            &mut triggered,
+        )?;
+        if let Some(error) = graph_error.into_inner() {
+            return Err(format!("graph streaming failed: {error}").into());
+        }
+        println!(
+            "graph stream: {} chunks, {} decoded bytes, {} indexed samples",
+            streamed_chunks.get(),
+            streamed_bytes.get(),
+            graph.sample_count()
+        );
+        graph.finish_capture(capture.clone())?;
+        verify_graph_smoke(graph, &capture)?;
+        capture
+    } else {
+        backend.capture_with_trace(&settings, cancel.as_ref(), &mut progress, &mut trace)?
+    };
     cancel.store(true, Ordering::Release);
+    if let Some(timer) = cancel_timer {
+        let _ = timer.join();
+    }
 
     println!(
-        "capture: {} Hz, {} channels, {} samples, unitsize={}, {} bytes",
+        "capture: {} Hz, physical_span={} channels, enabled={:?}, {} samples, unitsize={}, {} bytes",
         capture.metadata.sample_rate_hz,
         capture.metadata.channel_count,
+        capture.metadata.enabled_channels,
         capture.metadata.sample_count,
         capture.metadata.unitsize,
         capture.samples.len()
     );
+    if capture.metadata.enabled_channels != requested_enabled_channels {
+        return Err(format!(
+            "capture enabled-channel mismatch: requested={requested_enabled_channels:?}, metadata={:?}",
+            capture.metadata.enabled_channels
+        )
+        .into());
+    }
     if options.compare_mappings {
         compare_cross_mappings(&capture)?;
     } else {
@@ -127,9 +316,50 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--rate" => options.sample_rate_hz = next_arg(&mut args, "--rate")?.parse()?,
             "--ms" => options.duration_ms = next_arg(&mut args, "--ms")?.parse()?,
             "--channels" => options.channel_count = next_arg(&mut args, "--channels")?.parse()?,
+            "--enabled-channels" => {
+                options.enabled_channels = Some(parse_enabled_channels(&next_arg(
+                    &mut args,
+                    "--enabled-channels",
+                )?)?)
+            }
             "--vth" => options.threshold_volts = next_arg(&mut args, "--vth")?.parse()?,
+            "--external-trigger" => {
+                options.external_trigger_mode =
+                    parse_external_trigger_mode(&next_arg(&mut args, "--external-trigger")?)?
+            }
+            "--clock-negedge" => options.clock_negedge = true,
+            "--trigger-out" => options.trigger_out_enabled = true,
             "--mode" => options.mode = parse_mode(&next_arg(&mut args, "--mode")?)?,
+            "--buffer-mb" => {
+                options.buffer_size_mb = next_arg(&mut args, "--buffer-mb")?.parse()?
+            }
+            "--trigger-channel" => {
+                options.trigger_channel = Some(next_arg(&mut args, "--trigger-channel")?.parse()?)
+            }
+            "--trigger" => {
+                options.trigger_kind = parse_trigger_kind(&next_arg(&mut args, "--trigger")?)?
+            }
+            "--glitch-filter" => options.glitch_filter_enabled = true,
+            "--cancel-after-ms" => {
+                options.cancel_after_ms = Some(next_arg(&mut args, "--cancel-after-ms")?.parse()?)
+            }
+            "--graph-smoke" => options.graph_smoke = true,
+            "--pwm-enable" => {
+                options.pwm_configure = true;
+                options.pwm_enabled = true;
+            }
+            "--pwm-frequency" => {
+                options.pwm_configure = true;
+                options.pwm_frequency_hz = next_arg(&mut args, "--pwm-frequency")?.parse()?;
+            }
+            "--pwm-duty" => {
+                options.pwm_configure = true;
+                options.pwm_duty_percent = next_arg(&mut args, "--pwm-duty")?.parse()?;
+            }
+            "--pwm-only" => options.pwm_only = true,
             "--out" => options.output = Some(PathBuf::from(next_arg(&mut args, "--out")?)),
+            "--list-only" => options.list_only = true,
+            "--prepare-only" => options.prepare_only = true,
             "--raw-cross" => options.decode_cross = false,
             "--decode-cross" => options.decode_cross = true,
             "--compare-mappings" => options.compare_mappings = true,
@@ -156,17 +386,243 @@ fn parse_mode(value: &str) -> Result<CaptureMode, Box<dyn Error>> {
     }
 }
 
+fn parse_trigger_kind(value: &str) -> Result<CaptureTriggerKind, Box<dyn Error>> {
+    match value.to_ascii_lowercase().as_str() {
+        "rising" | "rise" | "r" => Ok(CaptureTriggerKind::Rising),
+        "falling" | "fall" | "f" => Ok(CaptureTriggerKind::Falling),
+        "high" | "one" | "1" => Ok(CaptureTriggerKind::High),
+        "low" | "zero" | "0" => Ok(CaptureTriggerKind::Low),
+        other => Err(format!(
+            "unknown trigger kind: {other}; expected rising, falling, high, or low"
+        )
+        .into()),
+    }
+}
+
+fn parse_external_trigger_mode(value: &str) -> Result<ExternalTriggerMode, Box<dyn Error>> {
+    match value.to_ascii_lowercase().as_str() {
+        "close" | "closed" | "off" => Ok(ExternalTriggerMode::Close),
+        "rising" | "rise" => Ok(ExternalTriggerMode::Rising),
+        "one" | "high" | "1" => Ok(ExternalTriggerMode::One),
+        "falling" | "fall" => Ok(ExternalTriggerMode::Falling),
+        "zero" | "low" | "0" => Ok(ExternalTriggerMode::Zero),
+        "edge" | "either" => Ok(ExternalTriggerMode::Edge),
+        other => Err(format!(
+            "unknown external trigger mode: {other}; expected close, rising, one, falling, zero, or edge"
+        )
+        .into()),
+    }
+}
+
+fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    let channels = value
+        .split(',')
+        .map(str::trim)
+        .filter(|channel| !channel.is_empty())
+        .map(str::parse::<u8>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if channels.is_empty() {
+        return Err("--enabled-channels requires at least one channel index".into());
+    }
+    Ok(channels)
+}
+
 fn print_help() {
     println!(
-        "usb_smoke [--device id] [--rate hz] [--ms duration] [--channels n] [--vth volts] [--mode buffer|stream] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only] [--prepare-only] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms ms] [--graph-smoke] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 
-fn describe_device(device: &DeviceInfo) -> String {
-    format!(
-        "{} vid={:04x} pid={:04x} bus={:?} addr={:?}",
-        device.id, device.vid, device.pid, device.bus, device.address
-    )
+fn verify_graph_smoke(
+    graph: &GraphSession,
+    capture: &pxlogic_core::CaptureData,
+) -> Result<(), Box<dyn Error>> {
+    let graph_metadata = graph.metadata().ok_or("graph metadata is missing")?;
+    if graph_metadata.enabled_channels != capture.metadata.enabled_channels {
+        return Err(format!(
+            "graph enabled-channel mismatch: graph={:?}, capture={:?}",
+            graph_metadata.enabled_channels, capture.metadata.enabled_channels
+        )
+        .into());
+    }
+    if graph_metadata.trigger != capture.metadata.trigger {
+        return Err(format!(
+            "graph trigger mismatch: graph={:?}, capture={:?}",
+            graph_metadata.trigger, capture.metadata.trigger
+        )
+        .into());
+    }
+    if let Some(trigger) = graph_metadata.trigger {
+        println!(
+            "graph trigger: D{} {:?} at sample {}",
+            trigger.channel, trigger.kind, trigger.sample_index
+        );
+    }
+
+    if graph.sample_count() != capture.metadata.sample_count {
+        return Err(format!(
+            "graph sample count mismatch: graph={}, capture={}",
+            graph.sample_count(),
+            capture.metadata.sample_count
+        )
+        .into());
+    }
+
+    let channels = resolve_enabled_channels(
+        capture.metadata.channel_count,
+        &capture.metadata.enabled_channels,
+    )?;
+    let enabled_mask = enabled_channel_mask(capture.metadata.channel_count, &channels)?;
+    for sample_index in 0..capture.metadata.sample_count.min(100_000) {
+        let word = read_sample_word(&capture.samples, capture.metadata.unitsize, sample_index)
+            .ok_or("capture samples ended before metadata sample_count")?;
+        if word & !enabled_mask != 0 {
+            return Err(format!(
+                "sample {sample_index} contains data outside enabled physical mask 0x{enabled_mask:08x}: 0x{word:08x}"
+            )
+            .into());
+        }
+    }
+    let full_frame = graph.render_frame(&GraphFrameRequest {
+        frame_id: 1,
+        waveform: WaveformRequest {
+            start_sample: 0,
+            sample_count: capture.metadata.sample_count.max(1),
+            pixels: 1_200,
+            channels: channels.clone(),
+        },
+        analyzer_view: None,
+        analyzers: Vec::new(),
+    })?;
+    if full_frame.sample_count != capture.metadata.sample_count
+        || full_frame.tile.sample_count != capture.metadata.sample_count
+        || full_frame.tile.channels.len() != channels.len()
+    {
+        return Err(format!(
+            "full graph frame mismatch: frame_samples={}, tile_samples={}, tile_channels={}",
+            full_frame.sample_count,
+            full_frame.tile.sample_count,
+            full_frame.tile.channels.len()
+        )
+        .into());
+    }
+    if full_frame.tile.channels.iter().any(|channel| {
+        channel
+            .packed_bins
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+    }) {
+        return Err("full graph frame contains an empty packed waveform tile".into());
+    }
+
+    let first_edge = full_frame
+        .tile
+        .channels
+        .iter()
+        .flat_map(|channel| {
+            channel
+                .rising_edges
+                .iter()
+                .chain(&channel.falling_edges)
+                .map(move |sample| (channel.channel, *sample))
+        })
+        .min_by_key(|(_, sample)| *sample);
+
+    if let Some((edge_channel, edge_sample)) = first_edge {
+        let exact_start = edge_sample.saturating_sub(512);
+        let exact_samples = capture
+            .metadata
+            .sample_count
+            .saturating_sub(exact_start)
+            .min(2_048)
+            .max(1);
+        let exact_frame = graph.render_frame(&GraphFrameRequest {
+            frame_id: 2,
+            waveform: WaveformRequest {
+                start_sample: exact_start,
+                sample_count: exact_samples,
+                pixels: u32::try_from(exact_samples).unwrap_or(2_048).max(1),
+                channels,
+            },
+            analyzer_view: None,
+            analyzers: Vec::new(),
+        })?;
+        let edge_tile = exact_frame
+            .tile
+            .channels
+            .iter()
+            .find(|channel| channel.channel == edge_channel)
+            .ok_or("exact graph frame omitted the edge channel")?;
+        let edge_is_connected = edge_tile.segments.windows(2).any(|segments| {
+            segments[0].end_sample == edge_sample
+                && segments[1].start_sample == edge_sample
+                && segments[0].high != segments[1].high
+        });
+        if !edge_is_connected {
+            return Err(format!(
+                "exact graph frame did not connect the transition at D{edge_channel} sample {edge_sample}"
+            )
+            .into());
+        }
+        if edge_tile.segments.windows(2).any(|segments| {
+            segments[0].end_sample != segments[1].start_sample
+                || segments[0].high == segments[1].high
+        }) {
+            return Err(format!(
+                "exact graph frame contains disconnected or redundant segments on D{edge_channel}"
+            )
+            .into());
+        }
+        println!(
+            "graph exact: D{edge_channel} edge at sample {edge_sample}, {} connected segments",
+            edge_tile.segments.len()
+        );
+    } else {
+        println!("graph exact: capture is static; edge connectivity check skipped");
+    }
+
+    println!(
+        "graph frame: {} samples, {} channels, {} pixels",
+        full_frame.sample_count,
+        full_frame.tile.channels.len(),
+        full_frame.tile.pixels
+    );
+    Ok(())
+}
+
+fn print_device(device: &DeviceInfo) {
+    println!(
+        "  {} [{}] vid={:04x} pid={:04x} bus={:?} addr={:?}",
+        device.id,
+        if device.ready { "ready" } else { "found" },
+        device.vid,
+        device.pid,
+        device.bus,
+        device.address
+    );
+    println!("    label: {}", device.label);
+    if let Some(speed) = device.usb_speed.as_deref() {
+        println!("    usb_speed: {speed}");
+    }
+    if let Some(profile) = device.profile_model.as_deref() {
+        println!("    pxview_profile: {profile}");
+    }
+    if let Some(logic_mode) = device.logic_mode {
+        println!("    logic_mode: 0x{logic_mode:08x}");
+    }
+    if let Some(manufacturer) = device.manufacturer.as_deref() {
+        println!("    manufacturer: {manufacturer}");
+    }
+    if let Some(product) = device.product.as_deref() {
+        println!("    product: {product}");
+    }
+    if let Some(serial) = device.serial_number.as_deref() {
+        println!("    serial: {serial}");
+    }
+    if let Some(error) = device.probe_error.as_deref() {
+        println!("    probe: {error}");
+    }
 }
 
 fn default_output_path() -> PathBuf {
@@ -246,6 +702,15 @@ struct MappingCandidate {
 
 fn compare_cross_mappings(capture: &pxlogic_core::CaptureData) -> Result<(), Box<dyn Error>> {
     let channel_count = capture.metadata.channel_count;
+    let enabled_channels = resolve_enabled_channels(
+        capture.metadata.channel_count,
+        &capture.metadata.enabled_channels,
+    )?;
+    if enabled_channels.len() != usize::from(channel_count) {
+        return Err(
+            "cross mapping comparison requires a contiguous all-channel raw capture".into(),
+        );
+    }
     let channels = usize::from(channel_count);
     if !matches!(channel_count, 16 | 32) {
         return Err(format!(

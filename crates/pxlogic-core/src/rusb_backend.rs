@@ -2,25 +2,35 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
-use rusb::{Context, DeviceHandle, UsbContext};
+use rusb::{Context, DeviceDescriptor, DeviceHandle, UsbContext};
 
 use crate::{
     capture::{
-        build_capture_register_script, decode_cross_data, pxview_capture_transfer_size,
-        sample_count_from_settings, unitsize_for_channel_count, CaptureProfile,
+        align_cross_sample_count, build_capture_register_script_for_channels,
+        build_pxview_pwm0_register_script, capture_profile_from_settings,
+        decode_cross_data_to_physical_channels, pxview_capture_transfer_size,
+        pxview_cross_raw_byte_count, pxview_trigger_position, resolve_enabled_channels,
+        sample_count_from_settings, unitsize_for_channel_count,
     },
     error::{CoreError, Result},
     models::{
         Bitstreams, CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings,
-        DeviceInfo, DeviceKind, DiagnosticEvent, DiagnosticLevel,
+        CaptureTriggerMetadata, DeviceInfo, DeviceKind, DiagnosticEvent, DiagnosticLevel,
+        PwmConfiguration, PwmSettings,
     },
     protocol,
+    pxview_profile::{
+        resolve_pxlogic_capture_plan, resolve_pxlogic_device_profile, PxUsbSpeed,
+        PxlogicDeviceProfile, PXLOGIC_32_CHANNEL_HARDWARE_DEPTH_BITS,
+    },
     transport::CaptureBackend,
 };
+
+const TRIGGER_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Default, Clone)]
 pub struct RusbBackend;
@@ -32,6 +42,57 @@ struct ControlStatus {
     sync_cur_sample: u64,
     trig_out_validset: u32,
     real_pos: u32,
+}
+
+fn trigger_metadata_from_status(
+    settings: &CaptureSettings,
+    status: ControlStatus,
+) -> Option<CaptureTriggerMetadata> {
+    (settings.trigger_enabled && status.trig_out_validset != 0).then_some(CaptureTriggerMetadata {
+        sample_index: u64::from(status.real_pos),
+        channel: settings.trigger_channel,
+        kind: settings.trigger_kind,
+    })
+}
+
+fn publish_trigger_status(
+    settings: &CaptureSettings,
+    status: ControlStatus,
+    trigger: &mut Option<CaptureTriggerMetadata>,
+    on_trigger: &mut dyn FnMut(&CaptureTriggerMetadata),
+    sink: &mut TraceSink<'_>,
+) {
+    if trigger.is_some() {
+        return;
+    }
+    let Some(metadata) = trigger_metadata_from_status(settings, status) else {
+        return;
+    };
+    trace(
+        sink,
+        "trigger",
+        format!(
+            "hardware trigger hit on D{} ({:?}) at sample {}; status=0x{:08x}, sync_cur_sample={}",
+            metadata.channel,
+            metadata.kind,
+            metadata.sample_index,
+            status.trig_out_validset,
+            status.sync_cur_sample
+        ),
+    );
+    on_trigger(&metadata);
+    *trigger = Some(metadata);
+}
+
+#[derive(Debug, Default)]
+struct UsbIdentityProbe {
+    manufacturer: Option<String>,
+    product: Option<String>,
+    serial_number: Option<String>,
+    logic_mode: Option<u32>,
+    profile: Option<&'static PxlogicDeviceProfile>,
+    ready: bool,
+    error: Option<String>,
 }
 
 fn trace(sink: &mut TraceSink<'_>, phase: impl Into<String>, message: impl Into<String>) {
@@ -131,6 +192,7 @@ impl RusbBackend {
         let mut handle = self.open_device(device_id)?;
         trace(sink, "prepare", "claiming USB interfaces 0 and 1");
         Self::claim_pxlogic_interfaces(&mut handle)?;
+        Self::trace_firmware_version(&mut handle, sink);
         trace(
             sink,
             "prepare",
@@ -140,17 +202,48 @@ impl RusbBackend {
                 bitstreams.main.len()
             ),
         );
-        trace(sink, "prepare", "clearing data OUT halt");
-        handle.clear_halt(protocol::BULK_EP_DATA_OUT)?;
+        trace(sink, "prepare", "clearing PXLogic USB endpoints");
+        Self::clear_pxlogic_endpoints(&mut handle, sink);
         trace(sink, "prepare", "uploading reset bitstream");
-        Self::upload_bitstream(&mut handle, &bitstreams.reset, 4)?;
-        trace(sink, "prepare", "clearing data OUT halt");
-        handle.clear_halt(protocol::BULK_EP_DATA_OUT)?;
+        Self::upload_bitstream_with_trace(&mut handle, &bitstreams.reset, 4, "reset", sink)?;
+        trace(sink, "prepare", "clearing PXLogic USB endpoints");
+        Self::clear_pxlogic_endpoints(&mut handle, sink);
         trace(sink, "prepare", "uploading main bitstream");
-        Self::upload_bitstream(&mut handle, &bitstreams.main, 4)?;
+        Self::upload_bitstream_with_trace(&mut handle, &bitstreams.main, 4, "main", sink)?;
         trace(sink, "prepare", "FPGA upload complete, waiting 100 ms");
         std::thread::sleep(Duration::from_millis(100));
         Ok(())
+    }
+
+    pub fn configure_pwm0_with_trace(
+        &self,
+        device_id: &str,
+        settings: &PwmSettings,
+        sink: &mut TraceSink<'_>,
+    ) -> Result<PwmConfiguration> {
+        let (configuration, script) = build_pxview_pwm0_register_script(settings)?;
+        trace(sink, "pwm0", format!("opening {device_id}"));
+        let mut handle = self.open_device(device_id)?;
+        trace(sink, "pwm0", "claiming USB interfaces 0 and 1");
+        Self::claim_pxlogic_interfaces(&mut handle)?;
+        for write in script {
+            Self::write_register_with_trace(&mut handle, write.addr, write.value, sink)?;
+        }
+        let _ = handle.release_interface(0);
+        let _ = handle.release_interface(1);
+        trace(
+            sink,
+            "pwm0",
+            format!(
+                "configured: enabled={}, requested={:.3} Hz at {:.3}%, effective={:.3} Hz at {:.3}%",
+                configuration.enabled,
+                configuration.requested_frequency_hz,
+                configuration.requested_duty_percent,
+                configuration.effective_frequency_hz,
+                configuration.effective_duty_percent
+            ),
+        );
+        Ok(configuration)
     }
 
     pub fn capture_with_trace(
@@ -167,6 +260,7 @@ impl RusbBackend {
             sink,
             &mut |_| {},
             &mut |_| {},
+            &mut |_| {},
         )
     }
 
@@ -178,72 +272,166 @@ impl RusbBackend {
         sink: &mut TraceSink<'_>,
         started: &mut dyn FnMut(&CaptureMetadata),
         on_samples: &mut dyn FnMut(&[u8]),
+        on_trigger: &mut dyn FnMut(&CaptureTriggerMetadata),
     ) -> Result<CaptureData> {
         trace(sink, "capture", format!("opening {}", settings.device_id));
         let mut handle = self.open_device(&settings.device_id)?;
         let speed = handle.device().speed();
         let superspeed = matches!(speed, rusb::Speed::Super | rusb::Speed::SuperPlus);
+        let desc = handle.device().device_descriptor()?;
         trace(sink, "capture", format!("USB link speed: {speed:?}"));
         trace(sink, "capture", "claiming USB interfaces 0 and 1");
         Self::claim_pxlogic_interfaces(&mut handle)?;
 
-        let channel_count = Self::resolve_capture_channel_count(
+        let mut effective_settings = settings.clone();
+        let mut hardware_depth_bits = PXLOGIC_32_CHANNEL_HARDWARE_DEPTH_BITS;
+        if let Some(profile) = Self::resolve_profile_for_capture(
             &mut handle,
-            &settings.device_id,
-            settings.channel_count,
+            desc.vendor_id(),
+            desc.product_id(),
+            speed,
             sink,
-        );
+        ) {
+            hardware_depth_bits = profile.hardware_depth_bits;
+            let plan = resolve_pxlogic_capture_plan(
+                profile,
+                settings.mode,
+                settings.channel_count,
+                settings.sample_rate_hz,
+            )?;
+            trace(
+                sink,
+                "profile",
+                format!(
+                    "selected {} / {} for {:?}: {}",
+                    plan.profile.model,
+                    plan.profile.vendor,
+                    settings.mode,
+                    plan.channel_mode.description
+                ),
+            );
+            if plan.channel_count != settings.channel_count {
+                trace_warn(
+                    sink,
+                    "profile",
+                    format!(
+                        "capping requested channels {} -> {} for {}",
+                        settings.channel_count, plan.channel_count, plan.profile.model
+                    ),
+                );
+            }
+            if plan.sample_rate_hz != settings.sample_rate_hz {
+                trace_warn(
+                    sink,
+                    "profile",
+                    format!(
+                        "capping requested samplerate {} Hz -> {} Hz for {}",
+                        settings.sample_rate_hz, plan.sample_rate_hz, plan.channel_mode.description
+                    ),
+                );
+            }
+            effective_settings.channel_count = plan.channel_count;
+            effective_settings.sample_rate_hz = plan.sample_rate_hz;
+        } else {
+            effective_settings.channel_count = Self::resolve_capture_channel_count(
+                &mut handle,
+                &settings.device_id,
+                settings.channel_count,
+                sink,
+            );
+        }
+
+        let channel_count = effective_settings.channel_count;
+        let enabled_channels =
+            resolve_enabled_channels(channel_count, &effective_settings.enabled_channels)?;
+        effective_settings.enabled_channels = enabled_channels.clone();
+        let enabled_channel_count = u8::try_from(enabled_channels.len())
+            .map_err(|_| CoreError::InvalidChannelCount(channel_count))?;
         let unitsize = unitsize_for_channel_count(channel_count)?;
-        let sample_count = sample_count_from_settings(settings, unitsize)?;
-        let target_bytes = sample_count * u64::from(unitsize);
+        let requested_sample_count = sample_count_from_settings(&effective_settings, unitsize)?;
+        let sample_count = align_cross_sample_count(requested_sample_count)?;
+        let target_raw_bytes = pxview_cross_raw_byte_count(sample_count, enabled_channel_count)?;
+        let target_decoded_bytes = sample_count
+            .checked_mul(u64::from(unitsize))
+            .ok_or(CoreError::InvalidCaptureDuration)?;
         let captured_at = Utc::now();
         let stream_metadata = CaptureMetadata {
             version: 1,
             source_device: settings.device_id.clone(),
-            sample_rate_hz: settings.sample_rate_hz,
+            sample_rate_hz: effective_settings.sample_rate_hz,
             channel_count,
+            enabled_channels: enabled_channels.clone(),
             unitsize,
             sample_count: 0,
             captured_at,
             labels: (0..channel_count)
                 .map(|index| format!("D{index}"))
                 .collect(),
+            trigger: None,
         };
         started(&stream_metadata);
-        let transfer_size =
-            pxview_capture_transfer_size(settings.sample_rate_hz, channel_count, superspeed)?;
+        let transfer_size = pxview_capture_transfer_size(
+            effective_settings.sample_rate_hz,
+            enabled_channel_count,
+            superspeed,
+        )?;
         trace(
             sink,
             "capture",
             format!(
-                "settings: {} Hz, {} channels, {} samples, {} bytes, transfer={} bytes, mode={:?}, decode_cross={}, threshold={:.2} V",
-                settings.sample_rate_hz,
+                "settings: {} Hz, physical_span={} channels, enabled={:?} ({} lanes), {} samples, {} raw bytes, {} decoded bytes, transfer={} bytes, mode={:?}, decode_cross={}, threshold={:.2} V, trigger={}, trigger_channel=D{}, trigger_kind={:?}, glitch_filter={}",
+                effective_settings.sample_rate_hz,
                 channel_count,
+                enabled_channels,
+                enabled_channel_count,
                 sample_count,
-                target_bytes,
+                target_raw_bytes,
+                target_decoded_bytes,
                 transfer_size,
-                settings.mode,
-                settings.decode_cross,
-                settings.threshold_volts
+                effective_settings.mode,
+                effective_settings.decode_cross,
+                effective_settings.threshold_volts,
+                effective_settings.trigger_enabled,
+                effective_settings.trigger_channel,
+                effective_settings.trigger_kind,
+                effective_settings.glitch_filter_enabled
             ),
         );
-        trace_stream_budget(settings, channel_count, speed, sink);
-        let script = build_capture_register_script(
+        trace_stream_budget(&effective_settings, enabled_channel_count, speed, sink);
+        let mut capture_profile =
+            capture_profile_from_settings(&effective_settings, channel_count)?;
+        capture_profile.trigger_pos = pxview_trigger_position(
+            &effective_settings,
+            sample_count,
+            enabled_channel_count,
+            hardware_depth_bits,
+        )?;
+        trace(
+            sink,
+            "trigger",
+            format!(
+                "requested position={}%, programmed pre-trigger samples={}",
+                effective_settings.trigger_position_percent, capture_profile.trigger_pos
+            ),
+        );
+        let script = build_capture_register_script_for_channels(
             transfer_size as u32,
-            target_bytes,
+            target_raw_bytes,
             channel_count,
-            settings.sample_rate_hz,
-            CaptureProfile {
-                stream_mode: matches!(settings.mode, CaptureMode::Stream),
-                vth_volts: settings.threshold_volts,
-                ..CaptureProfile::default()
-            },
+            &enabled_channels,
+            effective_settings.sample_rate_hz,
+            capture_profile,
         )?;
 
         trace(sink, "registers", "reset block pointer");
         Self::write_register(&mut handle, protocol::REG_BLOCK_START, 0)?;
         trace(sink, "capture", "clearing data endpoints");
+        let _ = handle.clear_halt(protocol::BULK_EP_REG_OUT);
+        let _ = handle.clear_halt(protocol::BULK_EP_REG_IN);
+        let _ = handle.clear_halt(protocol::BULK_EP_DATA_OUT);
         let _ = handle.clear_halt(protocol::BULK_EP_DATA_IN);
+        let _ = handle.clear_halt(protocol::BULK_EP_BUFFER_DATA_IN);
+        let _ = handle.clear_halt(0x02);
         let _ = handle.clear_halt(0x04);
         let _ = handle.clear_halt(0x84);
         trace(
@@ -252,55 +440,118 @@ impl RusbBackend {
             format!("writing {} capture registers", script.len()),
         );
         for write in script {
-            Self::write_register(&mut handle, write.addr, write.value)?;
+            Self::write_register_with_trace(&mut handle, write.addr, write.value, sink)?;
         }
-        Self::trace_control_status(&mut handle, sink, "after start");
+        let mut hardware_trigger = None;
+        if let Some(status) = Self::trace_control_status(&mut handle, sink, "after start", true) {
+            publish_trigger_status(
+                &effective_settings,
+                status,
+                &mut hardware_trigger,
+                on_trigger,
+                sink,
+            );
+        }
+        let data_endpoint = if matches!(effective_settings.mode, CaptureMode::Buffer) {
+            let settle =
+                buffer_capture_settle_duration(sample_count, effective_settings.sample_rate_hz);
+            trace(
+                sink,
+                "buffer",
+                format!("waiting {} ms before DDR read request", settle.as_millis()),
+            );
+            std::thread::sleep(settle);
+            if hardware_trigger.is_none() {
+                if let Some(status) =
+                    Self::trace_control_status(&mut handle, sink, "after buffer settle", true)
+                {
+                    publish_trigger_status(
+                        &effective_settings,
+                        status,
+                        &mut hardware_trigger,
+                        on_trigger,
+                        sink,
+                    );
+                }
+            }
+            let request_bytes = target_raw_bytes
+                .checked_add(transfer_size as u64)
+                .ok_or_else(|| CoreError::Decode("buffer read byte count overflow".to_string()))?;
+            trace(
+                sink,
+                "buffer",
+                format!(
+                    "requesting DDR read: base=0x{:x}, bytes={request_bytes}, endpoint=0x{:02x}",
+                    protocol::DATA_READ_BASE_ADDR,
+                    protocol::BULK_EP_BUFFER_DATA_IN
+                ),
+            );
+            Self::request_ddr_read(
+                &mut handle,
+                protocol::DATA_READ_BASE_ADDR,
+                request_bytes,
+                protocol::DATA_MODE_FPGA_DDR,
+            )?;
+            protocol::BULK_EP_BUFFER_DATA_IN
+        } else {
+            protocol::BULK_EP_DATA_IN
+        };
 
-        let target_len =
-            usize::try_from(target_bytes).map_err(|_| CoreError::InvalidCaptureDuration)?;
-        let initial_capacity = target_len
+        let target_raw_len =
+            usize::try_from(target_raw_bytes).map_err(|_| CoreError::InvalidCaptureDuration)?;
+        let target_decoded_len =
+            usize::try_from(target_decoded_bytes).map_err(|_| CoreError::InvalidCaptureDuration)?;
+        let initial_capacity = target_decoded_len
             .min(8 * 1024 * 1024)
             .saturating_add(transfer_size);
-        let decode_cross = settings.decode_cross && matches!(channel_count, 16 | 32);
+        // PXView tags every PXLogic logic payload as LA_CROSS_DATA. Each stripe contains
+        // one 64-sample word per enabled channel, including the 1/2/4/8-channel modes.
+        let decode_cross = effective_settings.decode_cross;
         let mut raw = Vec::with_capacity(if decode_cross { 0 } else { initial_capacity });
-        let mut decoded_samples = Vec::with_capacity(initial_capacity.min(target_len));
+        let mut decoded_samples = Vec::with_capacity(initial_capacity.min(target_decoded_len));
         let mut published_raw_len = 0usize;
         let mut pending_cross = Vec::with_capacity(if decode_cross {
-            usize::from(channel_count) * 8 + transfer_size
+            usize::from(enabled_channel_count) * 8 + transfer_size
         } else {
             0
         });
         let mut bytes_read = 0usize;
         let mut buffer = vec![0u8; transfer_size];
-        let mut timeout_count = 0u32;
+        let read_poll_timeout = capture_read_poll_timeout();
+        let stall_timeout =
+            capture_stall_timeout(&effective_settings, enabled_channel_count, transfer_size);
+        let mut idle_poll_count = 0u32;
+        let mut last_data_at = Instant::now();
+        let mut last_trigger_status_poll = Instant::now();
         let mut cancelled = false;
-        trace(sink, "bulk", "starting data IN reads");
-        while bytes_read < target_len {
+        trace(
+            sink,
+            "bulk",
+            format!(
+                "starting data IN reads on endpoint 0x{data_endpoint:02x}; cancel poll={} ms, stall timeout={}",
+                read_poll_timeout.as_millis(),
+                stall_timeout
+                    .map(|timeout| format!("{:.1} s", timeout.as_secs_f64()))
+                    .unwrap_or_else(|| "disabled while waiting for trigger".to_string())
+            ),
+        );
+        while bytes_read < target_raw_len {
             if cancel.load(Ordering::Acquire) {
-                let _ = Self::write_register(
-                    &mut handle,
-                    protocol::REG_STREAM_START,
-                    protocol::STREAM_STOP_FLAGS,
-                );
                 cancelled = true;
                 break;
             }
-            match handle.read_bulk(
-                protocol::BULK_EP_DATA_IN,
-                &mut buffer,
-                Duration::from_millis(protocol::DEFAULT_BULK_TIMEOUT_MS),
-            ) {
+            match handle.read_bulk(data_endpoint, &mut buffer, read_poll_timeout) {
                 Ok(read) => {
                     if read == 0 {
-                        timeout_count = timeout_count.saturating_add(1);
-                        trace_warn(sink, "bulk", "read returned 0 bytes");
+                        idle_poll_count = idle_poll_count.saturating_add(1);
                     } else {
-                        let accepted = read.min(target_len.saturating_sub(bytes_read));
+                        let accepted = read.min(target_raw_len.saturating_sub(bytes_read));
                         bytes_read = bytes_read.saturating_add(accepted);
                         if decode_cross {
                             publish_cross_stream_samples(
                                 &buffer[..accepted],
                                 channel_count,
+                                &enabled_channels,
                                 &mut pending_cross,
                                 &mut decoded_samples,
                                 on_samples,
@@ -314,45 +565,29 @@ impl RusbBackend {
                                 on_samples,
                             )?;
                         }
-                        timeout_count = 0;
+                        idle_poll_count = 0;
+                        last_data_at = Instant::now();
                         trace(
                             sink,
                             "bulk",
                             format!(
                                 "read {read} bytes, total {}/{}",
-                                bytes_read.min(target_len),
-                                target_bytes
+                                bytes_read.min(target_raw_len),
+                                target_raw_bytes
                             ),
                         );
+                        let samples_read = (bytes_read.min(target_raw_len) as u64)
+                            .saturating_mul(8)
+                            / u64::from(enabled_channel_count);
                         progress(CaptureProgress {
-                            bytes_read: bytes_read.min(target_len) as u64,
-                            bytes_expected: target_bytes,
-                            samples_read: bytes_read.min(target_len) as u64 / u64::from(unitsize),
+                            bytes_read: bytes_read.min(target_raw_len) as u64,
+                            bytes_expected: target_raw_bytes,
+                            samples_read: samples_read.min(sample_count),
                         });
                     }
                 }
                 Err(rusb::Error::Timeout) => {
-                    timeout_count = timeout_count.saturating_add(1);
-                    trace_warn(
-                        sink,
-                        "bulk",
-                        format!("timeout {timeout_count}/5 while waiting for endpoint 0x82"),
-                    );
-                    Self::trace_control_status(
-                        &mut handle,
-                        sink,
-                        format!("timeout {timeout_count}"),
-                    );
-                    if timeout_count >= 5 {
-                        let _ = Self::write_register(
-                            &mut handle,
-                            protocol::REG_STREAM_START,
-                            protocol::STREAM_STOP_FLAGS,
-                        );
-                        return Err(CoreError::Usb(
-                            "bulk endpoint 0x82 timed out without enough data".to_string(),
-                        ));
-                    }
+                    idle_poll_count = idle_poll_count.saturating_add(1);
                 }
                 Err(error) => {
                     let _ = Self::write_register(
@@ -363,9 +598,89 @@ impl RusbBackend {
                     return Err(CoreError::from(error));
                 }
             }
+            if idle_poll_count == 0
+                && hardware_trigger.is_none()
+                && effective_settings.trigger_enabled
+                && last_trigger_status_poll.elapsed() >= TRIGGER_STATUS_POLL_INTERVAL
+            {
+                last_trigger_status_poll = Instant::now();
+                if let Some(status) =
+                    Self::trace_control_status(&mut handle, sink, "while streaming", false)
+                {
+                    publish_trigger_status(
+                        &effective_settings,
+                        status,
+                        &mut hardware_trigger,
+                        on_trigger,
+                        sink,
+                    );
+                }
+            }
+            if idle_poll_count > 0 {
+                if cancel.load(Ordering::Acquire) {
+                    cancelled = true;
+                    break;
+                }
+                let idle = last_data_at.elapsed();
+                if stall_timeout.is_some_and(|timeout| idle >= timeout) {
+                    let _ = Self::write_register(
+                        &mut handle,
+                        protocol::REG_STREAM_START,
+                        protocol::STREAM_STOP_FLAGS,
+                    );
+                    return Err(CoreError::Usb(format!(
+                        "bulk endpoint 0x{data_endpoint:02x} produced no data for {:.1} s",
+                        idle.as_secs_f64()
+                    )));
+                }
+                if idle_poll_count == 1 || idle_poll_count % 20 == 0 {
+                    trace(
+                        sink,
+                        "bulk",
+                        format!(
+                            "waiting for endpoint 0x{data_endpoint:02x}: {:.1} s without data",
+                            idle.as_secs_f64()
+                        ),
+                    );
+                }
+                let should_log_status = idle_poll_count == 1 || idle_poll_count % 20 == 0;
+                if hardware_trigger.is_none() && effective_settings.trigger_enabled {
+                    last_trigger_status_poll = Instant::now();
+                    if let Some(status) = Self::trace_control_status(
+                        &mut handle,
+                        sink,
+                        format!("waiting {:.1} s", idle.as_secs_f64()),
+                        should_log_status,
+                    ) {
+                        publish_trigger_status(
+                            &effective_settings,
+                            status,
+                            &mut hardware_trigger,
+                            on_trigger,
+                            sink,
+                        );
+                    }
+                } else if idle_poll_count % 20 == 0 {
+                    Self::trace_control_status(
+                        &mut handle,
+                        sink,
+                        format!("waiting {:.1} s", idle.as_secs_f64()),
+                        true,
+                    );
+                }
+            }
         }
-        if cancelled && bytes_read == 0 {
-            return Err(CoreError::Cancelled);
+        if hardware_trigger.is_none() && effective_settings.trigger_enabled {
+            if let Some(status) = Self::trace_control_status(&mut handle, sink, "before stop", true)
+            {
+                publish_trigger_status(
+                    &effective_settings,
+                    status,
+                    &mut hardware_trigger,
+                    on_trigger,
+                    sink,
+                );
+            }
         }
 
         trace(sink, "capture", "stopping capture registers");
@@ -374,6 +689,9 @@ impl RusbBackend {
             protocol::REG_STREAM_START,
             protocol::STREAM_STOP_FLAGS,
         );
+        if cancelled && bytes_read == 0 {
+            return Err(CoreError::Cancelled);
+        }
         let samples = if decode_cross {
             trace(
                 sink,
@@ -395,18 +713,30 @@ impl RusbBackend {
             format!("capture complete: {} bytes", samples.len()),
         );
 
+        let captured_sample_count = if decode_cross {
+            samples.len() as u64 / u64::from(unitsize)
+        } else {
+            (bytes_read as u64)
+                .saturating_mul(8)
+                .checked_div(u64::from(enabled_channel_count))
+                .unwrap_or(0)
+                .min(sample_count)
+        };
+
         Ok(CaptureData {
             metadata: CaptureMetadata {
                 version: 1,
                 source_device: settings.device_id.clone(),
-                sample_rate_hz: settings.sample_rate_hz,
+                sample_rate_hz: effective_settings.sample_rate_hz,
                 channel_count,
+                enabled_channels,
                 unitsize,
-                sample_count: samples.len() as u64 / u64::from(unitsize),
+                sample_count: captured_sample_count,
                 captured_at,
                 labels: (0..channel_count)
                     .map(|index| format!("D{index}"))
                     .collect(),
+                trigger: hardware_trigger,
             },
             samples,
         })
@@ -529,23 +859,226 @@ impl RusbBackend {
         handle: &mut DeviceHandle<Context>,
         sink: &mut TraceSink<'_>,
         label: impl Into<String>,
-    ) {
+        log_success: bool,
+    ) -> Option<ControlStatus> {
         let label = label.into();
         match Self::read_control_status(handle, Duration::from_millis(100)) {
-            Ok(status) => trace(
+            Ok(status) => {
+                if log_success || status.trig_out_validset != 0 {
+                    trace(
+                        sink,
+                        "status",
+                        format!(
+                            "{label}: sync_cur_sample={}, trig_out_validset=0x{:08x}, real_pos={}",
+                            status.sync_cur_sample, status.trig_out_validset, status.real_pos
+                        ),
+                    );
+                }
+                Some(status)
+            }
+            Err(error) => {
+                if log_success {
+                    trace_warn(
+                        sink,
+                        "status",
+                        format!("{label}: failed to read control status: {error}"),
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    fn trace_firmware_version(handle: &mut DeviceHandle<Context>, sink: &mut TraceSink<'_>) {
+        match Self::read_register(handle, protocol::REG_FIRMWARE_VERSION) {
+            Ok(version) if version == protocol::EXPECTED_FIRMWARE_VERSION => trace(
                 sink,
-                "status",
+                "firmware",
+                format!("MCU firmware version 0x{version:08x} matches PXView"),
+            ),
+            Ok(version) if version == protocol::BOOTLOADER_FIRMWARE_VERSION => trace_warn(
+                sink,
+                "firmware",
                 format!(
-                    "{label}: sync_cur_sample={}, trig_out_validset=0x{:08x}, real_pos={}",
-                    status.sync_cur_sample, status.trig_out_validset, status.real_pos
+                    "MCU bootloader version 0x{version:08x} detected; CPU firmware flashing is not enabled in this Tauri path"
+                ),
+            ),
+            Ok(version) => trace_warn(
+                sink,
+                "firmware",
+                format!(
+                    "MCU firmware version 0x{version:08x} differs from PXView expected 0x{:08x}; continuing with FPGA prepare only",
+                    protocol::EXPECTED_FIRMWARE_VERSION
                 ),
             ),
             Err(error) => trace_warn(
                 sink,
-                "status",
-                format!("{label}: failed to read control status: {error}"),
+                "firmware",
+                format!("failed to read MCU firmware version: {error}"),
             ),
         }
+    }
+
+    fn clear_pxlogic_endpoints(handle: &mut DeviceHandle<Context>, sink: &mut TraceSink<'_>) {
+        for endpoint in [
+            protocol::BULK_EP_REG_OUT,
+            protocol::BULK_EP_REG_IN,
+            0x02,
+            protocol::BULK_EP_DATA_IN,
+            protocol::BULK_EP_DATA_OUT,
+            protocol::BULK_EP_BUFFER_DATA_IN,
+            0x04,
+            0x84,
+        ] {
+            if let Err(error) = handle.clear_halt(endpoint) {
+                trace_warn(
+                    sink,
+                    "prepare",
+                    format!("clear_halt 0x{endpoint:02x} failed: {error}"),
+                );
+            }
+        }
+    }
+
+    fn write_register_with_trace(
+        handle: &mut DeviceHandle<Context>,
+        addr: u32,
+        value: u32,
+        sink: &mut TraceSink<'_>,
+    ) -> Result<()> {
+        trace(
+            sink,
+            "registers",
+            format!("write addr=0x{addr:08x} value=0x{value:08x}"),
+        );
+        match Self::write_register(handle, addr, value) {
+            Ok(()) => Ok(()),
+            Err(first_error) => {
+                trace_warn(
+                    sink,
+                    "registers",
+                    format!(
+                        "write addr=0x{addr:08x} failed once: {first_error}; clearing endpoints and retrying"
+                    ),
+                );
+                Self::clear_pxlogic_endpoints(handle, sink);
+                std::thread::sleep(Duration::from_millis(20));
+                Self::write_register(handle, addr, value)
+            }
+        }
+    }
+
+    fn resolve_profile_for_capture(
+        handle: &mut DeviceHandle<Context>,
+        vid: u16,
+        pid: u16,
+        speed: rusb::Speed,
+        sink: &mut TraceSink<'_>,
+    ) -> Option<&'static PxlogicDeviceProfile> {
+        let Some(px_speed) = px_usb_speed_from_rusb(speed) else {
+            trace_warn(
+                sink,
+                "profile",
+                format!("unsupported USB speed for PXView profile matching: {speed:?}"),
+            );
+            return None;
+        };
+        let logic_mode = match Self::read_register(handle, protocol::REG_LOGIC_MODE) {
+            Ok(logic_mode) => {
+                trace(
+                    sink,
+                    "profile",
+                    format!("REG_LOGIC_MODE=0x{logic_mode:08x}"),
+                );
+                Some(logic_mode)
+            }
+            Err(error) => {
+                trace_warn(
+                    sink,
+                    "profile",
+                    format!("failed to read REG_LOGIC_MODE, using VID/PID/speed fallback: {error}"),
+                );
+                None
+            }
+        };
+        let profile = resolve_pxlogic_device_profile(vid, pid, px_speed, logic_mode);
+        if let Some(profile) = profile {
+            trace(
+                sink,
+                "profile",
+                format!(
+                    "matched PXView profile: {} {} ({vid:04x}:{pid:04x}, {:?}, logic_mode={})",
+                    profile.vendor, profile.model, profile.usb_speed, profile.logic_mode
+                ),
+            );
+        }
+        profile
+    }
+
+    fn probe_usb_identity(
+        device: &rusb::Device<Context>,
+        desc: &DeviceDescriptor,
+    ) -> UsbIdentityProbe {
+        let px_speed = px_usb_speed_from_rusb(device.speed());
+        let fallback_profile = px_speed.and_then(|speed| {
+            resolve_pxlogic_device_profile(desc.vendor_id(), desc.product_id(), speed, None)
+        });
+        let mut probe = UsbIdentityProbe {
+            profile: fallback_profile,
+            ready: true,
+            ..UsbIdentityProbe::default()
+        };
+
+        let mut handle = match device.open() {
+            Ok(handle) => handle,
+            Err(error) => {
+                probe.ready = false;
+                probe.error = Some(format!(
+                    "failed to open device for PX identity probe: {error}"
+                ));
+                return probe;
+            }
+        };
+
+        probe.manufacturer = handle.read_manufacturer_string_ascii(desc).ok();
+        probe.product = handle.read_product_string_ascii(desc).ok();
+        probe.serial_number = handle.read_serial_number_string_ascii(desc).ok();
+
+        if let Some(manufacturer) = probe.manufacturer.as_deref() {
+            if !manufacturer.starts_with("PX") {
+                probe.ready = false;
+                probe.error = Some(format!(
+                    "manufacturer string \"{manufacturer}\" does not match PXView PX* identity"
+                ));
+                return probe;
+            }
+        }
+
+        match Self::claim_pxlogic_interfaces(&mut handle) {
+            Ok(()) => {
+                probe.logic_mode = Self::read_register(&mut handle, protocol::REG_LOGIC_MODE).ok();
+                let _ = handle.release_interface(0);
+                let _ = handle.release_interface(1);
+                if let Some(speed) = px_speed {
+                    probe.profile = resolve_pxlogic_device_profile(
+                        desc.vendor_id(),
+                        desc.product_id(),
+                        speed,
+                        probe.logic_mode,
+                    )
+                    .or(fallback_profile);
+                }
+                if probe.logic_mode.is_none() {
+                    probe.error = Some("failed to read PXLogic REG_LOGIC_MODE".to_string());
+                }
+            }
+            Err(error) => {
+                probe.ready = false;
+                probe.error = Some(format!("failed to claim PXLogic interfaces: {error}"));
+            }
+        }
+
+        probe
     }
 
     fn resolve_capture_channel_count(
@@ -605,6 +1138,54 @@ impl RusbBackend {
         }
     }
 
+    fn request_ddr_read(
+        handle: &mut DeviceHandle<Context>,
+        base_addr: u32,
+        length: u64,
+        mode: u32,
+    ) -> Result<()> {
+        const PAGE_SIZE: u64 = 4096;
+        let aligned_length = length
+            .div_ceil(PAGE_SIZE)
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| CoreError::Decode("DDR read length overflow".to_string()))?;
+        let end_addr = u64::from(base_addr)
+            .checked_add(aligned_length)
+            .ok_or_else(|| CoreError::Decode("DDR read end address overflow".to_string()))?;
+        let end_addr = u32::try_from(end_addr)
+            .map_err(|_| CoreError::Decode("DDR read end address is too large".to_string()))?;
+
+        Self::write_register(handle, protocol::REG_READ_DATA_START, base_addr)?;
+        Self::write_register(handle, protocol::REG_READ_DATA_END, end_addr)?;
+        Self::write_register(handle, protocol::REG_READ_DATA_MODE, mode)?;
+        let _ = handle.clear_halt(protocol::BULK_EP_BUFFER_DATA_IN);
+        Ok(())
+    }
+
+    fn upload_bitstream_with_trace(
+        handle: &mut DeviceHandle<Context>,
+        data: &[u8],
+        mode: u32,
+        label: &str,
+        sink: &mut TraceSink<'_>,
+    ) -> Result<()> {
+        match Self::upload_bitstream(handle, data, mode) {
+            Ok(()) => Ok(()),
+            Err(first_error) => {
+                trace_warn(
+                    sink,
+                    "prepare",
+                    format!(
+                        "{label} bitstream upload failed once: {first_error}; clearing endpoints and retrying"
+                    ),
+                );
+                Self::clear_pxlogic_endpoints(handle, sink);
+                std::thread::sleep(Duration::from_millis(20));
+                Self::upload_bitstream(handle, data, mode)
+            }
+        }
+    }
+
     fn upload_bitstream(handle: &mut DeviceHandle<Context>, data: &[u8], mode: u32) -> Result<()> {
         const PAGE_SIZE: usize = 4096;
         let aligned_len = data.len().div_ceil(PAGE_SIZE) * PAGE_SIZE;
@@ -657,23 +1238,89 @@ fn publish_aligned_stream_samples(
 
 fn publish_cross_stream_samples(
     input: &[u8],
-    channel_count: u8,
+    output_channel_count: u8,
+    enabled_channels: &[u8],
     pending: &mut Vec<u8>,
     decoded_samples: &mut Vec<u8>,
     on_samples: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
-    let stripe_bytes = usize::from(channel_count) * 8;
+    let stripe_bytes = enabled_channels.len() * 8;
     pending.extend_from_slice(input);
     let aligned_end = pending.len() / stripe_bytes * stripe_bytes;
     if aligned_end == 0 {
         return Ok(());
     }
 
-    let decoded = decode_cross_data(channel_count, &pending[..aligned_end])?;
+    let decoded = decode_cross_data_to_physical_channels(
+        output_channel_count,
+        enabled_channels,
+        &pending[..aligned_end],
+        false,
+    )?;
     on_samples(&decoded);
     decoded_samples.extend_from_slice(&decoded);
     pending.drain(..aligned_end);
     Ok(())
+}
+
+fn buffer_capture_settle_duration(sample_count: u64, sample_rate_hz: u64) -> Duration {
+    let sample_us = if sample_rate_hz == 0 {
+        0
+    } else {
+        sample_count.saturating_mul(1_000_000) / sample_rate_hz
+    };
+    Duration::from_micros((10_000 + sample_us).min(5_000_000))
+}
+
+fn capture_read_poll_timeout() -> Duration {
+    Duration::from_millis(250)
+}
+
+fn capture_stall_timeout(
+    settings: &CaptureSettings,
+    channel_count: u8,
+    transfer_size: usize,
+) -> Option<Duration> {
+    if settings.trigger_enabled {
+        return None;
+    }
+    if matches!(settings.mode, CaptureMode::Buffer) {
+        return Some(Duration::from_secs(10));
+    }
+
+    let raw_bits_per_second = settings
+        .sample_rate_hz
+        .saturating_mul(u64::from(channel_count))
+        .max(1);
+    let transfer_bits = (transfer_size as u64).saturating_mul(8);
+    let expected_fill_ms = transfer_bits
+        .saturating_mul(1_000)
+        .div_ceil(raw_bits_per_second);
+    let timeout_ms = expected_fill_ms
+        .saturating_mul(2)
+        .saturating_add(5_000)
+        .clamp(5_000, 60_000);
+    Some(Duration::from_millis(timeout_ms))
+}
+
+fn px_usb_speed_from_rusb(speed: rusb::Speed) -> Option<PxUsbSpeed> {
+    match speed {
+        rusb::Speed::High => Some(PxUsbSpeed::High),
+        rusb::Speed::Super | rusb::Speed::SuperPlus => Some(PxUsbSpeed::Super),
+        _ => None,
+    }
+}
+
+fn usb_speed_label(speed: rusb::Speed) -> &'static str {
+    match speed {
+        rusb::Speed::Unknown => "unknown",
+        rusb::Speed::Low => "low",
+        rusb::Speed::Full => "full",
+        rusb::Speed::High => "high",
+        rusb::Speed::Super => "super",
+        rusb::Speed::SuperPlus => "super-plus",
+        _ => "unknown",
+    }
 }
 
 impl CaptureBackend for RusbBackend {
@@ -689,6 +1336,17 @@ impl CaptureBackend for RusbBackend {
             }
             let bus = device.bus_number();
             let address = device.address();
+            let speed = device.speed();
+            let identity = Self::probe_usb_identity(&device, &desc);
+            let label = if let Some(profile) = identity.profile {
+                format!(
+                    "{} {} {vid:04x}:{pid:04x} bus {bus} addr {address}",
+                    profile.vendor, profile.model
+                )
+            } else {
+                format!("PXLogic USB {vid:04x}:{pid:04x} bus {bus} addr {address}")
+            };
+            let profile_model = identity.profile.map(|profile| profile.model.to_string());
             devices.push(DeviceInfo {
                 id: usb_device_id(vid, pid, bus, address),
                 kind: DeviceKind::Usb,
@@ -696,8 +1354,15 @@ impl CaptureBackend for RusbBackend {
                 pid,
                 bus: Some(bus),
                 address: Some(address),
-                label: format!("PXLogic USB {vid:04x}:{pid:04x} bus {bus} addr {address}"),
-                ready: true,
+                label,
+                ready: identity.ready,
+                manufacturer: identity.manufacturer,
+                product: identity.product,
+                serial_number: identity.serial_number,
+                usb_speed: Some(usb_speed_label(speed).to_string()),
+                logic_mode: identity.logic_mode,
+                profile_model,
+                probe_error: identity.error,
             });
         }
         Ok(devices)
@@ -727,16 +1392,14 @@ impl CaptureBackend for RusbBackend {
         samples: &mut dyn FnMut(&[u8]),
     ) -> Result<CaptureData> {
         let mut sink = |_event: DiagnosticEvent| {};
-        self.capture_with_trace_streaming(settings, cancel, progress, &mut sink, started, samples)
-    }
-
-    fn stop_capture(&self, device_id: &str) -> Result<()> {
-        let mut handle = self.open_device(device_id)?;
-        Self::claim_pxlogic_interfaces(&mut handle)?;
-        Self::write_register(
-            &mut handle,
-            protocol::REG_STREAM_START,
-            protocol::STREAM_STOP_FLAGS,
+        self.capture_with_trace_streaming(
+            settings,
+            cancel,
+            progress,
+            &mut sink,
+            started,
+            samples,
+            &mut |_| {},
         )
     }
 }
@@ -837,6 +1500,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn maps_pxview_control_status_to_trigger_metadata() {
+        let status = ControlStatus {
+            sync_cur_sample: 12_000,
+            trig_out_validset: 1,
+            real_pos: 8_192,
+        };
+        let disabled = CaptureSettings::default();
+        assert_eq!(trigger_metadata_from_status(&disabled, status), None);
+
+        let enabled = CaptureSettings {
+            trigger_enabled: true,
+            trigger_channel: 7,
+            trigger_kind: crate::CaptureTriggerKind::Falling,
+            ..CaptureSettings::default()
+        };
+        assert_eq!(
+            trigger_metadata_from_status(&enabled, status),
+            Some(CaptureTriggerMetadata {
+                sample_index: 8_192,
+                channel: 7,
+                kind: crate::CaptureTriggerKind::Falling,
+            })
+        );
+    }
+
+    #[test]
     fn loads_bitstreams_from_directory() {
         let dir = env::temp_dir().join(format!("pxlogic-bitstreams-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -854,31 +1543,64 @@ mod tests {
 
     #[test]
     fn fragmented_cross_stream_keeps_only_the_incomplete_stripe() {
-        let channel_count = 32;
-        let stripe_bytes = usize::from(channel_count) * 8;
-        let raw = (0..stripe_bytes * 3)
-            .map(|index| (index.wrapping_mul(17) & 0xff) as u8)
-            .collect::<Vec<_>>();
-        let expected = decode_cross_data(channel_count, &raw).unwrap();
-        let mut pending = Vec::new();
-        let mut decoded = Vec::new();
-        let mut published = Vec::new();
-        let mut sink = |chunk: &[u8]| published.extend_from_slice(chunk);
-
-        for chunk in raw.chunks(73) {
-            publish_cross_stream_samples(
-                chunk,
+        for channel_count in [1u8, 2, 4, 8, 16, 32] {
+            let enabled_channels = (0..channel_count).collect::<Vec<_>>();
+            let stripe_bytes = usize::from(channel_count) * 8;
+            let raw = (0..stripe_bytes * 3)
+                .map(|index| (index.wrapping_mul(17) & 0xff) as u8)
+                .collect::<Vec<_>>();
+            let expected = decode_cross_data_to_physical_channels(
                 channel_count,
-                &mut pending,
-                &mut decoded,
-                &mut sink,
+                &enabled_channels,
+                &raw,
+                false,
             )
             .unwrap();
-            assert!(pending.len() < stripe_bytes);
-        }
+            let mut pending = Vec::new();
+            let mut decoded = Vec::new();
+            let mut published = Vec::new();
+            let mut sink = |chunk: &[u8]| published.extend_from_slice(chunk);
 
-        assert!(pending.is_empty());
-        assert_eq!(decoded, expected);
-        assert_eq!(published, expected);
+            for chunk in raw.chunks(73) {
+                publish_cross_stream_samples(
+                    chunk,
+                    channel_count,
+                    &enabled_channels,
+                    &mut pending,
+                    &mut decoded,
+                    &mut sink,
+                )
+                .unwrap();
+                assert!(pending.len() < stripe_bytes);
+            }
+
+            assert!(pending.is_empty());
+            assert_eq!(decoded, expected);
+            assert_eq!(published, expected);
+        }
+    }
+
+    #[test]
+    fn low_rate_stream_waits_for_a_full_pxview_transfer() {
+        let settings = CaptureSettings {
+            sample_rate_hz: 2_000,
+            channel_count: 32,
+            mode: CaptureMode::Stream,
+            ..CaptureSettings::default()
+        };
+        let transfer_size = pxview_capture_transfer_size(2_000, 32, false).unwrap();
+        assert_eq!(transfer_size, 128 * 1024);
+        let timeout = capture_stall_timeout(&settings, 32, transfer_size).unwrap();
+        assert!(timeout >= Duration::from_secs(37));
+        assert!(timeout <= Duration::from_secs(38));
+    }
+
+    #[test]
+    fn triggered_capture_has_no_idle_stall_deadline() {
+        let settings = CaptureSettings {
+            trigger_enabled: true,
+            ..CaptureSettings::default()
+        };
+        assert_eq!(capture_stall_timeout(&settings, 16, 256 * 1024), None);
     }
 }

@@ -101,6 +101,10 @@
   - 包含 session 独立 GraphSession、组合 `render_graph_frame`、capture stream 更新、文件/裁剪/measurement 和 extension 命令。
 - `src-tauri/src/bin/usb_smoke.rs`
   - USB smoke test 工具。
+- `native/saleae-analyzer-sidecar`
+  - Logic 2.4.43 Analyzer SDK sidecar；从本机运行时加载原版 SPI analyzer，不把 Saleae 二进制放进仓库。
+- `native/sigrok-analyzer-sidecar`
+  - PXView/libsigrokdecode C SPI sidecar；复用 `pxview-fork` 源码并对 transition-indexed capture 提供稀疏 runtime。
 - `src-tauri/tauri.conf.json`
   - Tauri 应用配置。
 - `src-tauri/capabilities/default.json`

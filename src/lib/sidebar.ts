@@ -50,6 +50,7 @@ export type UiCommand =
   | (typeof AnalyzerCommands)[keyof typeof AnalyzerCommands];
 
 export interface CommandPayload {
+  analyzerBackend?: "auto" | "saleae_native" | "sigrok_native" | "legacy_rust";
   analyzerName?: string;
 }
 

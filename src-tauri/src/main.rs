@@ -1,8 +1,9 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::Path,
     path::PathBuf,
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -12,9 +13,12 @@ use std::{
 
 use parking_lot::{Mutex, RwLock};
 use pxlogic_core::{
+    build_pxview_pwm0_register_script, generic_logic_capture_capabilities,
+    pxlogic_capture_capabilities_from_profile, resolve_pxlogic_device_profile,
     AnalyzerDecodeSettings, CaptureBackend, CaptureData, CaptureMetadata, CaptureProgress,
-    CaptureSettings, DecodedFrame, DeviceInfo, DiagnosticEvent, DiagnosticLevel, ExportFormat,
-    FakeBackend,
+    CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DeviceInfo,
+    DeviceKind, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
+    HardwareCaptureCapabilities, PwmConfiguration, PwmSettings, PxUsbSpeed,
 };
 use pxlogic_graph::{GraphFrameRequest, GraphFrameResponse, GraphSession};
 use pxlogic_waveform::{
@@ -32,6 +36,9 @@ type CommandResult<T> = Result<T, String>;
 struct AppState {
     sessions: Arc<RwLock<HashMap<String, Arc<GraphSession>>>>,
     cancel: Arc<AtomicBool>,
+    active_capture: Arc<Mutex<Option<ActiveCapture>>>,
+    prepared_devices: Arc<Mutex<HashSet<String>>>,
+    prepare_lock: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -53,6 +60,16 @@ impl AppState {
             .cloned()
             .ok_or_else(|| format!("session {session_id} has no capture data"))
     }
+
+    fn forget_prepared_device(&self, device_id: &str) {
+        self.prepared_devices.lock().remove(device_id);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActiveCapture {
+    device_id: String,
+    session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +82,12 @@ struct CaptureSummary {
 struct CaptureUpdatedEvent {
     session_id: String,
     summary: CaptureSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CaptureTriggeredEvent {
+    session_id: String,
+    trigger: CaptureTriggerMetadata,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,7 +132,102 @@ fn list_devices() -> CommandResult<Vec<DeviceInfo>> {
 }
 
 #[tauri::command]
-fn prepare_device(device_id: String) -> CommandResult<()> {
+fn device_capabilities(device_id: String) -> CommandResult<HardwareCaptureCapabilities> {
+    if device_id == FakeBackend::DEVICE_ID {
+        return Ok(generic_logic_capture_capabilities(
+            device_id,
+            "PXLogic Preview Device",
+        ));
+    }
+
+    let devices = list_devices()?;
+    let device = devices
+        .iter()
+        .find(|device| device.id == device_id)
+        .ok_or_else(|| format!("device {device_id} is not currently connected"))?;
+    capture_capabilities_for_device(device)
+}
+
+fn capture_capabilities_for_device(
+    device: &DeviceInfo,
+) -> CommandResult<HardwareCaptureCapabilities> {
+    if device.kind == DeviceKind::Fake {
+        return Ok(generic_logic_capture_capabilities(
+            device.id.clone(),
+            device
+                .profile_model
+                .clone()
+                .unwrap_or_else(|| device.label.clone()),
+        ));
+    }
+
+    let speed = px_usb_speed_from_device_info(device).ok_or_else(|| {
+        format!(
+            "device {} does not report a PXView-supported USB speed",
+            device.id
+        )
+    })?;
+    let profile = resolve_pxlogic_device_profile(device.vid, device.pid, speed, device.logic_mode)
+        .ok_or_else(|| format!("no PXView profile matched device {}", device.id))?;
+    Ok(pxlogic_capture_capabilities_from_profile(
+        device.id.clone(),
+        profile,
+    ))
+}
+
+fn px_usb_speed_from_device_info(device: &DeviceInfo) -> Option<PxUsbSpeed> {
+    match device.usb_speed.as_deref() {
+        Some("high") => Some(PxUsbSpeed::High),
+        Some("super" | "super-plus") => Some(PxUsbSpeed::Super),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "rusb-transport")]
+fn prepare_real_device_cached(
+    state: &AppState,
+    device_id: &str,
+    sink: &mut dyn FnMut(DiagnosticEvent),
+) -> pxlogic_core::Result<()> {
+    let _prepare_guard = state.prepare_lock.lock();
+    if state.prepared_devices.lock().contains(device_id) {
+        sink(DiagnosticEvent {
+            phase: "prepare".to_string(),
+            level: DiagnosticLevel::Info,
+            message: format!("FPGA already prepared for {device_id}; reusing process cache"),
+        });
+        return Ok(());
+    }
+
+    sink(DiagnosticEvent {
+        phase: "prepare".to_string(),
+        level: DiagnosticLevel::Info,
+        message: format!("preparing FPGA for {device_id}"),
+    });
+    let result = (|| {
+        let real = RusbBackend::default();
+        let bitstreams = RusbBackend::load_bitstreams()?;
+        real.prepare_device_with_trace(device_id, bitstreams.as_ref(), sink)
+    })();
+    if result.is_ok() {
+        state.prepared_devices.lock().insert(device_id.to_string());
+        sink(DiagnosticEvent {
+            phase: "prepare".to_string(),
+            level: DiagnosticLevel::Info,
+            message: format!("FPGA prepared for {device_id}; future captures will skip upload"),
+        });
+    } else {
+        state.forget_prepared_device(device_id);
+    }
+    result
+}
+
+#[tauri::command]
+async fn prepare_device(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    device_id: String,
+) -> CommandResult<()> {
     if device_id == FakeBackend::DEVICE_ID {
         return FakeBackend::default()
             .prepare_device(&device_id, None)
@@ -118,11 +236,57 @@ fn prepare_device(device_id: String) -> CommandResult<()> {
 
     #[cfg(feature = "rusb-transport")]
     {
-        let real = RusbBackend::default();
-        let bitstreams = RusbBackend::load_bitstreams().map_err(to_string)?;
-        return real
-            .prepare_device(&device_id, bitstreams.as_ref())
+        let app_state = state.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let diagnostics_app = app.clone();
+            let mut diagnostics = |event: DiagnosticEvent| {
+                let _ = diagnostics_app.emit("usb_diagnostic", &event);
+            };
+            prepare_real_device_cached(&app_state, &device_id, &mut diagnostics).map_err(to_string)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+
+    #[allow(unreachable_code)]
+    Err("real USB backend is not enabled in this build".to_string())
+}
+
+#[tauri::command]
+async fn configure_pwm(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    device_id: String,
+    settings: PwmSettings,
+) -> CommandResult<PwmConfiguration> {
+    if let Some(active) = state.active_capture.lock().clone() {
+        return Err(format!(
+            "cannot configure PWM0 while session {} is capturing from {}",
+            active.session_id, active.device_id
+        ));
+    }
+    if device_id == FakeBackend::DEVICE_ID {
+        return build_pxview_pwm0_register_script(&settings)
+            .map(|(configuration, _)| configuration)
             .map_err(to_string);
+    }
+
+    #[cfg(feature = "rusb-transport")]
+    {
+        let app_state = state.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let real = RusbBackend::default();
+            let diagnostics_app = app.clone();
+            let mut diagnostics = |event: DiagnosticEvent| {
+                let _ = diagnostics_app.emit("usb_diagnostic", &event);
+            };
+            prepare_real_device_cached(&app_state, &device_id, &mut diagnostics)
+                .map_err(to_string)?;
+            real.configure_pwm0_with_trace(&device_id, &settings, &mut diagnostics)
+                .map_err(to_string)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
     }
 
     #[allow(unreachable_code)]
@@ -135,12 +299,19 @@ async fn start_capture(
     state: State<'_, AppState>,
     session_id: String,
     settings: CaptureSettings,
+    demo_analyzers: Option<Vec<AnalyzerDecodeSettings>>,
 ) -> CommandResult<CaptureSummary> {
     state.cancel.store(false, Ordering::Release);
     let cancel = state.cancel.clone();
     let graph = state.session(&session_id);
+    let active_capture = state.active_capture.clone();
+    let app_state = state.inner().clone();
 
     let result = tauri::async_runtime::spawn_blocking(move || {
+        *active_capture.lock() = Some(ActiveCapture {
+            device_id: settings.device_id.clone(),
+            session_id: session_id.clone(),
+        });
         let progress_app = app.clone();
         let mut progress = |event: CaptureProgress| {
             let _ = progress_app.emit("capture_progress", &event);
@@ -192,10 +363,28 @@ async fn start_capture(
                 );
             }
         };
+        let trigger_graph = graph.clone();
+        let trigger_error = graph_error.clone();
+        let trigger_app = app.clone();
+        let trigger_session_id = session_id.clone();
+        let mut triggered = move |trigger: &CaptureTriggerMetadata| {
+            if let Err(error) = trigger_graph.set_trigger(trigger.clone()) {
+                *trigger_error.lock() = Some(error.to_string());
+                return;
+            }
+            let _ = trigger_app.emit(
+                "capture_triggered",
+                &CaptureTriggeredEvent {
+                    session_id: trigger_session_id.clone(),
+                    trigger: trigger.clone(),
+                },
+            );
+        };
 
         let capture = if settings.device_id == FakeBackend::DEVICE_ID {
-            FakeBackend::default().capture_streaming(
+            FakeBackend::default().capture_streaming_with_analyzers(
                 &settings,
+                demo_analyzers.as_deref().unwrap_or_default(),
                 &cancel,
                 &mut progress,
                 &mut started,
@@ -210,22 +399,17 @@ async fn start_capture(
                     level: DiagnosticLevel::Info,
                     message: "auto prepare before capture".to_string(),
                 });
-                match RusbBackend::load_bitstreams() {
-                    Ok(bitstreams) => match real.prepare_device_with_trace(
-                        &settings.device_id,
-                        bitstreams.as_ref(),
+                match prepare_real_device_cached(&app_state, &settings.device_id, &mut diagnostics)
+                {
+                    Ok(()) => real.capture_with_trace_streaming(
+                        &settings,
+                        &cancel,
+                        &mut progress,
                         &mut diagnostics,
-                    ) {
-                        Ok(()) => real.capture_with_trace_streaming(
-                            &settings,
-                            &cancel,
-                            &mut progress,
-                            &mut diagnostics,
-                            &mut started,
-                            &mut samples,
-                        ),
-                        Err(error) => Err(error),
-                    },
+                        &mut started,
+                        &mut samples,
+                        &mut triggered,
+                    ),
                     Err(error) => Err(error),
                 }
             }
@@ -237,6 +421,7 @@ async fn start_capture(
 
         match capture {
             Ok(capture) => {
+                *active_capture.lock() = None;
                 if let Some(error) = graph_error.lock().take() {
                     return Err(error);
                 }
@@ -249,6 +434,13 @@ async fn start_capture(
                 Ok(summary)
             }
             Err(error) => {
+                *active_capture.lock() = None;
+                #[cfg(feature = "rusb-transport")]
+                if settings.device_id != FakeBackend::DEVICE_ID
+                    && matches!(error, pxlogic_core::CoreError::Usb(_))
+                {
+                    app_state.forget_prepared_device(&settings.device_id);
+                }
                 let message = error.to_string();
                 let _ = app.emit(
                     "usb_diagnostic",
@@ -270,9 +462,98 @@ async fn start_capture(
 }
 
 #[tauri::command]
-fn cancel_capture(state: State<'_, AppState>) -> CommandResult<()> {
+fn cancel_capture(app: AppHandle, state: State<'_, AppState>) -> CommandResult<()> {
     state.cancel.store(true, Ordering::Release);
+    let active_capture = state.active_capture.lock().clone();
+    if let Some(active_capture) = active_capture {
+        let _ = app.emit(
+            "usb_diagnostic",
+            &DiagnosticEvent {
+                phase: "capture".to_string(),
+                level: DiagnosticLevel::Info,
+                message: format!(
+                    "stop requested for {} on {}; cancelling the active USB read",
+                    active_capture.session_id, active_capture.device_id
+                ),
+            },
+        );
+    }
+
     Ok(())
+}
+
+fn locate_saleae_runtime_root() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_RUNTIME_ROOT") {
+        return Some(PathBuf::from(path));
+    }
+    let mut candidates = vec![
+        PathBuf::from("/Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
+        PathBuf::from("/Applications/Logic 2.app/Contents/Resources/macos-arm64"),
+        PathBuf::from("/Volumes/tp7100s/Downloads/Saleae Logic.app/Contents/Resources/macos-arm64"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        candidates.push(home.join("Applications/Saleae Logic.app/Contents/Resources/macos-arm64"));
+        candidates.push(home.join("Applications/Logic 2.app/Contents/Resources/macos-arm64"));
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.join("libgraph_server_shared.dylib").is_file())
+}
+
+fn locate_saleae_graph_sidecar() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_GRAPH_SIDECAR") {
+        return Some(PathBuf::from(path));
+    }
+    let current = std::env::current_dir().ok()?;
+    [
+        current.join("target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar"),
+        current.join("../target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+fn convert_saleae_capture(path: &Path) -> CommandResult<PathBuf> {
+    let sidecar = locate_saleae_graph_sidecar().ok_or_else(|| {
+        "Saleae .sal support requires the native graph sidecar; build native/saleae-graph-sidecar/build.sh first"
+            .to_string()
+    })?;
+    let runtime_root = locate_saleae_runtime_root().ok_or_else(|| {
+        "Saleae .sal support requires Logic 2.4.43 runtime; set PXLOGIC_SALEAE_RUNTIME_ROOT"
+            .to_string()
+    })?;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let output = std::env::temp_dir().join(format!(
+        "pxlogic-saleae-sal-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&output).map_err(to_string)?;
+    let result = Command::new(&sidecar)
+        .arg("--runtime-root")
+        .arg(runtime_root)
+        .arg("--convert-sal")
+        .arg(path)
+        .arg(&output)
+        .output()
+        .map_err(|error| format!("failed to start Saleae graph sidecar: {error}"))?;
+    if !result.status.success() {
+        let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        let _ = fs::remove_dir_all(&output);
+        return Err(if detail.is_empty() {
+            format!("Saleae .sal conversion failed with {}", result.status)
+        } else {
+            format!("Saleae .sal conversion failed: {detail}")
+        });
+    }
+    if !output.join("manifest.json").is_file() {
+        let _ = fs::remove_dir_all(&output);
+        return Err("Saleae graph sidecar completed without a transition manifest".to_string());
+    }
+    Ok(output)
 }
 
 #[tauri::command]
@@ -281,7 +562,32 @@ fn open_capture(
     path: String,
     state: State<'_, AppState>,
 ) -> CommandResult<CaptureSummary> {
-    let capture = pxlogic_file::open_pxcap(PathBuf::from(path)).map_err(to_string)?;
+    let source_path = PathBuf::from(&path);
+    if source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sal"))
+    {
+        let converted = convert_saleae_capture(&source_path)?;
+        let result = pxlogic_file::open_saleae_transition_manifest(converted.join("manifest.json"))
+            .map_err(to_string);
+        let _ = fs::remove_dir_all(&converted);
+        let capture = result?;
+        let bytes = fs::metadata(&source_path)
+            .map(|metadata| usize::try_from(metadata.len()).unwrap_or(usize::MAX))
+            .unwrap_or_default();
+        let summary = CaptureSummary {
+            metadata: capture.metadata.clone(),
+            bytes,
+        };
+        state
+            .session(&session_id)
+            .replace_sparse_capture(capture)
+            .map_err(to_string)?;
+        return Ok(summary);
+    }
+
+    let capture = pxlogic_file::open_pxcap(source_path).map_err(to_string)?;
     let summary = CaptureSummary {
         metadata: capture.metadata.clone(),
         bytes: capture.samples.len(),
@@ -363,6 +669,13 @@ fn trim_capture(
 
     let mut metadata = capture.metadata.clone();
     metadata.sample_count = end - start;
+    metadata.trigger = metadata.trigger.and_then(|mut trigger| {
+        if trigger.sample_index < start || trigger.sample_index >= end {
+            return None;
+        }
+        trigger.sample_index -= start;
+        Some(trigger)
+    });
     let capture = CaptureData {
         metadata,
         samples: capture.samples[byte_start..byte_end].to_vec(),
@@ -418,13 +731,14 @@ async fn measure_digital_range(
 #[tauri::command]
 async fn decode_analyzer_frames(
     session_id: String,
+    backend: DecoderBackendKind,
     settings: AnalyzerDecodeSettings,
     state: State<'_, AppState>,
 ) -> CommandResult<Vec<DecodedFrame>> {
     let session = state.existing_session(&session_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         session
-            .decode_frames(&settings)
+            .decode_frames_with_backend(&settings, backend)
             .map(|frames| frames.as_ref().clone())
             .map_err(to_string)
     })
@@ -574,7 +888,9 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_devices,
+            device_capabilities,
             prepare_device,
+            configure_pwm,
             start_capture,
             cancel_capture,
             open_capture,

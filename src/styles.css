@@ -503,6 +503,21 @@ button:disabled {
   min-width: 196px;
 }
 
+.toolbarMenuGroup + .toolbarMenuGroup {
+  border-top: 1px solid var(--border-20);
+  margin-top: 5px;
+  padding-top: 5px;
+}
+
+.toolbarMenuGroupLabel {
+  color: var(--on-background-40);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  padding: 4px 12px 3px;
+  text-transform: uppercase;
+}
+
 .toolbarMenuItem {
   width: 100%;
   min-height: 32px;
@@ -591,6 +606,41 @@ button:disabled {
   pointer-events: none;
 }
 
+/* Ported from Logic 2.4.43 TriggerMarkerRender/styles.module.css. */
+.captureTriggerTimingMarker {
+  position: absolute;
+  top: 0;
+  z-index: 21;
+  color: hsl(55, 100%, 73%);
+  pointer-events: none;
+}
+
+.captureTriggerTimingLabel {
+  width: 17px;
+  position: absolute;
+  top: 8px;
+  left: -8px;
+  padding: 2px 0;
+  border-radius: 2px;
+  color: hsl(55, 100%, 73%);
+  background-color: var(--background-0);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 12px;
+  text-align: center;
+}
+
+.captureTriggerTimingArrow {
+  width: 0;
+  height: 0;
+  position: absolute;
+  top: 24px;
+  left: -8px;
+  border-color: hsl(55, 100%, 73%) transparent transparent;
+  border-style: solid;
+  border-width: 7px 8.5px 0;
+}
+
 .mainArea.emptySession {
   grid-template-columns: minmax(0, 1fr) auto;
 }
@@ -615,6 +665,11 @@ button:disabled {
   align-items: center;
   justify-content: center;
   gap: 24px;
+}
+
+.devicePrompts.single .devicePrompt {
+  width: min(100%, 760px);
+  flex: 0 1 760px;
 }
 
 .devicePrompt {
@@ -885,15 +940,71 @@ button:disabled {
 
 .channelLabels {
   min-height: 0;
-  z-index: 1;
-  display: grid;
-  align-content: start;
+  grid-column: 1 / -1;
+  grid-row: 1;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
   gap: calc(var(--row-v2-spacing-px) * 1px);
   padding-top: 0;
+  pointer-events: none;
+}
+
+.channelLabels.reorderingActive {
+  z-index: 30;
+}
+
+.channelDragItem {
+  width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: var(--channel-label-width) minmax(0, 1fr);
+  gap: calc(var(--row-v2-spacing-px) * 1px);
+  pointer-events: none;
+  transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+  will-change: transform;
+}
+
+.channelDragItem.dragging {
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--background-10);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(var(--on-background-0-base), 0.12);
+}
+
+.channelLabelCell {
+  min-width: 0;
   padding-right: 4px;
+  pointer-events: auto;
+}
+
+.channelDragWaveformGhost {
+  min-width: 0;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.channelLabels.reorderingActive .channelDragWaveformGhost {
+  background: #101013;
+}
+
+.channelDragWaveformPreview {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.channelLabels [data-rbd-placeholder-context-id] {
+  flex-shrink: 0;
 }
 
 .channelRow {
+  width: 100%;
+  height: 100%;
   min-width: 0;
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
@@ -906,6 +1017,18 @@ button:disabled {
   cursor: pointer;
 }
 
+.channelRow.reordering {
+  position: relative;
+  z-index: 30;
+  cursor: grabbing;
+  user-select: none;
+  filter: brightness(1.08);
+}
+
+.channelRow.reordering .channelHeader {
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.34);
+}
+
 .channelRow.disabled {
   opacity: 0.46;
 }
@@ -914,7 +1037,7 @@ button:disabled {
   content: " TRIG";
   margin-left: 5px;
   color: var(--selected-highlight);
-  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif;
   font-size: 9px;
   font-weight: 700;
 }
@@ -1087,7 +1210,7 @@ button:disabled {
 
 .channelContextItem:disabled {
   color: var(--on-background-50);
-  cursor: default;
+  cursor: pointer;
   opacity: 0.55;
 }
 
@@ -1210,9 +1333,21 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   height: 100%;
+  grid-column: 2;
+  grid-row: 1;
   position: relative;
   overflow: hidden;
   background: #101013;
+}
+
+.captureTriggerGraphLine {
+  width: 1px;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 13;
+  border-right: 1px dashed hsl(55, 100%, 73%);
+  pointer-events: none;
 }
 
 .channelResizeHandle {
@@ -1340,10 +1475,16 @@ button:disabled {
 .analyzerBubbleArrow {
   width: 0;
   height: 0;
+  display: none;
   flex: 0 0 auto;
   align-self: center;
   border-top: 8px solid transparent;
   border-bottom: 8px solid transparent;
+}
+
+.analyzerBubble.overflowLeft .analyzerBubbleArrow.left,
+.analyzerBubble.overflowRight .analyzerBubbleArrow.right {
+  display: block;
 }
 
 .analyzerBubbleArrow.left {
@@ -1423,30 +1564,12 @@ button:disabled {
   transform: translateY(-50%) scale(1);
 }
 
-.analyzerMarkerTrack {
+.analyzerMarkersCanvas {
   position: absolute;
-  left: 0;
-  right: 0;
-  overflow: hidden;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
-}
-
-.analyzerMarker {
-  width: 9px;
-  height: 6px;
-  position: absolute;
-  top: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--marker-color);
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.45));
-  opacity: 0.96;
-  transform: translate(-50%, -50%);
-}
-
-.analyzerMarker svg {
-  display: block;
 }
 
 .cursorOverlay {
@@ -2772,6 +2895,32 @@ button:disabled {
   font-weight: 600;
 }
 
+.pwmSettingsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pwmSettingsGrid .stack-field {
+  min-width: 0;
+  margin: 0;
+}
+
+.pwmEffectiveValue {
+  color: var(--on-background-30);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.pwmApplyButton {
+  justify-self: start;
+}
+
+.pwmApplyButton:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .deviceSettingsActions {
   display: inline-flex;
   align-items: center;
@@ -2809,6 +2958,16 @@ button:disabled {
 
 .channelPickerButton.enabled:hover {
   border-color: var(--on-background-0);
+}
+
+.deviceSettingsModeHint {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--on-background-30);
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modeButtonGroup {
@@ -3055,7 +3214,8 @@ button:disabled {
 .suggestedAnalyzerItem {
   width: 100%;
   min-height: 34px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   border: 1px solid transparent;
@@ -3065,6 +3225,12 @@ button:disabled {
   padding: 0 9px;
   text-align: left;
   cursor: pointer;
+}
+
+.suggestedAnalyzerItem small {
+  color: var(--on-background-40);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .suggestedAnalyzerItem:hover {
@@ -6124,6 +6290,11 @@ body.timing-marker-col-resize * {
 
   .devicePrompt {
     min-height: 320px;
+    flex: none;
+  }
+
+  .devicePrompts.single .devicePrompt {
+    width: 100%;
     flex: none;
   }
 

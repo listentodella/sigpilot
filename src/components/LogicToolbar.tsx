@@ -7,6 +7,7 @@ import {
   MeasurementCommands,
   UiCommand,
 } from "../lib/sidebar";
+import { ANALYZER_CATALOG_GROUPS } from "../lib/analyzers";
 
 type MenuName = "analyzers" | "markers" | null;
 
@@ -71,18 +72,26 @@ export function LogicToolbar({
         </PopoverButton>
         {openMenu === "analyzers" && (
           <ToolbarMenu className="analyzerMenu">
-            {["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"].map((name) => (
-              <button
-                className="toolbarMenuItem"
-                key={name}
-                onClick={() => {
-                  setOpenMenu(null);
-                  onCommand(AnalyzerCommands.AddAnalyzer, { analyzerName: name });
-                }}
-              >
-                <span>{name}</span>
-                <small>Analyzer</small>
-              </button>
+            {ANALYZER_CATALOG_GROUPS.map((group) => (
+              <div className="toolbarMenuGroup" key={group.backend}>
+                <div className="toolbarMenuGroupLabel">{group.label}</div>
+                {group.analyzers.map((name) => (
+                  <button
+                    className="toolbarMenuItem"
+                    key={`${group.backend}:${name}`}
+                    onClick={() => {
+                      setOpenMenu(null);
+                      onCommand(AnalyzerCommands.AddAnalyzer, {
+                        analyzerName: name,
+                        analyzerBackend: group.backend,
+                      });
+                    }}
+                  >
+                    <span>{name}</span>
+                    <small>{group.backend === "legacy_rust" ? "Compatibility" : "Native"}</small>
+                  </button>
+                ))}
+              </div>
             ))}
           </ToolbarMenu>
         )}

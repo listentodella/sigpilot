@@ -279,12 +279,17 @@ pub fn decode_i2c(
                 let acknowledged = !sda;
                 let bubble_label = if byte_index == 0 {
                     format!(
-                        "0x{:02X} {}",
+                        "Setup {} to [0x{:02X}] + {}",
+                        if byte & 1 == 0 { "Write" } else { "Read" },
                         byte >> 1,
-                        if byte & 1 == 0 { "W" } else { "R" }
+                        if acknowledged { "ACK" } else { "NAK" }
                     )
                 } else {
-                    label_for_value(u64::from(byte), 8)
+                    format!(
+                        "{} + {}",
+                        label_for_value(u64::from(byte), 8),
+                        if acknowledged { "ACK" } else { "NAK" }
+                    )
                 };
                 let label = if byte_index == 0 {
                     format!(
@@ -531,12 +536,14 @@ mod tests {
                 source_device: "test".to_string(),
                 sample_rate_hz: 1_000_000,
                 channel_count,
+                enabled_channels: (0..channel_count).collect(),
                 unitsize: 1,
                 sample_count: words.len() as u64,
                 captured_at: Utc::now(),
                 labels: (0..channel_count)
                     .map(|channel| format!("D{channel}"))
                     .collect(),
+                trigger: None,
             },
             samples: words.to_vec(),
         }
@@ -598,12 +605,15 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            ["Address 0x50 Write ACK", "Data 0x2A ACK", "Data 0x55 ACK"]
+            ["Address 0x20 Write ACK", "Data 0x90 ACK", "Data 0x90 NAK"]
         );
         assert_eq!(frames[0].channel_values.len(), 1);
         assert_eq!(frames[0].channel_values[0].channel, 1);
         assert_eq!(frames[0].channel_values[0].role, "SDA");
-        assert_eq!(frames[0].channel_values[0].label, "0x50 W");
+        assert_eq!(
+            frames[0].channel_values[0].label,
+            "Setup Write to [0x20] + ACK"
+        );
     }
 
     #[test]
@@ -628,14 +638,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             frames.first().map(|frame| frame.label.as_str()),
-            Some("MOSI 0xA5 / MISO 0x3C")
+            Some("MOSI 0x4C / MISO 0x4D")
         );
         let first_values = &frames[0].channel_values;
         assert_eq!(first_values.len(), 2);
         assert_eq!(first_values[0].role, "MOSI");
-        assert_eq!(first_values[0].label, "0xA5");
+        assert_eq!(first_values[0].label, "0x4C");
         assert_eq!(first_values[1].role, "MISO");
-        assert_eq!(first_values[1].label, "0x3C");
+        assert_eq!(first_values[1].label, "0x4D");
         assert!(frames.len() > 100);
     }
 
@@ -661,9 +671,12 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].value, 0xA0);
         assert_eq!(frames[0].label, "Address 0x50 Write ACK");
-        assert_eq!(frames[0].channel_values[0].label, "0x50 W");
+        assert_eq!(
+            frames[0].channel_values[0].label,
+            "Setup Write to [0x50] + ACK"
+        );
         assert_eq!(frames[1].label, "Data 0x5A ACK");
-        assert_eq!(frames[1].channel_values[0].label, "0x5A");
+        assert_eq!(frames[1].channel_values[0].label, "0x5A + ACK");
     }
 
     #[test]

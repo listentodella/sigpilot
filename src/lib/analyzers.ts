@@ -2,6 +2,7 @@ import type {
   AnalyzerBubble,
   AnalyzerDecodeSettings,
   AnalyzerTrackWindow,
+  DecoderBackendKind,
   DecodedFrame,
 } from "./api";
 
@@ -27,6 +28,7 @@ export interface UiAnalyzerInstance {
   type: string;
   name: string;
   color: string;
+  decoderBackend: DecoderBackendKind;
   channel: number;
   baudRate: number;
   inverted: boolean;
@@ -48,6 +50,7 @@ export interface UiAnalyzerInstance {
   previousFrame: DecodedFrame | null;
   nextFrame: DecodedFrame | null;
   renderedTracks: AnalyzerTrackWindow[];
+  renderedDecodeSignature: string | null;
   decodeBusy: boolean;
   highlightedFrameIndex: number | null;
 }
@@ -72,6 +75,7 @@ export function createAnalyzerInstance(
   type: string,
   analyzers: UiAnalyzerInstance[],
   channel = 0,
+  decoderBackend: DecoderBackendKind = "legacy_rust",
 ): UiAnalyzerInstance {
   const index = analyzers.length;
   const nextChannel = (offset: number) => (channel + offset) % 32;
@@ -80,6 +84,7 @@ export function createAnalyzerInstance(
     type,
     name: analyzerDisplayName(type, analyzers),
     color: SALEAE_ANALYZER_COLORS[index % SALEAE_ANALYZER_COLORS.length],
+    decoderBackend,
     channel,
     baudRate: 115_200,
     inverted: false,
@@ -101,6 +106,7 @@ export function createAnalyzerInstance(
     previousFrame: null,
     nextFrame: null,
     renderedTracks: [],
+    renderedDecodeSignature: null,
     decodeBusy: false,
     highlightedFrameIndex: null,
   };
@@ -237,5 +243,33 @@ export function analyzerChannelIndexes(analyzer: UiAnalyzerInstance) {
 }
 
 export function analyzerDecodeSignature(analyzer: UiAnalyzerInstance) {
-  return JSON.stringify(analyzerDecodeSettings(analyzer));
+  return JSON.stringify([analyzer.decoderBackend, analyzerDecodeSettings(analyzer)]);
 }
+
+export function decoderBackendLabel(backend: DecoderBackendKind) {
+  if (backend === "saleae_native") return "Saleae Native";
+  if (backend === "sigrok_native") return "Sigrok Native";
+  if (backend === "auto") return "Automatic";
+  return "Compatibility";
+}
+
+export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
+  if (type === "SPI") return ["saleae_native", "sigrok_native", "legacy_rust"];
+  return ["legacy_rust"];
+}
+
+export interface AnalyzerCatalogGroup {
+  backend: DecoderBackendKind;
+  label: string;
+  analyzers: string[];
+}
+
+export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
+  { backend: "saleae_native", label: "Saleae Native", analyzers: ["SPI"] },
+  { backend: "sigrok_native", label: "Sigrok Native (PXView)", analyzers: ["SPI"] },
+  {
+    backend: "legacy_rust",
+    label: "Compatibility",
+    analyzers: ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"],
+  },
+];

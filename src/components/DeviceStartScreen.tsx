@@ -1,6 +1,5 @@
 import { Download, RefreshCw, Usb } from "lucide-react";
 import logicDarkTheme from "../assets/saleae/logicDarkTheme.png";
-import logicMsoDarkTheme from "../assets/saleae/logicMsoDarkTheme.png";
 import { DeviceInfo } from "../lib/api";
 
 interface DeviceStartScreenProps {
@@ -28,19 +27,7 @@ export function DeviceStartScreen({
 
   return (
     <div className="sessionPlaceholder">
-      <div className="devicePrompts">
-        <DevicePromptCard deviceName="Logic MSO" imageSrc={logicMsoDarkTheme}>
-          <DeviceList
-            busy={busy}
-            devices={physicalDevices}
-            emptyLabel="No Logic MSO detected"
-            onRefreshDevices={onRefreshDevices}
-            onCreateSessionWithDevice={onCreateSessionWithDevice}
-            onSelectDevice={onSelectDevice}
-            selectedDevice={selectedDevice}
-          />
-        </DevicePromptCard>
-
+      <div className="devicePrompts single">
         <DevicePromptCard deviceName="Logic" imageSrc={logicDarkTheme}>
           <DeviceList
             busy={busy}

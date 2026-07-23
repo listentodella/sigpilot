@@ -1,0 +1,14 @@
+PXLogic Sigrok Analyzer Sidecar
+
+This sidecar is licensed under the GNU General Public License, version 2 or
+later (GPL-2.0-or-later). It links PXView's libsigrokdecode fork and loads its
+native C protocol decoder modules. See the PXView source tree and individual
+decoder source headers for copyright and license details.
+
+The sidecar is a separate executable and is not linked into the PXLogic Tauri
+process. No GPL source or object code is linked into the MIT/Apache Rust
+workspace libraries.
+
+The full GPL-2.0 text is available at:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+

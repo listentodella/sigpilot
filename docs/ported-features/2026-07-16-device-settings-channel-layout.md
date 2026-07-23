@@ -61,8 +61,8 @@
 
 ## 已知差距 / 后续任务
 
-- 当前后端 `CaptureSettings` 仍使用连续 `channel_count`。稀疏选择会采集到最高启用通道，再由前端隐藏未选通道；后续需改为 32 位 channel mask。
-- `DeviceInfo` 尚未声明每种设备的真实通道容量，因此当前第三方设备配置固定展示 32 个按钮；接入 Saleae 多型号或其他设备时应增加 capability 字段。
+- 稀疏物理通道采集已在 `2026-07-23-pxview-sparse-channel-capture.md` 完成，Device Settings 的选择会写入真实 32 位 channel mask。
+- 设备通道容量与 channel mode 已在 `2026-07-22-pxview-capabilities-ui.md` 完成，按钮数量来自真实 hardware capabilities。
 - 原版 `isMarkedHidden` 与 `activeDesired` 是两层状态；当前 Device Settings 按钮将“显示/隐藏”和“下次采集启用/禁用”合并处理。
 - 原版通道右键菜单中的 `Reset Y-height`、`Resize All Channels to Match` 尚未搬运。
 

@@ -1,0 +1,133 @@
+{
+  "format": "pxlogic.decoder-fixture.v1",
+  "description": "Backend-neutral SPI fixtures for Saleae Native, Sigrok Native, and temporary Legacy Rust comparison.",
+  "cases": [
+    {
+      "id": "spi-mode-0-msb",
+      "sample_rate_hz": 1000000,
+      "sample_count": 100,
+      "channel_count": 4,
+      "initial_levels": [1, 0, 0, 1],
+      "edges": [
+        { "channel": 0, "samples": [15, 25, 35, 55, 65, 75] },
+        { "channel": 1, "samples": [25, 65] },
+        { "channel": 2, "samples": [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85] },
+        { "channel": 3, "samples": [5, 90] }
+      ],
+      "decoder": {
+        "protocol": "spi",
+        "channels": { "mosi": 0, "miso": 1, "clk": 2, "cs": 3 },
+        "options": { "cpol": 0, "cpha": 0, "bit_order": "msb_first", "word_size": 8, "cs_polarity": "active_low" }
+      },
+      "expected_words": [
+        { "mosi": 165, "miso": 60 }
+      ]
+    },
+    {
+      "id": "spi-mode-1-msb",
+      "sample_rate_hz": 1000000,
+      "sample_count": 100,
+      "channel_count": 4,
+      "initial_levels": [1, 0, 0, 1],
+      "edges": [
+        { "channel": 0, "samples": [20, 30, 40, 60, 70, 80] },
+        { "channel": 1, "samples": [30, 70] },
+        { "channel": 2, "samples": [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85] },
+        { "channel": 3, "samples": [5, 90] }
+      ],
+      "decoder": {
+        "protocol": "spi",
+        "channels": { "mosi": 0, "miso": 1, "clk": 2, "cs": 3 },
+        "options": { "cpol": 0, "cpha": 1, "bit_order": "msb_first", "word_size": 8, "cs_polarity": "active_low" }
+      },
+      "expected_words": [
+        { "mosi": 165, "miso": 60 }
+      ]
+    },
+    {
+      "id": "spi-mode-2-msb",
+      "sample_rate_hz": 1000000,
+      "sample_count": 100,
+      "channel_count": 4,
+      "initial_levels": [1, 0, 1, 1],
+      "edges": [
+        { "channel": 0, "samples": [15, 25, 35, 55, 65, 75] },
+        { "channel": 1, "samples": [25, 65] },
+        { "channel": 2, "samples": [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85] },
+        { "channel": 3, "samples": [5, 90] }
+      ],
+      "decoder": {
+        "protocol": "spi",
+        "channels": { "mosi": 0, "miso": 1, "clk": 2, "cs": 3 },
+        "options": { "cpol": 1, "cpha": 0, "bit_order": "msb_first", "word_size": 8, "cs_polarity": "active_low" }
+      },
+      "expected_words": [
+        { "mosi": 165, "miso": 60 }
+      ]
+    },
+    {
+      "id": "spi-mode-3-msb",
+      "sample_rate_hz": 1000000,
+      "sample_count": 100,
+      "channel_count": 4,
+      "initial_levels": [1, 0, 1, 1],
+      "edges": [
+        { "channel": 0, "samples": [20, 30, 40, 60, 70, 80] },
+        { "channel": 1, "samples": [30, 70] },
+        { "channel": 2, "samples": [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85] },
+        { "channel": 3, "samples": [5, 90] }
+      ],
+      "decoder": {
+        "protocol": "spi",
+        "channels": { "mosi": 0, "miso": 1, "clk": 2, "cs": 3 },
+        "options": { "cpol": 1, "cpha": 1, "bit_order": "msb_first", "word_size": 8, "cs_polarity": "active_low" }
+      },
+      "expected_words": [
+        { "mosi": 165, "miso": 60 }
+      ]
+    },
+    {
+      "id": "spi-mode-0-lsb",
+      "sample_rate_hz": 1000000,
+      "sample_count": 100,
+      "channel_count": 4,
+      "initial_levels": [0, 1, 0, 1],
+      "edges": [
+        { "channel": 0, "samples": [15, 35, 45, 55, 75] },
+        { "channel": 1, "samples": [15, 25, 45, 55, 65] },
+        { "channel": 2, "samples": [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85] },
+        { "channel": 3, "samples": [5, 90] }
+      ],
+      "decoder": {
+        "protocol": "spi",
+        "channels": { "mosi": 0, "miso": 1, "clk": 2, "cs": 3 },
+        "options": { "cpol": 0, "cpha": 0, "bit_order": "lsb_first", "word_size": 8, "cs_polarity": "active_low" }
+      },
+      "expected_words": [
+        { "mosi": 150, "miso": 45 }
+      ]
+    },
+    {
+      "id": "spi-cs-resets-partial-word",
+      "sample_rate_hz": 1000000,
+      "sample_count": 150,
+      "channel_count": 4,
+      "initial_levels": [1, 0, 0, 1],
+      "edges": [
+        { "channel": 0, "samples": [15, 25, 35, 65, 75, 85, 105, 115, 125] },
+        { "channel": 1, "samples": [15, 25, 35, 75, 115] },
+        { "channel": 2, "samples": [10, 15, 20, 25, 30, 35, 40, 45, 60, 65, 70, 75, 80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 130, 135] },
+        { "channel": 3, "samples": [5, 47, 53, 140] }
+      ],
+      "decoder": {
+        "protocol": "spi",
+        "channels": { "mosi": 0, "miso": 1, "clk": 2, "cs": 3 },
+        "options": { "cpol": 0, "cpha": 0, "bit_order": "msb_first", "word_size": 8, "cs_polarity": "active_low" }
+      },
+      "expected_words": [
+        { "mosi": 90, "miso": 195 }
+      ],
+      "allow_additional_partial_frames": true
+    }
+  ]
+}

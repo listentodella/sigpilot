@@ -9,8 +9,10 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use parking_lot::{Mutex, RwLock};
 use pxlogic_core::{
-    AnalyzerDecodeSettings, CaptureData, CaptureMetadata, DecodedChannelValue, DecodedFrame,
-    I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings,
+    resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData, CaptureMetadata,
+    CaptureTriggerMetadata, DecodedChannelValue, DecodedFrame, DecoderBackend, DecoderBackendKind,
+    I2cDecodeSettings, SaleaeNativeDecoder, SigrokNativeDecoder, SparseCaptureData,
+    SpiDecodeSettings, UartDecodeSettings,
 };
 use pxlogic_waveform::{ChannelTile, DigitalSegment, WaveformBin, WaveformRequest, WaveformTile};
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,8 @@ pub enum GraphError {
     InvalidAnalyzer(String),
     #[error("failed to serialize analyzer settings: {0}")]
     AnalyzerCacheKey(#[from] serde_json::Error),
+    #[error("decoder backend failed: {0}")]
+    DecoderBackend(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +60,8 @@ pub struct AnalyzerTrackRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnalyzerRenderRequest {
     pub analyzer_id: String,
+    #[serde(default)]
+    pub backend: DecoderBackendKind,
     pub settings: AnalyzerDecodeSettings,
     #[serde(default)]
     pub tracks: Vec<AnalyzerTrackRequest>,
@@ -122,7 +128,7 @@ pub struct FrameIdInterval {
 #[derive(Debug, Clone)]
 struct DigitalChannelIndex {
     initial_high: bool,
-    edges: Vec<u32>,
+    edges: Vec<u64>,
 }
 
 impl DigitalChannelIndex {
@@ -134,8 +140,7 @@ impl DigitalChannelIndex {
     }
 
     fn edge_count_at_or_before(&self, sample: u64) -> usize {
-        self.edges
-            .partition_point(|edge| u64::from(*edge) <= sample)
+        self.edges.partition_point(|edge| *edge <= sample)
     }
 
     fn first_edge_after(&self, sample: u64) -> usize {
@@ -143,7 +148,7 @@ impl DigitalChannelIndex {
     }
 
     fn first_edge_at_or_after(&self, sample: u64) -> usize {
-        self.edges.partition_point(|edge| u64::from(*edge) < sample)
+        self.edges.partition_point(|edge| *edge < sample)
     }
 
     fn level_at(&self, sample: u64) -> bool {
@@ -155,7 +160,7 @@ impl DigitalChannelIndex {
     }
 
     fn edge(&self, edge_index: usize) -> u64 {
-        u64::from(self.edges[edge_index])
+        self.edges[edge_index]
     }
 }
 
@@ -201,16 +206,37 @@ impl DigitalGraph {
         Ok(graph)
     }
 
+    pub fn from_sparse_capture(capture: &SparseCaptureData) -> Result<Self> {
+        let mut graph = Self::new(capture.metadata.clone())?;
+        graph.sample_count = capture.metadata.sample_count;
+        graph.metadata.sample_count = capture.metadata.sample_count;
+        for sparse_channel in &capture.channels {
+            if sparse_channel.channel >= capture.metadata.channel_count {
+                return Err(GraphError::InvalidMetadata);
+            }
+            let index = &mut graph.channels[usize::from(sparse_channel.channel)];
+            index.initial_high = sparse_channel.initial_high;
+            if sparse_channel
+                .transitions
+                .windows(2)
+                .any(|window| window[0] >= window[1])
+                || sparse_channel
+                    .transitions
+                    .iter()
+                    .any(|sample| *sample >= capture.metadata.sample_count)
+            {
+                return Err(GraphError::InvalidMetadata);
+            }
+            index.edges.clone_from(&sparse_channel.transitions);
+        }
+        Ok(graph)
+    }
+
     pub fn append_interleaved(&mut self, samples: &[u8]) -> Result<u64> {
         let unit_size = usize::from(self.metadata.unitsize);
         if unit_size == 0 || samples.len() % unit_size != 0 {
             return Err(GraphError::UnalignedSamples);
         }
-        let appended_samples = samples.len() / unit_size;
-        if self.sample_count.saturating_add(appended_samples as u64) > u64::from(u32::MAX) + 1 {
-            return Err(GraphError::InvalidMetadata);
-        }
-
         for bytes in samples.chunks_exact(unit_size) {
             let word =
                 read_word(bytes, self.metadata.unitsize).ok_or(GraphError::InvalidMetadata)?;
@@ -220,7 +246,7 @@ impl DigitalGraph {
                 let mut changed = (previous ^ word) & valid_mask;
                 while changed != 0 {
                     let channel = changed.trailing_zeros() as usize;
-                    self.channels[channel].edges.push(sample as u32);
+                    self.channels[channel].edges.push(sample);
                     changed &= changed - 1;
                 }
             } else {
@@ -242,6 +268,26 @@ impl DigitalGraph {
 
     pub fn sample_count(&self) -> u64 {
         self.sample_count
+    }
+
+    fn set_trigger(&mut self, trigger: CaptureTriggerMetadata) {
+        self.metadata.trigger = Some(trigger);
+    }
+
+    fn finish_metadata(&mut self, metadata: CaptureMetadata) -> Result<()> {
+        validate_metadata(&metadata)?;
+        let enabled_channels = metadata_enabled_channels(&metadata)?;
+        let current_enabled_channels = metadata_enabled_channels(&self.metadata)?;
+        if metadata.sample_count != self.sample_count
+            || metadata.channel_count != self.metadata.channel_count
+            || enabled_channels != current_enabled_channels
+            || metadata.unitsize != self.metadata.unitsize
+            || metadata.sample_rate_hz != self.metadata.sample_rate_hz
+        {
+            return Err(GraphError::InvalidMetadata);
+        }
+        self.metadata = metadata;
+        Ok(())
     }
 
     pub fn build_tile(&self, request: &WaveformRequest) -> Result<WaveformTile> {
@@ -322,6 +368,13 @@ impl DigitalGraph {
             let (rising, falling) = sampled_channel_edges(index, start, end);
             (Vec::new(), rising, falling)
         };
+        let previous_transition = index
+            .first_edge_at_or_after(start)
+            .checked_sub(1)
+            .map(|edge_index| index.edge(edge_index));
+        let next_edge_index = index.first_edge_at_or_after(end);
+        let next_transition =
+            (next_edge_index < index.edges.len()).then(|| index.edge(next_edge_index));
         let label = self
             .metadata
             .labels
@@ -338,6 +391,8 @@ impl DigitalGraph {
             segments,
             rising_edges,
             falling_edges,
+            previous_transition,
+            next_transition,
         }
     }
 
@@ -425,9 +480,7 @@ impl DigitalGraph {
                     }],
                 });
                 let skip_until = sample + (bit_period * 9.0).floor() as u64;
-                edge_index = channel
-                    .edges
-                    .partition_point(|edge| u64::from(*edge) < skip_until);
+                edge_index = channel.edges.partition_point(|edge| *edge < skip_until);
             } else {
                 edge_index += 1;
             }
@@ -467,18 +520,8 @@ impl DigitalGraph {
         let mut collector = FrameCollector::default();
 
         while sda_edge < sda_index.edges.len() || scl_edge < scl_index.edges.len() {
-            let next_sda = sda_index
-                .edges
-                .get(sda_edge)
-                .copied()
-                .map(u64::from)
-                .unwrap_or(u64::MAX);
-            let next_scl = scl_index
-                .edges
-                .get(scl_edge)
-                .copied()
-                .map(u64::from)
-                .unwrap_or(u64::MAX);
+            let next_sda = sda_index.edges.get(sda_edge).copied().unwrap_or(u64::MAX);
+            let next_scl = scl_index.edges.get(scl_edge).copied().unwrap_or(u64::MAX);
             let sample = next_sda.min(next_scl);
             if sample == u64::MAX {
                 break;
@@ -517,12 +560,17 @@ impl DigitalGraph {
                     let acknowledged = !sda;
                     let bubble_label = if byte_index == 0 {
                         format!(
-                            "0x{:02X} {}",
+                            "Setup {} to [0x{:02X}] + {}",
+                            if byte & 1 == 0 { "Write" } else { "Read" },
                             byte >> 1,
-                            if byte & 1 == 0 { "W" } else { "R" }
+                            if acknowledged { "ACK" } else { "NAK" }
                         )
                     } else {
-                        label_for_value(u64::from(byte), 8)
+                        format!(
+                            "{} + {}",
+                            label_for_value(u64::from(byte), 8),
+                            if acknowledged { "ACK" } else { "NAK" }
+                        )
                     };
                     let label = if byte_index == 0 {
                         format!(
@@ -631,14 +679,7 @@ impl DigitalGraph {
             }
             0
         });
-        for (edge_index, sample) in clock
-            .edges
-            .iter()
-            .copied()
-            .map(u64::from)
-            .enumerate()
-            .skip(resume_edge)
-        {
+        for (edge_index, sample) in clock.edges.iter().copied().enumerate().skip(resume_edge) {
             let rising = clock.level_after_edge(edge_index);
             if rising != sample_rising_edge {
                 continue;
@@ -757,6 +798,7 @@ impl DigitalGraph {
 pub struct GraphSession {
     graph: RwLock<Option<DigitalGraph>>,
     capture: RwLock<Option<Arc<CaptureData>>>,
+    sparse_capture: RwLock<Option<Arc<SparseCaptureData>>>,
     analyzer_cache: Mutex<HashMap<String, AnalyzerCacheEntry>>,
     revision: AtomicU64,
 }
@@ -771,6 +813,7 @@ impl GraphSession {
     pub fn begin_capture(&self, metadata: CaptureMetadata) -> Result<()> {
         *self.graph.write() = Some(DigitalGraph::new(metadata)?);
         *self.capture.write() = None;
+        *self.sparse_capture.write() = None;
         self.analyzer_cache.lock().clear();
         self.bump_revision();
         Ok(())
@@ -787,10 +830,21 @@ impl GraphSession {
         Ok(count)
     }
 
+    pub fn set_trigger(&self, trigger: CaptureTriggerMetadata) -> Result<()> {
+        self.graph
+            .write()
+            .as_mut()
+            .ok_or(GraphError::EmptyGraph)?
+            .set_trigger(trigger);
+        self.bump_revision();
+        Ok(())
+    }
+
     pub fn replace_capture(&self, capture: CaptureData) -> Result<()> {
         let graph = DigitalGraph::from_capture(&capture)?;
         *self.graph.write() = Some(graph);
         *self.capture.write() = Some(Arc::new(capture));
+        *self.sparse_capture.write() = None;
         self.analyzer_cache.lock().clear();
         self.bump_revision();
         Ok(())
@@ -806,13 +860,37 @@ impl GraphSession {
         if indexed_samples != capture.metadata.sample_count {
             return self.replace_capture(capture);
         }
+        let finalized = self
+            .graph
+            .write()
+            .as_mut()
+            .ok_or(GraphError::EmptyGraph)
+            .and_then(|graph| graph.finish_metadata(capture.metadata.clone()));
+        if finalized.is_err() {
+            return self.replace_capture(capture);
+        }
         *self.capture.write() = Some(Arc::new(capture));
+        *self.sparse_capture.write() = None;
+        self.bump_revision();
+        Ok(())
+    }
+
+    pub fn replace_sparse_capture(&self, capture: SparseCaptureData) -> Result<()> {
+        let graph = DigitalGraph::from_sparse_capture(&capture)?;
+        *self.graph.write() = Some(graph);
+        *self.capture.write() = None;
+        *self.sparse_capture.write() = Some(Arc::new(capture));
+        self.analyzer_cache.lock().clear();
         self.bump_revision();
         Ok(())
     }
 
     pub fn capture(&self) -> Option<Arc<CaptureData>> {
         self.capture.read().clone()
+    }
+
+    pub fn sparse_capture(&self) -> Option<Arc<SparseCaptureData>> {
+        self.sparse_capture.read().clone()
     }
 
     pub fn metadata(&self) -> Option<CaptureMetadata> {
@@ -896,6 +974,70 @@ impl GraphSession {
         Ok(entry.frames.clone())
     }
 
+    pub fn decode_frames_with_backend(
+        &self,
+        settings: &AnalyzerDecodeSettings,
+        backend: DecoderBackendKind,
+    ) -> Result<Arc<Vec<DecodedFrame>>> {
+        if matches!(
+            backend,
+            DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust
+        ) {
+            return self.decode_frames(settings);
+        }
+        let packed_capture = self.capture();
+        let sparse_capture = self.sparse_capture();
+        if packed_capture.is_none() && sparse_capture.is_none() {
+            // Native sidecars are batch decoders. Keep live bubbles available
+            // from the indexed graph, then replace them after finish_capture().
+            return self.decode_frames(settings);
+        }
+
+        let key = serde_json::to_string(&(backend, settings))?;
+        let sample_count = self.sample_count();
+        if let Some(entry) = self.analyzer_cache.lock().get(&key) {
+            if entry.decoded_sample_count == sample_count {
+                return Ok(entry.frames.clone());
+            }
+        }
+
+        let output = match backend {
+            DecoderBackendKind::SaleaeNative => {
+                let decoder = SaleaeNativeDecoder::from_env()
+                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+                if let Some(capture) = &packed_capture {
+                    decoder.decode(capture.as_ref(), settings)
+                } else if let Some(capture) = &sparse_capture {
+                    decoder.decode_sparse(capture.as_ref(), settings)
+                } else {
+                    unreachable!();
+                }
+            }
+            DecoderBackendKind::SigrokNative => {
+                let decoder = SigrokNativeDecoder::from_env()
+                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+                if let Some(capture) = &packed_capture {
+                    decoder.decode(capture.as_ref(), settings)
+                } else if let Some(capture) = &sparse_capture {
+                    decoder.decode_sparse(capture.as_ref(), settings)
+                } else {
+                    unreachable!();
+                }
+            }
+            DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust => unreachable!(),
+        }
+        .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        let frames = Arc::new(output.into_decoded_frames());
+        self.analyzer_cache.lock().insert(
+            key,
+            AnalyzerCacheEntry {
+                decoded_sample_count: sample_count,
+                frames: frames.clone(),
+            },
+        );
+        Ok(frames)
+    }
+
     pub fn render_frame(&self, request: &GraphFrameRequest) -> Result<GraphFrameResponse> {
         let tile = self
             .graph
@@ -928,7 +1070,7 @@ impl GraphSession {
         request: &AnalyzerRenderRequest,
         waveform: &WaveformRequest,
     ) -> Result<AnalyzerRenderResult> {
-        let frames = self.decode_frames(&request.settings)?;
+        let frames = self.decode_frames_with_backend(&request.settings, request.backend)?;
         let tracks = request
             .tracks
             .iter()
@@ -1016,7 +1158,18 @@ fn validate_metadata(metadata: &CaptureMetadata) -> Result<()> {
     if metadata.unitsize != expected_unit_size || metadata.sample_rate_hz == 0 {
         return Err(GraphError::InvalidMetadata);
     }
+    let enabled_channels = metadata_enabled_channels(metadata)?;
+    if metadata.trigger.as_ref().is_some_and(|trigger| {
+        trigger.channel >= metadata.channel_count || !enabled_channels.contains(&trigger.channel)
+    }) {
+        return Err(GraphError::InvalidMetadata);
+    }
     Ok(())
+}
+
+fn metadata_enabled_channels(metadata: &CaptureMetadata) -> Result<Vec<u8>> {
+    resolve_enabled_channels(metadata.channel_count, &metadata.enabled_channels)
+        .map_err(|_| GraphError::InvalidMetadata)
 }
 
 fn channel_mask(channel_count: u8) -> u32 {
@@ -1502,6 +1655,7 @@ mod tests {
     use chrono::Utc;
     use pxlogic_core::{
         capture::generate_sample_words_with_count, decode_analyzer, CaptureSettings,
+        SparseCaptureData, SparseDigitalChannel,
     };
 
     use super::*;
@@ -1553,6 +1707,14 @@ mod tests {
                     scanned_channel.bins
                 );
                 assert_eq!(indexed_channel.segments, scanned_channel.segments);
+                assert_eq!(
+                    indexed_channel.previous_transition,
+                    scanned_channel.previous_transition
+                );
+                assert_eq!(
+                    indexed_channel.next_transition,
+                    scanned_channel.next_transition
+                );
                 if !scanned_channel.rising_edges.is_empty()
                     || !scanned_channel.falling_edges.is_empty()
                 {
@@ -1575,10 +1737,12 @@ mod tests {
             source_device: "test-32".to_string(),
             sample_rate_hz: 25_000_000,
             channel_count: 32,
+            enabled_channels: (0..32).collect(),
             unitsize: 4,
             sample_count: words.len() as u64,
             captured_at: Utc::now(),
             labels: (0..32).map(|channel| format!("D{channel}")).collect(),
+            trigger: None,
         };
         let capture = CaptureData {
             metadata: metadata.clone(),
@@ -1602,6 +1766,77 @@ mod tests {
         let tile = streaming.build_tile(&request).unwrap();
         assert_eq!(tile.channels[0].rising_edges, vec![1]);
         assert_eq!(tile.channels[0].falling_edges, vec![3]);
+
+        let navigation_tile = streaming
+            .build_tile(&WaveformRequest {
+                start_sample: 2,
+                sample_count: 1,
+                pixels: 1,
+                channels: vec![31],
+            })
+            .unwrap();
+        assert_eq!(navigation_tile.channels[0].previous_transition, Some(1));
+        assert_eq!(navigation_tile.channels[0].next_transition, Some(3));
+    }
+
+    #[test]
+    fn sparse_graph_indexes_saleae_capture_beyond_u32_samples() {
+        let sample_count = 49_940_179_616;
+        let metadata = CaptureMetadata {
+            version: 1,
+            source_device: "Saleae demo.sal".to_string(),
+            sample_rate_hz: 125_000_000,
+            channel_count: 8,
+            enabled_channels: vec![3],
+            unitsize: 1,
+            sample_count,
+            captured_at: Utc::now(),
+            labels: (0..8).map(|channel| format!("D{channel}")).collect(),
+            trigger: None,
+        };
+        let capture = SparseCaptureData {
+            metadata,
+            channels: vec![SparseDigitalChannel {
+                channel: 3,
+                initial_high: false,
+                transitions: vec![10, 4_294_967_300, 49_000_000_000],
+            }],
+        };
+        let graph = DigitalGraph::from_sparse_capture(&capture).unwrap();
+        let tile = graph
+            .build_tile(&WaveformRequest {
+                start_sample: 4_294_967_200,
+                sample_count: 300,
+                pixels: 300,
+                channels: vec![3],
+            })
+            .unwrap();
+        assert_eq!(tile.sample_count, 300);
+        assert_eq!(tile.channels[0].falling_edges, vec![4_294_967_300]);
+        assert_eq!(tile.channels[0].previous_transition, Some(10));
+        assert_eq!(tile.channels[0].next_transition, Some(49_000_000_000));
+    }
+
+    #[test]
+    fn incremental_finish_preserves_hardware_trigger_metadata() {
+        let mut capture = demo_capture(4, 4_096);
+        let session = GraphSession::default();
+        let mut starting_metadata = capture.metadata.clone();
+        starting_metadata.sample_count = 0;
+        session.begin_capture(starting_metadata).unwrap();
+        session.append_samples(&capture.samples).unwrap();
+
+        let trigger = CaptureTriggerMetadata {
+            sample_index: 2_048,
+            channel: 1,
+            kind: pxlogic_core::CaptureTriggerKind::Rising,
+        };
+        session.set_trigger(trigger.clone()).unwrap();
+        assert_eq!(session.metadata().unwrap().trigger, Some(trigger.clone()));
+
+        capture.metadata.trigger = Some(trigger.clone());
+        session.finish_capture(capture).unwrap();
+        assert_eq!(session.metadata().unwrap().trigger, Some(trigger));
     }
 
     #[test]
@@ -1711,6 +1946,7 @@ mod tests {
         for request in [
             AnalyzerRenderRequest {
                 analyzer_id: "i2c".to_string(),
+                backend: DecoderBackendKind::LegacyRust,
                 settings: AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
                 tracks: vec![AnalyzerTrackRequest {
                     channel: 1,
@@ -1719,6 +1955,7 @@ mod tests {
             },
             AnalyzerRenderRequest {
                 analyzer_id: "spi".to_string(),
+                backend: DecoderBackendKind::LegacyRust,
                 settings: AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
                 tracks: vec![
                     AnalyzerTrackRequest {
@@ -1740,6 +1977,57 @@ mod tests {
                 assert!(!track.bubbles.is_empty(), "track={expected:?}");
             }
         }
+    }
+
+    #[test]
+    fn analyzer_rendering_does_not_change_the_waveform_tile() {
+        let capture = demo_capture(16, 250_000);
+        let session = GraphSession::default();
+        session.replace_capture(capture).unwrap();
+        let waveform = WaveformRequest {
+            start_sample: 25_000,
+            sample_count: 100_000,
+            pixels: 1_200,
+            channels: (0..6).collect(),
+        };
+        let baseline = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 1,
+                waveform: waveform.clone(),
+                analyzer_view: None,
+                analyzers: Vec::new(),
+            })
+            .unwrap();
+        let with_analyzers = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 2,
+                waveform: waveform.clone(),
+                analyzer_view: Some(waveform),
+                analyzers: vec![
+                    AnalyzerRenderRequest {
+                        analyzer_id: "i2c".to_string(),
+                        backend: DecoderBackendKind::LegacyRust,
+                        settings: AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
+                        tracks: vec![AnalyzerTrackRequest {
+                            channel: 1,
+                            role: "SDA".to_string(),
+                        }],
+                    },
+                    AnalyzerRenderRequest {
+                        analyzer_id: "spi".to_string(),
+                        backend: DecoderBackendKind::LegacyRust,
+                        settings: AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
+                        tracks: vec![AnalyzerTrackRequest {
+                            channel: 3,
+                            role: "MOSI".to_string(),
+                        }],
+                    },
+                ],
+            })
+            .unwrap();
+
+        assert_eq!(baseline.tile, with_analyzers.tile);
+        assert_eq!(with_analyzers.analyzers.len(), 2);
     }
 
     #[test]

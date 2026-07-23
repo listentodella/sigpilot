@@ -7,10 +7,30 @@ Saleae-style desktop frontend for PXLogic logic analyzers.
 - `crates/pxlogic-core`: capture core, protocol constants, fake backend, optional `rusb` backend.
 - `crates/pxlogic-file`: `.pxcap`, `.sr`, and VCD read/write helpers.
 - `crates/pxlogic-waveform`: viewport tile generation for waveform rendering.
+- `native`: isolated Saleae Graph/Analyzer and PXView libsigrokdecode sidecars.
 - `src-tauri`: Tauri command/event adapter only.
 - `src`: React workbench UI.
 
 The UI shell is intentionally thin so it can be replaced by GPUI or another renderer later without rewriting capture, file, or waveform logic.
+
+## Decoder Direction
+
+Protocol decoding is migrating to two external ecosystems:
+
+- `Saleae Native`: a version-pinned Analyzer SDK sidecar that can load locally installed Logic analyzer plugins.
+- `Sigrok Native`: a GPL sidecar that currently hosts PXView's native C SPI decoder; the broader C/Python decoder catalog remains follow-up work.
+
+The current Rust UART/I2C/SPI implementation is exposed only as `LegacyRustDecoder` during the migration. It remains available to keep existing captures and UI tests working, but it is not the destination for new protocol features.
+
+The Saleae Native SPI proof of concept is available on macOS arm64:
+
+```bash
+native/saleae-analyzer-sidecar/verify.sh /path/to/Logic-2.4.43-macos-arm64.zip
+```
+
+It uses a pinned Analyzer SDK test host and the locally supplied Logic 2.4.43 SPI plugin. Saleae binaries are extracted only into ignored `target/` storage and are never copied into the repository.
+
+Both native SPI backends consume transition-indexed captures. Saleae `.sal` files are imported through the original GraphServer and remain sparse even when the capture spans tens of billions of samples.
 
 ## Commands
 
@@ -46,4 +66,4 @@ pnpm tauri dev
 ```
 
 The bundled bitstreams include their original MIT-style license in `resources/bitstreams/LICENSE.txt`.
-The project does not copy GPL source from PXView/pxlobster; those projects remain protocol references only.
+The main MIT/Apache workspace does not copy GPL source from PXView/pxlobster. Sigrok integration remains an explicitly separated GPL sidecar with its own source and license notices.

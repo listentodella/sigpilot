@@ -1,4 +1,4 @@
-import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, MouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnalyzerBubble, AnalyzerTrackWindow, WaveformTile } from "../lib/api";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
@@ -10,13 +10,12 @@ import {
 } from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
-import { SaleaeIcon } from "./SaleaeIcon";
 
 const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
 const MAX_MULTI_BUBBLE_COUNT = 99;
 const MAX_MULTI_BUBBLE_TEXT_LENGTH = 200;
-const MAX_MARKERS_PER_TRACK = 400;
+const MAX_MARKERS_PER_TRACK = 300;
 
 interface AnalyzerBubbleTrack {
   analyzer: UiAnalyzerInstance;
@@ -60,6 +59,8 @@ export function AnalyzerBubblesOverlay({
   onZoomBubble,
 }: AnalyzerBubblesOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const callbacksRef = useRef({ onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble });
+  callbacksRef.current = { onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble };
   const [overlayWidth, setOverlayWidth] = useState(1);
   const [hoveredTrackKey, setHoveredTrackKey] = useState<string | null>(null);
   const rowTops = useMemo(() => {
@@ -70,7 +71,6 @@ export function AnalyzerBubblesOverlay({
       return current;
     });
   }, [rowHeights]);
-  const viewportEnd = viewportStart + viewportSamples;
   const bubbleTracks = useMemo<AnalyzerBubbleTrack[]>(
     () =>
       analyzers.flatMap((analyzer) =>
@@ -127,14 +127,107 @@ export function AnalyzerBubblesOverlay({
             : null;
       if (frameIndex === null) return;
       event.preventDefault();
-      onGoToFrame(track.analyzer.id, frameIndex);
+      callbacksRef.current.onGoToFrame(track.analyzer.id, frameIndex);
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [bubbleTracks, hoveredTrackKey, onGoToFrame]);
+  }, [bubbleTracks, hoveredTrackKey]);
 
-  return (
-    <div className="analyzerBubblesOverlay" ref={overlayRef}>
+  useLayoutEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const width = Math.max(1, overlay.clientWidth);
+    const samples = Math.max(1, viewportSamples);
+
+    overlay.querySelectorAll<HTMLElement>(".analyzerBubble").forEach((element) => {
+      const start = Number(element.dataset.bubbleStart);
+      const end = Number(element.dataset.bubbleEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+      const left = ((start - viewportStart) / samples) * width;
+      const right = ((end - viewportStart) / samples) * width;
+      const visible = right >= 0 && left <= width;
+      element.style.display = visible ? "flex" : "none";
+      if (!visible) return;
+      element.style.left = `${Math.max(0, left)}px`;
+      element.style.width = `${Math.max(1, Math.min(right, width) - Math.max(left, 0))}px`;
+      element.classList.toggle("overflowLeft", left < 0);
+      element.classList.toggle("overflowRight", right > width);
+    });
+
+  }, [overlayWidth, viewportSamples, viewportStart, bubbleTracks, markerTracks, tileChannels]);
+
+  useLayoutEffect(() => {
+    const overlay = overlayRef.current;
+    const canvas = overlay?.querySelector<HTMLCanvasElement>(".analyzerMarkersCanvas");
+    if (!overlay || !canvas) return;
+    const width = Math.max(1, overlay.clientWidth);
+    const height = Math.max(1, overlay.clientHeight);
+    const dpr = window.devicePixelRatio || 1;
+    const pixelWidth = Math.max(1, Math.floor(width * dpr));
+    const pixelHeight = Math.max(1, Math.floor(height * dpr));
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.clearRect(0, 0, pixelWidth, pixelHeight);
+    context.save();
+    context.scale(dpr, dpr);
+    context.lineWidth = 1;
+    context.globalAlpha = 0.96;
+    context.shadowColor = "rgba(0, 0, 0, 0.45)";
+    context.shadowBlur = 1;
+    context.shadowOffsetY = 1;
+
+    const viewStart = viewportStart;
+    const viewEnd = viewportStart + Math.max(1, viewportSamples);
+    markerTracks.forEach((track) => {
+      const rowIndex = visibleChannelIndexes.indexOf(track.role.channel);
+      if (rowIndex < 0) return;
+      const channel = tileChannels.get(track.role.channel);
+      if (!channel) return;
+      const edgeSamples = track.edgeType === "rising" ? channel.rising_edges : channel.falling_edges;
+      if (edgeSamples.length === 0) return;
+      const firstIndex = Math.max(0, firstMarkerAtOrAfter(edgeSamples, viewStart - viewportSamples * 0.02));
+      const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
+      const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
+      const centerY = rowTops[rowIndex] + inset + trackHeight / 2;
+      context.fillStyle = saleaeLegacyChannelColor(track.role.channel);
+      context.strokeStyle = context.fillStyle;
+      for (
+        let index = firstIndex, rendered = 0;
+        index < edgeSamples.length && rendered < MAX_MARKERS_PER_TRACK;
+        index += 1
+      ) {
+        const sample = edgeSamples[index];
+        if (sample > viewEnd + viewportSamples * 0.02) break;
+        const left = ((sample - viewStart) / Math.max(1, viewportSamples)) * width;
+        if (left < -10 || left > width + 10) continue;
+        drawAnalyzerMarker(context, left, centerY, track.edgeType);
+        rendered += 1;
+      }
+    });
+    context.restore();
+  }, [
+    markerTracks,
+    overlayWidth,
+    rowHeights,
+    rowTopInsets,
+    rowTops,
+    tileChannels,
+    viewportSamples,
+    viewportStart,
+    visibleChannelIndexes,
+  ]);
+
+  const renderedContent = useMemo(
+    () => (
+      <>
+      <canvas className="analyzerMarkersCanvas" aria-hidden="true" />
       {visibleChannelIndexes.flatMap((channel, rowIndex) => {
         const channelTracks = bubbleTracks.filter((track) => track.role.channel === channel);
         return channelTracks.map((track, trackIndex) => {
@@ -152,8 +245,6 @@ export function AnalyzerBubblesOverlay({
               data-bubble-count={bubbles.length}
               data-first-bubble-start={bubbles[0]?.start_sample ?? ""}
               data-last-bubble-end={bubbles[bubbles.length - 1]?.end_sample ?? ""}
-              data-viewport-end={viewportStart + viewportSamples}
-              data-viewport-start={viewportStart}
               data-window-state={frameWindow ? "ready" : "pending"}
               key={track.key}
               onMouseEnter={() => setHoveredTrackKey(track.key)}
@@ -172,8 +263,6 @@ export function AnalyzerBubblesOverlay({
                 const originalBubbleWidth =
                   ((bubble.end_sample - bubble.start_sample) / Math.max(1, viewportSamples)) * overlayWidth;
                 const right = left + originalBubbleWidth;
-                if (right < 0 || left > overlayWidth) return null;
-
                 const bubbleWidth = Math.max(
                   1,
                   Math.min(originalBubbleWidth + Math.min(0, left), overlayWidth - Math.max(left, 0)),
@@ -197,22 +286,30 @@ export function AnalyzerBubblesOverlay({
                 function handleClick(event: MouseEvent<HTMLButtonElement>) {
                   event.stopPropagation();
                   if (event.metaKey || event.ctrlKey) {
-                    onOpenTableFrame(analyzer.id, firstFrameIndex);
+                    callbacksRef.current.onOpenTableFrame(analyzer.id, firstFrameIndex);
                   } else {
-                    onSelectFrame(analyzer.id, firstFrameIndex);
+                    callbacksRef.current.onSelectFrame(analyzer.id, firstFrameIndex);
                   }
                 }
 
                 return (
                   <button
                     className={`analyzerBubble ${multi ? "multi" : ""} ${highlighted ? "highlighted" : ""} ${overflowLeft ? "overflowLeft" : ""} ${overflowRight ? "overflowRight" : ""}`}
+                    data-bubble-end={bubble.end_sample}
+                    data-bubble-start={bubble.start_sample}
                     key={`${bubble.start_sample}-${bubble.frame_id_interval.begin}-${bubble.frame_id_interval.end}`}
                     onClick={handleClick}
                     onDoubleClick={(event) => {
                       event.stopPropagation();
-                      onZoomBubble(analyzer.id, bubble.start_sample, bubble.end_sample, firstFrameIndex);
+                      callbacksRef.current.onZoomBubble(
+                        analyzer.id,
+                        bubble.start_sample,
+                        bubble.end_sample,
+                        firstFrameIndex,
+                      );
                     }}
                     style={{
+                      display: right >= 0 && left <= overlayWidth ? "flex" : "none",
                       left: Math.max(left, 0),
                       width: bubbleWidth,
                       "--analyzer-color": analyzer.color,
@@ -220,14 +317,14 @@ export function AnalyzerBubblesOverlay({
                     title={`${tooltip}\n${navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+click to scroll to table row`}
                     type="button"
                   >
-                    {!multi && overflowLeft && <span className="analyzerBubbleArrow left" />}
+                    {!multi && <span className="analyzerBubbleArrow left" />}
                     {multi && (
                       <span className="analyzerBubbleCounter">
                         {bubble.result_count > MAX_MULTI_BUBBLE_COUNT ? `${MAX_MULTI_BUBBLE_COUNT}+` : bubble.result_count}
                       </span>
                     )}
                     <span className="analyzerBubbleText">{text}</span>
-                    {!multi && overflowRight && <span className="analyzerBubbleArrow right" />}
+                    {!multi && <span className="analyzerBubbleArrow right" />}
                   </button>
                 );
               })}
@@ -235,61 +332,73 @@ export function AnalyzerBubblesOverlay({
               {hovered && previousIndex !== null && (
                 <AnalyzerBubbleNavigationButton
                   direction="previous"
-                  onClick={() => onGoToFrame(analyzer.id, previousIndex)}
+                  onClick={() => callbacksRef.current.onGoToFrame(analyzer.id, previousIndex)}
                 />
               )}
               {hovered && nextIndex !== null && (
                 <AnalyzerBubbleNavigationButton
                   direction="next"
-                  onClick={() => onGoToFrame(analyzer.id, nextIndex)}
+                  onClick={() => callbacksRef.current.onGoToFrame(analyzer.id, nextIndex)}
                 />
               )}
             </div>
           );
         });
       })}
-      {markerTracks.flatMap((track) => {
-        const rowIndex = visibleChannelIndexes.indexOf(track.role.channel);
-        if (rowIndex < 0) return [];
-        const channel = tileChannels.get(track.role.channel);
-        if (!channel) return [];
-        const edgeSamples = track.edgeType === "rising" ? channel.rising_edges : channel.falling_edges;
-        const visibleEdges = edgeSamples
-          .filter((sample) => sample >= viewportStart && sample <= viewportEnd)
-          .slice(0, MAX_MARKERS_PER_TRACK);
-        if (visibleEdges.length === 0) return [];
-        const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
-        const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
-        return [
-          <div
-            className="analyzerMarkerTrack"
-            key={track.key}
-            style={{
-              height: trackHeight,
-              top: rowTops[rowIndex] + inset,
-            }}
-          >
-            {visibleEdges.map((sample, index) => {
-              const left = ((sample - viewportStart) / Math.max(1, viewportSamples)) * overlayWidth;
-              if (left < -10 || left > overlayWidth + 10) return null;
-              return (
-                <span
-                  className={`analyzerMarker ${track.edgeType}`}
-                  key={`${track.key}:${sample}:${index}`}
-                  style={{
-                    left,
-                    "--marker-color": saleaeLegacyChannelColor(track.role.channel),
-                  } as CSSProperties}
-                >
-                  <SaleaeIcon name={track.edgeType === "rising" ? "markerUpArrow" : "markerDownArrow"} />
-                </span>
-              );
-            })}
-          </div>,
-        ];
-      })}
+      </>
+    ),
+    [
+      bubbleTracks,
+      hoveredTrackKey,
+      overlayWidth,
+      rowHeights,
+      rowTopInsets,
+      rowTops,
+      visibleChannelIndexes,
+    ],
+  );
+
+  return (
+    <div className="analyzerBubblesOverlay" ref={overlayRef}>
+      {renderedContent}
     </div>
   );
+}
+
+function firstMarkerAtOrAfter(samples: number[], sample: number) {
+  let low = 0;
+  let high = samples.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (samples[middle] < sample) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function drawAnalyzerMarker(
+  context: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  edgeType: "rising" | "falling",
+) {
+  const width = 9;
+  const height = 6;
+  const left = centerX - width / 2;
+  const top = centerY - height / 2;
+  context.beginPath();
+  if (edgeType === "rising") {
+    context.moveTo(left, top + height);
+    context.lineTo(centerX, top);
+    context.lineTo(left + width, top + height);
+  } else {
+    context.moveTo(left, top);
+    context.lineTo(centerX, top + height);
+    context.lineTo(left + width, top);
+  }
+  context.closePath();
+  context.fill();
+  context.stroke();
 }
 
 function analyzerMarkerEdgeType(analyzer: UiAnalyzerInstance): "rising" | "falling" {

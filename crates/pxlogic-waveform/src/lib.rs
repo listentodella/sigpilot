@@ -76,6 +76,10 @@ pub struct ChannelTile {
     pub segments: Vec<DigitalSegment>,
     pub rising_edges: Vec<u64>,
     pub falling_edges: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_transition: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_transition: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +164,8 @@ pub fn build_tile(capture: &CaptureData, request: &WaveformRequest) -> Result<Wa
             .cloned()
             .unwrap_or_else(|| format!("D{channel}"));
         let exact = build_exact_digital_data(capture, channel, start, end, request.pixels)?;
+        let (previous_transition, next_transition) =
+            find_transitions_outside_range(capture, channel, start, end)?;
         channels.push(ChannelTile {
             channel,
             label,
@@ -168,6 +174,8 @@ pub fn build_tile(capture: &CaptureData, request: &WaveformRequest) -> Result<Wa
             segments: exact.segments,
             rising_edges: exact.rising_edges,
             falling_edges: exact.falling_edges,
+            previous_transition,
+            next_transition,
         });
     }
 
@@ -178,6 +186,55 @@ pub fn build_tile(capture: &CaptureData, request: &WaveformRequest) -> Result<Wa
         samples_per_pixel: samples_per_bin,
         channels,
     })
+}
+
+fn find_transitions_outside_range(
+    capture: &CaptureData,
+    channel: u8,
+    start: u64,
+    end: u64,
+) -> Result<(Option<u64>, Option<u64>)> {
+    let metadata = &capture.metadata;
+    let mask = 1u32 << channel;
+    let level_at = |sample| {
+        read_sample_word(&capture.samples, metadata.unitsize, sample)
+            .map(|word| word & mask != 0)
+            .ok_or(WaveformError::InvalidCapture)
+    };
+
+    let previous_transition = if start > 1 {
+        let mut after = level_at(start - 1)?;
+        let mut found = None;
+        for sample in (1..start).rev() {
+            let before = level_at(sample - 1)?;
+            if before != after {
+                found = Some(sample);
+                break;
+            }
+            after = before;
+        }
+        found
+    } else {
+        None
+    };
+
+    let next_transition = if end < metadata.sample_count {
+        let mut before = level_at(end - 1)?;
+        let mut found = None;
+        for sample in end..metadata.sample_count {
+            let after = level_at(sample)?;
+            if before != after {
+                found = Some(sample);
+                break;
+            }
+            before = after;
+        }
+        found
+    } else {
+        None
+    };
+
+    Ok((previous_transition, next_transition))
 }
 
 pub fn measure_digital_range(

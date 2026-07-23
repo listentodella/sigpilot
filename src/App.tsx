@@ -44,6 +44,14 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  DragDropContext,
+  Draggable,
+  DraggableProvidedDragHandleProps,
+  DropResult,
+  Droppable,
+  DroppableProps,
+} from "react-beautiful-dnd";
 import analyzersIcon from "./assets/saleae/sidebar/analyzers.svg";
 import cursorsIcon from "./assets/saleae/sidebar/cursors.svg";
 import devicesIcon from "./assets/saleae/sidebar/devices.svg";
@@ -55,6 +63,7 @@ import timingMarkersIcon from "./assets/saleae/sidebar/timingMarkers.svg";
 import emptyMeasurementArt from "./assets/saleae/empty_measurement.svg";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
+import { CaptureTriggerMarker } from "./components/CaptureTriggerMarker";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
@@ -72,14 +81,23 @@ import {
   CaptureProgress,
   CaptureSettings,
   CaptureSummary,
+  CaptureTriggerKind,
+  CaptureTriggerMetadata,
+  configurePwm,
   decodeAnalyzerFrames,
+  DecoderBackendKind,
+  deviceCapabilities,
   DeviceInfo,
   DigitalRangeMeasurementStats,
   DiagnosticEvent,
+  ExternalTriggerMode,
   exportCapture,
+  HardwareCaptureCapabilities,
+  HardwareChannelModeInfo,
   listDevices,
   measureDigitalRange,
   openCapture,
+  prepareDevice,
   releaseGraphSession,
   renderGraphFrame,
   saveCapture,
@@ -89,12 +107,14 @@ import {
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
 import {
+  ANALYZER_CATALOG_GROUPS,
   analyzerChannelIndexes,
   analyzerChannelRoleLabel,
   analyzerChannelRoles,
   analyzerBubbleRoles,
   analyzerDecodeSettings,
   analyzerDecodeSignature as getAnalyzerDecodeSignature,
+  decoderBackendLabel,
   analyzerStripInsetForChannel,
   analyzerSupportsDecoding,
   createAnalyzerInstance,
@@ -165,6 +185,7 @@ interface UiSession {
   selectedDevice: string;
   settings: CaptureSettings;
   deviceSettings: UiDeviceSettings;
+  channelOrder: number[];
   channelLabels: string[];
   channelHeights: number[];
   hiddenDigitalChannels: boolean[];
@@ -196,6 +217,11 @@ interface CaptureUpdatedEvent {
   summary: CaptureSummary;
 }
 
+interface CaptureTriggeredEvent {
+  session_id: string;
+  trigger: CaptureTriggerMetadata;
+}
+
 interface UiAnalyzerTriggerState {
   analyzerId: string;
   enabled: boolean;
@@ -210,20 +236,34 @@ interface AnalyzerEditState {
   sessionId: string;
 }
 
+interface AnalyzerChoice {
+  backend: DecoderBackendKind;
+  name: string;
+  source: string;
+}
+
 type UiRecordingMode = "FreeRun" | "Timer" | "Trigger";
 type UiTriggerEdge = "Rising Edge" | "Falling Edge" | "High Pulse" | "Low Pulse";
 
 interface UiDeviceSettings {
   bufferSizeMb: number;
   captureMode: UiRecordingMode;
+  clockNegedge: boolean;
   digitalChannels: boolean[];
+  externalTriggerMode: ExternalTriggerMode;
   glitchFilterEnabled: boolean;
   glitchFilterNs: number;
+  pwmDutyPercent: number;
+  pwmEffectiveDutyPercent: number | null;
+  pwmEffectiveFrequencyHz: number | null;
+  pwmEnabled: boolean;
+  pwmFrequencyHz: number;
   singleShotEnabled: boolean;
   singleShotHighResolution: boolean;
   singleShotPostTriggerMs: number;
   singleShotPreTriggerMs: number;
   triggerHoldoffMs: number;
+  triggerOutEnabled: boolean;
   triggerChannel: number;
   triggerEdge: UiTriggerEdge;
   triggerSamplingEnabled: boolean;
@@ -281,9 +321,28 @@ interface ChannelContextMenuState {
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
 const DEFAULT_BUFFER_SIZE_MB = 1024;
 const DEFAULT_DEMO_BUFFER_SIZE_MB = 4096;
-const SAMPLE_RATES = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000];
-const CHANNEL_COUNTS = [1, 4, 8, 16, 24, 32];
-const BUILT_IN_ANALYZERS = ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"];
+const FALLBACK_SAMPLE_RATES = [
+  2_000,
+  5_000,
+  10_000,
+  20_000,
+  40_000,
+  50_000,
+  100_000,
+  200_000,
+  400_000,
+  500_000,
+  1_000_000,
+  2_000_000,
+  4_000_000,
+  5_000_000,
+  10_000_000,
+  20_000_000,
+  25_000_000,
+  50_000_000,
+  100_000_000,
+];
+const FALLBACK_CHANNEL_COUNTS = [1, 2, 4, 8, 16, 24, 32];
   const RANGE_COLORS = [
   "hsl(334, 58%, 53%)",
   "hsl(150, 100%, 30%)",
@@ -323,12 +382,21 @@ function defaultSettings(deviceId: string): CaptureSettings {
   return {
     device_id: deviceId,
     sample_rate_hz: 25_000_000,
-    channel_count: 16,
+    channel_count: 8,
+    enabled_channels: Array.from({ length: 8 }, (_, index) => index),
     duration_ms: 10,
     buffer_size_mb: defaultBufferSizeMb(deviceId),
     decode_cross: true,
     threshold_volts: 2.0,
+    external_trigger_mode: "Close",
     mode: "Stream",
+    trigger_enabled: false,
+    trigger_channel: 0,
+    trigger_kind: "Rising",
+    trigger_position_percent: 50,
+    glitch_filter_enabled: false,
+    clock_edge: false,
+    trigger_out_enabled: false,
   };
 }
 
@@ -342,8 +410,210 @@ function backendCaptureMode(mode: UiRecordingMode): CaptureSettings["mode"] {
   return mode === "Timer" ? "Buffer" : "Stream";
 }
 
+function captureTriggerKind(edge: UiTriggerEdge): CaptureTriggerKind {
+  if (edge === "Falling Edge") return "Falling";
+  if (edge === "High Pulse") return "High";
+  if (edge === "Low Pulse") return "Low";
+  return "Rising";
+}
+
+function settingsFromDeviceSettings(session: UiSession, deviceId: string): CaptureSettings {
+  const deviceSettings = session.deviceSettings;
+  const captureMode = backendCaptureMode(deviceSettings.captureMode);
+  const sampleRateHz =
+    deviceSettings.captureMode === "Trigger" && deviceSettings.triggerSamplingEnabled
+      ? deviceSettings.triggerSamplingRateHz
+      : session.settings.sample_rate_hz;
+  const triggerWindowMs = Math.max(
+    0,
+    deviceSettings.singleShotPreTriggerMs + deviceSettings.singleShotPostTriggerMs,
+  );
+  const triggerPositionPercent =
+    triggerWindowMs > 0
+      ? Math.round((Math.max(0, deviceSettings.singleShotPreTriggerMs) / triggerWindowMs) * 100)
+      : 50;
+  const enabledChannels = enabledChannelIndexes(
+    deviceSettings.digitalChannels,
+    session.settings.channel_count,
+  );
+  return {
+    ...session.settings,
+    clock_edge: deviceSettings.clockNegedge,
+    device_id: deviceId,
+    buffer_size_mb: deviceSettings.bufferSizeMb,
+    enabled_channels: enabledChannels,
+    external_trigger_mode: deviceSettings.externalTriggerMode,
+    glitch_filter_enabled: deviceSettings.glitchFilterEnabled,
+    mode: captureMode,
+    sample_rate_hz: sampleRateHz,
+    trigger_channel: deviceSettings.triggerChannel,
+    trigger_enabled: deviceSettings.captureMode === "Trigger",
+    trigger_kind: captureTriggerKind(deviceSettings.triggerEdge),
+    trigger_position_percent: Math.max(0, Math.min(100, triggerPositionPercent)),
+    trigger_out_enabled: deviceSettings.triggerOutEnabled,
+  };
+}
+
+function hardwareModesForCaptureMode(
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+  mode: CaptureSettings["mode"],
+) {
+  if (!capabilities) return [];
+  const stream = mode === "Stream";
+  return capabilities.channel_modes.filter((channelMode) => channelMode.stream === stream);
+}
+
+function maxChannelsForCapabilities(
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+  mode: CaptureSettings["mode"],
+) {
+  const modes = hardwareModesForCaptureMode(capabilities, mode);
+  return Math.max(1, ...(modes.length > 0 ? modes.map((channelMode) => channelMode.channels) : [capabilities?.max_channels ?? 32]));
+}
+
+function channelCountOptionsForCapabilities(
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+  mode: CaptureSettings["mode"],
+  current?: number,
+) {
+  const maxChannels = maxChannelsForCapabilities(capabilities, mode);
+  const options = FALLBACK_CHANNEL_COUNTS.filter((count) => count <= maxChannels);
+  if (current != null && current >= 1 && current <= maxChannels) options.push(current);
+  if (!options.includes(maxChannels)) options.push(maxChannels);
+  return uniqueSortedNumbers(options);
+}
+
+function sampleRateOptionsForCapabilities(
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+  mode: CaptureSettings["mode"],
+  channelCount: number,
+) {
+  if (!capabilities) return FALLBACK_SAMPLE_RATES;
+  const matchingModes = hardwareModesForCaptureMode(capabilities, mode).filter(
+    (channelMode) => channelMode.channels >= channelCount,
+  );
+  const rates =
+    matchingModes.length > 0
+      ? matchingModes.flatMap((channelMode) => channelMode.sample_rates)
+      : capabilities.sample_rates;
+  return uniqueSortedNumbers(rates.length > 0 ? rates : FALLBACK_SAMPLE_RATES);
+}
+
+function sampleRateSelectOptionsForCapabilities(
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+  mode: CaptureSettings["mode"],
+  channelCount: number,
+  current: number,
+) {
+  const options = sampleRateOptionsForCapabilities(capabilities, mode, channelCount);
+  if (!options.includes(current)) return uniqueSortedNumbers([...options, current]);
+  return options;
+}
+
+function selectedHardwareChannelMode(
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+  mode: CaptureSettings["mode"],
+  channelCount: number,
+  sampleRateHz: number,
+): HardwareChannelModeInfo | null {
+  const modes = hardwareModesForCaptureMode(capabilities, mode);
+  if (modes.length === 0) return null;
+  const maxChannels = Math.max(1, ...modes.map((channelMode) => channelMode.channels));
+  const effectiveChannelCount = Math.max(1, Math.min(channelCount, maxChannels));
+  const capableModes = modes.filter((channelMode) => channelMode.channels >= effectiveChannelCount);
+  const inRange = capableModes
+    .filter(
+      (channelMode) =>
+        sampleRateHz >= channelMode.min_sample_rate_hz && sampleRateHz <= channelMode.max_sample_rate_hz,
+    )
+    .sort(
+      (left, right) =>
+        left.channels - right.channels || left.max_sample_rate_hz - right.max_sample_rate_hz,
+    );
+  if (inRange[0]) return inRange[0];
+  return (
+    capableModes.sort(
+      (left, right) =>
+        right.max_sample_rate_hz - left.max_sample_rate_hz || left.channels - right.channels,
+    )[0] ?? null
+  );
+}
+
+function clampCaptureSettingsToCapabilities(
+  settings: CaptureSettings,
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+): CaptureSettings {
+  if (!capabilities) return settings;
+  const mode = settings.mode;
+  const maxChannels = maxChannelsForCapabilities(capabilities, mode);
+  const channelCount = Math.max(1, Math.min(settings.channel_count, maxChannels));
+  const enabledChannels = settings.enabled_channels.filter(
+    (channel, index, channels) =>
+      Number.isInteger(channel) &&
+      channel >= 0 &&
+      channel < channelCount &&
+      channels.indexOf(channel) === index,
+  );
+  const selectedMode = selectedHardwareChannelMode(
+    capabilities,
+    mode,
+    channelCount,
+    settings.sample_rate_hz,
+  );
+  const boundedSampleRate = selectedMode
+    ? Math.max(
+        selectedMode.min_sample_rate_hz,
+        Math.min(settings.sample_rate_hz, selectedMode.max_sample_rate_hz),
+      )
+    : settings.sample_rate_hz;
+  return {
+    ...settings,
+    channel_count: channelCount,
+    enabled_channels: enabledChannels,
+    sample_rate_hz: nearestSampleRate(
+      sampleRateOptionsForCapabilities(capabilities, mode, channelCount),
+      boundedSampleRate,
+    ),
+  };
+}
+
+function nearestSampleRate(sampleRates: number[], target: number) {
+  if (sampleRates.length === 0) return target;
+  return sampleRates.reduce((nearest, rate) =>
+    Math.abs(rate - target) < Math.abs(nearest - target) ? rate : nearest,
+  );
+}
+
+function uniqueSortedNumbers(values: number[]) {
+  return Array.from(new Set(values.filter((value) => Number.isFinite(value)))).sort((left, right) => left - right);
+}
+
 function makeDigitalChannels(channelCount: number) {
   return Array.from({ length: 32 }, (_, index) => index < channelCount);
+}
+
+function enabledChannelIndexes(channels: boolean[], channelCount: number) {
+  return channels
+    .slice(0, Math.max(1, channelCount))
+    .flatMap((enabled, index) => (enabled ? [index] : []));
+}
+
+function metadataEnabledChannels(metadata: CaptureSummary["metadata"]) {
+  const channels = metadata.enabled_channels ?? [];
+  return channels.length > 0
+    ? channels.filter(
+        (channel, index) =>
+          Number.isInteger(channel) &&
+          channel >= 0 &&
+          channel < metadata.channel_count &&
+          channels.indexOf(channel) === index,
+      )
+    : Array.from({ length: metadata.channel_count }, (_, index) => index);
+}
+
+function digitalChannelsForMetadata(metadata: CaptureSummary["metadata"]) {
+  const enabled = new Set(metadataEnabledChannels(metadata));
+  return Array.from({ length: 32 }, (_, index) => enabled.has(index));
 }
 
 function makeHiddenDigitalChannels(existing: boolean[] = []) {
@@ -352,6 +622,15 @@ function makeHiddenDigitalChannels(existing: boolean[] = []) {
 
 function channelLabelsForCount(channelCount: number, existing: string[] = []) {
   return Array.from({ length: Math.max(1, channelCount) }, (_, index) => existing[index] ?? `D${index}`);
+}
+
+function channelOrderForCount(channelCount: number, existing: number[] = []) {
+  const count = Math.max(1, channelCount);
+  const validExisting = existing.filter(
+    (channel, index) => Number.isInteger(channel) && channel >= 0 && channel < count && existing.indexOf(channel) === index,
+  );
+  const missing = Array.from({ length: count }, (_, index) => index).filter((channel) => !validExisting.includes(channel));
+  return [...validExisting, ...missing];
 }
 
 function captureChannelLimit(session: UiSession) {
@@ -369,8 +648,9 @@ function isDigitalChannelEnabled(session: UiSession, channelIndex: number) {
 
 function visibleDigitalChannelIndexes(session: UiSession) {
   const limit = captureChannelLimit(session);
-  return Array.from({ length: limit }, (_, index) => index).filter((index) =>
-    isDigitalChannelEnabled(session, index) && !(session.hiddenDigitalChannels[index] ?? false),
+  const order = channelOrderForCount(limit, session.channelOrder);
+  return order.filter(
+    (index) => isDigitalChannelEnabled(session, index) && !(session.hiddenDigitalChannels[index] ?? false),
   );
 }
 
@@ -403,6 +683,26 @@ function tileForVisibleChannels(tile: WaveformTile | null, channelIndexes: numbe
   };
 }
 
+function graphTileCanServeViewport(
+  tile: WaveformTile | null,
+  viewportStart: number,
+  viewportSamples: number,
+  canvasWidth: number,
+  channelIndexes: number[],
+) {
+  if (!tile || tile.channels.length !== channelIndexes.length || viewportSamples <= 0) return false;
+  if (tile.channels.some((channel, index) => channel.channel !== channelIndexes[index])) return false;
+  const viewportEnd = viewportStart + viewportSamples;
+  const tileEnd = tile.start_sample + tile.sample_count;
+  if (viewportStart < tile.start_sample || viewportEnd > tileEnd) return false;
+  const desiredSamplesPerPixel = viewportSamples / Math.max(1, canvasWidth);
+  if (desiredSamplesPerPixel <= 8 && tile.channels.some((channel) => channel.segments.length === 0)) {
+    return false;
+  }
+  const resolutionRatio = tile.samples_per_pixel / Math.max(Number.EPSILON, desiredSamplesPerPixel);
+  return resolutionRatio >= 0.5 && resolutionRatio <= 1.75;
+}
+
 function summaryWithLabels(summary: CaptureSummary, labels: string[]): CaptureSummary {
   return {
     ...summary,
@@ -413,7 +713,32 @@ function summaryWithLabels(summary: CaptureSummary, labels: string[]): CaptureSu
   };
 }
 
+function syncSessionWithEffectiveCaptureMetadata(session: UiSession, summary: CaptureSummary): UiSession {
+  const enabledChannels = metadataEnabledChannels(summary.metadata);
+  const triggerChannel = enabledChannels.includes(session.deviceSettings.triggerChannel)
+    ? session.deviceSettings.triggerChannel
+    : (enabledChannels[0] ?? 0);
+  return {
+    ...session,
+    selectedDevice: summary.metadata.source_device || session.selectedDevice,
+    settings: {
+      ...session.settings,
+      device_id: summary.metadata.source_device || session.settings.device_id,
+      sample_rate_hz: summary.metadata.sample_rate_hz,
+      channel_count: summary.metadata.channel_count,
+      enabled_channels: enabledChannels,
+    },
+    deviceSettings: {
+      ...session.deviceSettings,
+      digitalChannels: digitalChannelsForMetadata(summary.metadata),
+      triggerChannel,
+    },
+    channelLabels: channelLabelsForCount(summary.metadata.channel_count, session.channelLabels),
+  };
+}
+
 function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): UiSession {
+  const syncedSession = syncSessionWithEffectiveCaptureMetadata(session, summary);
   const previousSamples = session.summary?.metadata.sample_count ?? 0;
   const wasFollowingLiveEdge =
     previousSamples === 0 ||
@@ -432,12 +757,35 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     : Math.max(0, Math.min(maxViewportStart, session.viewportStart));
 
   return {
-    ...session,
-    channelLabels: channelLabelsForCount(summary.metadata.channel_count, session.channelLabels),
-    summary: summaryWithLabels(summary, session.channelLabels),
+    ...syncedSession,
+    summary: summaryWithLabels(summary, syncedSession.channelLabels),
     viewportStart,
     viewportSamples,
     message: "Capturing",
+  };
+}
+
+function initialCaptureViewport(summary: CaptureSummary) {
+  const totalSamples = Math.max(1, summary.metadata.sample_count);
+  const viewportSamples = Math.max(1, Math.min(totalSamples, 100_000));
+  const triggerSample = summary.metadata.trigger?.sample_index;
+  const viewportStart =
+    triggerSample == null
+      ? 0
+      : Math.max(0, Math.min(totalSamples - viewportSamples, triggerSample - viewportSamples / 2));
+  return { viewportSamples, viewportStart };
+}
+
+function applyCaptureTrigger(session: UiSession, trigger: CaptureTriggerMetadata): UiSession {
+  return {
+    ...session,
+    summary: session.summary
+      ? {
+          ...session.summary,
+          metadata: { ...session.summary.metadata, trigger },
+        }
+      : session.summary,
+    message: `Triggered on D${trigger.channel} (${trigger.kind})`,
   };
 }
 
@@ -462,6 +810,7 @@ function applyTrimmedCapture(
       previousFrame: null,
       nextFrame: null,
       renderedTracks: [],
+      renderedDecodeSignature: null,
       highlightedFrameIndex: null,
     })),
     channelLabels: labels,
@@ -514,14 +863,22 @@ function defaultDeviceSettings(channelCount: number, bufferSizeMb = DEFAULT_BUFF
   return {
     bufferSizeMb,
     captureMode: "FreeRun",
+    clockNegedge: false,
     digitalChannels: makeDigitalChannels(channelCount),
+    externalTriggerMode: "Close",
     glitchFilterEnabled: false,
     glitchFilterNs: 10,
+    pwmDutyPercent: 50,
+    pwmEffectiveDutyPercent: null,
+    pwmEffectiveFrequencyHz: null,
+    pwmEnabled: false,
+    pwmFrequencyHz: 1_000,
     singleShotEnabled: false,
     singleShotHighResolution: false,
     singleShotPostTriggerMs: 5,
     singleShotPreTriggerMs: 5,
     triggerHoldoffMs: 0,
+    triggerOutEnabled: false,
     triggerChannel: 0,
     triggerEdge: "Rising Edge",
     triggerSamplingEnabled: false,
@@ -532,7 +889,7 @@ function defaultDeviceSettings(channelCount: number, bufferSizeMb = DEFAULT_BUFF
   };
 }
 
-function defaultCursorState(sampleCount = 100_000, channelCount = 16): UiCursorState {
+function defaultCursorState(sampleCount = 100_000, channelCount = 8): UiCursorState {
   return {
     visible: false,
     x1Sample: Math.max(0, Math.round(sampleCount * 0.25)),
@@ -637,6 +994,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     deviceSettings: source
       ? { ...source.deviceSettings, digitalChannels: [...source.deviceSettings.digitalChannels] }
       : defaultDeviceSettings(settings.channel_count, settings.buffer_size_mb),
+    channelOrder: channelOrderForCount(32, source?.channelOrder),
     channelLabels: source
       ? channelLabelsForCount(settings.channel_count, source.channelLabels)
       : channelLabelsForCount(settings.channel_count),
@@ -721,6 +1079,7 @@ function getSidebarPanelAllowed(panel: SidebarPanel, session: UiSession | null |
 
 export default function App() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [deviceCapabilitiesById, setDeviceCapabilitiesById] = useState<Record<string, HardwareCaptureCapabilities>>({});
   const [draftSelectedDevice, setDraftSelectedDevice] = useState(DEFAULT_DEVICE_ID);
   const [sessions, setSessions] = useState<UiSession[]>([]);
   const [extensions, setExtensions] = useState<UiExtensionRecord[]>(loadUiExtensions);
@@ -729,10 +1088,12 @@ export default function App() {
   const [sidebarPanelWidth, setSidebarPanelWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
   const [footerPopover, setFooterPopover] = useState<FooterPopover>(null);
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
+  const [channelReorderActive, setChannelReorderActive] = useState(false);
   const [channelContextMenu, setChannelContextMenu] = useState<ChannelContextMenuState | null>(null);
   const [analyzerInEdit, setAnalyzerInEdit] = useState<AnalyzerEditState | null>(null);
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [graphRequestEpoch, setGraphRequestEpoch] = useState(0);
+  const [analyzerRenderRequestEpoch, setAnalyzerRenderRequestEpoch] = useState(0);
   const [startupMessage, setStartupMessage] = useState("Ready");
 
   const footerRef = useRef<HTMLElement>(null);
@@ -750,11 +1111,17 @@ export default function App() {
   const tileRequestSeq = useRef(0);
   const graphRequestInFlightRef = useRef(false);
   const graphRequestPendingRef = useRef(false);
+  const graphRequestLastStartedAtRef = useRef(0);
+  const analyzerRenderRequestSeq = useRef(0);
+  const analyzerRenderRequestInFlightRef = useRef(false);
+  const analyzerRenderRequestPendingRef = useRef(false);
+  const analyzerRenderRequestLastStartedAtRef = useRef(0);
   const analyzerRequestSeq = useRef<Record<string, number>>({});
   const rangeMeasurementRequestSeq = useRef<Record<string, number>>({});
   const viewportAnimationRef = useRef<number | null>(null);
   const lastPointerXRef = useRef<number | null>(null);
   const sessionCounter = useRef(1);
+  const preparingDeviceIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -825,6 +1192,11 @@ export default function App() {
     () => devices.find((device) => device.id === selectedDevice) ?? null,
     [devices, selectedDevice],
   );
+  const selectedCapabilities = deviceCapabilitiesById[selectedDevice] ?? null;
+  const capabilitiesForDevice = useCallback(
+    (deviceId: string) => deviceCapabilitiesById[deviceId] ?? null,
+    [deviceCapabilitiesById],
+  );
 
   const updateSession = useCallback((sessionId: string, updater: (session: UiSession) => UiSession) => {
     setSessions((current) => current.map((session) => (session.id === sessionId ? updater(session) : session)));
@@ -848,6 +1220,32 @@ export default function App() {
       setDevices(next);
       setDraftSelectedDevice((current) => (next.some((device) => device.id === current) ? current : next[0]?.id ?? current));
       setStartupMessage(`${next.length} device source${next.length === 1 ? "" : "s"}`);
+
+      const physicalDevices = next.filter(
+        (device) =>
+          device.kind === "Usb" &&
+          device.ready &&
+          !preparingDeviceIdsRef.current.has(device.id),
+      );
+      if (physicalDevices.length > 0) {
+        physicalDevices.forEach((device) => preparingDeviceIdsRef.current.add(device.id));
+        setStartupMessage(
+          `${next.length} device source${next.length === 1 ? "" : "s"}; preparing FPGA in background`,
+        );
+        void Promise.allSettled(physicalDevices.map((device) => prepareDevice(device.id))).then((results) => {
+          physicalDevices.forEach((device) => preparingDeviceIdsRef.current.delete(device.id));
+          const failure = results.find(
+            (result): result is PromiseRejectedResult => result.status === "rejected",
+          );
+          if (failure) {
+            setStartupMessage(`FPGA preparation failed: ${String(failure.reason)}`);
+          } else {
+            setStartupMessage(
+              `${next.length} device source${next.length === 1 ? "" : "s"}; FPGA ready`,
+            );
+          }
+        });
+      }
     } catch (error) {
       setStartupMessage(String(error));
     }
@@ -856,6 +1254,59 @@ export default function App() {
   useEffect(() => {
     refreshDevices();
   }, [refreshDevices]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void deviceCapabilities(selectedDevice)
+      .then((capabilities) => {
+        if (cancelled) return;
+        setDeviceCapabilitiesById((current) => ({
+          ...current,
+          [selectedDevice]: capabilities,
+          [capabilities.device_id]: capabilities,
+        }));
+      })
+      .catch((error) => {
+        if (!cancelled) setStartupMessage(`Capabilities: ${String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDevice]);
+
+  useEffect(() => {
+    if (!activeSession || !selectedCapabilities) return;
+    updateSession(activeSession.id, (session) => {
+      if (session.selectedDevice !== selectedDevice) return session;
+      const nextSettings = clampCaptureSettingsToCapabilities(session.settings, selectedCapabilities);
+      if (
+        nextSettings.sample_rate_hz === session.settings.sample_rate_hz &&
+        nextSettings.channel_count === session.settings.channel_count &&
+        nextSettings.mode === session.settings.mode
+      ) {
+        return session;
+      }
+      const channelCountChanged = nextSettings.channel_count !== session.settings.channel_count;
+      const digitalChannels = channelCountChanged
+        ? makeDigitalChannels(nextSettings.channel_count)
+        : session.deviceSettings.digitalChannels;
+      return {
+        ...session,
+        channelLabels: channelCountChanged
+          ? channelLabelsForCount(nextSettings.channel_count, session.channelLabels)
+          : session.channelLabels,
+        deviceSettings: {
+          ...session.deviceSettings,
+          digitalChannels,
+          triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, nextSettings.channel_count - 1)),
+        },
+        settings: {
+          ...nextSettings,
+          enabled_channels: enabledChannelIndexes(digitalChannels, nextSettings.channel_count),
+        },
+      };
+    });
+  }, [activeSession?.id, selectedCapabilities, selectedDevice, updateSession]);
 
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
@@ -882,32 +1333,39 @@ export default function App() {
         const { session_id: sessionId, summary } = event.payload;
         updateSession(sessionId, (session) => applyLiveCaptureSummary(session, summary));
       }).catch(() => () => {}),
+      listen<CaptureTriggeredEvent>("capture_triggered", (event) => {
+        const { session_id: sessionId, trigger } = event.payload;
+        updateSession(sessionId, (session) => applyCaptureTrigger(session, trigger));
+      }).catch(() => () => {}),
       listen<CaptureSummary>("capture_completed", (event) => {
         const targetId = captureSessionRef.current;
         if (!targetId) return;
-        updateSession(targetId, (session) => ({
-          ...session,
-          channelLabels: channelLabelsForCount(event.payload.metadata.channel_count, session.channelLabels),
-          rangePlacement: null,
-          timingMarkerPlacement: null,
-          summary: summaryWithLabels(event.payload, session.channelLabels),
-          viewportStart: 0,
-          viewportSamples: Math.min(event.payload.metadata.sample_count, 100_000),
-          cursorState: {
-            ...defaultCursorState(event.payload.metadata.sample_count, event.payload.metadata.channel_count),
-            visible: session.cursorState.visible,
-          },
-          analyzers: session.analyzers.map((analyzer) => ({
-            ...analyzer,
-            protocolBubbles: [],
-            decodedFrames: [],
-            previousFrame: null,
-            nextFrame: null,
-            renderedTracks: [],
-            highlightedFrameIndex: null,
-          })),
-          message: "Capture complete",
-        }));
+        updateSession(targetId, (session) => {
+          const syncedSession = syncSessionWithEffectiveCaptureMetadata(session, event.payload);
+          const initialViewport = initialCaptureViewport(event.payload);
+          return {
+            ...syncedSession,
+            rangePlacement: null,
+            timingMarkerPlacement: null,
+            summary: summaryWithLabels(event.payload, syncedSession.channelLabels),
+            ...initialViewport,
+            cursorState: {
+              ...defaultCursorState(event.payload.metadata.sample_count, event.payload.metadata.channel_count),
+              visible: syncedSession.cursorState.visible,
+            },
+            analyzers: syncedSession.analyzers.map((analyzer) => ({
+              ...analyzer,
+              protocolBubbles: [],
+              decodedFrames: [],
+              previousFrame: null,
+              nextFrame: null,
+              renderedTracks: [],
+              renderedDecodeSignature: null,
+              highlightedFrameIndex: null,
+            })),
+            message: "Capture complete",
+          };
+        });
       }).catch(() => () => {}),
       listen<string>("capture_failed", (event) => {
         const targetId = captureSessionRef.current ?? activeSessionIdRef.current;
@@ -947,8 +1405,19 @@ export default function App() {
   );
   const visibleChannelIndexes = useMemo(
     () => (activeSession ? visibleDigitalChannelIndexes(activeSession) : []),
-    [activeSession],
+    [
+      activeSession?.channelOrder,
+      activeSession?.deviceSettings.digitalChannels,
+      activeSession?.hiddenDigitalChannels,
+      activeSession?.settings.channel_count,
+      activeSession?.summary?.metadata.channel_count,
+    ],
   );
+  const visibleChannelSignature = visibleChannelIndexes.join(",");
+  const graphAnalyzerDecodeSignature =
+    activeSession?.analyzers
+      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}`)
+      .join("|") ?? "";
   const visibleChannelLabels = useMemo(
     () => visibleChannelIndexes.map((channelIndex) => channelLabels[channelIndex] ?? `D${channelIndex}`),
     [channelLabels, visibleChannelIndexes],
@@ -977,7 +1446,12 @@ export default function App() {
             manualLayout: activeSession.manualChannelLayout,
           })
         : [],
-    [activeSession, graphViewportHeight, visibleChannelIndexes],
+    [
+      activeSession?.channelHeights,
+      activeSession?.manualChannelLayout,
+      graphViewportHeight,
+      visibleChannelSignature,
+    ],
   );
   const visibleAnalyzerInsets = useMemo(
     () =>
@@ -986,11 +1460,15 @@ export default function App() {
             analyzerStripInsetForChannel(activeSession.analyzers, channelIndex),
           )
         : [],
-    [activeSession?.analyzers, visibleChannelIndexes],
+    [graphAnalyzerDecodeSignature, visibleChannelSignature],
   );
   const visibleOuterRowHeights = useMemo(
     () => visibleChannelHeights.map((height, index) => height + (visibleAnalyzerInsets[index] ?? 0)),
     [visibleAnalyzerInsets, visibleChannelHeights],
+  );
+  const visibleChannelLayouts = useMemo(
+    () => getSaleaeGraphChannelLayout(visibleOuterRowHeights, visibleChannelIndexes.length),
+    [visibleOuterRowHeights, visibleChannelIndexes.length],
   );
   const visibleTile = useMemo(
     () => tileForVisibleChannels(activeSession?.tile ?? null, visibleChannelIndexes, channelLabels),
@@ -1075,12 +1553,6 @@ export default function App() {
     updateViewport(activeSession.id, 0, activeSession.summary.metadata.sample_count);
   }, [activeSession, updateViewport]);
 
-  const graphAnalyzerDecodeSignature =
-    activeSession?.analyzers
-      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}`)
-      .join("|") ?? "";
-  const visibleChannelSignature = visibleChannelIndexes.join(",");
-
   useEffect(() => {
     if (!activeSession?.summary) {
       tileRequestSeq.current += 1;
@@ -1088,17 +1560,36 @@ export default function App() {
     }
 
     const sessionSnapshot = activeSession;
+    if (
+      !sessionSnapshot.busy &&
+      graphTileCanServeViewport(
+        sessionSnapshot.tile,
+        sessionSnapshot.viewportStart,
+        sessionSnapshot.viewportSamples,
+        sessionSnapshot.canvasWidth,
+        visibleChannelIndexes,
+      )
+    ) {
+      return;
+    }
+
     const requestSeq = tileRequestSeq.current + 1;
     tileRequestSeq.current = requestSeq;
-    const animationFrame = window.requestAnimationFrame(() => {
+    const minimumRequestIntervalMs = sessionSnapshot.busy ? 33 : 24;
+    const requestDelay = Math.max(
+      0,
+      minimumRequestIntervalMs - (performance.now() - graphRequestLastStartedAtRef.current),
+    );
+    const requestTimer = window.setTimeout(() => {
       if (graphRequestInFlightRef.current) {
         graphRequestPendingRef.current = true;
         return;
       }
       graphRequestInFlightRef.current = true;
+      graphRequestLastStartedAtRef.current = performance.now();
       void (async () => {
       try {
-        const overscan = Math.max(64, sessionSnapshot.viewportSamples);
+        const overscan = Math.max(64, Math.round(sessionSnapshot.viewportSamples * 0.5));
         const requestStart = Math.max(0, sessionSnapshot.viewportStart - overscan);
         const requestEnd = Math.min(
           sessionSnapshot.summary!.metadata.sample_count,
@@ -1106,39 +1597,23 @@ export default function App() {
         );
         const requestSamples = Math.max(1, requestEnd - requestStart);
         const pixelScale = requestSamples / Math.max(1, sessionSnapshot.viewportSamples);
-        const maxPixels = sessionSnapshot.summary!.metadata.channel_count > 16 ? 1800 : 2600;
-        const analyzerRequests = sessionSnapshot.analyzers.flatMap((analyzer) => {
-              const settings = analyzerDecodeSettings(analyzer);
-              if (!settings || !analyzerSupportsDecoding(analyzer)) return [];
-              return [
-                {
-                  analyzer_id: analyzer.id,
-                  settings,
-                  tracks: analyzerBubbleRoles(analyzer).map((role) => ({
-                    channel: role.channel,
-                    role: role.title,
-                  })),
-                },
-              ];
-            });
+        const maxPixels = visibleChannelIndexes.length > 16 ? 1800 : 2600;
+        const renderPixels = Math.max(
+          480,
+          Math.min(maxPixels, Math.round(sessionSnapshot.canvasWidth * pixelScale)),
+        );
         const next = await renderGraphFrame(sessionSnapshot.id, {
           frame_id: requestSeq,
           waveform: {
             start_sample: requestStart,
             sample_count: requestSamples,
-            pixels: Math.max(480, Math.min(maxPixels, Math.round(sessionSnapshot.canvasWidth * pixelScale))),
+            pixels: renderPixels,
             channels: visibleChannelIndexes.length > 0 ? visibleChannelIndexes : [255],
           },
-          analyzer_view: {
-            start_sample: sessionSnapshot.viewportStart,
-            sample_count: sessionSnapshot.viewportSamples,
-            pixels: Math.max(1, sessionSnapshot.canvasWidth),
-            channels: [],
-          },
-          analyzers: analyzerRequests,
+          analyzer_view: null,
+          analyzers: [],
         });
         if (requestSeq === tileRequestSeq.current && next.frame_id === requestSeq) {
-          const analyzerResults = new Map(next.analyzers.map((result) => [result.analyzer_id, result]));
           updateSession(sessionSnapshot.id, (session) => ({
             ...session,
             tile: {
@@ -1148,10 +1623,6 @@ export default function App() {
                 label: session.channelLabels[channel.channel] ?? channel.label,
               })),
             },
-            analyzers: session.analyzers.map((analyzer) => ({
-              ...analyzer,
-              renderedTracks: analyzerResults.get(analyzer.id)?.tracks ?? [],
-            })),
           }));
         }
       } catch (error) {
@@ -1166,8 +1637,8 @@ export default function App() {
         }
       }
       })();
-    });
-    return () => window.cancelAnimationFrame(animationFrame);
+    }, requestDelay);
+    return () => window.clearTimeout(requestTimer);
   }, [
     activeSession?.canvasWidth,
     activeSession?.busy,
@@ -1176,10 +1647,127 @@ export default function App() {
     activeSession?.summary?.metadata.sample_count,
     activeSession?.viewportSamples,
     activeSession?.viewportStart,
-    graphAnalyzerDecodeSignature,
     graphRequestEpoch,
     updateSession,
     visibleChannelSignature,
+  ]);
+
+  useEffect(() => {
+    if (!activeSession?.summary) {
+      analyzerRenderRequestSeq.current += 1;
+      return;
+    }
+
+    const sessionSnapshot = activeSession;
+    const analyzerRequests = sessionSnapshot.analyzers.flatMap((analyzer) => {
+      const settings = analyzerDecodeSettings(analyzer);
+      if (!settings || !analyzerSupportsDecoding(analyzer)) return [];
+      return [
+        {
+          analyzer_id: analyzer.id,
+          backend: analyzer.decoderBackend,
+          settings,
+          tracks: analyzerBubbleRoles(analyzer).map((role) => ({
+            channel: role.channel,
+            role: role.title,
+          })),
+        },
+      ];
+    });
+    if (analyzerRequests.length === 0) {
+      analyzerRenderRequestSeq.current += 1;
+      return;
+    }
+
+    const requestSeq = analyzerRenderRequestSeq.current + 1;
+    analyzerRenderRequestSeq.current = requestSeq;
+    const minimumRequestIntervalMs = sessionSnapshot.busy ? 100 : 40;
+    const requestDelay = Math.max(
+      0,
+      minimumRequestIntervalMs -
+        (performance.now() - analyzerRenderRequestLastStartedAtRef.current),
+    );
+    const requestTimer = window.setTimeout(() => {
+      if (analyzerRenderRequestInFlightRef.current) {
+        analyzerRenderRequestPendingRef.current = true;
+        return;
+      }
+      analyzerRenderRequestInFlightRef.current = true;
+      analyzerRenderRequestLastStartedAtRef.current = performance.now();
+      void (async () => {
+        try {
+          const overscan = Math.max(64, Math.round(sessionSnapshot.viewportSamples * 0.5));
+          const requestStart = Math.max(0, sessionSnapshot.viewportStart - overscan);
+          const requestEnd = Math.min(
+            sessionSnapshot.summary!.metadata.sample_count,
+            sessionSnapshot.viewportStart + sessionSnapshot.viewportSamples + overscan,
+          );
+          const requestSamples = Math.max(1, requestEnd - requestStart);
+          const pixelScale = requestSamples / Math.max(1, sessionSnapshot.viewportSamples);
+          const renderPixels = Math.max(
+            480,
+            Math.min(2_600, Math.round(sessionSnapshot.canvasWidth * pixelScale)),
+          );
+          const next = await renderGraphFrame(sessionSnapshot.id, {
+            frame_id: requestSeq,
+            waveform: {
+              start_sample: requestStart,
+              sample_count: requestSamples,
+              pixels: renderPixels,
+              channels: [255],
+            },
+            analyzer_view: {
+              start_sample: requestStart,
+              sample_count: requestSamples,
+              pixels: renderPixels,
+              channels: [],
+            },
+            analyzers: analyzerRequests,
+          });
+          if (
+            requestSeq === analyzerRenderRequestSeq.current &&
+            next.frame_id === requestSeq
+          ) {
+            const analyzerResults = new Map(
+              next.analyzers.map((result) => [result.analyzer_id, result]),
+            );
+            updateSession(sessionSnapshot.id, (session) => ({
+              ...session,
+              analyzers: session.analyzers.map((analyzer) => ({
+                ...analyzer,
+                renderedTracks: analyzerResults.get(analyzer.id)?.tracks ?? [],
+                renderedDecodeSignature: getAnalyzerDecodeSignature(analyzer),
+              })),
+            }));
+          }
+        } catch (error) {
+          if (requestSeq === analyzerRenderRequestSeq.current) {
+            updateSession(sessionSnapshot.id, (session) => ({
+              ...session,
+              message: String(error),
+            }));
+          }
+        } finally {
+          analyzerRenderRequestInFlightRef.current = false;
+          if (analyzerRenderRequestPendingRef.current) {
+            analyzerRenderRequestPendingRef.current = false;
+            setAnalyzerRenderRequestEpoch((epoch) => epoch + 1);
+          }
+        }
+      })();
+    }, requestDelay);
+    return () => window.clearTimeout(requestTimer);
+  }, [
+    activeSession?.busy,
+    activeSession?.canvasWidth,
+    activeSession?.id,
+    activeSession?.summary?.metadata.captured_at,
+    activeSession?.summary?.metadata.sample_count,
+    activeSession?.viewportSamples,
+    activeSession?.viewportStart,
+    analyzerRenderRequestEpoch,
+    graphAnalyzerDecodeSignature,
+    updateSession,
   ]);
 
   const rangeMeasurementSignature =
@@ -1272,12 +1860,17 @@ export default function App() {
 
   async function runCaptureForSession(session: UiSession, deviceId: string) {
     const captureDevice = devices.find((device) => device.id === deviceId) ?? selected;
-    const nextSettings = {
-      ...session.settings,
-      device_id: deviceId,
-      buffer_size_mb: session.deviceSettings.bufferSizeMb,
-      mode: backendCaptureMode(session.deviceSettings.captureMode),
-    };
+    const nextSettings = clampCaptureSettingsToCapabilities(
+      settingsFromDeviceSettings(session, deviceId),
+      capabilitiesForDevice(deviceId),
+    );
+    if (nextSettings.enabled_channels.length === 0) {
+      updateSession(session.id, (current) => ({
+        ...current,
+        message: "Enable at least one digital channel before starting capture",
+      }));
+      return;
+    }
     captureSessionRef.current = session.id;
     setDraftSelectedDevice(deviceId);
     updateSession(session.id, (current) => ({
@@ -1295,22 +1888,41 @@ export default function App() {
         previousFrame: null,
         nextFrame: null,
         renderedTracks: [],
+        renderedDecodeSignature: null,
         highlightedFrameIndex: null,
       })),
       diagnostics: [],
-      message: captureDevice?.kind === "Usb" ? "Preparing device and capturing" : "Capturing",
+      message:
+        nextSettings.trigger_enabled && captureDevice?.kind === "Usb"
+          ? `Preparing device; waiting for ${nextSettings.trigger_kind.toLowerCase()} trigger on D${nextSettings.trigger_channel}`
+          : captureDevice?.kind === "Usb"
+            ? "Preparing device and capturing"
+            : "Capturing",
     }));
     try {
-      const next = await startCapture(session.id, nextSettings, {
-        onProgress: (progress) => {
-          updateSession(session.id, (current) => ({ ...current, progress }));
+      const demoAnalyzers = session.analyzers
+        .map(analyzerDecodeSettings)
+        .filter((settings): settings is NonNullable<typeof settings> => settings !== null);
+      const next = await startCapture(
+        session.id,
+        nextSettings,
+        {
+          onProgress: (progress) => {
+            updateSession(session.id, (current) => ({ ...current, progress }));
+          },
+          onSummary: (summary) => {
+            updateSession(session.id, (current) => applyLiveCaptureSummary(current, summary));
+          },
+          onTrigger: (trigger) => {
+            updateSession(session.id, (current) => applyCaptureTrigger(current, trigger));
+          },
         },
-        onSummary: (summary) => {
-          updateSession(session.id, (current) => applyLiveCaptureSummary(current, summary));
-        },
-      });
+        demoAnalyzers,
+      );
+      const initialViewport = initialCaptureViewport(next);
       updateSession(session.id, (current) => ({
         ...applyLiveCaptureSummary(current, next),
+        ...initialViewport,
         cursorState: {
           ...defaultCursorState(next.metadata.sample_count, next.metadata.channel_count),
           visible: current.cursorState.visible,
@@ -1322,6 +1934,7 @@ export default function App() {
           previousFrame: null,
           nextFrame: null,
           renderedTracks: [],
+          renderedDecodeSignature: null,
           highlightedFrameIndex: null,
         })),
         message: "Capture complete",
@@ -1362,7 +1975,7 @@ export default function App() {
       ),
     }));
     try {
-      const frames = (await decodeAnalyzerFrames(session.id, settings)).sort(
+      const frames = (await decodeAnalyzerFrames(session.id, settings, analyzer.decoderBackend)).sort(
         (left, right) => left.start_sample - right.start_sample || left.frame_id - right.frame_id,
       );
       if (requestSeq !== analyzerRequestSeq.current[requestKey]) return;
@@ -1442,6 +2055,8 @@ export default function App() {
         ? activeSession
         : createSession(summary.metadata.source_device || selectedDevice, activeSession ?? undefined));
     const labels = channelLabelsForCount(summary.metadata.channel_count, summary.metadata.labels);
+    const enabledChannels = metadataEnabledChannels(summary.metadata);
+    const initialViewport = initialCaptureViewport(summary);
     updateSession(target.id, (session) => ({
       ...session,
       selectedDevice: summary.metadata.source_device || session.selectedDevice,
@@ -1450,11 +2065,14 @@ export default function App() {
         device_id: summary.metadata.source_device || session.selectedDevice,
         sample_rate_hz: summary.metadata.sample_rate_hz,
         channel_count: summary.metadata.channel_count,
+        enabled_channels: enabledChannels,
       },
       deviceSettings: {
         ...session.deviceSettings,
-        digitalChannels: makeDigitalChannels(summary.metadata.channel_count),
-        triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, summary.metadata.channel_count - 1)),
+        digitalChannels: digitalChannelsForMetadata(summary.metadata),
+        triggerChannel: enabledChannels.includes(session.deviceSettings.triggerChannel)
+          ? session.deviceSettings.triggerChannel
+          : (enabledChannels[0] ?? 0),
       },
       hiddenDigitalChannels: makeHiddenDigitalChannels(),
       channelLabels: labels,
@@ -1463,8 +2081,7 @@ export default function App() {
       timingMarkerPlacement: null,
       summary: summaryWithLabels(summary, labels),
       tile: null,
-      viewportStart: 0,
-      viewportSamples: Math.min(summary.metadata.sample_count, 100_000),
+      ...initialViewport,
       analyzers: session.analyzers.map((analyzer) => ({
         ...analyzer,
         protocolBubbles: [],
@@ -1472,6 +2089,7 @@ export default function App() {
         previousFrame: null,
         nextFrame: null,
         renderedTracks: [],
+        renderedDecodeSignature: null,
         highlightedFrameIndex: null,
       })),
       message: "Capture opened",
@@ -1484,7 +2102,7 @@ export default function App() {
     try {
       const path = await openDialog({
         multiple: false,
-        filters: [{ name: "PXLogic Capture", extensions: ["pxcap"] }],
+        filters: [{ name: "Logic Capture", extensions: ["pxcap", "sal"] }],
       });
       if (typeof path !== "string") return;
       target =
@@ -1546,23 +2164,62 @@ export default function App() {
   function setSelectedDeviceForActive(deviceId: string) {
     setDraftSelectedDevice(deviceId);
     if (!activeSession) return;
-    updateSession(activeSession.id, (session) => ({
-      ...session,
-      selectedDevice: deviceId,
-      settings: { ...session.settings, device_id: deviceId },
-    }));
+    updateSession(activeSession.id, (session) => {
+      const bufferSizeMb = defaultBufferSizeMb(deviceId);
+      const nextSettings = clampCaptureSettingsToCapabilities(
+        {
+          ...session.settings,
+          buffer_size_mb: bufferSizeMb,
+          device_id: deviceId,
+        },
+        capabilitiesForDevice(deviceId),
+      );
+      const channelCountChanged = nextSettings.channel_count !== session.settings.channel_count;
+      const digitalChannels = channelCountChanged
+        ? makeDigitalChannels(nextSettings.channel_count)
+        : session.deviceSettings.digitalChannels;
+      return {
+        ...session,
+        channelLabels: channelCountChanged
+          ? channelLabelsForCount(nextSettings.channel_count, session.channelLabels)
+          : session.channelLabels,
+        deviceSettings: {
+          ...session.deviceSettings,
+          bufferSizeMb,
+          digitalChannels,
+          pwmEffectiveDutyPercent: null,
+          pwmEffectiveFrequencyHz: null,
+          triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, nextSettings.channel_count - 1)),
+        },
+        selectedDevice: deviceId,
+        settings: {
+          ...nextSettings,
+          enabled_channels: enabledChannelIndexes(digitalChannels, nextSettings.channel_count),
+        },
+      };
+    });
   }
 
   function updateActiveSettings(patch: Partial<CaptureSettings>) {
     if (!activeSession) return;
-    updateSession(activeSession.id, (session) => ({
-      ...session,
-      channelLabels:
-        patch.channel_count == null
-          ? session.channelLabels
-          : channelLabelsForCount(patch.channel_count, session.channelLabels),
-      settings: { ...session.settings, ...patch },
-    }));
+    updateSession(activeSession.id, (session) => {
+      const nextSettings = clampCaptureSettingsToCapabilities(
+        { ...session.settings, ...patch },
+        capabilitiesForDevice(patch.device_id ?? session.selectedDevice),
+      );
+      const channelCountChanged = nextSettings.channel_count !== session.settings.channel_count;
+      return {
+        ...session,
+        channelLabels: channelCountChanged
+          ? channelLabelsForCount(nextSettings.channel_count, session.channelLabels)
+          : session.channelLabels,
+        deviceSettings: {
+          ...session.deviceSettings,
+          triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, nextSettings.channel_count - 1)),
+        },
+        settings: nextSettings,
+      };
+    });
   }
 
   function renameChannelLabel(channelIndex: number, name: string) {
@@ -1599,14 +2256,21 @@ export default function App() {
       hiddenDigitalChannels[channelIndex] = false;
       const highestEnabled = highestEnabledDigitalChannel(digitalChannels);
       const channelCount = Math.max(1, highestEnabled + 1);
+      const enabledChannels = enabledChannelIndexes(digitalChannels, channelCount);
       return {
         ...session,
         channelLabels: channelLabelsForCount(channelCount, session.channelLabels),
-        settings: { ...session.settings, channel_count: channelCount },
+        settings: {
+          ...session.settings,
+          channel_count: channelCount,
+          enabled_channels: enabledChannels,
+        },
         deviceSettings: {
           ...session.deviceSettings,
           digitalChannels,
-          triggerChannel: Math.min(session.deviceSettings.triggerChannel, highestEnabled),
+          triggerChannel: enabledChannels.includes(session.deviceSettings.triggerChannel)
+            ? session.deviceSettings.triggerChannel
+            : (enabledChannels[0] ?? 0),
         },
         hiddenDigitalChannels,
         message: `D${channelIndex} ${digitalChannels[channelIndex] ? "shown and enabled" : "hidden and disabled"}`,
@@ -1689,6 +2353,48 @@ export default function App() {
         manualChannelLayout: true,
       };
     });
+  }
+
+  function reorderVisibleChannels(sourceIndex: number, destinationIndex: number) {
+    if (!activeSession || sourceIndex === destinationIndex) return;
+    updateSession(activeSession.id, (session) => {
+      const visibleChannels = visibleDigitalChannelIndexes(session);
+      if (
+        sourceIndex < 0 ||
+        sourceIndex >= visibleChannels.length ||
+        destinationIndex < 0 ||
+        destinationIndex >= visibleChannels.length
+      ) {
+        return session;
+      }
+
+      const nextVisibleChannels = [...visibleChannels];
+      const [sourceChannel] = nextVisibleChannels.splice(sourceIndex, 1);
+      nextVisibleChannels.splice(destinationIndex, 0, sourceChannel);
+
+      const visibleSet = new Set(visibleChannels);
+      let nextVisibleIndex = 0;
+      const nextOrder = channelOrderForCount(32, session.channelOrder).map((channel) =>
+        visibleSet.has(channel) ? nextVisibleChannels[nextVisibleIndex++] : channel,
+      );
+      return {
+        ...session,
+        channelOrder: nextOrder,
+        message: (session.channelLabels[sourceChannel] ?? `D${sourceChannel}`) + " moved",
+      };
+    });
+  }
+
+  function beginChannelReorder() {
+    setEditingChannel(null);
+    setChannelContextMenu(null);
+    setChannelReorderActive(true);
+  }
+
+  function finishChannelReorder(result: DropResult) {
+    setChannelReorderActive(false);
+    if (!result.destination) return;
+    reorderVisibleChannels(result.source.index, result.destination.index);
   }
 
   function matchAllDigitalChannelHeights(channelIndex: number) {
@@ -1815,13 +2521,17 @@ export default function App() {
   function addAnalyzerForChannel(channelIndex: number) {
     if (!activeSession) return;
     setAnalyzerInEdit({
-      analyzer: createAnalyzerInstance("Async Serial", activeSession.analyzers, channelIndex),
+      analyzer: createAnalyzerInstance("Async Serial", activeSession.analyzers, channelIndex, "legacy_rust"),
       isNew: true,
       sessionId: activeSession.id,
     });
   }
 
-  function beginAddAnalyzer(name: string, channelIndex?: number) {
+  function beginAddAnalyzer(
+    name: string,
+    channelIndex?: number,
+    decoderBackend: DecoderBackendKind = "legacy_rust",
+  ) {
     if (!activeSession) return;
     const firstEnabledChannel = activeSession.deviceSettings.digitalChannels.findIndex(Boolean);
     setAnalyzerInEdit({
@@ -1829,6 +2539,7 @@ export default function App() {
         name,
         activeSession.analyzers,
         channelIndex ?? Math.max(0, firstEnabledChannel),
+        decoderBackend,
       ),
       isNew: true,
       sessionId: activeSession.id,
@@ -1856,6 +2567,7 @@ export default function App() {
         hiddenDigitalChannels[channel] = false;
       });
       const channelCount = Math.max(session.settings.channel_count, highestAnalyzerChannel + 1);
+      const enabledChannels = enabledChannelIndexes(digitalChannels, channelCount);
       const nextAnalyzers = editor.isNew
         ? [...session.analyzers, analyzer]
         : session.analyzers.map((item) => (item.id === analyzer.id ? analyzer : item));
@@ -1865,7 +2577,11 @@ export default function App() {
         channelLabels: channelLabelsForCount(channelCount, session.channelLabels),
         hiddenDigitalChannels,
         deviceSettings: { ...session.deviceSettings, digitalChannels },
-        settings: { ...session.settings, channel_count: channelCount },
+        settings: {
+          ...session.settings,
+          channel_count: channelCount,
+          enabled_channels: enabledChannels,
+        },
         message: `${analyzer.name} settings saved`,
       };
     });
@@ -1962,7 +2678,7 @@ export default function App() {
     }
 
     if (command === AnalyzerCommands.AddAnalyzer) {
-      handleAddAnalyzer(payload?.analyzerName ?? "Async Serial");
+      handleAddAnalyzer(payload?.analyzerName ?? "Async Serial", payload?.analyzerBackend ?? "legacy_rust");
       return;
     }
 
@@ -1981,8 +2697,8 @@ export default function App() {
     }
   }
 
-  function handleAddAnalyzer(name: string) {
-    beginAddAnalyzer(name);
+  function handleAddAnalyzer(name: string, backend: DecoderBackendKind = "legacy_rust") {
+    beginAddAnalyzer(name, undefined, backend);
   }
 
   function handleAddRangeMeasurement() {
@@ -2357,6 +3073,8 @@ export default function App() {
                 <TimingDisplayCanvas
                   graphWidthPx={activeSession?.canvasWidth ?? 0}
                   sampleRateHz={activeSession?.summary?.metadata.sample_rate_hz ?? activeSettings.sample_rate_hz}
+                  timeOriginSample={activeSession?.summary?.metadata.trigger?.sample_index ?? 0}
+                  triggerSample={activeSession?.summary?.metadata.trigger?.sample_index}
                   viewportSamples={activeSession?.summary ? activeSession.viewportSamples : 0}
                   viewportStart={activeSession?.summary ? activeSession.viewportStart : 0}
                 />
@@ -2381,38 +3099,90 @@ export default function App() {
                     style={{ height: graphContentHeight, minHeight: graphContentHeight }}
                   >
                     <div className="labelsBackground" />
-                    <div
-                      className="channelLabels"
-                      style={{
-                        gridTemplateRows:
-                          visibleOuterRowHeights.length > 0
-                            ? visibleOuterRowHeights.map((height) => `${height}px`).join(" ")
-                            : undefined,
-                      }}
+                    <DragDropContext
+                      onDragEnd={finishChannelReorder}
+                      onDragStart={beginChannelReorder}
                     >
-                      {visibleChannelIndexes.map((channelIndex, rowIndex) => (
-                        <ChannelLabelRow
-                          index={channelIndex}
-                          isEditing={editingChannel === channelIndex}
-                          isEnabled
-                          isTrigger={activeSession.deviceSettings.triggerChannel === channelIndex}
-                          key={channelIndex}
-                          label={visibleChannelLabels[rowIndex]}
-                          analyzers={activeSession.analyzers}
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            setEditingChannel(null);
-                            setChannelContextMenu({ channelIndex, source: "label", x: event.clientX, y: event.clientY });
-                          }}
-                          onEditEnd={() => setEditingChannel(null)}
-                          onEditStart={() => {
-                            setChannelContextMenu(null);
-                            setEditingChannel(channelIndex);
-                          }}
-                          onRename={(name) => renameChannelLabel(channelIndex, name)}
-                        />
-                      ))}
-                    </div>
+                      <StrictModeDroppable droppableId={`channel-labels-${activeSession.id}`}>
+                        {(droppableProvided) => (
+                          <div
+                            className={`channelLabels ${channelReorderActive ? "reorderingActive" : ""}`}
+                            ref={droppableProvided.innerRef}
+                            {...droppableProvided.droppableProps}
+                          >
+                            {visibleChannelIndexes.map((channelIndex, rowIndex) => (
+                              <Draggable
+                                draggableId={`channel-${channelIndex}`}
+                                index={rowIndex}
+                                key={channelIndex}
+                              >
+                                {(draggableProvided, draggableSnapshot) => (
+                                  <div
+                                    className={[
+                                      "channelDragItem",
+                                      draggableSnapshot.isDragging ? "dragging" : "",
+                                      draggableSnapshot.isDropAnimating ? "dropping" : "",
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" ")}
+                                    data-channel-index={channelIndex}
+                                    ref={draggableProvided.innerRef}
+                                    {...draggableProvided.draggableProps}
+                                    onMouseDown={() => {
+                                      const { activeElement } = document;
+                                      if (activeElement instanceof HTMLElement) activeElement.blur();
+                                    }}
+                                    style={{
+                                      ...draggableProvided.draggableProps.style,
+                                      height: visibleOuterRowHeights[rowIndex],
+                                      zIndex: draggableSnapshot.isDragging ? 5000 : undefined,
+                                    }}
+                                  >
+                                    <div className="channelLabelCell">
+                                      <ChannelLabelRow
+                                        analyzers={activeSession.analyzers}
+                                        dragHandleProps={draggableProvided.dragHandleProps}
+                                        index={channelIndex}
+                                        isDragging={draggableSnapshot.isDragging}
+                                        isEditing={editingChannel === channelIndex}
+                                        isEnabled
+                                        isTrigger={activeSession.deviceSettings.triggerChannel === channelIndex}
+                                        label={visibleChannelLabels[rowIndex]}
+                                        onContextMenu={(event) => {
+                                          event.preventDefault();
+                                          setEditingChannel(null);
+                                          setChannelContextMenu({
+                                            channelIndex,
+                                            source: "label",
+                                            x: event.clientX,
+                                            y: event.clientY,
+                                          });
+                                        }}
+                                        onEditEnd={() => setEditingChannel(null)}
+                                        onEditStart={() => {
+                                          setChannelContextMenu(null);
+                                          setEditingChannel(channelIndex);
+                                        }}
+                                        onRename={(name) => renameChannelLabel(channelIndex, name)}
+                                      />
+                                    </div>
+                                    <div className="channelDragWaveformGhost" aria-hidden="true">
+                                      {channelReorderActive && (
+                                        <ChannelDragWaveformPreview
+                                          rowHeight={visibleOuterRowHeights[rowIndex]}
+                                          rowTop={visibleChannelLayouts[rowIndex]?.outerTop ?? 0}
+                                        />
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+                              </Draggable>
+                            ))}
+                            {droppableProvided.placeholder}
+                          </div>
+                        )}
+                      </StrictModeDroppable>
+                    </DragDropContext>
                     {channelContextMenu && (
                       <ChannelContextMenu
                         channelIndex={channelContextMenu.channelIndex}
@@ -2449,6 +3219,7 @@ export default function App() {
                           updateSession(activeSession.id, (session) => ({ ...session, canvasWidth: width }))
                         }
                         sampleRateHz={activeSession.summary?.metadata.sample_rate_hz ?? activeSession.settings.sample_rate_hz}
+                        timeOriginSample={activeSession.summary?.metadata.trigger?.sample_index ?? 0}
                         showInteractiveMeasurement={activeSession.showInteractiveMeasurement}
                         totalSamples={totalSamples}
                         viewportStart={activeSession.viewportStart}
@@ -2464,6 +3235,11 @@ export default function App() {
                           });
                         }}
                         onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
+                      />
+                      <CaptureTriggerMarker
+                        triggerSample={activeSession.summary?.metadata.trigger?.sample_index}
+                        viewportSamples={activeSession.viewportSamples}
+                        viewportStart={activeSession.viewportStart}
                       />
                       <AnalyzerBubblesOverlay
                         analyzers={activeSession.analyzers}
@@ -2493,7 +3269,7 @@ export default function App() {
                         visibleChannelIndexes={visibleChannelIndexes}
                       />
                     </div>
-                    {visibleChannelIndexes.slice(0, -1).map((channelIndex, rowIndex) => (
+                    {visibleChannelIndexes.map((channelIndex, rowIndex) => (
                       <ChannelResizeHandle
                         channelIndex={channelIndex}
                         height={visibleChannelHeights[rowIndex]}
@@ -2567,7 +3343,7 @@ export default function App() {
             extensions={extensions}
             onChangeExtensions={(updater) => setExtensions((current) => updater(current))}
             onCreateSession={createSessionFromFooter}
-            onAddAnalyzer={beginAddAnalyzer}
+            onAddAnalyzer={handleAddAnalyzer}
             onAddRangeMeasurement={handleAddRangeMeasurement}
             onAddMarkerPair={handleAddMarkerPair}
             onAddSingleMarker={handleAddSingleMarker}
@@ -2595,6 +3371,7 @@ export default function App() {
               if (activeSession) animateViewport(activeSession.id, start, samples);
             }}
             selectedDevice={selectedDevice}
+            selectedCapabilities={selectedCapabilities}
             selectedPanel={selectedPanel}
             sidebarPanelWidth={sidebarPanelWidth}
             session={activeSession}
@@ -2647,6 +3424,21 @@ export default function App() {
   );
 }
 
+function StrictModeDroppable({ children, ...props }: DroppableProps) {
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setEnabled(true));
+    return () => {
+      window.cancelAnimationFrame(frame);
+      setEnabled(false);
+    };
+  }, []);
+
+  if (!enabled) return null;
+  return <Droppable {...props}>{children}</Droppable>;
+}
+
 function SaleaeSidebarIcon({ iconUrl }: { iconUrl: string }) {
   return (
     <span
@@ -2659,7 +3451,9 @@ function SaleaeSidebarIcon({ iconUrl }: { iconUrl: string }) {
 
 function ChannelLabelRow({
   analyzers,
+  dragHandleProps,
   index,
+  isDragging,
   isEditing,
   isEnabled,
   isTrigger,
@@ -2670,7 +3464,9 @@ function ChannelLabelRow({
   onRename,
 }: {
   analyzers: UiAnalyzerInstance[];
+  dragHandleProps: DraggableProvidedDragHandleProps | null | undefined;
   index: number;
+  isDragging: boolean;
   isEditing: boolean;
   isEnabled: boolean;
   isTrigger: boolean;
@@ -2726,7 +3522,9 @@ function ChannelLabelRow({
 
   return (
     <div
-      className={`channelRow ${isEnabled ? "" : "disabled"} ${isTrigger ? "triggerChannel" : ""}`}
+      className={["channelRow", isEnabled ? "" : "disabled", isTrigger ? "triggerChannel" : "", isDragging ? "reordering" : ""].filter(Boolean).join(" ")}
+      data-channel-index={index}
+      {...dragHandleProps}
       onContextMenu={onContextMenu}
       onDoubleClick={onEditStart}
       role="button"
@@ -2773,6 +3571,40 @@ function ChannelLabelRow({
       </span>
     </div>
   );
+}
+
+function ChannelDragWaveformPreview({ rowHeight, rowTop }: { rowHeight: number; rowTop: number }) {
+  const previewRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const preview = previewRef.current;
+    const source = document.querySelector<HTMLCanvasElement>(".graphViewport .waveform-canvas");
+    if (!preview || !source) return;
+
+    const sourceRect = source.getBoundingClientRect();
+    if (sourceRect.width <= 0 || sourceRect.height <= 0) return;
+    const scaleX = source.width / sourceRect.width;
+    const scaleY = source.height / sourceRect.height;
+    const sourceY = Math.max(0, Math.round(rowTop * scaleY));
+    const sourceHeight = Math.max(1, Math.min(source.height - sourceY, Math.round(rowHeight * scaleY)));
+
+    preview.width = Math.max(1, Math.round(sourceRect.width * scaleX));
+    preview.height = sourceHeight;
+    const context = preview.getContext("2d");
+    context?.drawImage(
+      source,
+      0,
+      sourceY,
+      source.width,
+      sourceHeight,
+      0,
+      0,
+      preview.width,
+      preview.height,
+    );
+  }, [rowHeight, rowTop]);
+
+  return <canvas className="channelDragWaveformPreview" ref={previewRef} />;
 }
 
 function ChannelResizeHandle({
@@ -4348,6 +5180,7 @@ function RightSidebar({
   onUpdateSettings,
   onViewportChange,
   selectedDevice,
+  selectedCapabilities,
   selectedPanel,
   sidebarPanelWidth,
   session,
@@ -4355,7 +5188,7 @@ function RightSidebar({
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
-  onAddAnalyzer: (name: string) => void;
+  onAddAnalyzer: (name: string, backend?: DecoderBackendKind) => void;
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
   onAddSingleMarker: () => void;
@@ -4372,6 +5205,7 @@ function RightSidebar({
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   onViewportChange: (start: number, samples: number) => void;
   selectedDevice: string;
+  selectedCapabilities: HardwareCaptureCapabilities | null;
   selectedPanel: SidebarPanel | undefined;
   sidebarPanelWidth: number;
   session: UiSession | null;
@@ -4465,6 +5299,7 @@ function RightSidebar({
             onUpdateSettings={onUpdateSettings}
             onViewportChange={onViewportChange}
             panel={selectedPanel}
+            selectedCapabilities={selectedCapabilities}
             selectedDevice={selectedDevice}
             session={session}
           />
@@ -4523,13 +5358,14 @@ function SidebarPanelContent({
   onUpdateSettings,
   onViewportChange,
   panel,
+  selectedCapabilities,
   selectedDevice,
   session,
 }: {
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
-  onAddAnalyzer: (name: string) => void;
+  onAddAnalyzer: (name: string, backend?: DecoderBackendKind) => void;
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
   onAddSingleMarker: () => void;
@@ -4545,6 +5381,7 @@ function SidebarPanelContent({
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   onViewportChange: (start: number, samples: number) => void;
   panel: SidebarPanel;
+  selectedCapabilities: HardwareCaptureCapabilities | null;
   selectedDevice: string;
   session: UiSession | null;
 }) {
@@ -4566,6 +5403,7 @@ function SidebarPanelContent({
           onSelectDevice={onSelectDevice}
           onUpdateSession={onUpdateSession}
           onUpdateSettings={onUpdateSettings}
+          selectedCapabilities={selectedCapabilities}
           selectedDevice={selectedDevice}
           session={session}
         />
@@ -4574,21 +5412,29 @@ function SidebarPanelContent({
         <RecordingSettingsPanel
           onUpdateSession={onUpdateSession}
           onUpdateSettings={onUpdateSettings}
+          selectedCapabilities={selectedCapabilities}
           session={session}
         />
       )}
       {panel === "analyzers" && session && (
         <AnalyzersPanel
           availableAnalyzers={[
-            ...BUILT_IN_ANALYZERS,
+            ...ANALYZER_CATALOG_GROUPS.flatMap((group) =>
+              group.analyzers.map((name) => ({ name, backend: group.backend, source: group.label })),
+            ),
             ...extensions
               .filter((extension) => extension.installed && extension.enabled)
               .flatMap((extension) =>
                 Object.entries(extension.manifest.extensions)
                   .filter(([, feature]) => feature.type === "HighLevelAnalyzer")
-                  .map(([name]) => name),
+                  .map(([name]) => ({ name, backend: "legacy_rust" as const, source: "Extension" })),
               ),
-          ].filter((name, index, analyzers) => analyzers.indexOf(name) === index)}
+          ].filter(
+            (choice, index, choices) =>
+              choices.findIndex(
+                (candidate) => candidate.name === choice.name && candidate.backend === choice.backend,
+              ) === index,
+          )}
           onAddAnalyzer={onAddAnalyzer}
           onDecodeAnalyzer={onDecodeAnalyzer}
           onEditAnalyzer={onEditAnalyzer}
@@ -4655,6 +5501,7 @@ function DeviceSettingsPanel({
   onSelectDevice,
   onUpdateSession,
   onUpdateSettings,
+  selectedCapabilities,
   selectedDevice,
   session,
 }: {
@@ -4663,15 +5510,39 @@ function DeviceSettingsPanel({
   onSelectDevice: (deviceId: string) => void;
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
+  selectedCapabilities: HardwareCaptureCapabilities | null;
   selectedDevice: string;
   session: UiSession;
 }) {
   const [showDeviceInfo, setShowDeviceInfo] = useState(false);
+  const [pwmBusy, setPwmBusy] = useState(false);
   const selected = devices.find((device) => device.id === selectedDevice);
+  const activeBackendMode = backendCaptureMode(session.deviceSettings.captureMode);
+  const maxDigitalChannels = maxChannelsForCapabilities(selectedCapabilities, activeBackendMode);
+  const sampleRateOptions = sampleRateSelectOptionsForCapabilities(
+    selectedCapabilities,
+    activeBackendMode,
+    session.settings.channel_count,
+    session.settings.sample_rate_hz,
+  );
+  const channelCountOptions = channelCountOptionsForCapabilities(
+    selectedCapabilities,
+    activeBackendMode,
+    session.settings.channel_count,
+  );
+  const selectedChannelMode = selectedHardwareChannelMode(
+    selectedCapabilities,
+    activeBackendMode,
+    session.settings.channel_count,
+    session.settings.sample_rate_hz,
+  );
   const enabledChannels = selected
-    ? session.deviceSettings.digitalChannels.filter(Boolean).length
+    ? session.deviceSettings.digitalChannels.slice(0, maxDigitalChannels).filter(Boolean).length
     : session.settings.channel_count;
-  const digitalChannels = session.deviceSettings.digitalChannels;
+  const digitalChannels = Array.from(
+    { length: maxDigitalChannels },
+    (_, index) => session.deviceSettings.digitalChannels[index] ?? index < session.settings.channel_count,
+  );
 
   function updateDeviceSettings(patch: Partial<UiDeviceSettings>) {
     onUpdateSession((current) => ({
@@ -4692,29 +5563,49 @@ function DeviceSettingsPanel({
   }
 
   function setChannelCount(channelCount: number) {
-    onUpdateSettings({ channel_count: channelCount });
+    const nextSettings = clampCaptureSettingsToCapabilities(
+      { ...session.settings, channel_count: channelCount, mode: activeBackendMode },
+      selectedCapabilities,
+    );
+    onUpdateSettings({
+      channel_count: nextSettings.channel_count,
+      enabled_channels: Array.from({ length: nextSettings.channel_count }, (_, index) => index),
+      sample_rate_hz: nextSettings.sample_rate_hz,
+    });
     onUpdateSession((current) => ({
       ...current,
       deviceSettings: {
         ...current.deviceSettings,
-        digitalChannels: makeDigitalChannels(channelCount),
-        triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, channelCount - 1)),
+        digitalChannels: makeDigitalChannels(nextSettings.channel_count),
+        triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, nextSettings.channel_count - 1)),
       },
       hiddenDigitalChannels: makeHiddenDigitalChannels(),
     }));
   }
 
   function toggleDigitalChannel(index: number) {
+    if (index >= maxDigitalChannels) return;
     const nextChannels = [...digitalChannels];
     nextChannels[index] = !nextChannels[index];
     const highestEnabled = highestEnabledDigitalChannel(nextChannels);
-    onUpdateSettings({ channel_count: Math.max(1, highestEnabled + 1) });
+    const nextSettings = clampCaptureSettingsToCapabilities(
+      { ...session.settings, channel_count: Math.max(1, highestEnabled + 1), mode: activeBackendMode },
+      selectedCapabilities,
+    );
+    const nextEnabledChannels = enabledChannelIndexes(nextChannels, nextSettings.channel_count);
+    onUpdateSettings({
+      channel_count: nextSettings.channel_count,
+      enabled_channels: nextEnabledChannels,
+      sample_rate_hz: nextSettings.sample_rate_hz,
+    });
     onUpdateSession((current) => ({
       ...current,
       deviceSettings: {
         ...current.deviceSettings,
         digitalChannels: nextChannels,
-        triggerChannel: Math.min(current.deviceSettings.triggerChannel, highestEnabled),
+        triggerChannel: nextEnabledChannels.includes(current.deviceSettings.triggerChannel)
+          ? current.deviceSettings.triggerChannel
+          : (nextEnabledChannels[0] ?? 0),
       },
       hiddenDigitalChannels: nextChannels[index]
         ? makeHiddenDigitalChannels(current.hiddenDigitalChannels).map((hidden, hiddenIndex) =>
@@ -4726,18 +5617,47 @@ function DeviceSettingsPanel({
   }
 
   function selectAllDigitalChannels(enabled: boolean) {
-    const nextCount = enabled ? 32 : 1;
-    onUpdateSettings({ channel_count: nextCount });
+    const nextCount = enabled ? maxDigitalChannels : 1;
+    onUpdateSettings({
+      channel_count: nextCount,
+      enabled_channels: enabled ? Array.from({ length: nextCount }, (_, index) => index) : [],
+    });
     onUpdateSession((current) => ({
       ...current,
       deviceSettings: {
         ...current.deviceSettings,
-        digitalChannels: enabled ? Array.from({ length: 32 }, () => true) : Array.from({ length: 32 }, () => false),
+        digitalChannels: makeDigitalChannels(enabled ? nextCount : 0),
         triggerChannel: 0,
       },
       hiddenDigitalChannels: makeHiddenDigitalChannels(),
-      message: enabled ? "All 32 digital channels shown and enabled" : "All digital channels hidden and disabled",
+      message: enabled ? `All ${nextCount} digital channels shown and enabled` : "All digital channels hidden and disabled",
     }));
+  }
+
+  async function applyPwm0() {
+    if (!selected || pwmBusy || session.busy) return;
+    setPwmBusy(true);
+    try {
+      const configuration = await configurePwm(selectedDevice, {
+        duty_percent: session.deviceSettings.pwmDutyPercent,
+        enabled: session.deviceSettings.pwmEnabled,
+        frequency_hz: session.deviceSettings.pwmFrequencyHz,
+      });
+      onUpdateSession((current) => ({
+        ...current,
+        deviceSettings: {
+          ...current.deviceSettings,
+          digitalChannels: [...current.deviceSettings.digitalChannels],
+          pwmEffectiveDutyPercent: configuration.effective_duty_percent,
+          pwmEffectiveFrequencyHz: configuration.effective_frequency_hz,
+        },
+        message: `PWM0 ${configuration.enabled ? "enabled" : "disabled"} at ${formatRate(configuration.effective_frequency_hz)}, ${trimNumber(configuration.effective_duty_percent)}% duty`,
+      }));
+    } catch (error) {
+      onUpdateSession((current) => ({ ...current, message: String(error) }));
+    } finally {
+      setPwmBusy(false);
+    }
   }
 
   return (
@@ -4757,6 +5677,13 @@ function DeviceSettingsPanel({
           <InfoRow label="Device ID" value={selectedDevice} />
           <InfoRow label="VID / PID" value={selected ? `${hex16(selected.vid)} / ${hex16(selected.pid)}` : "-"} />
           <InfoRow label="USB Address" value={selected?.bus == null ? "Simulation" : `${selected.bus}:${selected.address}`} />
+          <InfoRow label="USB Speed" value={selected?.usb_speed ?? "-"} />
+          <InfoRow label="Manufacturer" value={selected?.manufacturer ?? "-"} />
+          <InfoRow label="Product" value={selected?.product ?? "-"} />
+          <InfoRow label="PXView Profile" value={selected?.profile_model ?? "-"} />
+          <InfoRow label="PXView Channel Mode" value={selectedChannelMode?.description ?? "-"} />
+          <InfoRow label="Logic Mode" value={selected?.logic_mode == null ? "-" : hex32(selected.logic_mode)} />
+          {selected?.probe_error && <InfoRow label="Probe" value={selected.probe_error} />}
           <InfoRow label="Capture Buffer" value={formatBytes(session.deviceSettings.bufferSizeMb * 1024 * 1024)} />
           <button className="deviceSettingsSmallButton" onClick={onRefreshDevices} type="button">
             <RefreshCw size={13} />
@@ -4803,7 +5730,7 @@ function DeviceSettingsPanel({
             value={session.settings.sample_rate_hz}
             onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
           >
-            {SAMPLE_RATES.map((rate) => (
+            {sampleRateOptions.map((rate) => (
               <option key={rate} value={rate}>
                 {formatRate(rate)}
               </option>
@@ -4813,13 +5740,16 @@ function DeviceSettingsPanel({
         <label className="stack-field">
           <span>Active channels</span>
           <select value={session.settings.channel_count} onChange={(event) => setChannelCount(Number(event.target.value))}>
-            {CHANNEL_COUNTS.map((count) => (
+            {channelCountOptions.map((count) => (
               <option key={count} value={count}>
                 {count} digital
               </option>
             ))}
           </select>
         </label>
+        {selectedChannelMode && (
+          <div className="deviceSettingsModeHint">{selectedChannelMode.description}</div>
+        )}
         <label className="stack-field">
           <span>Digital threshold</span>
           <input
@@ -4952,6 +5882,107 @@ function DeviceSettingsPanel({
 
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
+          <span>Hardware I/O</span>
+          <small>PXLogic</small>
+        </div>
+        <label className="stack-field">
+          <span>Ext Trigger Mode</span>
+          <select
+            value={session.deviceSettings.externalTriggerMode}
+            onChange={(event) =>
+              updateDeviceSettings({ externalTriggerMode: event.target.value as ExternalTriggerMode })
+            }
+          >
+            {(
+              [
+                ["Close", "close"],
+                ["Rising", "Rising"],
+                ["One", "One"],
+                ["Falling", "Falling"],
+                ["Zero", "Zero"],
+                ["Edge", "Edge"],
+              ] as [ExternalTriggerMode, string][]
+            ).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="toggle-field panel-toggle">
+          <input
+            checked={session.deviceSettings.clockNegedge}
+            onChange={(event) => updateDeviceSettings({ clockNegedge: event.target.checked })}
+            type="checkbox"
+          />
+          Using Clock Negedge
+        </label>
+        <label className="toggle-field panel-toggle">
+          <input
+            checked={session.deviceSettings.triggerOutEnabled}
+            onChange={(event) => updateDeviceSettings({ triggerOutEnabled: event.target.checked })}
+            type="checkbox"
+          />
+          En Trigger Out
+        </label>
+      </section>
+
+      <section className="deviceSettingsBlock compact">
+        <div className="deviceSettingsBlockTitle">
+          <span>PWM0 Output</span>
+          <small>125 MHz clock</small>
+        </div>
+        <label className="toggle-field panel-toggle">
+          <input
+            checked={session.deviceSettings.pwmEnabled}
+            onChange={(event) => updateDeviceSettings({ pwmEnabled: event.target.checked })}
+            type="checkbox"
+          />
+          PWM0 EN
+        </label>
+        <div className="pwmSettingsGrid">
+          <label className="stack-field">
+            <span>PWM0 Freq (Hz)</span>
+            <input
+              max={1_000_000}
+              min={1}
+              onChange={(event) => updateDeviceSettings({ pwmFrequencyHz: Number(event.target.value) })}
+              step={1}
+              type="number"
+              value={session.deviceSettings.pwmFrequencyHz}
+            />
+          </label>
+          <label className="stack-field">
+            <span>PWM0 Duty (%)</span>
+            <input
+              max={100}
+              min={0}
+              onChange={(event) => updateDeviceSettings({ pwmDutyPercent: Number(event.target.value) })}
+              step={1}
+              type="number"
+              value={session.deviceSettings.pwmDutyPercent}
+            />
+          </label>
+        </div>
+        {session.deviceSettings.pwmEffectiveFrequencyHz != null &&
+          session.deviceSettings.pwmEffectiveDutyPercent != null && (
+            <div className="pwmEffectiveValue">
+              Effective {formatRate(session.deviceSettings.pwmEffectiveFrequencyHz)} / {trimNumber(session.deviceSettings.pwmEffectiveDutyPercent)}%
+            </div>
+          )}
+        <button
+          className="deviceSettingsSmallButton pwmApplyButton"
+          disabled={!selected || pwmBusy || session.busy}
+          onClick={() => void applyPwm0()}
+          type="button"
+        >
+          <SlidersHorizontal size={13} />
+          {pwmBusy ? "Applying..." : "Apply PWM0"}
+        </button>
+      </section>
+
+      <section className="deviceSettingsBlock compact">
+        <div className="deviceSettingsBlockTitle">
           <span>Connected Devices</span>
           <small>{enabledChannels} active</small>
         </div>
@@ -4982,6 +6013,10 @@ function hex16(value: number) {
   return `0x${value.toString(16).padStart(4, "0").toUpperCase()}`;
 }
 
+function hex32(value: number) {
+  return `0x${value.toString(16).padStart(8, "0").toUpperCase()}`;
+}
+
 function formatSeconds(value: number) {
   const absolute = Math.abs(value);
   if (absolute >= 1) return `${trimNumber(value)} s`;
@@ -4999,12 +6034,34 @@ function trimNumber(value: number) {
 function RecordingSettingsPanel({
   onUpdateSettings,
   onUpdateSession,
+  selectedCapabilities,
   session,
 }: {
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
+  selectedCapabilities: HardwareCaptureCapabilities | null;
   session: UiSession;
 }) {
+  const activeBackendMode = backendCaptureMode(session.deviceSettings.captureMode);
+  const sampleRateOptions = sampleRateSelectOptionsForCapabilities(
+    selectedCapabilities,
+    activeBackendMode,
+    session.settings.channel_count,
+    session.settings.sample_rate_hz,
+  );
+  const triggerSampleRateOptions = sampleRateSelectOptionsForCapabilities(
+    selectedCapabilities,
+    "Stream",
+    session.settings.channel_count,
+    session.deviceSettings.triggerSamplingRateHz,
+  );
+  const selectedChannelMode = selectedHardwareChannelMode(
+    selectedCapabilities,
+    activeBackendMode,
+    session.settings.channel_count,
+    session.settings.sample_rate_hz,
+  );
+
   function updateDeviceSettings(patch: Partial<UiDeviceSettings>) {
     onUpdateSession((current) => ({
       ...current,
@@ -5026,7 +6083,7 @@ function RecordingSettingsPanel({
       <section className="deviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
           <span>Recording Type</span>
-          <small>{session.deviceSettings.captureMode}</small>
+          <small>{selectedChannelMode?.description ?? session.deviceSettings.captureMode}</small>
         </div>
         <div className="recordingTypeGrid">
           {(["FreeRun", "Timer", "Trigger"] as UiRecordingMode[]).map((mode) => (
@@ -5055,7 +6112,7 @@ function RecordingSettingsPanel({
               value={session.settings.sample_rate_hz}
               onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
             >
-              {SAMPLE_RATES.map((rate) => (
+              {sampleRateOptions.map((rate) => (
                 <option key={rate} value={rate}>
                   {formatRate(rate)}
                 </option>
@@ -5094,7 +6151,7 @@ function RecordingSettingsPanel({
               value={session.settings.sample_rate_hz}
               onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
             >
-              {SAMPLE_RATES.map((rate) => (
+              {sampleRateOptions.map((rate) => (
                 <option key={rate} value={rate}>
                   {formatRate(rate)}
                 </option>
@@ -5211,7 +6268,7 @@ function RecordingSettingsPanel({
                 value={session.deviceSettings.triggerSamplingRateHz}
                 onChange={(event) => updateDeviceSettings({ triggerSamplingRateHz: Number(event.target.value) })}
               >
-                {SAMPLE_RATES.map((rate) => (
+                {triggerSampleRateOptions.map((rate) => (
                   <option key={rate} value={rate}>
                     {formatRate(rate)}
                   </option>
@@ -5247,8 +6304,8 @@ function AnalyzersPanel({
   onUpdateSession,
   session,
 }: {
-  availableAnalyzers: string[];
-  onAddAnalyzer: (name: string) => void;
+  availableAnalyzers: AnalyzerChoice[];
+  onAddAnalyzer: (name: string, backend?: DecoderBackendKind) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
   onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean) => void;
@@ -5259,9 +6316,9 @@ function AnalyzersPanel({
   const [searchQuery, setSearchQuery] = useState("");
   const tableBodyRef = useRef<HTMLDivElement>(null);
 
-  function addAnalyzer(name: string) {
+  function addAnalyzer(choice: AnalyzerChoice) {
     setSelectorOpen(false);
-    onAddAnalyzer(name);
+    onAddAnalyzer(choice.name, choice.backend);
   }
 
   function removeAnalyzer(analyzerId: string) {
@@ -5352,15 +6409,15 @@ function AnalyzersPanel({
 
         {selectorOpen && (
           <div className="analyzerSelectionPopover">
-            {availableAnalyzers.map((name) => (
+            {availableAnalyzers.map((choice) => (
               <button
                 className="analyzerSelectionItem"
-                key={name}
-                onClick={() => addAnalyzer(name)}
+                key={`${choice.backend}:${choice.name}`}
+                onClick={() => addAnalyzer(choice)}
                 type="button"
               >
-                <span>{name}</span>
-                <small>{name === "Async Serial" ? "Built-in UART decoder" : "Analyzer"}</small>
+                <span>{choice.name}</span>
+                <small>{choice.source}</small>
               </button>
             ))}
           </div>
@@ -5369,10 +6426,16 @@ function AnalyzersPanel({
         {session.analyzers.length === 0 ? (
           <div className="suggestedAnalyzers">
             <div className="suggestedAnalyzersTitle">Suggested Analyzers</div>
-            {availableAnalyzers.slice(0, 4).map((name) => (
-              <button className="suggestedAnalyzerItem" key={name} onClick={() => addAnalyzer(name)} type="button">
+            {availableAnalyzers.slice(0, 4).map((choice) => (
+              <button
+                className="suggestedAnalyzerItem"
+                key={`${choice.backend}:${choice.name}`}
+                onClick={() => addAnalyzer(choice)}
+                type="button"
+              >
                 <SlidersHorizontal size={13} />
-                <span>{name}</span>
+                <span>{choice.name}</span>
+                <small>{choice.source}</small>
               </button>
             ))}
           </div>
@@ -5385,7 +6448,9 @@ function AnalyzersPanel({
                   <span className="analyzerColorIndicator" style={{ background: analyzer.color }} />
                   <button className="analyzerNameButton" onClick={() => onEditAnalyzer(analyzer.id)} type="button">
                     <strong>{analyzer.name}</strong>
-                    <small>D{analyzer.channel}</small>
+                    <small>
+                      {decoderBackendLabel(analyzer.decoderBackend)} · D{analyzer.channel}
+                    </small>
                   </button>
                   <div className="analyzerRowActions">
                     <button disabled={index === 0} onClick={() => moveAnalyzer(analyzer.id, -1)} title="Move up" type="button">

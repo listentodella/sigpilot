@@ -120,3 +120,53 @@ chore: 说明内容
   - Analyzer 气泡从 useMemo 预计算改为渲染时懒加载 + 缓存，解决滚轮缩放卡顿问题。
 - `docs/ported-features/2026-07-22-graph-server-32-channel-pipeline.md`
   - 参考 Electron packed waveform 与原版 Graph Server 边界，落地 Rust 32 通道增量 graph、固定预算波形传输、实时 analyzer cache 和有界气泡聚合。
+- `docs/ported-features/2026-07-22-analyzer-demo-protocol-performance.md`
+  - Analyzer 驱动 UART/I2C/SPI Demo 波形、原版 I2C 气泡文本、六通道缩放滚动优化，以及深缩放边沿连续性修复。
+- `docs/ported-features/2026-07-22-pxview-hardware-profile-buffer-mode.md`
+  - 搬运 PXView PXLogic profile/channel-mode 矩阵，真实 USB 捕获按硬件 mode 限幅，并修正 Buffer Mode DDR read request 与 `0x83` 数据端点。
+- `docs/ported-features/2026-07-22-pxview-prepare-firmware-retry.md`
+  - 搬运 PXView prepare 阶段 MCU firmware version 诊断、PXLogic 端点清理和 FPGA bitstream 上传失败重试。
+- `docs/ported-features/2026-07-22-pxview-device-enumeration-identity.md`
+  - 搬运 PXView 设备枚举身份探测：USB string、`PX*` manufacturer 检查、`REG_LOGIC_MODE` 读取、profile 标签和 probe diagnostics。
+- `docs/ported-features/2026-07-22-usb-smoke-real-hardware-verification.md`
+  - 增强 `usb_smoke` 的 list/prepare-only 真机验证入口，完成 U2 32ch stream、buffer 和 raw cross mapping smoke capture。
+- `docs/ported-features/2026-07-22-tauri-effective-capture-settings-sync.md`
+  - Tauri UI live/completed capture 路径同步后端 effective samplerate/channel count，真实硬件被 PXView profile 限幅后控件显示不再滞留请求值。
+- `docs/ported-features/2026-07-22-pxview-capabilities-ui.md`
+  - 将 PXView `channel_modes[]` 和 `supported_PX[]` 暴露为 Tauri `device_capabilities`，Devices/Recording Settings 按真实 profile 过滤通道数与采样率，并在捕获前同步限幅。
+- `docs/ported-features/2026-07-22-pxview-trigger-filter-settings.md`
+  - 搬运 PXView simple trigger mask 与 `SR_FILTER_1T` 路径，Tauri 捕获开始时将 Trigger channel/type、Trigger Sampling rate 和 Glitch filter 写入真实硬件寄存器脚本。
+- `docs/ported-features/2026-07-23-pxview-cross-data-all-channel-modes.md`
+  - 按 PXView `LA_CROSS_DATA` stripe 定义补齐 1/2/4/8/16/32 通道增量解交织，避免高速少通道真机采集被误当成普通 sample words。
+- `docs/ported-features/2026-07-23-graph-stream-render-smoke.md`
+  - 新增真实 USB decoded chunks 到 GraphSession/render frame 的完整 smoke，校验 sample count、packed tile 和 exact segment 边沿连通性。
+- `docs/ported-features/2026-07-23-analyzer-waveform-render-isolation.md`
+  - 将 waveform tile 与 I2C/SPI analyzer 聚合拆分为独立请求队列，避免分析器延迟导致深倍率竖边沿晚于水平段更新。
+- `docs/ported-features/2026-07-23-pxview-cancellable-low-rate-stream.md`
+  - Stop 改为取消 active handle 的同步 USB poll，并按 PXView block 填充时间放宽低速 stall deadline，消除 Busy 与 5 秒误超时。
+- `docs/ported-features/2026-07-23-pxview-hardware-trigger-time-zero.md`
+  - 搬运 PXView `trig_out_validset`/`real_pos` 触发语义、Stream 状态轮询和 10%/90% 预触发限幅；真实触发贯穿 GraphSession、`.pxcap` 与 Tauri event，并以 Logic 2 风格 `T` 标记作为时间零点。
+- `docs/ported-features/2026-07-23-pxview-sparse-channel-capture.md`
+  - 搬运 PXView `en_ch_num()`/`en_ch_num_mask()` 与 enabled-channel cross stripe 语义；D0+D4 等稀疏选择现在写入真实 mask、按两 lane 采集，并以物理 D0/D4 位进入 GraphSession、`.pxcap` 和 UI。
+- `docs/ported-features/2026-07-23-pxview-sparse-channel-export.md`
+  - 搬运 PXView `srzip.c` 的 enabled physical probe 规则；稀疏 `.sr`/VCD 只声明真实采集通道，同时保留物理 probe 编号和 sample bit。
+- `docs/ported-features/2026-07-23-pxview-pwm0-output.md`
+  - 搬运 PXView PWM0 的 125MHz clock、整数 tick 量化和 disable/program/restore register path，并接入 Device Settings、Tauri 与真机 disabled smoke。
+- `docs/ported-features/2026-07-23-pxview-hardware-io-settings.md`
+  - 搬运 PXView External Trigger 六种模式、Clock Negedge 和 Trigger Out；修复 UI Start 前强制关闭硬件 I/O，并以真实 U2 负沿采样验证 GPIO bit。
+- `docs/ported-features/2026-07-23-pxview-startup-fpga-prewarm.md`
+  - 搬运 PXView 启动阶段设备 prepare 语义：真实 USB 设备枚举后后台预热 FPGA，Tauri 进程内缓存和并发去重，后续 Start/PWM 配置复用已上传状态，USB 错误时清除缓存；MCU firmware 仍不自动刷写。
+- `docs/ported-features/2026-07-23-channel-reorder-and-last-row-resize.md`
+  - 搬运 GraphRows/Reorder 的可见通道排序，以及 PXView 最后一条 trace 的底边高度调整。
+- `docs/ported-features/2026-07-23-startup-default-channels-edge-navigation.md`
+  - 启动页移除 MSO、默认启用 D0-D7，并按原版 Graph Server transition 元数据修复边沿按钮和快捷键偶发失效。
+- `docs/ported-features/2026-07-23-decoder-backend-migration-baseline.md`
+  - 停止扩张自有 Rust decoder，建立 Saleae Native / Sigrok Native 后端契约和 SPI 跨生态一致性夹具。
+- `docs/ported-features/2026-07-23-saleae-native-spi-sidecar-poc.md`
+  - 固定 Logic 2.4.43 / Analyzer SDK ABI，在隔离 sidecar 中直接加载原版 SPI analyzer；Mode 0-3、LSB 和 CS 边界 fixtures 全部通过，并接入统一 `DecoderOutput` Rust adapter。
+- `docs/ported-features/2026-07-23-saleae-sal-import-export.md`
+  - 直接调用 Logic 2.4.43 GraphServer 的 DigitalStore/ExportNode 将 `.sal` 转为公开 digital binary，并以 `u64` transition index 导入，不展开长捕获。
+- `docs/ported-features/2026-07-23-sigrok-native-spi-sidecar.md`
+  - 独立 GPL sidecar 直接构建 PXView `libsigrokdecode` 与 `spi_c`，统一输出 `DecoderOutput`，SPI 跨生态 fixtures 全部通过。
+- `docs/ported-features/2026-07-23-sparse-native-decoder-bridge.md`
+  - 将 `.sal` 的 transition index 直接接入 Saleae Native / Sigrok Native SPI，Sigrok 复用 PXView `spi_c` C decoder 的状态机而不展开长捕获，补齐 490 亿 sample 大索引回归。

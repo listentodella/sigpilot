@@ -11,6 +11,7 @@ use crate::{
         sample_count_from_duration, sample_count_from_settings, unitsize_for_channel_count,
         DemoSampleGenerator,
     },
+    decode::AnalyzerDecodeSettings,
     error::{CoreError, Result},
     models::{
         CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings, DeviceInfo,
@@ -25,48 +26,23 @@ pub struct FakeBackend;
 
 impl FakeBackend {
     pub const DEVICE_ID: &'static str = "fake:pxlogic-demo";
-}
 
-const INITIAL_CAPTURE_RESERVE_BYTES: usize = 8 * 1024 * 1024;
-
-impl CaptureBackend for FakeBackend {
-    fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
-        Ok(vec![DeviceInfo {
-            id: Self::DEVICE_ID.to_string(),
-            kind: DeviceKind::Fake,
-            vid: PXLOGIC_WCH_VID,
-            pid: PXLOGIC_WCH_PID,
-            bus: None,
-            address: None,
-            label: "PXLogic Demo Source".to_string(),
-            ready: true,
-        }])
-    }
-
-    fn prepare_device(
-        &self,
-        device_id: &str,
-        _bitstreams: Option<&crate::models::Bitstreams>,
-    ) -> Result<()> {
-        if device_id == Self::DEVICE_ID {
-            Ok(())
-        } else {
-            Err(CoreError::UnsupportedDevice)
-        }
-    }
-
-    fn capture(
+    pub fn capture_streaming_with_analyzers(
         &self,
         settings: &CaptureSettings,
+        analyzers: &[AnalyzerDecodeSettings],
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(CaptureProgress),
+        started: &mut dyn FnMut(&CaptureMetadata),
+        on_samples: &mut dyn FnMut(&[u8]),
     ) -> Result<CaptureData> {
-        self.capture_streaming(settings, cancel, progress, &mut |_| {}, &mut |_| {})
+        self.capture_streaming_generated(settings, analyzers, cancel, progress, started, on_samples)
     }
 
-    fn capture_streaming(
+    fn capture_streaming_generated(
         &self,
         settings: &CaptureSettings,
+        analyzers: &[AnalyzerDecodeSettings],
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(CaptureProgress),
         started: &mut dyn FnMut(&CaptureMetadata),
@@ -96,18 +72,24 @@ impl CaptureBackend for FakeBackend {
                 .unwrap_or(INITIAL_CAPTURE_RESERVE_BYTES)
                 .min(INITIAL_CAPTURE_RESERVE_BYTES),
         );
-        let mut generator = DemoSampleGenerator::new(settings, unitsize_u8);
+        let enabled_channels = crate::capture::resolve_enabled_channels(
+            settings.channel_count,
+            &settings.enabled_channels,
+        )?;
+        let mut generator = DemoSampleGenerator::with_analyzers(settings, unitsize_u8, analyzers)?;
         let metadata = CaptureMetadata {
             version: 1,
             source_device: settings.device_id.clone(),
             sample_rate_hz: settings.sample_rate_hz,
             channel_count: settings.channel_count,
+            enabled_channels,
             unitsize: unitsize_u8,
             sample_count: 0,
             captured_at,
             labels: (0..settings.channel_count)
                 .map(|channel| format!("D{channel}"))
                 .collect(),
+            trigger: None,
         };
         started(&metadata);
 
@@ -173,5 +155,61 @@ impl CaptureBackend for FakeBackend {
             },
             samples,
         })
+    }
+}
+
+const INITIAL_CAPTURE_RESERVE_BYTES: usize = 8 * 1024 * 1024;
+
+impl CaptureBackend for FakeBackend {
+    fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
+        Ok(vec![DeviceInfo {
+            id: Self::DEVICE_ID.to_string(),
+            kind: DeviceKind::Fake,
+            vid: PXLOGIC_WCH_VID,
+            pid: PXLOGIC_WCH_PID,
+            bus: None,
+            address: None,
+            label: "PXLogic Demo Source".to_string(),
+            ready: true,
+            manufacturer: Some("PXLogic".to_string()),
+            product: Some("Demo Device".to_string()),
+            serial_number: None,
+            usb_speed: None,
+            logic_mode: None,
+            profile_model: Some("PXLogic Demo Source".to_string()),
+            probe_error: None,
+        }])
+    }
+
+    fn prepare_device(
+        &self,
+        device_id: &str,
+        _bitstreams: Option<&crate::models::Bitstreams>,
+    ) -> Result<()> {
+        if device_id == Self::DEVICE_ID {
+            Ok(())
+        } else {
+            Err(CoreError::UnsupportedDevice)
+        }
+    }
+
+    fn capture(
+        &self,
+        settings: &CaptureSettings,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(CaptureProgress),
+    ) -> Result<CaptureData> {
+        self.capture_streaming(settings, cancel, progress, &mut |_| {}, &mut |_| {})
+    }
+
+    fn capture_streaming(
+        &self,
+        settings: &CaptureSettings,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(CaptureProgress),
+        started: &mut dyn FnMut(&CaptureMetadata),
+        on_samples: &mut dyn FnMut(&[u8]),
+    ) -> Result<CaptureData> {
+        self.capture_streaming_generated(settings, &[], cancel, progress, started, on_samples)
     }
 }

@@ -1,8 +1,12 @@
 use chrono::Utc;
 
 use crate::{
+    decode::{AnalyzerDecodeSettings, I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings},
     error::{CoreError, Result},
-    models::{CaptureData, CaptureMetadata, CaptureMode, CaptureSettings},
+    models::{
+        CaptureData, CaptureMetadata, CaptureMode, CaptureSettings, CaptureTriggerKind,
+        PwmConfiguration, PwmSettings,
+    },
     protocol,
 };
 
@@ -45,10 +49,137 @@ impl Default for CaptureProfile {
     }
 }
 
+pub fn capture_profile_from_settings(
+    settings: &CaptureSettings,
+    channel_count: u8,
+) -> Result<CaptureProfile> {
+    let enabled_channels = resolve_enabled_channels(channel_count, &settings.enabled_channels)?;
+    let mut profile = CaptureProfile {
+        stream_mode: matches!(settings.mode, CaptureMode::Stream),
+        filter: u8::from(settings.glitch_filter_enabled),
+        clock_edge: u8::from(settings.clock_edge),
+        ext_trigger_mode: settings.external_trigger_mode.into(),
+        trigger_out_enable: u32::from(settings.trigger_out_enabled),
+        vth_volts: settings.threshold_volts,
+        ..CaptureProfile::default()
+    };
+
+    if settings.trigger_enabled {
+        if !enabled_channels.contains(&settings.trigger_channel) {
+            return Err(CoreError::Decode(format!(
+                "trigger channel D{} is not enabled",
+                settings.trigger_channel
+            )));
+        }
+        let trigger_bit = 1u32
+            .checked_shl(u32::from(settings.trigger_channel))
+            .ok_or_else(|| CoreError::Decode("trigger channel mask overflow".to_string()))?;
+        match settings.trigger_kind {
+            CaptureTriggerKind::Rising => profile.trigger_rise = trigger_bit,
+            CaptureTriggerKind::Falling => profile.trigger_fall = trigger_bit,
+            CaptureTriggerKind::High => profile.trigger_one = trigger_bit,
+            CaptureTriggerKind::Low => profile.trigger_zero = trigger_bit,
+        }
+    }
+
+    Ok(profile)
+}
+
+/// PXView `set_trigger()` computes the requested pre-trigger sample count from
+/// the capture ratio, then clamps it to the FPGA's per-channel memory depth.
+pub fn pxview_trigger_position(
+    settings: &CaptureSettings,
+    sample_count: u64,
+    channel_count: u8,
+    hardware_depth_bits: u64,
+) -> Result<u32> {
+    if settings.trigger_position_percent > 100 {
+        return Err(CoreError::Decode(format!(
+            "trigger position must be between 0 and 100%, got {}%",
+            settings.trigger_position_percent
+        )));
+    }
+    if channel_count == 0 {
+        return Err(CoreError::InvalidChannelCount(channel_count));
+    }
+
+    const PXLOGIC_ATOMIC_SAMPLES: u64 = 64;
+    const SAMPLES_ALIGN: u64 = 1023;
+    let requested = (u128::from(sample_count)
+        .saturating_mul(u128::from(settings.trigger_position_percent))
+        / 100)
+        .min(u128::from(u64::MAX)) as u64;
+    let channel_depth = (hardware_depth_bits / u64::from(channel_count)) & !SAMPLES_ALIGN;
+    let maximum_percent = if matches!(settings.mode, CaptureMode::Stream) {
+        10
+    } else {
+        90
+    };
+    let maximum = channel_depth.saturating_mul(maximum_percent) / 100;
+    let clamped = requested.max(PXLOGIC_ATOMIC_SAMPLES).min(maximum);
+    u32::try_from(clamped.min(u64::from(u32::MAX))).map_err(|_| CoreError::InvalidCaptureDuration)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegisterWrite {
     pub addr: u32,
     pub value: u32,
+}
+
+/// Mirrors PXView's `SR_CONF_PWM0_FREQ` / `SR_CONF_PWM0_DUTY` register path.
+/// The FPGA output is disabled while period and high-time registers change.
+pub fn build_pxview_pwm0_register_script(
+    settings: &PwmSettings,
+) -> Result<(PwmConfiguration, Vec<RegisterWrite>)> {
+    if !settings.frequency_hz.is_finite()
+        || !(1.0..=protocol::PWM_MAX_FREQUENCY_HZ).contains(&settings.frequency_hz)
+    {
+        return Err(CoreError::Decode(format!(
+            "PWM0 frequency must be between 1 and {} Hz",
+            protocol::PWM_MAX_FREQUENCY_HZ as u64
+        )));
+    }
+    if !settings.duty_percent.is_finite() || !(0.0..=100.0).contains(&settings.duty_percent) {
+        return Err(CoreError::Decode(
+            "PWM0 duty must be between 0 and 100%".to_string(),
+        ));
+    }
+
+    let period_ticks = (f64::from(protocol::PWM_CLOCK_HZ) / settings.frequency_hz) as u32;
+    if period_ticks == 0 {
+        return Err(CoreError::Decode(
+            "PWM0 frequency produces a zero clock divisor".to_string(),
+        ));
+    }
+    let high_ticks = (f64::from(period_ticks) * settings.duty_percent / 100.0) as u32;
+    let configuration = PwmConfiguration {
+        enabled: settings.enabled,
+        requested_frequency_hz: settings.frequency_hz,
+        requested_duty_percent: settings.duty_percent,
+        effective_frequency_hz: f64::from(protocol::PWM_CLOCK_HZ) / f64::from(period_ticks),
+        effective_duty_percent: f64::from(high_ticks) * 100.0 / f64::from(period_ticks),
+        period_ticks,
+        high_ticks,
+    };
+    let script = vec![
+        RegisterWrite {
+            addr: protocol::REG_PWM0_ENABLE,
+            value: 0,
+        },
+        RegisterWrite {
+            addr: protocol::REG_PWM0_PERIOD,
+            value: period_ticks - 1,
+        },
+        RegisterWrite {
+            addr: protocol::REG_PWM0_HIGH,
+            value: high_ticks.wrapping_sub(1),
+        },
+        RegisterWrite {
+            addr: protocol::REG_PWM0_ENABLE,
+            value: u32::from(settings.enabled),
+        },
+    ];
+    Ok((configuration, script))
 }
 
 pub fn supported_samplerates() -> &'static [u64] {
@@ -150,6 +281,47 @@ pub fn capture_channel_mask(channel_count: u8) -> Result<u32> {
     }
 }
 
+/// Resolves the physical channel order used by PXView's `en_ch_num()` and
+/// `en_ch_num_mask()`. An empty list is the legacy contiguous D0..Dn form.
+pub fn resolve_enabled_channels(channel_count: u8, enabled_channels: &[u8]) -> Result<Vec<u8>> {
+    capture_channel_mask(channel_count)?;
+    if enabled_channels.is_empty() {
+        return Ok((0..channel_count).collect());
+    }
+
+    let mut resolved = enabled_channels.to_vec();
+    resolved.sort_unstable();
+    for channels in resolved.windows(2) {
+        if channels[0] == channels[1] {
+            return Err(CoreError::Decode(format!(
+                "enabled channel D{} is listed more than once",
+                channels[0]
+            )));
+        }
+    }
+    if let Some(channel) = resolved
+        .iter()
+        .copied()
+        .find(|channel| *channel >= channel_count)
+    {
+        return Err(CoreError::Decode(format!(
+            "enabled channel D{channel} is outside the physical channel range 0..{}",
+            channel_count.saturating_sub(1)
+        )));
+    }
+    Ok(resolved)
+}
+
+pub fn enabled_channel_mask(channel_count: u8, enabled_channels: &[u8]) -> Result<u32> {
+    resolve_enabled_channels(channel_count, enabled_channels)?
+        .into_iter()
+        .try_fold(0u32, |mask, channel| {
+            1u32.checked_shl(u32::from(channel))
+                .map(|bit| mask | bit)
+                .ok_or_else(|| CoreError::Decode("enabled channel mask overflow".to_string()))
+        })
+}
+
 pub fn sample_count_from_duration(
     sample_rate_hz: u64,
     duration_ms: u64,
@@ -187,6 +359,21 @@ pub fn sample_count_from_settings(settings: &CaptureSettings, unitsize: u8) -> R
             Ok(samples.max(1))
         }
     }
+}
+
+pub fn align_cross_sample_count(sample_count: u64) -> Result<u64> {
+    sample_count
+        .div_ceil(64)
+        .checked_mul(64)
+        .ok_or(CoreError::InvalidCaptureDuration)
+}
+
+pub fn pxview_cross_raw_byte_count(sample_count: u64, channel_count: u8) -> Result<u64> {
+    capture_channel_mask(channel_count)?;
+    sample_count
+        .checked_mul(u64::from(channel_count))
+        .map(|bits| bits.div_ceil(8))
+        .ok_or(CoreError::InvalidCaptureDuration)
 }
 
 pub fn pxview_capture_transfer_size(
@@ -246,8 +433,27 @@ fn align_up(value: u64, alignment: u64) -> Result<u64> {
 
 pub fn build_capture_register_script(
     transfer_size: u32,
-    target_bytes: u64,
+    target_raw_bytes: u64,
     channel_count: u8,
+    sample_rate_hz: u64,
+    profile: CaptureProfile,
+) -> Result<Vec<RegisterWrite>> {
+    let enabled_channels = resolve_enabled_channels(channel_count, &[])?;
+    build_capture_register_script_for_channels(
+        transfer_size,
+        target_raw_bytes,
+        channel_count,
+        &enabled_channels,
+        sample_rate_hz,
+        profile,
+    )
+}
+
+pub fn build_capture_register_script_for_channels(
+    transfer_size: u32,
+    target_raw_bytes: u64,
+    output_channel_count: u8,
+    enabled_channels: &[u8],
     sample_rate_hz: u64,
     profile: CaptureProfile,
 ) -> Result<Vec<RegisterWrite>> {
@@ -257,8 +463,11 @@ pub fn build_capture_register_script(
         ));
     }
 
-    let channel_mask = capture_channel_mask(channel_count)?;
-    let target_total = target_bytes
+    let enabled_channels = resolve_enabled_channels(output_channel_count, enabled_channels)?;
+    let enabled_channel_count = u8::try_from(enabled_channels.len())
+        .map_err(|_| CoreError::InvalidChannelCount(output_channel_count))?;
+    let channel_mask = enabled_channel_mask(output_channel_count, &enabled_channels)?;
+    let target_total = target_raw_bytes
         .checked_add(u64::from(transfer_size))
         .ok_or_else(|| CoreError::Decode("target byte count overflow".to_string()))?;
     let target_low = target_total as u32;
@@ -341,7 +550,7 @@ pub fn build_capture_register_script(
         },
         RegisterWrite {
             addr: protocol::REG_CAPTURE_CHANNEL_COUNT,
-            value: u32::from(channel_count),
+            value: u32::from(enabled_channel_count),
         },
         RegisterWrite {
             addr: protocol::REG_CAPTURE_TRIGGER_POS,
@@ -386,6 +595,51 @@ pub fn decode_cross_data(channel_count: u8, input: &[u8]) -> Result<Vec<u8>> {
     decode_cross_data_with_map(channel_count, input, None, false)
 }
 
+/// Converts PXView `LA_CROSS_DATA` lanes into interleaved sample words while
+/// preserving the physical channel numbers selected by the hardware mask.
+pub fn decode_cross_data_to_physical_channels(
+    output_channel_count: u8,
+    enabled_channels: &[u8],
+    input: &[u8],
+    reverse_bits_in_word: bool,
+) -> Result<Vec<u8>> {
+    let enabled_channels = resolve_enabled_channels(output_channel_count, enabled_channels)?;
+    let unitsize = usize::from(unitsize_for_channel_count(output_channel_count)?);
+    let stripe_bytes = enabled_channels.len() * 8;
+    if input.len() % stripe_bytes != 0 {
+        return Err(CoreError::Decode(
+            "cross-lane input is not stripe-aligned".to_string(),
+        ));
+    }
+
+    let stripe_count = input.len() / stripe_bytes;
+    let output_capacity = stripe_count
+        .checked_mul(64)
+        .and_then(|samples| samples.checked_mul(unitsize))
+        .ok_or(CoreError::InvalidCaptureDuration)?;
+    let mut output = Vec::with_capacity(output_capacity);
+    for stripe in input.chunks_exact(stripe_bytes) {
+        let mut words = [0u64; 32];
+        for (raw_lane, bytes) in stripe.chunks_exact(8).enumerate() {
+            words[raw_lane] = u64::from_le_bytes(bytes.try_into().expect("fixed lane"));
+        }
+        for bit_index in 0..64 {
+            let source_bit = if reverse_bits_in_word {
+                63 - bit_index
+            } else {
+                bit_index
+            };
+            let mut sample_word = 0u32;
+            for (raw_lane, physical_channel) in enabled_channels.iter().copied().enumerate() {
+                let bit_value = ((words[raw_lane] >> source_bit) & 1) as u32;
+                sample_word |= bit_value << physical_channel;
+            }
+            write_sample_word(&mut output, sample_word, unitsize);
+        }
+    }
+    Ok(output)
+}
+
 pub fn decode_cross_data_with_map(
     channel_count: u8,
     input: &[u8],
@@ -394,9 +648,6 @@ pub fn decode_cross_data_with_map(
 ) -> Result<Vec<u8>> {
     let unitsize = usize::from(unitsize_for_channel_count(channel_count)?);
     let channels = usize::from(channel_count);
-    if !matches!(channel_count, 16 | 32) {
-        return Err(CoreError::InvalidChannelCount(channel_count));
-    }
     if let Some(map) = channel_map {
         validate_cross_channel_map(channel_count, map)?;
     }
@@ -485,7 +736,9 @@ pub fn generate_sample_words_with_count(
     sample_count: u64,
     unitsize: u8,
 ) -> Result<CaptureData> {
-    let mut generator = DemoSampleGenerator::new(settings, unitsize);
+    let enabled_channels =
+        resolve_enabled_channels(settings.channel_count, &settings.enabled_channels)?;
+    let mut generator = DemoSampleGenerator::new(settings, unitsize)?;
     let samples = generator.generate(sample_count);
 
     Ok(CaptureData {
@@ -494,12 +747,14 @@ pub fn generate_sample_words_with_count(
             source_device: settings.device_id.clone(),
             sample_rate_hz: settings.sample_rate_hz,
             channel_count: settings.channel_count,
+            enabled_channels,
             unitsize,
             sample_count,
             captured_at: Utc::now(),
             labels: (0..settings.channel_count)
                 .map(|index| format!("D{index}"))
                 .collect(),
+            trigger: None,
         },
         samples,
     })
@@ -509,19 +764,49 @@ pub(crate) struct DemoSampleGenerator {
     settings: CaptureSettings,
     unitsize: u8,
     channels: Vec<SaleaeDemoPulseChannel>,
+    signals: Vec<DemoChannelSignal>,
+    enabled_channel_mask: u32,
     next_sample: u64,
 }
 
 impl DemoSampleGenerator {
-    pub(crate) fn new(settings: &CaptureSettings, unitsize: u8) -> Self {
-        Self {
+    pub(crate) fn new(settings: &CaptureSettings, unitsize: u8) -> Result<Self> {
+        Self::with_signals(
+            settings,
+            unitsize,
+            legacy_demo_signals(settings.channel_count),
+        )
+    }
+
+    pub(crate) fn with_analyzers(
+        settings: &CaptureSettings,
+        unitsize: u8,
+        analyzers: &[AnalyzerDecodeSettings],
+    ) -> Result<Self> {
+        Self::with_signals(
+            settings,
+            unitsize,
+            demo_signals_for_analyzers(settings.channel_count, analyzers),
+        )
+    }
+
+    fn with_signals(
+        settings: &CaptureSettings,
+        unitsize: u8,
+        signals: Vec<DemoChannelSignal>,
+    ) -> Result<Self> {
+        let enabled_channel_mask =
+            enabled_channel_mask(settings.channel_count, &settings.enabled_channels)?;
+        Ok(Self {
             settings: settings.clone(),
             unitsize,
             channels: (0..settings.channel_count)
                 .map(SaleaeDemoPulseChannel::new)
                 .collect(),
+            signals,
+            enabled_channel_mask,
             next_sample: 0,
-        }
+        })
     }
 
     pub(crate) fn generate(&mut self, sample_count: u64) -> Vec<u8> {
@@ -535,22 +820,22 @@ impl DemoSampleGenerator {
             let sample_index = self.next_sample;
             let mut word = 0u32;
             for channel in 0..self.settings.channel_count {
-                let high = if channel == 0 {
-                    demo_uart_level(sample_index, self.settings.sample_rate_hz).unwrap_or_else(
-                        || self.channels[usize::from(channel)].level_at(sample_index),
-                    )
-                } else if (1..=2).contains(&channel) {
-                    demo_i2c_level(sample_index, self.settings.sample_rate_hz, channel)
-                        .unwrap_or_else(|| {
-                            self.channels[usize::from(channel)].level_at(sample_index)
-                        })
-                } else if (3..=6).contains(&channel) {
-                    demo_spi_level(sample_index, self.settings.sample_rate_hz, channel)
-                        .unwrap_or_else(|| {
-                            self.channels[usize::from(channel)].level_at(sample_index)
-                        })
-                } else {
-                    self.channels[usize::from(channel)].level_at(sample_index)
+                if self.enabled_channel_mask & (1u32 << channel) == 0 {
+                    continue;
+                }
+                let channel_index = usize::from(channel);
+                let high = match &self.signals[channel_index] {
+                    DemoChannelSignal::Pulse => self.channels[channel_index].level_at(sample_index),
+                    DemoChannelSignal::Uart(settings) => {
+                        demo_uart_level(sample_index, self.settings.sample_rate_hz, settings)
+                            .unwrap_or_else(|| self.channels[channel_index].level_at(sample_index))
+                    }
+                    DemoChannelSignal::I2c { settings, role } => {
+                        demo_i2c_level(sample_index, self.settings.sample_rate_hz, settings, *role)
+                    }
+                    DemoChannelSignal::Spi { settings, role } => {
+                        demo_spi_level(sample_index, self.settings.sample_rate_hz, settings, *role)
+                    }
                 };
                 if high {
                     word |= 1u32 << channel;
@@ -560,6 +845,179 @@ impl DemoSampleGenerator {
             self.next_sample += 1;
         }
         samples
+    }
+}
+
+#[derive(Debug, Clone)]
+enum DemoChannelSignal {
+    Pulse,
+    Uart(UartDecodeSettings),
+    I2c {
+        settings: I2cDecodeSettings,
+        role: DemoI2cRole,
+    },
+    Spi {
+        settings: SpiDecodeSettings,
+        role: DemoSpiRole,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DemoI2cRole {
+    Sda,
+    Scl,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DemoSpiRole {
+    Mosi,
+    Miso,
+    Clock,
+    Enable,
+}
+
+fn legacy_demo_signals(channel_count: u8) -> Vec<DemoChannelSignal> {
+    demo_signals_for_analyzers(
+        channel_count,
+        &[
+            AnalyzerDecodeSettings::Uart(UartDecodeSettings::default()),
+            AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
+            AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
+        ],
+    )
+}
+
+fn demo_signals_for_analyzers(
+    channel_count: u8,
+    analyzers: &[AnalyzerDecodeSettings],
+) -> Vec<DemoChannelSignal> {
+    let mut signals = vec![DemoChannelSignal::Pulse; usize::from(channel_count)];
+    let mut claimed = vec![false; usize::from(channel_count)];
+
+    for analyzer in analyzers {
+        let roles = match analyzer {
+            AnalyzerDecodeSettings::Uart(settings) => {
+                let channels = [settings.channel];
+                if !can_claim_demo_channels(&channels, &claimed) {
+                    continue;
+                }
+                claim_demo_channel(
+                    &mut signals,
+                    &mut claimed,
+                    settings.channel,
+                    DemoChannelSignal::Uart(settings.clone()),
+                );
+                continue;
+            }
+            AnalyzerDecodeSettings::I2c(settings) => {
+                let channels = [settings.sda_channel, settings.scl_channel];
+                if settings.sda_channel == settings.scl_channel
+                    || !can_claim_demo_channels(&channels, &claimed)
+                {
+                    continue;
+                }
+                vec![
+                    (
+                        settings.sda_channel,
+                        DemoChannelSignal::I2c {
+                            settings: settings.clone(),
+                            role: DemoI2cRole::Sda,
+                        },
+                    ),
+                    (
+                        settings.scl_channel,
+                        DemoChannelSignal::I2c {
+                            settings: settings.clone(),
+                            role: DemoI2cRole::Scl,
+                        },
+                    ),
+                ]
+            }
+            AnalyzerDecodeSettings::Spi(settings) => {
+                let channels = [
+                    settings.mosi_channel,
+                    settings.miso_channel,
+                    Some(settings.clock_channel),
+                    settings.enable_channel,
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+                if channels.len() < 2
+                    || channels
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        != channels.len()
+                    || !can_claim_demo_channels(&channels, &claimed)
+                {
+                    continue;
+                }
+                let mut roles = Vec::new();
+                if let Some(channel) = settings.mosi_channel {
+                    roles.push((
+                        channel,
+                        DemoChannelSignal::Spi {
+                            settings: settings.clone(),
+                            role: DemoSpiRole::Mosi,
+                        },
+                    ));
+                }
+                if let Some(channel) = settings.miso_channel {
+                    roles.push((
+                        channel,
+                        DemoChannelSignal::Spi {
+                            settings: settings.clone(),
+                            role: DemoSpiRole::Miso,
+                        },
+                    ));
+                }
+                roles.push((
+                    settings.clock_channel,
+                    DemoChannelSignal::Spi {
+                        settings: settings.clone(),
+                        role: DemoSpiRole::Clock,
+                    },
+                ));
+                if let Some(channel) = settings.enable_channel {
+                    roles.push((
+                        channel,
+                        DemoChannelSignal::Spi {
+                            settings: settings.clone(),
+                            role: DemoSpiRole::Enable,
+                        },
+                    ));
+                }
+                roles
+            }
+        };
+
+        for (channel, signal) in roles {
+            claim_demo_channel(&mut signals, &mut claimed, channel, signal);
+        }
+    }
+    signals
+}
+
+fn can_claim_demo_channels(channels: &[u8], claimed: &[bool]) -> bool {
+    channels.iter().all(|channel| {
+        claimed
+            .get(usize::from(*channel))
+            .is_some_and(|claimed| !claimed)
+    })
+}
+
+fn claim_demo_channel(
+    signals: &mut [DemoChannelSignal],
+    claimed: &mut [bool],
+    channel: u8,
+    signal: DemoChannelSignal,
+) {
+    let index = usize::from(channel);
+    if let (Some(target), Some(claimed)) = (signals.get_mut(index), claimed.get_mut(index)) {
+        *target = signal;
+        *claimed = true;
     }
 }
 
@@ -599,13 +1057,16 @@ impl SaleaeDemoPulseChannel {
     }
 }
 
-fn demo_uart_level(sample_index: u64, sample_rate_hz: u64) -> Option<bool> {
-    const BAUD: u64 = 115_200;
+fn demo_uart_level(
+    sample_index: u64,
+    sample_rate_hz: u64,
+    settings: &UartDecodeSettings,
+) -> Option<bool> {
     const MESSAGE: &[u8] = b"PXLogic demo\n";
     const LEAD_IDLE_BITS: u64 = 4;
     const TRAIL_IDLE_BITS: u64 = 8;
 
-    let bit_period = sample_rate_hz / BAUD;
+    let bit_period = sample_rate_hz / u64::from(settings.baud_rate.max(1));
     if bit_period < 8 {
         return None;
     }
@@ -624,68 +1085,89 @@ fn demo_uart_level(sample_index: u64, sample_rate_hz: u64) -> Option<bool> {
     let frame_index = message_bit / 10;
     let frame_bit = message_bit % 10;
     let byte = MESSAGE.get(frame_index as usize)?;
-    match frame_bit {
+    let level = match frame_bit {
         0 => Some(false),
         1..=8 => Some((byte >> (frame_bit - 1)) & 1 != 0),
         9 => Some(true),
         _ => Some(true),
-    }
+    }?;
+    Some(level != settings.inverted)
 }
 
-fn demo_i2c_level(sample_index: u64, sample_rate_hz: u64, channel: u8) -> Option<bool> {
-    if !matches!(channel, 1 | 2) {
-        return None;
-    }
+fn demo_i2c_level(
+    sample_index: u64,
+    sample_rate_hz: u64,
+    _settings: &I2cDecodeSettings,
+    role: DemoI2cRole,
+) -> bool {
     let half_period = (sample_rate_hz / 200_000).max(2);
     let phase = (sample_index / half_period) % 60;
     if phase < 2 {
-        return Some(true);
+        return true;
     }
     if phase == 2 {
-        return Some(channel == 2);
+        return matches!(role, DemoI2cRole::Scl);
     }
     let data_phase = phase - 3;
     if data_phase < 54 {
         let byte_index = data_phase / 18;
         let bit_index = (data_phase % 18) / 2;
-        let byte = [0xA0u8, 0x2A, 0x55][byte_index as usize];
-        if channel == 2 {
-            return Some(data_phase % 2 == 1);
+        let byte = [0x40u8, 0x90, 0x90][byte_index as usize];
+        if matches!(role, DemoI2cRole::Scl) {
+            return data_phase % 2 == 1;
         }
         if bit_index == 8 {
-            return Some(false);
+            return byte_index == 2;
         }
-        return Some(byte & (1 << (7 - bit_index)) != 0);
+        return byte & (1 << (7 - bit_index)) != 0;
     }
-    Some(match (phase, channel) {
+    match (phase, role) {
         (57, _) => false,
-        (58, 2) => true,
+        (58, DemoI2cRole::Scl) => true,
         (58, _) => false,
         _ => true,
-    })
+    }
 }
 
-fn demo_spi_level(sample_index: u64, sample_rate_hz: u64, channel: u8) -> Option<bool> {
-    if !(3..=6).contains(&channel) {
-        return None;
-    }
+fn demo_spi_level(
+    sample_index: u64,
+    sample_rate_hz: u64,
+    settings: &SpiDecodeSettings,
+    role: DemoSpiRole,
+) -> bool {
     let half_period = (sample_rate_hz / 2_000_000).max(2);
-    let phase = (sample_index / half_period) % 20;
-    let active = (2..18).contains(&phase);
-    if channel == 6 {
-        return Some(!active);
+    let transfer_half_periods = u64::from(settings.bits_per_transfer.max(1)) * 2 + 4;
+    let phase = (sample_index / half_period) % transfer_half_periods;
+    let active = (2..transfer_half_periods - 2).contains(&phase);
+    if matches!(role, DemoSpiRole::Enable) {
+        return active != settings.enable_active_low;
     }
-    if channel == 5 {
-        return Some(active && phase % 2 == 1);
+    if matches!(role, DemoSpiRole::Clock) {
+        let clock = if active { phase % 2 == 1 } else { false };
+        return clock != settings.clock_polarity;
     }
     if !active {
-        return Some(false);
+        return false;
     }
-    let bit_index = (phase - 2) / 2;
-    let word_index = (sample_index / (half_period * 20)) as usize % 4;
-    let word = [0xA5u8, 0x3C, 0x5A, 0xF0][word_index];
-    let value = if channel == 3 { word } else { word ^ 0x99 };
-    Some(value & (1 << (7 - bit_index)) != 0)
+    let wire_bit = ((phase - 2) / 2).min(u64::from(settings.bits_per_transfer - 1));
+    let bit_index = if settings.msb_first {
+        u64::from(settings.bits_per_transfer - 1) - wire_bit
+    } else {
+        wire_bit
+    };
+    let word_index = (sample_index / (half_period * transfer_half_periods)) as u64;
+    let mask = if settings.bits_per_transfer >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << settings.bits_per_transfer) - 1
+    };
+    let mosi = (0x4c + word_index) & mask;
+    let value = if matches!(role, DemoSpiRole::Mosi) {
+        mosi
+    } else {
+        (mosi + 1) & mask
+    };
+    value & (1u64 << bit_index) != 0
 }
 
 pub fn read_sample_word(samples: &[u8], unitsize: u8, sample_index: u64) -> Option<u32> {
@@ -728,6 +1210,67 @@ mod tests {
     }
 
     #[test]
+    fn builds_pxview_pwm0_disable_program_restore_sequence() {
+        let settings = PwmSettings::default();
+        let (configuration, script) = build_pxview_pwm0_register_script(&settings).unwrap();
+
+        assert_eq!(configuration.period_ticks, 125_000);
+        assert_eq!(configuration.high_ticks, 62_500);
+        assert_eq!(configuration.effective_frequency_hz, 1_000.0);
+        assert_eq!(configuration.effective_duty_percent, 50.0);
+        assert_eq!(
+            script,
+            vec![
+                RegisterWrite {
+                    addr: protocol::REG_PWM0_ENABLE,
+                    value: 0,
+                },
+                RegisterWrite {
+                    addr: protocol::REG_PWM0_PERIOD,
+                    value: 124_999,
+                },
+                RegisterWrite {
+                    addr: protocol::REG_PWM0_HIGH,
+                    value: 62_499,
+                },
+                RegisterWrite {
+                    addr: protocol::REG_PWM0_ENABLE,
+                    value: 0,
+                },
+            ]
+        );
+
+        let enabled = PwmSettings {
+            enabled: true,
+            frequency_hz: 1_000_000.0,
+            duty_percent: 0.0,
+        };
+        let (configuration, script) = build_pxview_pwm0_register_script(&enabled).unwrap();
+        assert_eq!(configuration.period_ticks, 125);
+        assert_eq!(configuration.high_ticks, 0);
+        assert_eq!(script[2].value, u32::MAX);
+        assert_eq!(script[3].value, 1);
+    }
+
+    #[test]
+    fn validates_pxview_pwm0_public_control_range() {
+        for frequency_hz in [0.0, -1.0, 1_000_001.0, f64::NAN] {
+            assert!(build_pxview_pwm0_register_script(&PwmSettings {
+                frequency_hz,
+                ..PwmSettings::default()
+            })
+            .is_err());
+        }
+        for duty_percent in [-1.0, 100.1, f64::INFINITY] {
+            assert!(build_pxview_pwm0_register_script(&PwmSettings {
+                duty_percent,
+                ..PwmSettings::default()
+            })
+            .is_err());
+        }
+    }
+
+    #[test]
     fn builds_pxlogic_capture_script() {
         let script =
             build_capture_register_script(4096, 65_536, 16, 250_000_000, CaptureProfile::default())
@@ -757,6 +1300,141 @@ mod tests {
     }
 
     #[test]
+    fn builds_sparse_pxlogic_capture_script_from_physical_channel_mask() {
+        let script = build_capture_register_script_for_channels(
+            4096,
+            16,
+            16,
+            &[0, 4],
+            25_000_000,
+            CaptureProfile::default(),
+        )
+        .unwrap();
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_CAPTURE_CHANNEL_COUNT,
+            value: 2,
+        }));
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_STREAM_CHANNEL_ENABLE,
+            value: 0x0000_0011,
+        }));
+    }
+
+    #[test]
+    fn validates_and_canonicalizes_enabled_physical_channels() {
+        assert_eq!(
+            resolve_enabled_channels(8, &[]).unwrap(),
+            (0..8).collect::<Vec<_>>()
+        );
+        assert_eq!(resolve_enabled_channels(8, &[4, 0]).unwrap(), vec![0, 4]);
+        assert!(resolve_enabled_channels(8, &[0, 0]).is_err());
+        assert!(resolve_enabled_channels(8, &[0, 8]).is_err());
+        assert_eq!(enabled_channel_mask(8, &[0, 4]).unwrap(), 0x11);
+    }
+
+    #[test]
+    fn maps_capture_settings_to_pxview_trigger_and_filter_profile() {
+        let profile = capture_profile_from_settings(
+            &CaptureSettings {
+                trigger_enabled: true,
+                trigger_channel: 3,
+                trigger_kind: CaptureTriggerKind::Falling,
+                glitch_filter_enabled: true,
+                external_trigger_mode: crate::ExternalTriggerMode::Edge,
+                clock_edge: true,
+                trigger_out_enabled: true,
+                mode: CaptureMode::Buffer,
+                threshold_volts: 1.8,
+                ..CaptureSettings::default()
+            },
+            16,
+        )
+        .unwrap();
+
+        assert_eq!(profile.filter, 1);
+        assert_eq!(profile.trigger_fall, 1 << 3);
+        assert_eq!(profile.trigger_rise, 0);
+        assert_eq!(profile.trigger_one, 0);
+        assert_eq!(profile.trigger_zero, 0);
+        assert_eq!(profile.ext_trigger_mode, 5);
+        assert_eq!(profile.clock_edge, 1);
+        assert_eq!(profile.trigger_out_enable, 1);
+
+        let script = build_capture_register_script(4096, 65_536, 16, 250_000_000, profile).unwrap();
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_TRIGGER_FALL,
+            value: 1 << 3,
+        }));
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_EXT_TRIGGER_MODE,
+            value: 5,
+        }));
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_TRIGGER_OUT_ENABLE,
+            value: 1,
+        }));
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_GPIO_MODE,
+            value: 2 | (1 << protocol::STREAM_FILTER_SHIFT),
+        }));
+
+        let disabled_trigger = CaptureSettings {
+            channel_count: 8,
+            enabled_channels: vec![0, 4],
+            trigger_enabled: true,
+            trigger_channel: 3,
+            ..CaptureSettings::default()
+        };
+        assert!(capture_profile_from_settings(&disabled_trigger, 8).is_err());
+        assert!(script.contains(&RegisterWrite {
+            addr: protocol::REG_STREAM_CONTROL,
+            value: 1 << protocol::STREAM_FILTER_SHIFT,
+        }));
+    }
+
+    #[test]
+    fn computes_pxview_trigger_position_and_hardware_depth_clamps() {
+        let stream = CaptureSettings {
+            mode: CaptureMode::Stream,
+            trigger_position_percent: 50,
+            ..CaptureSettings::default()
+        };
+        assert_eq!(
+            pxview_trigger_position(&stream, 20_000_000, 32, 4_000_000_000).unwrap(),
+            10_000_000
+        );
+        let channel_depth = (4_000_000_000u64 / 32) & !1023;
+        assert_eq!(
+            pxview_trigger_position(&stream, 100_000_000, 32, 4_000_000_000).unwrap(),
+            (channel_depth / 10) as u32
+        );
+
+        let buffer = CaptureSettings {
+            mode: CaptureMode::Buffer,
+            ..stream.clone()
+        };
+        assert_eq!(
+            pxview_trigger_position(&buffer, 100_000_000, 32, 4_000_000_000).unwrap(),
+            50_000_000
+        );
+
+        let capture_start = CaptureSettings {
+            trigger_position_percent: 0,
+            ..stream.clone()
+        };
+        assert_eq!(
+            pxview_trigger_position(&capture_start, 100_000, 32, 4_000_000_000).unwrap(),
+            64
+        );
+
+        let invalid = CaptureSettings {
+            trigger_position_percent: 101,
+            ..stream
+        };
+        assert!(pxview_trigger_position(&invalid, 100_000, 32, 4_000_000_000).is_err());
+    }
+
+    #[test]
     fn computes_pxview_transfer_size() {
         assert_eq!(
             pxview_capture_transfer_size(25_000_000, 32, true).unwrap(),
@@ -774,6 +1452,20 @@ mod tests {
     }
 
     #[test]
+    fn computes_pxview_cross_raw_bytes_for_all_channel_counts() {
+        assert_eq!(align_cross_sample_count(1).unwrap(), 64);
+        assert_eq!(align_cross_sample_count(64).unwrap(), 64);
+        assert_eq!(align_cross_sample_count(65).unwrap(), 128);
+
+        for channel_count in 1u8..=32 {
+            assert_eq!(
+                pxview_cross_raw_byte_count(64, channel_count).unwrap(),
+                u64::from(channel_count) * 8
+            );
+        }
+    }
+
+    #[test]
     fn decodes_cross_lane_16_channel_stripe() {
         let mut input = vec![0u8; 16 * 8];
         let ch0 = 0b1010u64;
@@ -787,6 +1479,49 @@ mod tests {
         assert_eq!(read_sample_word(&decoded, 2, 1).unwrap() & 0b11, 0b01);
         assert_eq!(read_sample_word(&decoded, 2, 2).unwrap() & 0b11, 0b10);
         assert_eq!(read_sample_word(&decoded, 2, 3).unwrap() & 0b11, 0b01);
+    }
+
+    #[test]
+    fn decodes_sparse_cross_lanes_into_physical_sample_bits() {
+        let mut input = Vec::new();
+        input.extend_from_slice(&0b1010u64.to_le_bytes());
+        input.extend_from_slice(&0b0101u64.to_le_bytes());
+
+        let decoded = decode_cross_data_to_physical_channels(5, &[0, 4], &input, false).unwrap();
+        assert_eq!(decoded.len(), 64);
+        assert_eq!(read_sample_word(&decoded, 1, 0), Some(1 << 4));
+        assert_eq!(read_sample_word(&decoded, 1, 1), Some(1));
+        assert_eq!(read_sample_word(&decoded, 1, 2), Some(1 << 4));
+        assert_eq!(read_sample_word(&decoded, 1, 3), Some(1));
+        assert!(decoded.iter().all(|word| word & !0x11 == 0));
+    }
+
+    #[test]
+    fn decodes_cross_lane_for_every_pxview_channel_width() {
+        for channel_count in [1u8, 2, 4, 8, 16, 32] {
+            let mut input = Vec::new();
+            for channel in 0..channel_count {
+                let word = if channel % 2 == 0 {
+                    0xAAAA_AAAA_AAAA_AAAAu64
+                } else {
+                    0x5555_5555_5555_5555u64
+                };
+                input.extend_from_slice(&word.to_le_bytes());
+            }
+
+            let decoded = decode_cross_data(channel_count, &input).unwrap();
+            let unitsize = unitsize_for_channel_count(channel_count).unwrap();
+            let even_mask = (0..channel_count)
+                .filter(|channel| channel % 2 == 0)
+                .fold(0u32, |mask, channel| mask | (1u32 << channel));
+            let odd_mask = (0..channel_count)
+                .filter(|channel| channel % 2 == 1)
+                .fold(0u32, |mask, channel| mask | (1u32 << channel));
+
+            assert_eq!(decoded.len(), 64 * usize::from(unitsize));
+            assert_eq!(read_sample_word(&decoded, unitsize, 0), Some(odd_mask));
+            assert_eq!(read_sample_word(&decoded, unitsize, 1), Some(even_mask));
+        }
     }
 
     #[test]
@@ -824,6 +1559,10 @@ mod tests {
         };
         let capture = generate_sample_words(&settings).unwrap();
         assert_eq!(capture.metadata.sample_count, 128);
+        assert_eq!(
+            capture.metadata.enabled_channels,
+            (0..16).collect::<Vec<_>>()
+        );
         assert_eq!(capture.samples.len(), 128 * 2);
     }
 

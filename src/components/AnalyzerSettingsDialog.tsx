@@ -1,7 +1,11 @@
 import { X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { UiAnalyzerInstance } from "../lib/analyzers";
-import { analyzerSupportsDecoding } from "../lib/analyzers";
+import {
+  analyzerBackendOptions,
+  analyzerSupportsDecoding,
+  decoderBackendLabel,
+} from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SaleaeIcon } from "./SaleaeIcon";
 
@@ -224,6 +228,24 @@ export function AnalyzerSettingsDialog({
               </AnalyzerSettingRow>
             </>
           )}
+
+          <AnalyzerSettingRow label="Decoder Library">
+            <select
+              value={draft.decoderBackend}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  decoderBackend: event.target.value as typeof current.decoderBackend,
+                }))
+              }
+            >
+              {analyzerBackendOptions(draft.type).map((backend) => (
+                <option key={backend} value={backend}>
+                  {decoderBackendLabel(backend)}
+                </option>
+              ))}
+            </select>
+          </AnalyzerSettingRow>
 
           {!supported && <div className="analyzerDialogWarning">Decoder backend unavailable</div>}
           {validationError && <div className="analyzerDialogWarning">{validationError}</div>}

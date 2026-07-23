@@ -15,6 +15,8 @@ import {
 interface TimingDisplayCanvasProps {
   graphWidthPx: number;
   sampleRateHz: number;
+  timeOriginSample?: number;
+  triggerSample?: number;
   viewportSamples: number;
   viewportStart: number;
 }
@@ -26,12 +28,14 @@ const timingGraphInsetLeftPx = SALEAE_ROW_V2_CONTAINER_PADDING_PX + SALEAE_ROW_V
 export function TimingDisplayCanvas({
   graphWidthPx,
   sampleRateHz,
+  timeOriginSample = 0,
+  triggerSample,
   viewportSamples,
   viewportStart,
 }: TimingDisplayCanvasProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const timingRef = useRef({ graphWidthPx, sampleRateHz, viewportSamples, viewportStart });
+  const timingRef = useRef({ graphWidthPx, sampleRateHz, timeOriginSample, viewportSamples, viewportStart });
 
   useEffect(() => {
     const host = hostRef.current;
@@ -46,6 +50,7 @@ export function TimingDisplayCanvas({
         timing.viewportSamples,
         timing.sampleRateHz,
         timing.graphWidthPx,
+        timing.timeOriginSample,
       );
     };
     const observer = new ResizeObserver(([entry]) => {
@@ -60,14 +65,29 @@ export function TimingDisplayCanvas({
   }, []);
 
   useEffect(() => {
-    timingRef.current = { graphWidthPx, sampleRateHz, viewportSamples, viewportStart };
+    timingRef.current = { graphWidthPx, sampleRateHz, timeOriginSample, viewportSamples, viewportStart };
     const canvas = canvasRef.current;
-    if (canvas) drawTimingDisplay(canvas, viewportStart, viewportSamples, sampleRateHz, graphWidthPx);
-  }, [graphWidthPx, sampleRateHz, viewportSamples, viewportStart]);
+    if (canvas) drawTimingDisplay(canvas, viewportStart, viewportSamples, sampleRateHz, graphWidthPx, timeOriginSample);
+  }, [graphWidthPx, sampleRateHz, timeOriginSample, viewportSamples, viewportStart]);
+
+  const triggerRatio =
+    triggerSample == null || triggerSample < viewportStart || triggerSample > viewportStart + viewportSamples
+      ? null
+      : (triggerSample - viewportStart) / Math.max(1, viewportSamples);
+  const triggerLeft =
+    triggerRatio == null
+      ? undefined
+      : `calc(${triggerRatio * 100}% + ${timingGraphInsetLeftPx * (1 - triggerRatio)}px)`;
 
   return (
     <div className="timingDisplayCanvasHost" ref={hostRef}>
       <canvas aria-label="Capture time ruler" className="timingDisplayCanvas" ref={canvasRef} />
+      {triggerLeft && (
+        <div className="captureTriggerTimingMarker" style={{ left: triggerLeft }} title="Trigger">
+          <span className="captureTriggerTimingLabel">T</span>
+          <span className="captureTriggerTimingArrow" />
+        </div>
+      )}
     </div>
   );
 }
@@ -78,6 +98,7 @@ function drawTimingDisplay(
   viewportSamples: number,
   sampleRateHz: number,
   graphWidthPx: number,
+  timeOriginSample: number,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -116,7 +137,7 @@ function drawTimingDisplay(
     return;
   }
 
-  const startSeconds = viewportStart / sampleRateHz;
+  const startSeconds = (viewportStart - timeOriginSample) / sampleRateHz;
   const timeSecondsPerPixel = viewportSamples / sampleRateHz / Math.max(1, graphWidthPx || widthCss);
   const { majorTicks, minorTicks } = getHorizontalGraphTicks(
     startSeconds,

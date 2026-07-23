@@ -18,6 +18,7 @@ interface WaveformCanvasProps {
   tile: WaveformTile | null;
   onWidthChange: (width: number) => void;
   sampleRateHz: number;
+  timeOriginSample?: number;
   showInteractiveMeasurement?: boolean;
   totalSamples: number;
   viewportStart: number;
@@ -39,6 +40,7 @@ const digitalMeasurementBoxMinWidthPx = 110;
 const panningAnimationDurationMs = 300;
 const packedDigitalBinBytes = 16;
 const packedDigitalBinCache = new WeakMap<object, DataView>();
+const digitalEdgeCache = new WeakMap<object, DigitalEdge[]>();
 
 type EdgeKind = "rising" | "falling";
 
@@ -72,6 +74,7 @@ export function WaveformCanvas({
   tile,
   onWidthChange,
   sampleRateHz,
+  timeOriginSample = 0,
   showInteractiveMeasurement = true,
   totalSamples,
   viewportStart,
@@ -84,17 +87,24 @@ export function WaveformCanvas({
   const dragRef = useRef<{ x: number; start: number; samples: number } | null>(null);
   const tileRef = useRef<WaveformTile | null>(null);
   const viewportRef = useRef({ start: viewportStart, samples: viewportSamples });
+  const viewportPropsRef = useRef({ start: viewportStart, samples: viewportSamples });
   const sampleRateRef = useRef(sampleRateHz);
+  const timeOriginSampleRef = useRef(timeOriginSample);
   const totalSamplesRef = useRef(totalSamples);
   const rowHeightsRef = useRef(rowHeights);
   const rowTopInsetsRef = useRef(rowTopInsets);
+  const onViewportChangeRef = useRef(onViewportChange);
+  const onWidthChangeRef = useRef(onWidthChange);
   const hoverRef = useRef<HoverMeasurement | null>(null);
   const showInteractiveMeasurementRef = useRef(showInteractiveMeasurement);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
   const viewportFrameRef = useRef<number | null>(null);
+  const drawFrameRef = useRef<number | null>(null);
   const animatedViewportFrameRef = useRef<number | null>(null);
   const [hoverNavigation, setHoverNavigation] = useState<HoverNavigation | null>(null);
+  onViewportChangeRef.current = onViewportChange;
+  onWidthChangeRef.current = onWidthChange;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -105,50 +115,49 @@ export function WaveformCanvas({
       const dpr = window.devicePixelRatio || 1;
       canvas.width = Math.max(1, Math.floor(rect.width * dpr));
       canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-      onWidthChange(Math.max(1, Math.floor(rect.width)));
-      draw(
-        canvas,
-        tileRef.current,
-        viewportRef.current.start,
-        viewportRef.current.samples,
-        showInteractiveMeasurementRef.current ? hoverRef.current : null,
-        sampleRateRef.current,
-        rowHeightsRef.current,
-        rowTopInsetsRef.current,
-      );
+      onWidthChangeRef.current(Math.max(1, Math.floor(rect.width)));
+      scheduleDraw();
     });
     observer.observe(host);
     return () => observer.disconnect();
-  }, [onWidthChange]);
+  }, []);
 
   useEffect(() => {
+    const tileChanged = tileRef.current !== tile;
+    const viewportChanged =
+      viewportPropsRef.current.start !== viewportStart ||
+      viewportPropsRef.current.samples !== viewportSamples;
+    const graphLayoutChanged =
+      sampleRateRef.current !== sampleRateHz ||
+      timeOriginSampleRef.current !== timeOriginSample ||
+      rowHeightsRef.current !== rowHeights ||
+      rowTopInsetsRef.current !== rowTopInsets;
+    const interactionChanged = showInteractiveMeasurementRef.current !== showInteractiveMeasurement;
+
     tileRef.current = tile;
-    viewportRef.current = { start: viewportStart, samples: viewportSamples };
+    viewportPropsRef.current = { start: viewportStart, samples: viewportSamples };
+    if (viewportChanged) {
+      viewportRef.current = { start: viewportStart, samples: viewportSamples };
+    }
     sampleRateRef.current = sampleRateHz;
+    timeOriginSampleRef.current = timeOriginSample;
     showInteractiveMeasurementRef.current = showInteractiveMeasurement;
     totalSamplesRef.current = totalSamples;
     rowHeightsRef.current = rowHeights;
     rowTopInsetsRef.current = rowTopInsets;
-    const canvas = canvasRef.current;
     if (!showInteractiveMeasurement) hoverRef.current = null;
-    if (canvas) {
-      draw(
-        canvas,
-        tile,
-        viewportStart,
-        viewportSamples,
-        showInteractiveMeasurement ? hoverRef.current : null,
-        sampleRateHz,
-        rowHeights,
-        rowTopInsets,
-      );
+    if (tileChanged || viewportChanged || graphLayoutChanged || interactionChanged) {
+      scheduleDraw();
     }
-  }, [rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, totalSamples, viewportSamples, viewportStart]);
+  }, [rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
       if (viewportFrameRef.current !== null) {
         cancelAnimationFrame(viewportFrameRef.current);
+      }
+      if (drawFrameRef.current !== null) {
+        cancelAnimationFrame(drawFrameRef.current);
       }
       cancelViewportAnimation();
     };
@@ -159,6 +168,30 @@ export function WaveformCanvas({
     setHoverNavigation((current) => (sameHoverNavigation(current, next) ? current : next));
   }
 
+  function drawCurrent() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    draw(
+      canvas,
+      tileRef.current,
+      viewportRef.current.start,
+      viewportRef.current.samples,
+      showInteractiveMeasurementRef.current ? hoverRef.current : null,
+      sampleRateRef.current,
+      timeOriginSampleRef.current,
+      rowHeightsRef.current,
+      rowTopInsetsRef.current,
+    );
+  }
+
+  function scheduleDraw() {
+    if (drawFrameRef.current !== null) return;
+    drawFrameRef.current = requestAnimationFrame(() => {
+      drawFrameRef.current = null;
+      drawCurrent();
+    });
+  }
+
   function clampViewport(start: number, samples: number) {
     const next = normalizeViewport(start, samples, totalSamplesRef.current);
     scheduleViewportChange(next.start, next.samples);
@@ -166,19 +199,7 @@ export function WaveformCanvas({
 
   function scheduleViewportChange(start: number, samples: number) {
     viewportRef.current = { start, samples };
-    const canvas = canvasRef.current;
-    if (canvas) {
-      draw(
-        canvas,
-        tileRef.current,
-        start,
-        samples,
-        showInteractiveMeasurementRef.current ? hoverRef.current : null,
-        sampleRateRef.current,
-        rowHeightsRef.current,
-        rowTopInsetsRef.current,
-      );
-    }
+    scheduleDraw();
     syncNavigationToViewport(start, samples);
 
     pendingViewportRef.current = { start, samples };
@@ -187,7 +208,7 @@ export function WaveformCanvas({
       viewportFrameRef.current = null;
       const next = pendingViewportRef.current;
       pendingViewportRef.current = null;
-      if (next) onViewportChange(next.start, next.samples);
+      if (next) onViewportChangeRef.current(next.start, next.samples);
     });
   }
 
@@ -305,7 +326,7 @@ export function WaveformCanvas({
   function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
     if (!totalSamplesRef.current) return;
     if (!dragRef.current) {
-      updateHover(event);
+      updateHoverAt(event.clientX, event.clientY);
       return;
     }
     const rect = event.currentTarget.getBoundingClientRect();
@@ -319,25 +340,19 @@ export function WaveformCanvas({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    updateHover(event);
+    updateHoverAt(event.clientX, event.clientY);
   }
 
-  function handlePointerLeave() {
+  function clearHover() {
     hoverRef.current = null;
     setNavigation(null);
-    const canvas = canvasRef.current;
-    if (canvas) {
-      draw(
-        canvas,
-        tileRef.current,
-        viewportRef.current.start,
-        viewportRef.current.samples,
-        null,
-        sampleRateRef.current,
-        rowHeightsRef.current,
-        rowTopInsetsRef.current,
-      );
-    }
+    scheduleDraw();
+  }
+
+  function handlePointerLeave(event: PointerEvent<HTMLDivElement>) {
+    const graphSurface = event.currentTarget.parentElement;
+    if (event.relatedTarget instanceof Node && graphSurface?.contains(event.relatedTarget)) return;
+    clearHover();
   }
 
   function handleContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
@@ -364,13 +379,14 @@ export function WaveformCanvas({
     });
   }
 
-  function updateHover(event: PointerEvent<HTMLDivElement>) {
+  function updateHoverAt(clientX: number, clientY: number) {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = event.currentTarget.getBoundingClientRect();
+    const host = hostRef.current;
+    if (!canvas || !host) return;
+    const rect = host.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    const x = (event.clientX - rect.left) * dpr;
-    const y = (event.clientY - rect.top) * dpr;
+    const x = (clientX - rect.left) * dpr;
+    const y = (clientY - rect.top) * dpr;
     hoverRef.current = showInteractiveMeasurementRef.current
       ? findHoverMeasurement(
           canvas,
@@ -389,21 +405,12 @@ export function WaveformCanvas({
         tileRef.current,
         viewportRef.current.start,
         viewportRef.current.samples,
-        event.clientY - rect.top,
+        clientY - rect.top,
         rowHeightsRef.current,
         rowTopInsetsRef.current,
       ),
     );
-    draw(
-      canvas,
-      tileRef.current,
-      viewportRef.current.start,
-      viewportRef.current.samples,
-      showInteractiveMeasurementRef.current ? hoverRef.current : null,
-      sampleRateRef.current,
-      rowHeightsRef.current,
-      rowTopInsetsRef.current,
-    );
+    scheduleDraw();
   }
 
   useEffect(() => {
@@ -412,7 +419,25 @@ export function WaveformCanvas({
     const onWheel = (event: WheelEvent) => handleWheel(event);
     host.addEventListener("wheel", onWheel, { passive: false });
     return () => host.removeEventListener("wheel", onWheel);
-  });
+  }, []);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    const graphSurface = host?.parentElement;
+    if (!host || !graphSurface) return;
+
+    const handleOverlayPointerMove = (event: globalThis.PointerEvent) => {
+      if (dragRef.current || (event.target instanceof Node && host.contains(event.target))) return;
+      updateHoverAt(event.clientX, event.clientY);
+    };
+    const handleGraphSurfaceLeave = () => clearHover();
+    graphSurface.addEventListener("pointermove", handleOverlayPointerMove, { passive: true });
+    graphSurface.addEventListener("pointerleave", handleGraphSurfaceLeave);
+    return () => {
+      graphSurface.removeEventListener("pointermove", handleOverlayPointerMove);
+      graphSurface.removeEventListener("pointerleave", handleGraphSurfaceLeave);
+    };
+  }, []);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -560,6 +585,7 @@ function draw(
   viewportSamples: number,
   hover: HoverMeasurement | null,
   sampleRateHz: number,
+  timeOriginSample: number,
   rowHeights: number[],
   rowTopInsets: number[],
 ) {
@@ -572,7 +598,7 @@ function draw(
   ctx.fillStyle = "#101013";
   ctx.fillRect(0, 0, width, height);
 
-  drawGridLines(ctx, width, height, viewportStart, viewportSamples, sampleRateHz);
+  drawGridLines(ctx, width, height, viewportStart, viewportSamples, sampleRateHz, timeOriginSample);
 
   if (!tile || tile.channels.length === 0) {
     ctx.fillStyle = "rgba(255,255,255,0.55)";
@@ -679,16 +705,21 @@ interface DigitalSegmentsDrawArgs {
 
 function drawDigitalSegments(ctx: CanvasRenderingContext2D, args: DigitalSegmentsDrawArgs) {
   const { color, highY, lowY, left, right, viewSamples, viewStart, segments, dpr } = args;
-  ctx.lineWidth = Math.max(1.25 * dpr, 1);
+  const lineWidth = Math.max(1.25 * dpr, 1);
+  ctx.lineWidth = lineWidth;
   ctx.lineCap = "butt";
   ctx.lineJoin = "miter";
   ctx.strokeStyle = color;
 
   const path = new Path2D();
-  segments.forEach((segment, index) => {
+  const viewEnd = viewStart + viewSamples;
+  const startIndex = Math.max(0, firstSegmentEndingAtOrAfter(segments, viewStart) - 1);
+  for (let index = startIndex; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (segment.start_sample > viewEnd) break;
     const x0 = xForSample(segment.start_sample, left, right, viewStart, viewSamples);
     const x1 = xForSample(segment.end_sample, left, right, viewStart, viewSamples);
-    if (x1 < left || x0 > right) return;
+    if (x1 < left || x0 > right) continue;
 
     const clippedX0 = Math.max(left, x0);
     const clippedX1 = Math.min(right, x1);
@@ -697,12 +728,30 @@ function drawDigitalSegments(ctx: CanvasRenderingContext2D, args: DigitalSegment
     path.lineTo(clippedX1, y);
 
     const previous = segments[index - 1];
-    if (previous && previous.high !== segment.high && x0 >= left && x0 <= right) {
-      path.moveTo(crispX(x0), crispY(previous.high ? highY : lowY));
-      path.lineTo(crispX(x0), y);
+    if (previous && previous.high !== segment.high && x0 >= left - lineWidth && x0 <= right + lineWidth) {
+      const edgeX = crispX(clamp(x0, left, right));
+      path.moveTo(edgeX, crispY(previous.high ? highY : lowY));
+      path.lineTo(edgeX, y);
     }
-  });
+  }
   ctx.stroke(path);
+}
+
+function firstSegmentEndingAtOrAfter(
+  segments: WaveformTile["channels"][number]["segments"],
+  sample: number,
+) {
+  let low = 0;
+  let high = segments.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (segments[middle].end_sample < sample) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
 }
 
 function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelDrawArgs) {
@@ -728,19 +777,47 @@ function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelD
 
   const stablePath = new Path2D();
   const edgePath = new Path2D();
+  let previousBinIndex: number | null = null;
+  let previousLastHigh: boolean | null = null;
+  const firstVisibleBin = Math.max(
+    0,
+    Math.floor((viewStart - tileStart) / Math.max(Number.EPSILON, samplesPerPixel)) - 1,
+  );
+  const lastVisibleBin = Math.ceil(
+    (viewStart + viewSamples - tileStart) / Math.max(Number.EPSILON, samplesPerPixel),
+  ) + 1;
 
   forEachDigitalBin(channel, (binIndex, first, last, hasHigh, hasLow, edges, firstEdgeOffset) => {
     const sample0 = tileStart + binIndex * samplesPerPixel;
     const sample1 = sample0 + samplesPerPixel;
     const x0 = xForSample(sample0, left, right, viewStart, viewSamples);
     const x1 = xForSample(sample1, left, right, viewStart, viewSamples);
-    if (x1 < left || x0 > right) return;
+    if (x1 < left) {
+      previousBinIndex = binIndex;
+      previousLastHigh = last;
+      return;
+    }
+    if (x0 > right) return;
 
     const clippedX0 = Math.max(left, x0);
     const clippedX1 = Math.min(right, x1);
     const y0 = crispY(first ? highY : lowY);
     const y1 = crispY(last ? highY : lowY);
     const binWidth = Math.max(1, clippedX1 - clippedX0);
+
+    if (
+      previousBinIndex === binIndex - 1 &&
+      previousLastHigh !== null &&
+      previousLastHigh !== first &&
+      x0 >= left - lineWidth &&
+      x0 <= right + lineWidth
+    ) {
+      const edgeX = crispX(clamp(x0, left, right));
+      edgePath.moveTo(edgeX, crispY(previousLastHigh ? highY : lowY));
+      edgePath.lineTo(edgeX, y0);
+    }
+    previousBinIndex = binIndex;
+    previousLastHigh = last;
 
     if (hasHigh && hasLow) {
       if (edges <= 1 && firstEdgeOffset != null) {
@@ -764,7 +841,7 @@ function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelD
 
     stablePath.moveTo(clippedX0, y0);
     stablePath.lineTo(clippedX1, y0);
-  });
+  }, firstVisibleBin, lastVisibleBin);
 
   ctx.stroke(stablePath);
   ctx.stroke(edgePath);
@@ -781,7 +858,7 @@ function findHoverNavigation(
 ): HoverNavigation | null {
   if (!tile || tile.channels.length === 0) return null;
   const channelLayout = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets);
-  const channelIndex = findSaleaeGraphChannelIndexAtY(channelLayout, Math.min(rect.height, y));
+  const channelIndex = findHoverChannelIndexAtY(channelLayout, clamp(y, 0, Math.max(0, rect.height - 0.001)));
   if (channelIndex === null) return null;
   const layout = channelLayout[channelIndex];
   return findChannelNavigation(tile, channelIndex, viewportStart, viewportSamples, layout.top, layout.height);
@@ -798,11 +875,11 @@ function findChannelNavigation(
   if (!tile || tile.channels.length === 0) return null;
   if (channelIndex < 0 || channelIndex >= tile.channels.length) return null;
   const edges = collectDigitalEdges(tile, channelIndex);
-  if (edges.length === 0) return null;
+  const channel = tile.channels[channelIndex];
 
   const viewportEnd = viewportStart + viewportSamples;
-  const previousEdge = findPreviousEdge(edges, viewportStart);
-  const nextEdge = findNextEdgeSample(edges, viewportEnd);
+  const previousEdge = findPreviousEdge(edges, viewportStart) ?? channel.previous_transition ?? null;
+  const nextEdge = findNextEdgeSample(edges, viewportEnd) ?? channel.next_transition ?? null;
   if (previousEdge == null && nextEdge == null) return null;
 
   return {
@@ -811,6 +888,18 @@ function findChannelNavigation(
     previousEdge,
     nextEdge,
   };
+}
+
+function findHoverChannelIndexAtY(
+  layout: ReturnType<typeof getSaleaeGraphChannelLayout>,
+  y: number,
+) {
+  for (let index = 0; index < layout.length; index += 1) {
+    const row = layout[index];
+    const nextTop = layout[index + 1]?.outerTop ?? row.outerTop + row.outerHeight;
+    if (y >= row.outerTop && y < nextTop) return index;
+  }
+  return null;
 }
 
 function findHoverMeasurement(
@@ -1159,11 +1248,15 @@ function drawDigitalExtraData(ctx: CanvasRenderingContext2D, args: DigitalExtraD
 function collectDigitalEdges(tile: WaveformTile, channelIndex: number): DigitalEdge[] {
   const channel = tile.channels[channelIndex];
   if (!channel) return [];
+  const cached = digitalEdgeCache.get(channel);
+  if (cached) return cached;
   if (channel.rising_edges.length || channel.falling_edges.length) {
-    return [
+    const edges = [
       ...channel.rising_edges.map((sample) => ({ sample, kind: "rising" as const })),
       ...channel.falling_edges.map((sample) => ({ sample, kind: "falling" as const })),
     ].sort((a, b) => a.sample - b.sample);
+    digitalEdgeCache.set(channel, edges);
+    return edges;
   }
   const edges: DigitalEdge[] = [];
   forEachDigitalBin(channel, (binIndex, firstHigh, lastHigh, hasHigh, hasLow, edgeCount, firstEdgeOffset, lastEdgeOffset) => {
@@ -1175,7 +1268,9 @@ function collectDigitalEdges(tile: WaveformTile, channelIndex: number): DigitalE
       edges.push({ sample: sample0 + lastEdgeOffset, kind: lastHigh ? "rising" : "falling" });
     }
   });
-  return edges.sort((a, b) => a.sample - b.sample);
+  edges.sort((a, b) => a.sample - b.sample);
+  digitalEdgeCache.set(channel, edges);
+  return edges;
 }
 
 type DigitalBinVisitor = (
@@ -1189,9 +1284,17 @@ type DigitalBinVisitor = (
   lastEdgeOffset: number | null,
 ) => void;
 
-function forEachDigitalBin(channel: WaveformTile["channels"][number], visit: DigitalBinVisitor) {
+function forEachDigitalBin(
+  channel: WaveformTile["channels"][number],
+  visit: DigitalBinVisitor,
+  startIndex = 0,
+  endIndex = Number.MAX_SAFE_INTEGER,
+) {
   if (!channel.packed_bins) {
-    channel.bins.forEach((bin, index) =>
+    const begin = Math.max(0, Math.min(channel.bins.length, Math.floor(startIndex)));
+    const end = Math.max(begin, Math.min(channel.bins.length, Math.ceil(endIndex)));
+    for (let index = begin; index < end; index += 1) {
+      const bin = channel.bins[index];
       visit(
         index,
         bin.first,
@@ -1201,8 +1304,8 @@ function forEachDigitalBin(channel: WaveformTile["channels"][number], visit: Dig
         bin.edges,
         bin.first_edge_offset,
         bin.last_edge_offset,
-      ),
-    );
+      );
+    }
     return;
   }
 
@@ -1215,7 +1318,9 @@ function forEachDigitalBin(channel: WaveformTile["channels"][number], visit: Dig
     packedDigitalBinCache.set(channel, view);
   }
   const count = Math.floor(view.byteLength / packedDigitalBinBytes);
-  for (let index = 0; index < count; index += 1) {
+  const begin = Math.max(0, Math.min(count, Math.floor(startIndex)));
+  const end = Math.max(begin, Math.min(count, Math.ceil(endIndex)));
+  for (let index = begin; index < end; index += 1) {
     const offset = index * packedDigitalBinBytes;
     const flags = view.getUint32(offset, true);
     const firstEdgeOffset = view.getUint32(offset + 8, true);
@@ -1348,6 +1453,7 @@ function drawGridLines(
   viewportStart: number,
   viewportSamples: number,
   sampleRateHz: number,
+  timeOriginSample: number,
 ) {
   const dpr = window.devicePixelRatio || 1;
   const left = graphPaddingLeft * dpr;
@@ -1365,7 +1471,7 @@ function drawGridLines(
     return;
   }
 
-  const startSeconds = viewportStart / sampleRateHz;
+  const startSeconds = (viewportStart - timeOriginSample) / sampleRateHz;
   const viewportSeconds = Math.max(Number.EPSILON, viewportSamples / sampleRateHz);
   const timeSecondsPerPixel = viewportSeconds / usableWidthCss;
   const gridTicks = getHorizontalGraphTicks(startSeconds, timeSecondsPerPixel, usableWidthCss, {
