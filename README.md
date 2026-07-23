@@ -18,7 +18,7 @@ The UI shell is intentionally thin so it can be replaced by GPUI or another rend
 Protocol decoding is migrating to two external ecosystems:
 
 - `Saleae Native`: a version-pinned Analyzer SDK sidecar that can load locally installed Logic analyzer plugins.
-- `Sigrok Native`: a GPL sidecar that currently hosts PXView's native C SPI decoder; the broader C/Python decoder catalog remains follow-up work.
+- `Sigrok Native`: a GPL sidecar that hosts PXView's native C UART, I2C, and SPI decoders; the broader C/Python decoder catalog remains follow-up work.
 
 The current Rust UART/I2C/SPI implementation is exposed only as `LegacyRustDecoder` during the migration. It remains available to keep existing captures and UI tests working, but it is not the destination for new protocol features.
 
@@ -30,7 +30,7 @@ native/saleae-analyzer-sidecar/verify.sh /path/to/Logic-2.4.43-macos-arm64.zip
 
 It uses a pinned Analyzer SDK test host and the locally supplied Logic 2.4.43 SPI plugin. Saleae binaries are extracted only into ignored `target/` storage and are never copied into the repository.
 
-Both native SPI backends consume transition-indexed captures. Saleae `.sal` files are imported through the original GraphServer and remain sparse even when the capture spans tens of billions of samples.
+Both native SPI backends consume transition-indexed captures. Sigrok Native uses the same sparse path for UART and I2C. Saleae `.sal` files are imported through the original GraphServer and remain sparse even when the capture spans tens of billions of samples.
 
 ## Commands
 

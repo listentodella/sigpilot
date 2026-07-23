@@ -8,6 +8,7 @@ import {
   UiCommand,
 } from "../lib/sidebar";
 import { ANALYZER_CATALOG_GROUPS } from "../lib/analyzers";
+import { AnalyzerLibraryMenu } from "./AnalyzerLibraryMenu";
 
 type MenuName = "analyzers" | "markers" | null;
 
@@ -72,27 +73,18 @@ export function LogicToolbar({
         </PopoverButton>
         {openMenu === "analyzers" && (
           <ToolbarMenu className="analyzerMenu">
-            {ANALYZER_CATALOG_GROUPS.map((group) => (
-              <div className="toolbarMenuGroup" key={group.backend}>
-                <div className="toolbarMenuGroupLabel">{group.label}</div>
-                {group.analyzers.map((name) => (
-                  <button
-                    className="toolbarMenuItem"
-                    key={`${group.backend}:${name}`}
-                    onClick={() => {
-                      setOpenMenu(null);
-                      onCommand(AnalyzerCommands.AddAnalyzer, {
-                        analyzerName: name,
-                        analyzerBackend: group.backend,
-                      });
-                    }}
-                  >
-                    <span>{name}</span>
-                    <small>{group.backend === "legacy_rust" ? "Compatibility" : "Native"}</small>
-                  </button>
-                ))}
-              </div>
-            ))}
+            <AnalyzerLibraryMenu
+              choices={ANALYZER_CATALOG_GROUPS.flatMap((group) =>
+                group.analyzers.map((name) => ({ name, backend: group.backend, source: group.label })),
+              )}
+              onSelect={(choice) => {
+                setOpenMenu(null);
+                onCommand(AnalyzerCommands.AddAnalyzer, {
+                  analyzerName: choice.name,
+                  analyzerBackend: choice.backend,
+                });
+              }}
+            />
           </ToolbarMenu>
         )}
 

@@ -170,3 +170,5 @@ chore: 说明内容
   - 独立 GPL sidecar 直接构建 PXView `libsigrokdecode` 与 `spi_c`，统一输出 `DecoderOutput`，SPI 跨生态 fixtures 全部通过。
 - `docs/ported-features/2026-07-23-sparse-native-decoder-bridge.md`
   - 将 `.sal` 的 transition index 直接接入 Saleae Native / Sigrok Native SPI，Sigrok 复用 PXView `spi_c` C decoder 的状态机而不展开长捕获，补齐 490 亿 sample 大索引回归。
+- `docs/ported-features/2026-07-23-sigrok-native-uart-i2c-catalog.md`
+  - 直接接入 PXView `uart_c`/`i2c_c`，与 `spi_c` 共用 transition runtime；顶部和右侧 Analyzer 选择器改为来源到协议的两级菜单，三协议均补齐 packed/sparse 与 490 亿 sample 回归。

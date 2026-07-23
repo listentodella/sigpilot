@@ -50,7 +50,7 @@ Mode 0-3、LSB-first、CS partial-word fixtures 全部通过；稀疏 490 亿 sa
 
 ## 已知差距 / 后续任务
 
-- 当前 catalog 只构建 `spi_c`，还未暴露 PXView 全部 C/Python decoder。
+- 本文完成时 catalog 只构建 `spi_c`；UART/I2C 后续已由 `2026-07-23-sigrok-native-uart-i2c-catalog.md` 接通。
 - Python decoder stack 暂未接入 transition-indexed sparse runtime。
 - backend availability 还没有独立 Tauri probe 面板。
 - 当前工作树尚未创建独立 Git commit。

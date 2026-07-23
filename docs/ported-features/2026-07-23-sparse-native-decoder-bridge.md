@@ -4,7 +4,7 @@
 
 将 `.sal` 经 Saleae GraphServer 导出的 transition index 直接交给 Saleae Native SPI 和 Sigrok Native SPI decoder，避免把长捕获展开成逐采样 buffer。
 
-本目标只覆盖 SPI batch decode。UART、I2C、HLA 以及原生 decoder streaming 仍按现有能力矩阵处理。
+本目标最初只覆盖 SPI batch decode。UART/I2C sparse decode 后续已由 `2026-07-23-sigrok-native-uart-i2c-catalog.md` 接通；HLA 与原生 decoder streaming 仍按现有能力矩阵处理。
 
 ## 原版参考路径
 

@@ -59,6 +59,33 @@ typedef struct {
     int cs_active_low;
 } spi_settings;
 
+typedef struct {
+    int rx;
+    int tx;
+    uint64_t baudrate;
+    int data_bits;
+    double stop_bits;
+    const char *parity;
+    const char *bit_order;
+    const char *format;
+    int invert_rx;
+    int invert_tx;
+} uart_settings;
+
+typedef struct {
+    int scl;
+    int sda;
+    const char *address_format;
+    const char *packets_format;
+    int show_data_point;
+} i2c_settings;
+
+typedef enum {
+    DECODER_SPI,
+    DECODER_UART,
+    DECODER_I2C,
+} decoder_protocol;
+
 static void fatal(const char *message)
 {
     fprintf(stderr, "%s\n", message);
@@ -209,7 +236,21 @@ static int optional_channel(cJSON *channels, const char *key)
     return cJSON_IsNumber(value) ? value->valueint : -1;
 }
 
-static void parse_settings(cJSON *request, spi_settings *settings)
+static decoder_protocol parse_protocol(cJSON *request)
+{
+    cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
+    const char *protocol = decoder ? json_string(decoder, "protocol", "") : "";
+    if (strcmp(protocol, "uart") == 0)
+        return DECODER_UART;
+    if (strcmp(protocol, "i2c") == 0)
+        return DECODER_I2C;
+    if (strcmp(protocol, "spi") == 0)
+        return DECODER_SPI;
+    fatal("decoder.protocol must be one of uart, i2c, or spi");
+    return DECODER_SPI;
+}
+
+static void parse_spi_settings(cJSON *request, spi_settings *settings)
 {
     cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
     cJSON *channels = decoder ? cJSON_GetObjectItem(decoder, "channels") : NULL;
@@ -228,6 +269,49 @@ static void parse_settings(cJSON *request, spi_settings *settings)
     settings->cs_active_low = strcmp(json_string(options, "cs_polarity", "active_low"), "active_high") != 0;
     if (settings->clk < 0 || (settings->mosi < 0 && settings->miso < 0))
         fatal("SPI requires clock and at least one data channel");
+}
+
+static void parse_uart_settings(cJSON *request, uart_settings *settings)
+{
+    cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
+    cJSON *channels = decoder ? cJSON_GetObjectItem(decoder, "channels") : NULL;
+    cJSON *options = decoder ? cJSON_GetObjectItem(decoder, "options") : NULL;
+    if (!decoder || !channels || !options)
+        fatal("decoder channels/options are required");
+
+    settings->rx = optional_channel(channels, "rx");
+    settings->tx = optional_channel(channels, "tx");
+    settings->baudrate = (uint64_t)json_int(options, "baudrate", 115200);
+    settings->data_bits = json_int(options, "data_bits", 8);
+    settings->stop_bits = cJSON_IsNumber(cJSON_GetObjectItem(options, "stop_bits"))
+                              ? cJSON_GetObjectItem(options, "stop_bits")->valuedouble
+                              : 1.0;
+    settings->parity = json_string(options, "parity", "none");
+    settings->bit_order = json_string(options, "bit_order", "lsb-first");
+    settings->format = json_string(options, "format", "hex");
+    settings->invert_rx = json_int(options, "invert_rx", 0) != 0;
+    settings->invert_tx = json_int(options, "invert_tx", 0) != 0;
+    if (settings->baudrate == 0 || settings->data_bits < 5 || settings->data_bits > 9 ||
+        settings->stop_bits < 0.0 || settings->stop_bits > 2.0 ||
+        (settings->rx < 0 && settings->tx < 0))
+        fatal("invalid UART settings");
+}
+
+static void parse_i2c_settings(cJSON *request, i2c_settings *settings)
+{
+    cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
+    cJSON *channels = decoder ? cJSON_GetObjectItem(decoder, "channels") : NULL;
+    cJSON *options = decoder ? cJSON_GetObjectItem(decoder, "options") : NULL;
+    if (!decoder || !channels || !options)
+        fatal("decoder channels/options are required");
+
+    settings->scl = optional_channel(channels, "scl");
+    settings->sda = optional_channel(channels, "sda");
+    settings->address_format = json_string(options, "address_format", "shifted");
+    settings->packets_format = json_string(options, "packets_format", "hex");
+    settings->show_data_point = json_int(options, "show_data_point", 1) != 0;
+    if (settings->scl < 0 || settings->sda < 0 || settings->scl == settings->sda)
+        fatal("I2C requires distinct SCL and SDA channels");
 }
 
 typedef struct {
@@ -523,6 +607,16 @@ static void add_option_u64(GHashTable *options, const char *key, uint64_t value)
     g_hash_table_insert(options, g_strdup(key), g_variant_ref_sink(g_variant_new_uint64(value)));
 }
 
+static void add_option_i64(GHashTable *options, const char *key, int64_t value)
+{
+    g_hash_table_insert(options, g_strdup(key), g_variant_ref_sink(g_variant_new_int64(value)));
+}
+
+static void add_option_double(GHashTable *options, const char *key, double value)
+{
+    g_hash_table_insert(options, g_strdup(key), g_variant_ref_sink(g_variant_new_double(value)));
+}
+
 static void add_channel(GHashTable *channels, const char *role, int channel)
 {
     if (channel >= 0)
@@ -539,6 +633,28 @@ static const char *annotation_text_for(const decode_collector *collector, int an
             return item->texts[0];
     }
     return NULL;
+}
+
+static const char *annotation_text_overlapping(const decode_collector *collector, int ann_class,
+                                               uint64_t start_sample, uint64_t end_sample)
+{
+    const char *best = NULL;
+    uint64_t best_span = 0;
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if (item->ann_class != ann_class || item->text_count == 0)
+            continue;
+        if (item->start_sample <= end_sample && item->end_sample >= start_sample) {
+            uint64_t span = item->end_sample >= item->start_sample
+                                ? item->end_sample - item->start_sample
+                                : 0;
+            if (!best || span > best_span) {
+                best = item->texts[0];
+                best_span = span;
+            }
+        }
+    }
+    return best;
 }
 
 static cJSON *field_value_unsigned(uint64_t value)
@@ -645,7 +761,130 @@ static cJSON *render_output(const decode_collector *collector, const spi_setting
     return root;
 }
 
-static struct srd_decoder *initialize_decoder(const char *decoder_root)
+static void add_protocol_value(cJSON *frame, const char *name, const char *role, int channel,
+                               uint64_t value, const char *text, int width)
+{
+    cJSON *fields = cJSON_GetObjectItem(frame, "fields");
+    cJSON *channel_values = cJSON_GetObjectItem(frame, "channel_values");
+    cJSON *texts = cJSON_GetObjectItem(frame, "texts");
+    cJSON *field = cJSON_CreateObject();
+    cJSON_AddStringToObject(field, "name", name);
+    cJSON_AddItemToObject(field, "value", field_value_unsigned(value));
+    cJSON_AddItemToArray(fields, field);
+
+    char label[40];
+    snprintf(label, sizeof(label), "0x%0*llX", width < 2 ? 2 : width,
+             (unsigned long long)value);
+    cJSON_AddItemToArray(texts, cJSON_CreateString(text ? text : label));
+
+    if (channel >= 0) {
+        cJSON *channel_value = cJSON_CreateObject();
+        cJSON_AddNumberToObject(channel_value, "channel", channel);
+        cJSON_AddStringToObject(channel_value, "role", role);
+        cJSON_AddStringToObject(channel_value, "label", label);
+        cJSON_AddNumberToObject(channel_value, "value", (double)value);
+        cJSON_AddItemToArray(channel_values, channel_value);
+    }
+}
+
+static cJSON *new_frame(uint64_t frame_id, uint64_t start_sample, uint64_t end_sample,
+                        const char *row)
+{
+    cJSON *frame = cJSON_CreateObject();
+    cJSON_AddNumberToObject(frame, "frame_id", (double)frame_id);
+    cJSON_AddNumberToObject(frame, "start_sample", (double)start_sample);
+    cJSON_AddNumberToObject(frame, "end_sample", (double)end_sample);
+    cJSON_AddStringToObject(frame, "row", row);
+    add_array(frame, "texts");
+    add_array(frame, "fields");
+    add_array(frame, "channel_values");
+    add_array(frame, "markers");
+    return frame;
+}
+
+static cJSON *render_uart_output(const decode_collector *collector, const uart_settings *settings)
+{
+    enum { UART_RX_DATA = 2, UART_TX_DATA = 3, UART_RX_WARN = 0, UART_TX_WARN = 1 };
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "backend", "sigrok_native");
+    cJSON_AddStringToObject(root, "protocol", "UART");
+    cJSON *frames = add_array(root, "frames");
+    uint64_t frame_id = 0;
+
+    for (size_t index = 0; index < collector->binaries.count; index++) {
+        const binary_item *item = &collector->binaries.items[index];
+        if (item->bin_class != 0 && item->bin_class != 1)
+            continue;
+        int channel = item->bin_class == 0 ? settings->rx : settings->tx;
+        int ann_class = item->bin_class == 0 ? UART_RX_DATA : UART_TX_DATA;
+        const char *text = annotation_text_overlapping(collector, ann_class,
+                                                        item->start_sample, item->end_sample);
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample,
+                                 item->bin_class == 0 ? "RX" : "TX");
+        add_protocol_value(frame, "data", item->bin_class == 0 ? "RX" : "TX", channel,
+                           item->value, text, (settings->data_bits + 3) / 4);
+        cJSON_AddItemToArray(frames, frame);
+    }
+
+    cJSON *diagnostics = add_array(root, "diagnostics");
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if ((item->ann_class == UART_RX_WARN || item->ann_class == UART_TX_WARN) &&
+            item->text_count > 0) {
+            cJSON *diagnostic = cJSON_CreateObject();
+            cJSON_AddStringToObject(diagnostic, "level", "warning");
+            cJSON_AddStringToObject(diagnostic, "message", item->texts[0]);
+            cJSON_AddItemToArray(diagnostics, diagnostic);
+        }
+    }
+    return root;
+}
+
+static cJSON *render_i2c_output(const decode_collector *collector, const i2c_settings *settings)
+{
+    enum {
+        I2C_ADDRESS_READ = 6,
+        I2C_ADDRESS_WRITE = 7,
+        I2C_DATA_READ = 8,
+        I2C_DATA_WRITE = 9,
+    };
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "backend", "sigrok_native");
+    cJSON_AddStringToObject(root, "protocol", "I2C");
+    cJSON *frames = add_array(root, "frames");
+    uint64_t frame_id = 0;
+
+    for (size_t index = 0; index < collector->binaries.count; index++) {
+        const binary_item *item = &collector->binaries.items[index];
+        if (item->bin_class < 0 || item->bin_class > 3)
+            continue;
+        int ann_class;
+        const char *name;
+        const char *direction;
+        if (item->bin_class == 0) {
+            ann_class = I2C_ADDRESS_READ; name = "address"; direction = "Read";
+        } else if (item->bin_class == 1) {
+            ann_class = I2C_ADDRESS_WRITE; name = "address"; direction = "Write";
+        } else if (item->bin_class == 2) {
+            ann_class = I2C_DATA_READ; name = "data"; direction = "Read";
+        } else {
+            ann_class = I2C_DATA_WRITE; name = "data"; direction = "Write";
+        }
+        const char *text = annotation_text_overlapping(collector, ann_class,
+                                                        item->start_sample, item->end_sample);
+        char row[32];
+        snprintf(row, sizeof(row), "%s %s",
+                 strcmp(name, "address") == 0 ? "Address" : "Data",
+                 strcmp(direction, "Read") == 0 ? "read" : "write");
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample, row);
+        add_protocol_value(frame, name, direction, settings->sda, item->value, text, 2);
+        cJSON_AddItemToArray(frames, frame);
+    }
+    add_array(root, "diagnostics");
+    return root;
+}
+
+static struct srd_decoder *initialize_decoder(const char *decoder_root, const char *decoder_id)
 {
     if (srd_init(NULL) != SRD_OK)
         return NULL;
@@ -653,7 +892,7 @@ static struct srd_decoder *initialize_decoder(const char *decoder_root)
     if (decoder_root && *decoder_root)
         srd_c_decoder_path_add(decoder_root);
     srd_c_decoder_load_all();
-    return srd_decoder_get_by_id("spi_c");
+    return srd_decoder_get_by_id(decoder_id);
 }
 
 static cJSON *decode_request(cJSON *request, const char *decoder_root)
@@ -666,13 +905,29 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     if (channel_count <= 0 || channel_count > 32 || sample_count == 0 || sample_rate == 0)
         fatal("invalid channel_count, sample_count, or sample_rate_hz");
 
-    spi_settings settings;
-    parse_settings(request, &settings);
+    decoder_protocol protocol = parse_protocol(request);
+    spi_settings spi;
+    uart_settings uart;
+    i2c_settings i2c;
+    memset(&spi, 0, sizeof(spi));
+    memset(&uart, 0, sizeof(uart));
+    memset(&i2c, 0, sizeof(i2c));
+    const char *decoder_id;
+    if (protocol == DECODER_UART) {
+        parse_uart_settings(request, &uart);
+        decoder_id = "uart_c";
+    } else if (protocol == DECODER_I2C) {
+        parse_i2c_settings(request, &i2c);
+        decoder_id = "i2c_c";
+    } else {
+        parse_spi_settings(request, &spi);
+        decoder_id = "spi_c";
+    }
     sparse_input input = build_sparse_input(request, channel_count, sample_count);
 
-    struct srd_decoder *decoder = initialize_decoder(decoder_root);
+    struct srd_decoder *decoder = initialize_decoder(decoder_root, decoder_id);
     if (!decoder)
-        fatal("PXView spi_c decoder is not available");
+        fatal("requested PXView C decoder is not available");
 
     struct srd_session *session = NULL;
     if (srd_session_new(&session) != SRD_OK || !session)
@@ -680,24 +935,49 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
 
     GHashTable *options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                 (GDestroyNotify)g_variant_unref);
-    add_option_string(options, "cs_polarity", settings.cs_active_low ? "active-low" : "active-high");
-    add_option_u64(options, "cpol", (uint64_t)settings.cpol);
-    add_option_u64(options, "cpha", (uint64_t)settings.cpha);
-    add_option_string(options, "bitorder", settings.msb_first ? "msb-first" : "lsb-first");
-    add_option_u64(options, "wordsize", (uint64_t)settings.word_size);
-    add_option_string(options, "format", "hex");
-    add_option_string(options, "show_data_point", "no");
-    struct srd_decoder_inst *instance = srd_inst_new(session, "spi_c", options);
+    if (protocol == DECODER_UART) {
+        add_option_i64(options, "baudrate", (int64_t)uart.baudrate);
+        add_option_i64(options, "data_bits", (int64_t)uart.data_bits);
+        add_option_double(options, "stop_bits", uart.stop_bits);
+        add_option_string(options, "parity", uart.parity);
+        add_option_string(options, "bit_order", uart.bit_order);
+        add_option_string(options, "format", uart.format);
+        add_option_string(options, "invert_rx", uart.invert_rx ? "yes" : "no");
+        add_option_string(options, "invert_tx", uart.invert_tx ? "yes" : "no");
+        add_option_string(options, "show_data_point", "no");
+        add_option_string(options, "show_start_stop", "yes");
+    } else if (protocol == DECODER_I2C) {
+        add_option_string(options, "address_format", i2c.address_format);
+        add_option_string(options, "packets_format", i2c.packets_format);
+        add_option_string(options, "show_data_point", i2c.show_data_point ? "yes" : "no");
+    } else {
+        add_option_string(options, "cs_polarity", spi.cs_active_low ? "active-low" : "active-high");
+        add_option_u64(options, "cpol", (uint64_t)spi.cpol);
+        add_option_u64(options, "cpha", (uint64_t)spi.cpha);
+        add_option_string(options, "bitorder", spi.msb_first ? "msb-first" : "lsb-first");
+        add_option_u64(options, "wordsize", (uint64_t)spi.word_size);
+        add_option_string(options, "format", "hex");
+        add_option_string(options, "show_data_point", "no");
+    }
+    struct srd_decoder_inst *instance = srd_inst_new(session, decoder_id, options);
     g_hash_table_destroy(options);
     if (!instance)
-        fatal("failed to create PXView spi_c instance");
+        fatal("failed to create PXView C decoder instance");
 
     GHashTable *channels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                  (GDestroyNotify)g_variant_unref);
-    add_channel(channels, "clk", settings.clk);
-    add_channel(channels, "miso", settings.miso);
-    add_channel(channels, "mosi", settings.mosi);
-    add_channel(channels, "cs", settings.cs);
+    if (protocol == DECODER_UART) {
+        add_channel(channels, "rx", uart.rx);
+        add_channel(channels, "tx", uart.tx);
+    } else if (protocol == DECODER_I2C) {
+        add_channel(channels, "scl", i2c.scl);
+        add_channel(channels, "sda", i2c.sda);
+    } else {
+        add_channel(channels, "clk", spi.clk);
+        add_channel(channels, "miso", spi.miso);
+        add_channel(channels, "mosi", spi.mosi);
+        add_channel(channels, "cs", spi.cs);
+    }
     srd_inst_channel_set_all(instance, channels);
     g_hash_table_destroy(channels);
     instance->runtime = &sparse_runtime;
@@ -716,7 +996,11 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     instance->c_dec_inst->decode(instance);
     srd_session_end(session, &error);
 
-    cJSON *output = render_output(&collector, &settings);
+    cJSON *output = protocol == DECODER_UART
+                        ? render_uart_output(&collector, &uart)
+                        : protocol == DECODER_I2C
+                              ? render_i2c_output(&collector, &i2c)
+                              : render_output(&collector, &spi);
     srd_session_destroy(session);
     srd_exit();
     free_sparse_input(&input);
@@ -726,15 +1010,21 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
 
 static cJSON *probe(const char *decoder_root)
 {
-    struct srd_decoder *decoder = initialize_decoder(decoder_root);
+    struct srd_decoder *uart = initialize_decoder(decoder_root, "uart_c");
+    struct srd_decoder *i2c = srd_decoder_get_by_id("i2c_c");
+    struct srd_decoder *spi = srd_decoder_get_by_id("spi_c");
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "available", decoder != NULL);
+    cJSON_AddBoolToObject(root, "available", uart != NULL || i2c != NULL || spi != NULL);
     cJSON *protocols = add_array(root, "protocols");
-    if (decoder)
+    if (uart)
+        cJSON_AddItemToArray(protocols, cJSON_CreateString("UART"));
+    if (i2c)
+        cJSON_AddItemToArray(protocols, cJSON_CreateString("I2C"));
+    if (spi)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("SPI"));
     cJSON_AddBoolToObject(root, "supports_streaming", 0);
-    cJSON_AddStringToObject(root, "decoder_name", decoder && decoder->name ? decoder->name : "PXView SPI(C)");
-    cJSON_AddStringToObject(root, "decoder_id", decoder && decoder->id ? decoder->id : "spi_c");
+    cJSON_AddStringToObject(root, "decoder_name", "PXView native C decoder pack");
+    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c");
     cJSON_AddNumberToObject(root, "api_version", SRD_C_DECODER_API_VERSION);
     srd_exit();
     return root;

@@ -38,20 +38,27 @@ target_include_directories(pxview_sigrokdecode PRIVATE
 target_link_libraries(pxview_sigrokdecode PRIVATE PkgConfig::GLIB Python3::Python)
 
 set(DECODER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/decoders/c_decoders")
-add_library(pxview_spi_c MODULE
-    ${PXVIEW_ROOT}/libsigrokdecode/c_decoders/spi_c.c
-    ${PXVIEW_ROOT}/libsigrokdecode/c_decoder_api.c
-)
-target_compile_definitions(pxview_spi_c PRIVATE SRD_C_DECODER_DLL)
-target_include_directories(pxview_spi_c PRIVATE
-    ${PXVIEW_ROOT}/libsigrokdecode
-    ${PXVIEW_ROOT}/common
-)
-target_link_libraries(pxview_spi_c PRIVATE PkgConfig::GLIB)
-set_target_properties(pxview_spi_c PROPERTIES
-    OUTPUT_NAME spi_c
-    LIBRARY_OUTPUT_DIRECTORY "${DECODER_OUTPUT_DIR}"
-)
+function(add_pxview_c_decoder protocol)
+    set(target "pxview_${protocol}_c")
+    add_library(${target} MODULE
+        ${PXVIEW_ROOT}/libsigrokdecode/c_decoders/${protocol}_c.c
+        ${PXVIEW_ROOT}/libsigrokdecode/c_decoder_api.c
+    )
+    target_compile_definitions(${target} PRIVATE SRD_C_DECODER_DLL)
+    target_include_directories(${target} PRIVATE
+        ${PXVIEW_ROOT}/libsigrokdecode
+        ${PXVIEW_ROOT}/common
+    )
+    target_link_libraries(${target} PRIVATE PkgConfig::GLIB)
+    set_target_properties(${target} PROPERTIES
+        OUTPUT_NAME ${protocol}_c
+        LIBRARY_OUTPUT_DIRECTORY "${DECODER_OUTPUT_DIR}"
+    )
+endfunction()
+
+add_pxview_c_decoder(uart)
+add_pxview_c_decoder(i2c)
+add_pxview_c_decoder(spi)
 
 add_executable(pxlogic-sigrok-sidecar src/main.c)
 target_compile_definitions(pxlogic-sigrok-sidecar PRIVATE CJSON_IMPLEMENTATION)
@@ -66,5 +73,4 @@ target_link_libraries(pxlogic-sigrok-sidecar PRIVATE
     PkgConfig::GLIB
     Python3::Python
 )
-add_dependencies(pxlogic-sigrok-sidecar pxview_spi_c)
-
+add_dependencies(pxlogic-sigrok-sidecar pxview_uart_c pxview_i2c_c pxview_spi_c)

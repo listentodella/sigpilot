@@ -498,6 +498,69 @@ button:disabled {
   padding: 6px 0;
 }
 
+.toolbarMenu.analyzerMenu {
+  width: 376px;
+  min-width: 376px;
+  padding: 4px;
+}
+
+.analyzerLibraryMenu {
+  min-height: 156px;
+  display: grid;
+  grid-template-columns: minmax(142px, 1fr) minmax(178px, 1.2fr);
+  background: var(--background-20);
+}
+
+.analyzerLibrarySources,
+.analyzerLibraryProtocols {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.analyzerLibrarySources {
+  border-right: 1px solid var(--border-20);
+  padding-right: 4px;
+}
+
+.analyzerLibraryProtocols {
+  padding-left: 4px;
+}
+
+.analyzerLibrarySources button,
+.analyzerLibraryProtocols button {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--on-background-20);
+  background: transparent;
+  padding: 0 9px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.analyzerLibrarySources button {
+  justify-content: space-between;
+}
+
+.analyzerLibrarySources button:hover,
+.analyzerLibrarySources button.active,
+.analyzerLibraryProtocols button:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.analyzerLibrarySources button.active {
+  color: var(--on-background-0);
+  background: var(--background-40);
+}
+
+.analyzerLibraryProtocols button {
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .toolbarMenu.markerMenu {
   left: 151px;
   min-width: 196px;
@@ -3146,13 +3209,17 @@ button:disabled {
   top: 38px;
   right: 12px;
   z-index: 5;
-  width: 216px;
+  width: 376px;
   overflow: hidden;
   border: 1px solid var(--border-20);
   border-radius: 4px;
   background: var(--background-20);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   padding: 6px 0;
+}
+
+.analyzerSelectionPopover .analyzerLibraryMenu {
+  margin: 0 4px;
 }
 
 .analyzerSelectionItem {

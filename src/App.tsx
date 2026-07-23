@@ -69,6 +69,7 @@ import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
 import { SaleaeIcon } from "./components/SaleaeIcon";
+import { AnalyzerLibraryMenu } from "./components/AnalyzerLibraryMenu";
 import { StripChartScrollbar } from "./components/StripChartScrollbar";
 import { TimingDisplayCanvas } from "./components/TimingDisplayCanvas";
 import {
@@ -2521,7 +2522,7 @@ export default function App() {
   function addAnalyzerForChannel(channelIndex: number) {
     if (!activeSession) return;
     setAnalyzerInEdit({
-      analyzer: createAnalyzerInstance("Async Serial", activeSession.analyzers, channelIndex, "legacy_rust"),
+      analyzer: createAnalyzerInstance("Async Serial", activeSession.analyzers, channelIndex, "sigrok_native"),
       isNew: true,
       sessionId: activeSession.id,
     });
@@ -2530,7 +2531,7 @@ export default function App() {
   function beginAddAnalyzer(
     name: string,
     channelIndex?: number,
-    decoderBackend: DecoderBackendKind = "legacy_rust",
+    decoderBackend: DecoderBackendKind = "sigrok_native",
   ) {
     if (!activeSession) return;
     const firstEnabledChannel = activeSession.deviceSettings.digitalChannels.findIndex(Boolean);
@@ -2678,7 +2679,7 @@ export default function App() {
     }
 
     if (command === AnalyzerCommands.AddAnalyzer) {
-      handleAddAnalyzer(payload?.analyzerName ?? "Async Serial", payload?.analyzerBackend ?? "legacy_rust");
+      handleAddAnalyzer(payload?.analyzerName ?? "Async Serial", payload?.analyzerBackend ?? "sigrok_native");
       return;
     }
 
@@ -2697,7 +2698,7 @@ export default function App() {
     }
   }
 
-  function handleAddAnalyzer(name: string, backend: DecoderBackendKind = "legacy_rust") {
+  function handleAddAnalyzer(name: string, backend: DecoderBackendKind = "sigrok_native") {
     beginAddAnalyzer(name, undefined, backend);
   }
 
@@ -6409,17 +6410,7 @@ function AnalyzersPanel({
 
         {selectorOpen && (
           <div className="analyzerSelectionPopover">
-            {availableAnalyzers.map((choice) => (
-              <button
-                className="analyzerSelectionItem"
-                key={`${choice.backend}:${choice.name}`}
-                onClick={() => addAnalyzer(choice)}
-                type="button"
-              >
-                <span>{choice.name}</span>
-                <small>{choice.source}</small>
-              </button>
-            ))}
+            <AnalyzerLibraryMenu choices={availableAnalyzers} onSelect={addAnalyzer} />
           </div>
         )}
 

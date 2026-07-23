@@ -75,7 +75,7 @@ export function createAnalyzerInstance(
   type: string,
   analyzers: UiAnalyzerInstance[],
   channel = 0,
-  decoderBackend: DecoderBackendKind = "legacy_rust",
+  decoderBackend: DecoderBackendKind = "sigrok_native",
 ): UiAnalyzerInstance {
   const index = analyzers.length;
   const nextChannel = (offset: number) => (channel + offset) % 32;
@@ -255,6 +255,7 @@ export function decoderBackendLabel(backend: DecoderBackendKind) {
 
 export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
   if (type === "SPI") return ["saleae_native", "sigrok_native", "legacy_rust"];
+  if (type === "Async Serial" || type === "I2C") return ["sigrok_native", "legacy_rust"];
   return ["legacy_rust"];
 }
 
@@ -266,7 +267,11 @@ export interface AnalyzerCatalogGroup {
 
 export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
   { backend: "saleae_native", label: "Saleae Native", analyzers: ["SPI"] },
-  { backend: "sigrok_native", label: "Sigrok Native (PXView)", analyzers: ["SPI"] },
+  {
+    backend: "sigrok_native",
+    label: "Sigrok Native (PXView)",
+    analyzers: ["Async Serial", "I2C", "SPI"],
+  },
   {
     backend: "legacy_rust",
     label: "Compatibility",

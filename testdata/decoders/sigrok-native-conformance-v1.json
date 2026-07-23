@@ -1,0 +1,66 @@
+{
+  "format": "pxlogic.sigrok-native-fixture.v1",
+  "cases": [
+    {
+      "id": "uart-8n1-rx-a5",
+      "sample_rate_hz": 1000000,
+      "sample_count": 120,
+      "channel_count": 1,
+      "initial_levels": [1],
+      "edges": [
+        {
+          "channel": 0,
+          "samples": [10, 20, 30, 40, 50, 70, 80, 90]
+        }
+      ],
+      "decoder": {
+        "protocol": "uart",
+        "channels": { "rx": 0, "tx": null },
+        "options": {
+          "baudrate": 100000,
+          "data_bits": 8,
+          "stop_bits": 1.0,
+          "parity": "none",
+          "bit_order": "lsb-first",
+          "format": "hex",
+          "invert_rx": 0,
+          "invert_tx": 0
+        }
+      },
+      "expected_rows": ["RX"],
+      "expected_values": [165]
+    },
+    {
+      "id": "i2c-write-50-a5",
+      "sample_rate_hz": 1000000,
+      "sample_count": 600,
+      "channel_count": 2,
+      "initial_levels": [1, 1],
+      "edges": [
+        {
+          "channel": 0,
+          "samples": [
+            20, 40, 50, 70, 80, 100, 110, 130, 140, 160, 170, 190, 200,
+            220, 230, 250, 260, 280, 290, 310, 320, 340, 350, 370, 380,
+            400, 410, 430, 440, 460, 470, 490, 500, 520, 530, 550, 560, 570
+          ]
+        },
+        {
+          "channel": 1,
+          "samples": [10, 30, 60, 90, 120, 300, 330, 360, 390, 450, 480, 510, 540, 580]
+        }
+      ],
+      "decoder": {
+        "protocol": "i2c",
+        "channels": { "scl": 0, "sda": 1 },
+        "options": {
+          "address_format": "shifted",
+          "packets_format": "hex",
+          "show_data_point": 0
+        }
+      },
+      "expected_rows": ["Address write", "Data write"],
+      "expected_values": [80, 165]
+    }
+  ]
+}
