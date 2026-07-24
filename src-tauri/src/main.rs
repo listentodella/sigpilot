@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use parking_lot::{Mutex, RwLock};
 use pxlogic_core::{
     build_pxview_pwm0_register_script, generic_logic_capture_capabilities,
@@ -25,7 +26,7 @@ use pxlogic_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(feature = "rusb-transport")]
 use pxlogic_core::RusbBackend;
@@ -100,6 +101,21 @@ struct CaptureTriggeredEvent {
 struct TrimCaptureRequest {
     trim_before_sample: Option<u64>,
     trim_after_sample: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScreenshotPathRequest {
+    connected_device_name: Option<String>,
+    previous_path: Option<String>,
+    session_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteScreenshotRequest {
+    data_base64: String,
+    path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -797,6 +813,320 @@ fn trim_capture(
     Ok(summary)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedScreenshotPath {
+    basename_without_index: String,
+    dirname: PathBuf,
+    extension: String,
+    index: Option<u64>,
+}
+
+fn screenshot_numeric_index(basename: &str) -> Option<(usize, usize, u64)> {
+    let bytes = basename.as_bytes();
+    for start in 0..bytes.len() {
+        if bytes[start] != b'_' {
+            continue;
+        }
+        let mut end = start + 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start + 1 {
+            let index = basename[start + 1..end].parse().ok()?;
+            return Some((start, end, index));
+        }
+    }
+    None
+}
+
+fn parse_screenshot_path(path: &Path) -> ParsedScreenshotPath {
+    let dirname = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!(".{extension}"))
+        .unwrap_or_default();
+    let basename = path
+        .file_stem()
+        .and_then(|basename| basename.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let (basename_without_index, index) = match screenshot_numeric_index(&basename) {
+        Some((start, end, index)) => {
+            let mut without_index = basename;
+            without_index.replace_range(start..end, "");
+            (without_index, Some(index))
+        }
+        None => (basename, None),
+    };
+    ParsedScreenshotPath {
+        basename_without_index,
+        dirname,
+        extension,
+        index,
+    }
+}
+
+fn increment_screenshot_path(path: &Path) -> PathBuf {
+    let parsed = parse_screenshot_path(path);
+    let next_index = parsed.index.map_or(2, |index| index + 1);
+    parsed.dirname.join(format!(
+        "{}_{}{}",
+        parsed.basename_without_index, next_index, parsed.extension
+    ))
+}
+
+fn is_default_session_name(name: &str) -> bool {
+    name.strip_prefix("Session ").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn next_screenshot_path_with_exists(
+    home_dir: &Path,
+    request: &ScreenshotPathRequest,
+    path_exists: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    let parsed_previous = request
+        .previous_path
+        .as_deref()
+        .map(Path::new)
+        .map(parse_screenshot_path);
+    let extension = parsed_previous
+        .as_ref()
+        .map(|parsed| parsed.extension.as_str())
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or(".png");
+    let derived_basename = match request.session_name.as_deref() {
+        Some(session_name) if !is_default_session_name(session_name) => session_name,
+        _ => request
+            .connected_device_name
+            .as_deref()
+            .unwrap_or("Logic 2"),
+    };
+    let derived_path = home_dir.join(format!("{derived_basename}{extension}"));
+
+    let next_path = match (&request.previous_path, &parsed_previous) {
+        (Some(previous_path), Some(previous)) => {
+            let previous_was_derived = is_default_session_name(&previous.basename_without_index)
+                || request.connected_device_name.as_deref()
+                    == Some(previous.basename_without_index.as_str())
+                || previous.basename_without_index == "Logic 2";
+            if previous_was_derived {
+                let derived = parse_screenshot_path(&derived_path);
+                if previous.basename_without_index == derived.basename_without_index {
+                    PathBuf::from(previous_path)
+                } else {
+                    derived_path
+                }
+            } else {
+                PathBuf::from(previous_path)
+            }
+        }
+        _ => derived_path,
+    };
+
+    if path_exists(&next_path) {
+        increment_screenshot_path(&next_path)
+    } else {
+        next_path
+    }
+}
+
+#[tauri::command]
+fn next_screenshot_path(app: AppHandle, request: ScreenshotPathRequest) -> CommandResult<String> {
+    let home_dir = app.path().home_dir().map_err(to_string)?;
+    Ok(
+        next_screenshot_path_with_exists(&home_dir, &request, Path::exists)
+            .to_string_lossy()
+            .to_string(),
+    )
+}
+
+#[tauri::command]
+fn write_screenshot_file(request: WriteScreenshotRequest) -> CommandResult<()> {
+    let path = PathBuf::from(&request.path);
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg") {
+        return Err("screenshots must use a .png, .jpg, or .jpeg extension".to_string());
+    }
+    let encoded = request
+        .data_base64
+        .split_once(',')
+        .map_or(request.data_base64.as_str(), |(_, data)| data);
+    let bytes = BASE64_STANDARD.decode(encoded).map_err(to_string)?;
+    if bytes.is_empty() {
+        return Err("screenshot image is empty".to_string());
+    }
+    fs::write(path, bytes).map_err(to_string)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn capture_screenshot_png(app: AppHandle) -> CommandResult<String> {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{
+        NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey, NSImage,
+    };
+    use objc2_foundation::{NSDictionary, NSError};
+    use objc2_web_kit::WKWebView;
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main webview is unavailable".to_string())?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<CommandResult<String>>(1);
+    window
+        .with_webview(move |webview| unsafe {
+            let view: &WKWebView = &*webview.inner().cast();
+            let completion = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                let result = if !error.is_null() {
+                    Err("WKWebView screenshot failed".to_string())
+                } else if image.is_null() {
+                    Err("WKWebView returned an empty screenshot".to_string())
+                } else {
+                    let image = &*image;
+                    image
+                        .TIFFRepresentation()
+                        .ok_or_else(|| "screenshot TIFF encoding failed".to_string())
+                        .and_then(|tiff| {
+                            NSBitmapImageRep::imageRepWithData(&tiff)
+                                .ok_or_else(|| "screenshot bitmap conversion failed".to_string())
+                        })
+                        .and_then(|bitmap| {
+                            let properties =
+                                NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+                            bitmap
+                                .representationUsingType_properties(
+                                    NSBitmapImageFileType::PNG,
+                                    &properties,
+                                )
+                                .ok_or_else(|| "screenshot PNG encoding failed".to_string())
+                        })
+                        .map(|png| BASE64_STANDARD.encode(png.to_vec()))
+                };
+                let _ = sender.send(result);
+            });
+            view.takeSnapshotWithConfiguration_completionHandler(None, &completion);
+        })
+        .map_err(to_string)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "WKWebView screenshot timed out".to_string())?
+    })
+    .await
+    .map_err(to_string)?
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+async fn capture_screenshot_png(_app: AppHandle) -> CommandResult<String> {
+    Err("native screenshots are not supported on this platform".to_string())
+}
+
+#[cfg(test)]
+mod screenshot_tests {
+    use super::*;
+
+    fn request(
+        previous_path: Option<&str>,
+        session_name: Option<&str>,
+        connected_device_name: Option<&str>,
+    ) -> ScreenshotPathRequest {
+        ScreenshotPathRequest {
+            connected_device_name: connected_device_name.map(str::to_string),
+            previous_path: previous_path.map(str::to_string),
+            session_name: session_name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn screenshot_path_matches_logic_derived_name_rules() {
+        let home = Path::new("/Users/tester");
+        assert_eq!(
+            next_screenshot_path_with_exists(
+                home,
+                &request(None, Some("Session 1"), Some("Logic Pro 8")),
+                |_| false,
+            ),
+            home.join("Logic Pro 8.png")
+        );
+        assert_eq!(
+            next_screenshot_path_with_exists(
+                home,
+                &request(None, Some("powertrain"), Some("Logic Pro 8")),
+                |_| false,
+            ),
+            home.join("powertrain.png")
+        );
+    }
+
+    #[test]
+    fn screenshot_path_preserves_custom_names_and_increments_existing_files() {
+        let home = Path::new("/Users/tester");
+        assert_eq!(
+            next_screenshot_path_with_exists(
+                home,
+                &request(
+                    Some("/tmp/custom_4.jpeg"),
+                    Some("Session 2"),
+                    Some("PXLogic U2"),
+                ),
+                |path| path == Path::new("/tmp/custom_4.jpeg"),
+            ),
+            PathBuf::from("/tmp/custom_5.jpeg")
+        );
+    }
+
+    #[test]
+    fn screenshot_path_preserves_the_previous_name_when_the_device_changes() {
+        let home = Path::new("/Users/tester");
+        assert_eq!(
+            next_screenshot_path_with_exists(
+                home,
+                &request(
+                    Some("/Users/tester/Logic Pro 8_2.png"),
+                    Some("Session 3"),
+                    Some("PXLogic U2"),
+                ),
+                |_| false,
+            ),
+            PathBuf::from("/Users/tester/Logic Pro 8_2.png")
+        );
+    }
+
+    #[test]
+    fn screenshot_writer_decodes_data_urls_and_rejects_unknown_extensions() {
+        let path = std::env::temp_dir().join(format!(
+            "pxlogic-screenshot-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        write_screenshot_file(WriteScreenshotRequest {
+            data_base64: "data:image/png;base64,c25hcHNob3Q=".to_string(),
+            path: path.to_string_lossy().to_string(),
+        })
+        .expect("valid screenshot data should be written");
+        assert_eq!(
+            fs::read(&path).expect("screenshot file should exist"),
+            b"snapshot"
+        );
+        fs::remove_file(&path).expect("temporary screenshot should be removable");
+
+        assert!(write_screenshot_file(WriteScreenshotRequest {
+            data_base64: "c25hcHNob3Q=".to_string(),
+            path: path.with_extension("txt").to_string_lossy().to_string(),
+        })
+        .is_err());
+    }
+}
+
 #[tauri::command]
 async fn get_waveform_tile(
     session_id: String,
@@ -1002,6 +1332,7 @@ fn to_string(error: impl std::fmt::Display) -> String {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
@@ -1015,6 +1346,9 @@ fn main() {
             save_capture,
             export_capture,
             trim_capture,
+            capture_screenshot_png,
+            next_screenshot_path,
+            write_screenshot_file,
             get_waveform_tile,
             render_graph_frame,
             measure_digital_range,

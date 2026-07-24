@@ -158,6 +158,14 @@ import {
   getSaleaeGraphChannelLayout,
 } from "./lib/saleaeGraphLayout";
 import {
+  loadScreenshotSettings,
+  persistScreenshotSettings,
+  SCREENSHOT_DELAY_MS,
+  ScreenshotCaptureRect,
+  ScreenshotDestination,
+  takeScreenshot,
+} from "./lib/screenshots";
+import {
   copyRangeMeasurementValues,
   DEFAULT_DIGITAL_RANGE_MEASUREMENTS,
   DIGITAL_RANGE_MEASUREMENT_CATEGORIES,
@@ -1108,6 +1116,7 @@ export default function App() {
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
   const [channelReorderActive, setChannelReorderActive] = useState(false);
   const [channelContextMenu, setChannelContextMenu] = useState<ChannelContextMenuState | null>(null);
+  const [screenshotSettings, setScreenshotSettings] = useState(loadScreenshotSettings);
   const [analyzerInEdit, setAnalyzerInEdit] = useState<AnalyzerEditState | null>(null);
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [graphRequestEpoch, setGraphRequestEpoch] = useState(0);
@@ -1140,6 +1149,7 @@ export default function App() {
   const lastPointerXRef = useRef<number | null>(null);
   const sessionCounter = useRef(1);
   const preparingDeviceIdsRef = useRef(new Set<string>());
+  const screenshotInProgressRef = useRef(false);
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -1148,6 +1158,10 @@ export default function App() {
   useEffect(() => {
     saveUiExtensions(extensions);
   }, [extensions]);
+
+  useEffect(() => {
+    persistScreenshotSettings(screenshotSettings);
+  }, [screenshotSettings]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -2529,6 +2543,55 @@ export default function App() {
     }
   }
 
+  function takeContextScreenshot(target: "channel" | "window") {
+    if (!activeSession || screenshotInProgressRef.current) return;
+
+    let rect: ScreenshotCaptureRect | undefined;
+    if (target === "channel") {
+      const menu = channelContextMenu;
+      const graphViewport = document.querySelector<HTMLElement>(".graphViewport");
+      if (!menu || !graphViewport) return;
+      const rowIndex = visibleChannelIndexes.indexOf(menu.channelIndex);
+      const layout = visibleChannelLayouts[rowIndex];
+      if (rowIndex < 0 || !layout) return;
+      const viewportRect = graphViewport.getBoundingClientRect();
+      rect = {
+        x: viewportRect.left,
+        y: viewportRect.top + layout.outerTop + (visibleAnalyzerInsets[rowIndex] ?? 0),
+        width: viewportRect.width,
+        height: visibleChannelHeights[rowIndex] ?? SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
+      };
+    }
+
+    const sessionId = activeSession.id;
+    const sessionName = activeSession.name;
+    const device = devices.find((item) => item.id === activeSession.selectedDevice);
+    const connectedDeviceName = device?.profile_model || device?.product || device?.label;
+    const settings = { ...screenshotSettings };
+    screenshotInProgressRef.current = true;
+    window.setTimeout(() => {
+      void takeScreenshot({ connectedDeviceName, rect, sessionName, settings })
+        .then((result) => {
+          if (result.filePath) {
+            setScreenshotSettings((current) => ({ ...current, filePath: result.filePath }));
+          }
+          if (result.message) {
+            updateSession(sessionId, (session) => ({ ...session, message: result.message ?? session.message }));
+          }
+        })
+        .catch((error) => {
+          updateSession(sessionId, (session) => ({ ...session, message: `Screenshot failed: ${String(error)}` }));
+        })
+        .finally(() => {
+          screenshotInProgressRef.current = false;
+        });
+    }, SCREENSHOT_DELAY_MS);
+  }
+
+  function setScreenshotDestination(destination: ScreenshotDestination) {
+    setScreenshotSettings((current) => ({ ...current, destination }));
+  }
+
   function handleGraphScroll(event: ReactUIEvent<HTMLDivElement>) {
     if (!activeSession) return;
     pendingGraphScrollRef.current = {
@@ -3291,6 +3354,7 @@ export default function App() {
                     {channelContextMenu && (
                       <ChannelContextMenu
                         channelIndex={channelContextMenu.channelIndex}
+                        channelLabel={channelLabels[channelContextMenu.channelIndex] ?? `D${channelContextMenu.channelIndex}`}
                         autoLayoutEnabled={!activeSession.manualChannelLayout}
                         channelRows={contextMenuChannelRows}
                         hasCapture={Boolean(activeSession.summary)}
@@ -3306,11 +3370,15 @@ export default function App() {
                         onMatchAllHeights={() => matchAllDigitalChannelHeights(channelContextMenu.channelIndex)}
                         onOpenSettings={() => openSidebarPanel("devices")}
                         onResetChannelNames={resetChannelNames}
+                        onScreenshotChannel={() => takeContextScreenshot("channel")}
+                        onScreenshotWindow={() => takeContextScreenshot("window")}
                         onShowAllChannels={showAllChannelRows}
+                        onSetScreenshotDestination={setScreenshotDestination}
                         onToggleAutoLayout={toggleAutoLayout}
                         onToggleChannelVisibility={toggleChannelRowVisibility}
                         onToggleInteractiveMeasurement={toggleInteractiveMeasurement}
                         refElement={channelContextMenuRef}
+                        screenshotDestination={screenshotSettings.destination}
                         x={channelContextMenu.x}
                         y={channelContextMenu.y}
                       />
@@ -3770,6 +3838,7 @@ function ChannelResizeHandle({
 function ChannelContextMenu({
   autoLayoutEnabled,
   channelIndex,
+  channelLabel,
   channelRows,
   hasCapture,
   hasHiddenChannels,
@@ -3784,16 +3853,21 @@ function ChannelContextMenu({
   onMatchAllHeights,
   onOpenSettings,
   onResetChannelNames,
+  onScreenshotChannel,
+  onScreenshotWindow,
+  onSetScreenshotDestination,
   onShowAllChannels,
   onToggleAutoLayout,
   onToggleChannelVisibility,
   onToggleInteractiveMeasurement,
   refElement,
+  screenshotDestination,
   x,
   y,
 }: {
   autoLayoutEnabled: boolean;
   channelIndex: number;
+  channelLabel: string;
   channelRows: { index: number; isHidden: boolean; isSelectable: boolean; label: string }[];
   hasCapture: boolean;
   hasHiddenChannels: boolean;
@@ -3808,11 +3882,15 @@ function ChannelContextMenu({
   onMatchAllHeights: () => void;
   onOpenSettings: () => void;
   onResetChannelNames: () => void;
+  onScreenshotChannel: () => void;
+  onScreenshotWindow: () => void;
+  onSetScreenshotDestination: (destination: ScreenshotDestination) => void;
   onShowAllChannels: () => void;
   onToggleAutoLayout: () => void;
   onToggleChannelVisibility: (channelIndex: number) => void;
   onToggleInteractiveMeasurement: () => void;
   refElement: RefObject<HTMLDivElement>;
+  screenshotDestination: ScreenshotDestination;
   x: number;
   y: number;
 }) {
@@ -3906,20 +3984,24 @@ function ChannelContextMenu({
       <ChannelMenuSelectionItem label="Settings" onClick={() => run(onOpenSettings)} />
       <ChannelMenuSeparator />
       <ChannelMenuSelectionItem
-        disabled
-        label={`Screenshot D${channelIndex}`}
-        onClick={() => undefined}
-        tooltip="Placeholder for Logic's Electron capturePage screenshot action; requires a Tauri screenshot backend."
+        label={`Screenshot ${channelLabel}`}
+        onClick={() => run(onScreenshotChannel)}
       />
       <ChannelMenuSelectionItem
-        disabled
         label="Screenshot Window"
-        onClick={() => undefined}
-        tooltip="Placeholder for Logic's Electron capturePage screenshot action; requires a Tauri screenshot backend."
+        onClick={() => run(onScreenshotWindow)}
       />
-      <ChannelMenuSubmenu disabled label="Screenshot Destination [File]" tooltip="Screenshot destination is waiting for Tauri screenshot support.">
-        <ChannelMenuSelectionItem disabled label="File" onClick={() => undefined} selected />
-        <ChannelMenuSelectionItem disabled label="Clipboard" onClick={() => undefined} />
+      <ChannelMenuSubmenu label={`Screenshot Destination [${screenshotDestination}]`}>
+        <ChannelMenuSelectionItem
+          label="File"
+          onClick={() => run(() => onSetScreenshotDestination("File"), false)}
+          selected={screenshotDestination === "File"}
+        />
+        <ChannelMenuSelectionItem
+          label="Clipboard"
+          onClick={() => run(() => onSetScreenshotDestination("Clipboard"), false)}
+          selected={screenshotDestination === "Clipboard"}
+        />
       </ChannelMenuSubmenu>
     </div>
   );

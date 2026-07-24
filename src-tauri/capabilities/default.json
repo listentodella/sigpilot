@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Default PXLogic Studio desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "clipboard-manager:allow-write-image"
+  ]
 }

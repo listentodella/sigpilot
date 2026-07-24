@@ -11,6 +11,7 @@ default = ["rusb-transport"]
 rusb-transport = ["pxlogic-core/rusb-transport"]
 
 [dependencies]
+base64.workspace = true
 pxlogic-core = { path = "../crates/pxlogic-core" }
 pxlogic-file = { path = "../crates/pxlogic-file" }
 pxlogic-graph = { path = "../crates/pxlogic-graph" }
@@ -19,8 +20,16 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
+tauri-plugin-clipboard-manager.workspace = true
 tauri-plugin-dialog.workspace = true
 tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+objc2-web-kit.workspace = true
 
 [build-dependencies]
 tauri-build.workspace = true
