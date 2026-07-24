@@ -347,6 +347,48 @@ export function analyzerDecodeSignature(analyzer: UiAnalyzerInstance) {
   return JSON.stringify([analyzer.decoderBackend, analyzerDecodeSettings(analyzer)]);
 }
 
+export function mergeAnalyzerTrackFrames(
+  decodedFrames: DecodedFrame[],
+  tracks: AnalyzerTrackWindow[],
+) {
+  const frames = new Map<string, DecodedFrame>();
+  const mergeFrame = (frame: DecodedFrame) => {
+    const key = `${frame.frame_id}:${frame.start_sample}:${frame.end_sample}`;
+    const existing = frames.get(key);
+    if (!existing) {
+      frames.set(key, { ...frame, channel_values: [...frame.channel_values] });
+      return;
+    }
+    const channelValues = [...existing.channel_values];
+    frame.channel_values.forEach((value) => {
+      const index = channelValues.findIndex(
+        (candidate) => candidate.channel === value.channel && candidate.role === value.role,
+      );
+      if (index >= 0) channelValues[index] = value;
+      else channelValues.push(value);
+    });
+    frames.set(key, {
+      ...existing,
+      frame_type: existing.frame_type || frame.frame_type,
+      channel_values: channelValues,
+      label:
+        channelValues.length > 1
+          ? channelValues.map((value) => `${value.role} ${value.label}`).join(" / ")
+          : existing.label || frame.label,
+    });
+  };
+
+  decodedFrames.forEach(mergeFrame);
+  tracks.forEach((track) => {
+    track.frames.forEach(mergeFrame);
+    if (track.previous_frame) mergeFrame(track.previous_frame);
+    if (track.next_frame) mergeFrame(track.next_frame);
+  });
+  return [...frames.values()].sort(
+    (left, right) => left.start_sample - right.start_sample || left.frame_id - right.frame_id,
+  );
+}
+
 export function decoderBackendLabel(backend: DecoderBackendKind) {
   if (backend === "saleae_native") return "Saleae Native";
   if (backend === "sigrok_native") return "Sigrok Native";

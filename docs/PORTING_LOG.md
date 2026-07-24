@@ -178,3 +178,5 @@ chore: 说明内容
   - 复用 Logic 2 persisted analyzer migration/startAnalysis 流程；`.sal` 导入自动恢复 SPI/I2C/Async Serial 配置并重新解码，导出可无损保留原始 analyzer metadata。
 - `docs/ported-features/2026-07-24-saleae-sparse-analyzer-progressive-restore.md`
   - 修复长 `.sal` native analyzer 整段批处理阻塞；按 viewport/边沿窗口渐进解码，并同步恢复波形 bubbles 与右侧 Data Table 结果。
+- `docs/ported-features/2026-07-24-saleae-sal-frame-table-session-isolation.md`
+  - 过滤 Saleae Native SPI 控制 frame 的伪数据气泡，恢复 Type/MOSI/MISO 动态表格列，并隔离普通新 session 与显式 setup duplicate 的通道名称继承语义。

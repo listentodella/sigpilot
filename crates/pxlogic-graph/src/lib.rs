@@ -475,6 +475,7 @@ impl DigitalGraph {
                     frame_id: 0,
                     start_sample: sample,
                     end_sample: sample + (bit_period * 10.0).ceil() as u64,
+                    frame_type: "data".to_string(),
                     label: label.clone(),
                     value: u64::from(value),
                     channel_values: vec![DecodedChannelValue {
@@ -595,6 +596,7 @@ impl DigitalGraph {
                         frame_id: 0,
                         start_sample: byte_start,
                         end_sample: sample.saturating_add(1),
+                        frame_type: if byte_index == 0 { "address" } else { "data" }.to_string(),
                         label,
                         value: u64::from(byte),
                         channel_values: vec![DecodedChannelValue {
@@ -760,6 +762,7 @@ impl DigitalGraph {
                     frame_id: 0,
                     start_sample: transfer_start,
                     end_sample: sample.saturating_add(1),
+                    frame_type: "result".to_string(),
                     label,
                     value: settings.mosi_channel.map_or(miso_value, |_| mosi_value),
                     channel_values,
@@ -1848,16 +1851,12 @@ fn display_frame_for_track<'a>(
     frame: &'a DecodedFrame,
     track: &AnalyzerTrackRequest,
 ) -> Option<DisplayFrame<'a>> {
-    let label = if frame.channel_values.is_empty() {
-        frame.label.as_str()
-    } else {
-        frame
-            .channel_values
-            .iter()
-            .find(|value| value.channel == track.channel && value.role == track.role)?
-            .label
-            .as_str()
-    };
+    let label = frame
+        .channel_values
+        .iter()
+        .find(|value| value.channel == track.channel && value.role == track.role)?
+        .label
+        .as_str();
     Some(DisplayFrame {
         frame_id: frame.frame_id,
         start_sample: frame.start_sample,
@@ -1867,9 +1866,6 @@ fn display_frame_for_track<'a>(
 }
 
 fn frame_for_track(frame: &DecodedFrame, track: &AnalyzerTrackRequest) -> Option<DecodedFrame> {
-    if frame.channel_values.is_empty() {
-        return Some(frame.clone());
-    }
     let value = frame
         .channel_values
         .iter()
@@ -2184,9 +2180,15 @@ mod tests {
                 frame_id,
                 start_sample: frame_id * 100,
                 end_sample: frame_id * 100 + 80,
+                frame_type: "data".to_string(),
                 label: format!("0x{:02X}", frame_id & 0xff),
                 value: frame_id & 0xff,
-                channel_values: Vec::new(),
+                channel_values: vec![DecodedChannelValue {
+                    channel: 0,
+                    role: "Input".to_string(),
+                    label: format!("0x{:02X}", frame_id & 0xff),
+                    value: frame_id & 0xff,
+                }],
             })
             .collect::<Vec<_>>();
         let window = render_analyzer_track(
@@ -2345,6 +2347,28 @@ mod tests {
                 .decode_frames_with_backend_for_view(&settings, backend, &view)
                 .unwrap();
             assert!(!table_frames.is_empty(), "backend={backend:?} table");
+            assert!(table_frames.iter().any(|frame| {
+                frame
+                    .channel_values
+                    .iter()
+                    .any(|value| value.role == "MOSI")
+                    && frame
+                        .channel_values
+                        .iter()
+                        .any(|value| value.role == "MISO")
+            }));
+            assert!(table_frames
+                .iter()
+                .all(
+                    |frame| frame.channel_values.iter().all(|value| value.value <= 0xff
+                        && value.label.len() == 4
+                        && value.label.starts_with("0x"))
+                ));
+            if backend == DecoderBackendKind::SaleaeNative {
+                assert!(table_frames
+                    .iter()
+                    .any(|frame| frame.label == "Error" && frame.channel_values.is_empty()));
+            }
             let result = session
                 .render_analyzer(
                     &AnalyzerRenderRequest {
@@ -2371,6 +2395,10 @@ mod tests {
                 .flat_map(|track| &track.bubbles)
                 .collect::<Vec<_>>();
             assert!(!bubbles.is_empty(), "backend={backend:?}");
+            assert!(bubbles.iter().all(|bubble| bubble
+                .display_text
+                .iter()
+                .all(|text| text.len() == 4 && text.starts_with("0x"))));
             assert!(
                 bubbles
                     .iter()

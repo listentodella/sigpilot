@@ -178,6 +178,7 @@ pub struct DecodedFrame {
     pub frame_id: u64,
     pub start_sample: u64,
     pub end_sample: u64,
+    pub frame_type: String,
     pub label: String,
     pub value: u64,
     pub channel_values: Vec<DecodedChannelValue>,
@@ -296,6 +297,7 @@ pub fn decode_uart(
                     frame_id: 0,
                     start_sample: sample,
                     end_sample: sample + ((bit_period * 10.0).ceil() as u64),
+                    frame_type: "data".to_string(),
                     label: label_for_value(u64::from(value), 8),
                     value: u64::from(value),
                     channel_values: vec![DecodedChannelValue {
@@ -397,6 +399,7 @@ pub fn decode_i2c(
                     frame_id: 0,
                     start_sample: byte_start,
                     end_sample: sample.saturating_add(1),
+                    frame_type: if byte_index == 0 { "address" } else { "data" }.to_string(),
                     label,
                     value: u64::from(byte),
                     channel_values: vec![DecodedChannelValue {
@@ -544,6 +547,7 @@ pub fn decode_spi(
                     frame_id: 0,
                     start_sample: transfer_start,
                     end_sample: sample.saturating_add(1),
+                    frame_type: "result".to_string(),
                     label,
                     value: settings.mosi_channel.map_or(miso_value, |_| mosi_value),
                     channel_values,

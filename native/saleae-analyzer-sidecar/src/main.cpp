@@ -302,6 +302,18 @@ std::string HexLabel(U64 value, U32 bits)
     return output.str();
 }
 
+bool FitsTransferWidth(U64 value, U32 bits)
+{
+    return bits >= 64 || value < (U64{1} << bits);
+}
+
+bool HasHexadecimalResultText(const std::vector<std::string>& texts)
+{
+    return std::any_of(texts.begin(), texts.end(), [](const std::string& text) {
+        return text.size() >= 3 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    });
+}
+
 std::string MarkerKind(AnalyzerResults::MarkerType type)
 {
     static const std::array<const char*, 12> names = {"dot",       "error_dot", "square", "error_square",
@@ -474,7 +486,11 @@ json Decode(const RuntimePaths& runtime, const json& input)
             }
         }
 
-        if (captured.fields.empty() && captured.legacy_frame_id.has_value()) {
+        const bool legacy_data_frame =
+            captured.fields.empty() && captured.legacy_frame_id.has_value() && HasHexadecimalResultText(texts) &&
+            (!settings.mosi.has_value() || FitsTransferWidth(captured.data1, settings.bits_per_transfer)) &&
+            (!settings.miso.has_value() || FitsTransferWidth(captured.data2, settings.bits_per_transfer));
+        if (legacy_data_frame) {
             if (settings.mosi.has_value()) {
                 fields.push_back({{"name", "mosi"}, {"value", json{{"Unsigned", captured.data1}}}});
                 channel_values.push_back({{"channel", *settings.mosi},

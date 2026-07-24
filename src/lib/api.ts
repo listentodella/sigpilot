@@ -289,6 +289,7 @@ export interface DecodedFrame {
   frame_id: number;
   start_sample: number;
   end_sample: number;
+  frame_type: string;
   label: string;
   value: number;
   channel_values: DecodedChannelValue[];
@@ -1039,6 +1040,8 @@ function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFr
       frame_id: sourceFrameId,
       start_sample: startSample,
       end_sample: Math.min(metadata.sample_count, endSample),
+      frame_type:
+        settings.protocol === "I2c" ? (byteIndex === 0 ? "address" : "data") : "result",
       label:
         settings.protocol === "I2c"
           ? byteIndex === 0
@@ -1435,6 +1438,7 @@ function previewUartFrame(cycle: number, byteIndex: number, bitPeriod: number): 
     frame_id: frameId,
     start_sample: startSample,
     end_sample: endSample,
+    frame_type: "data",
     label: labelForPreviewByte(value),
     value,
     channel_values: [

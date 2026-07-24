@@ -4744,7 +4744,7 @@ body.timing-marker-col-resize * {
   min-height: 0;
   flex: 1;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   padding: 0 12px 12px;
 }
@@ -4814,7 +4814,7 @@ body.timing-marker-col-resize * {
   height: 28px;
   min-width: 283px;
   display: grid;
-  grid-template-columns: 18px 110px 80px minmax(75px, 1fr);
+  grid-template-columns: 18px 75px 110px 80px;
   flex: 0 0 28px;
   border-top: 1px solid var(--border-20);
   border-bottom: 1px solid var(--border-20);
@@ -4822,6 +4822,9 @@ body.timing-marker-col-resize * {
   background: var(--background-10);
   font-size: 12px;
   font-weight: 700;
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .analyzerTableHeader span {
@@ -5891,6 +5894,32 @@ body.timing-marker-col-resize * {
   left: 0;
   right: 0;
   background: var(--on-background-0);
+}
+
+.sessionTabContextMenu {
+  min-width: 210px;
+  position: fixed;
+  z-index: 200;
+  padding: 4px;
+}
+
+.sessionTabContextMenu button {
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 2px;
+  color: var(--on-background-10);
+  background: transparent;
+  padding: 0 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sessionTabContextMenu button:hover:not(:disabled) {
+  background: var(--hover-background);
 }
 
 .newSessionButton {

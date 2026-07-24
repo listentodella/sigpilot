@@ -1030,6 +1030,7 @@ impl DecoderOutput {
         self.frames
             .into_iter()
             .map(|frame| {
+                let frame_type = frame.row.clone();
                 let label = frame
                     .texts
                     .first()
@@ -1050,6 +1051,7 @@ impl DecoderOutput {
                     frame_id: frame.frame_id,
                     start_sample: frame.start_sample,
                     end_sample: frame.end_sample,
+                    frame_type,
                     label,
                     value,
                     channel_values: frame.channel_values,

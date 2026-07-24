@@ -44,6 +44,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   DragDropContext,
   Draggable,
@@ -118,6 +119,7 @@ import {
   analyzerDecodeSignature as getAnalyzerDecodeSignature,
   decoderBackendLabel,
   analyzerStripInsetForChannel,
+  mergeAnalyzerTrackFrames,
   analyzerSupportsDecoding,
   createAnalyzerInstance,
   restoreSaleaeAnalyzer,
@@ -1021,7 +1023,20 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     diagnostics: [],
     busy: false,
     message: "Ready",
-    analyzers: [],
+    analyzers: source
+      ? source.analyzers.map((analyzer, index) => ({
+          ...analyzer,
+          id: `${id}-analyzer-${index}`,
+          protocolBubbles: [],
+          decodedFrames: [],
+          previousFrame: null,
+          nextFrame: null,
+          renderedTracks: [],
+          renderedDecodeSignature: null,
+          decodeBusy: false,
+          highlightedFrameIndex: null,
+        }))
+      : [],
     analyzerDataPane: "table",
     analyzerTrigger: {
       analyzerId: "",
@@ -1737,11 +1752,15 @@ export default function App() {
             );
             updateSession(sessionSnapshot.id, (session) => ({
               ...session,
-              analyzers: session.analyzers.map((analyzer) => ({
-                ...analyzer,
-                renderedTracks: analyzerResults.get(analyzer.id)?.tracks ?? [],
-                renderedDecodeSignature: getAnalyzerDecodeSignature(analyzer),
-              })),
+              analyzers: session.analyzers.map((analyzer) => {
+                const renderedTracks = analyzerResults.get(analyzer.id)?.tracks ?? [];
+                return {
+                  ...analyzer,
+                  decodedFrames: mergeAnalyzerTrackFrames(analyzer.decodedFrames, renderedTracks),
+                  renderedTracks,
+                  renderedDecodeSignature: getAnalyzerDecodeSignature(analyzer),
+                };
+              }),
             }));
           }
         } catch (error) {
@@ -2858,12 +2877,19 @@ export default function App() {
 
   function createSessionFromFooter(deviceId = selectedDevice) {
     setFooterPopover(null);
-    createSession(deviceId, activeSession ?? undefined);
+    createSession(deviceId);
   }
 
   function createSessionFromStartScreen(deviceId: string) {
     setDraftSelectedDevice(deviceId);
-    createSession(deviceId, activeSession ?? undefined);
+    createSession(deviceId);
+  }
+
+  function duplicateSessionSetup(sessionId: string) {
+    const source = sessions.find((session) => session.id === sessionId);
+    if (!source || source.busy) return;
+    setFooterPopover(null);
+    createSession(source.selectedDevice, source);
   }
 
   useEffect(() => {
@@ -3440,6 +3466,7 @@ export default function App() {
           footerPopover={footerPopover}
           onCloseSession={closeSession}
           onCreateSession={createSessionFromFooter}
+          onDuplicateSession={duplicateSessionSetup}
           onRefreshDevices={refreshDevices}
           onRenameSession={(sessionId, name) =>
             updateSession(sessionId, (session) => ({ ...session, name: name.trim() ? name : session.name }))
@@ -4950,6 +4977,7 @@ function BottomBar({
   footerPopover,
   onCloseSession,
   onCreateSession,
+  onDuplicateSession,
   onRefreshDevices,
   onRenameSession,
   onSelectDevice,
@@ -4972,6 +5000,7 @@ function BottomBar({
   footerPopover: FooterPopover;
   onCloseSession: (sessionId: string) => void;
   onCreateSession: (deviceId?: string) => void;
+  onDuplicateSession: (sessionId: string) => void;
   onRefreshDevices: () => void;
   onRenameSession: (sessionId: string, name: string) => void;
   onSelectDevice: (deviceId: string) => void;
@@ -5019,6 +5048,7 @@ function BottomBar({
             isActive={session.id === activeSessionId}
             key={session.id}
             onClose={() => onCloseSession(session.id)}
+            onDuplicate={() => onDuplicateSession(session.id)}
             onRename={(name) => onRenameSession(session.id, name)}
             onSelect={() => onSelectSession(session.id)}
             session={session}
@@ -5090,18 +5120,49 @@ function BottomBar({
 function SessionTab({
   isActive,
   onClose,
+  onDuplicate,
   onRename,
   onSelect,
   session,
 }: {
   isActive: boolean;
   onClose: () => void;
+  onDuplicate: () => void;
   onRename: (name: string) => void;
   onSelect: () => void;
   session: UiSession;
 }) {
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [contextMenu]);
+
   return (
-    <div className={`sessionTab ${isActive ? "active" : ""}`} role="tab" aria-selected={isActive} onClick={onSelect}>
+    <div
+      className={`sessionTab ${isActive ? "active" : ""}`}
+      role="tab"
+      aria-selected={isActive}
+      onClick={onSelect}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onSelect();
+        setContextMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       {isActive ? (
         <input
           aria-label="Session name"
@@ -5125,6 +5186,29 @@ function SessionTab({
         <X size={12} />
       </button>
       {isActive && <div className="sessionTabLine" />}
+      {contextMenu && createPortal(
+        <div
+          className="sessionTabContextMenu saleaeContextMenu"
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.stopPropagation()}
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            disabled={session.busy}
+            onClick={() => {
+              setContextMenu(null);
+              onDuplicate();
+            }}
+            role="menuitem"
+            type="button"
+          >
+            <Copy size={13} />
+            <span>Duplicate Session Setup</span>
+          </button>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -6399,11 +6483,26 @@ function AnalyzersPanel({
     () =>
       normalizedSearch
         ? tableFrames.filter(({ analyzer, frame }) =>
-            `${analyzer.name} ${frame.label}`.toLowerCase().includes(normalizedSearch),
+            `${analyzer.name} ${frame.frame_type} ${frame.label} ${frame.channel_values
+              .map((value) => `${value.role} ${value.label}`)
+              .join(" ")}`
+              .toLowerCase()
+              .includes(normalizedSearch),
           )
         : tableFrames,
     [normalizedSearch, tableFrames],
   );
+  const tableDataColumns = useMemo(() => {
+    const roles: string[] = [];
+    tableFrames.forEach(({ frame }) => {
+      frame.channel_values.forEach((value) => {
+        if (!roles.includes(value.role)) roles.push(value.role);
+      });
+    });
+    return roles;
+  }, [tableFrames]);
+  const tableGridTemplate = `18px 75px 110px 80px${tableDataColumns.length > 0 ? ` repeat(${tableDataColumns.length}, minmax(75px, 1fr))` : ""}`;
+  const tableMinimumWidth = 283 + tableDataColumns.length * 75;
   const terminalFrames = useMemo(
     () =>
       session.analyzers
@@ -6563,20 +6662,38 @@ function AnalyzersPanel({
               <button
                 aria-label="Copy analyzer data"
                 disabled={filteredTableFrames.length === 0}
-                onClick={() => void navigator.clipboard?.writeText(filteredTableFrames.map(({ frame }) => frame.label).join("\n"))}
+                onClick={() => {
+                  const header = ["Type", "Start", "Duration", ...tableDataColumns].join("\t");
+                  const rows = filteredTableFrames.map(({ frame }) =>
+                    [
+                      frame.frame_type,
+                      formatSeconds(frame.start_sample / Math.max(1, sampleRateHz)),
+                      formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz)),
+                      ...tableDataColumns.map(
+                        (role) => frame.channel_values.find((value) => value.role === role)?.label ?? "",
+                      ),
+                    ].join("\t"),
+                  );
+                  void navigator.clipboard?.writeText([header, ...rows].join("\n"));
+                }}
                 title="Copy"
                 type="button"
               >
                 <Copy size={12} />
               </button>
             </div>
-            <div className="analyzerTableHeader" aria-hidden="true">
-              <span />
-              <span>Start</span>
-              <span>Duration</span>
-              <span>Data</span>
-            </div>
             <div className="analyzerFramesList" ref={tableBodyRef}>
+              <div
+                className="analyzerTableHeader"
+                aria-hidden="true"
+                style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinimumWidth }}
+              >
+                <span />
+                <span>Type</span>
+                <span>Start</span>
+                <span>Duration</span>
+                {tableDataColumns.map((role) => <span key={role}>{role}</span>)}
+              </div>
               {session.analyzers.length === 0 ? (
                 <div className="empty-result">No analyzers</div>
               ) : tableFrames.length === 0 ? (
@@ -6600,16 +6717,28 @@ function AnalyzersPanel({
                         })),
                       }))
                     }
-                    style={{ "--analyzer-color": analyzer.color } as CSSProperties}
+                    style={{
+                      "--analyzer-color": analyzer.color,
+                      gridTemplateColumns: tableGridTemplate,
+                      minWidth: tableMinimumWidth,
+                    } as CSSProperties}
                   >
                     <span className="decodeAnalyzerDot" title={analyzer.name} />
+                    <span className="analyzerDataCell">
+                      <HighlightedAnalyzerText query={searchQuery} text={frame.frame_type} />
+                    </span>
                     <span className="analyzerTimeCell">{formatSeconds(frame.start_sample / Math.max(1, sampleRateHz))}</span>
                     <span className="analyzerTimeCell">
                       {formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz))}
                     </span>
-                    <span className="analyzerDataCell">
-                      <HighlightedAnalyzerText query={searchQuery} text={frame.label} />
-                    </span>
+                    {tableDataColumns.map((role) => (
+                      <span className="analyzerDataCell" key={role}>
+                        <HighlightedAnalyzerText
+                          query={searchQuery}
+                          text={frame.channel_values.find((value) => value.role === role)?.label ?? ""}
+                        />
+                      </span>
+                    ))}
                     <button
                       className="analyzerGoToButton"
                       onClick={(event) => {
