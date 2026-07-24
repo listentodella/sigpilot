@@ -418,8 +418,7 @@ fn normalize_saleae_analyzer(raw: Value) -> Option<SaleaeAnalyzerMetadata> {
         return None;
     }
     let decoder_backend = match analyzer_type.as_str() {
-        "SPI" => DecoderBackendKind::SaleaeNative,
-        "Async Serial" | "Serial" | "I2C" => DecoderBackendKind::SigrokNative,
+        "SPI" | "Async Serial" | "Serial" | "I2C" => DecoderBackendKind::SaleaeNative,
         _ => DecoderBackendKind::LegacyRust,
     };
     let decode_settings = normalize_saleae_decode_settings(&analyzer_type, &raw);
@@ -1075,7 +1074,7 @@ mod tests {
         assert_eq!(analyzer.color, "#75CACA");
         assert!(!analyzer.show_in_data_table);
         assert!(analyzer.stream_to_terminal);
-        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SigrokNative);
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SaleaeNative);
         assert_eq!(analyzer.saleae_metadata, raw);
         assert_eq!(
             analyzer.decode_settings,
@@ -1145,7 +1144,7 @@ mod tests {
             parity: UartParity::Odd,
             msb_first: true,
         });
-        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SigrokNative);
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SaleaeNative);
         assert_eq!(analyzer.decode_settings, Some(expected.clone()));
         assert_eq!(analyzer.saleae_metadata, raw);
 

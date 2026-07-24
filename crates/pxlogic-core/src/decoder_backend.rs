@@ -169,18 +169,7 @@ struct SaleaeSidecarProbe {
 }
 
 #[derive(Debug, Serialize)]
-struct SpiSidecarRequest {
-    format: &'static str,
-    sample_rate_hz: u64,
-    sample_count: u64,
-    channel_count: u8,
-    initial_levels: Vec<u8>,
-    edges: Vec<SpiEdgeSet>,
-    decoder: SpiSidecarSettings,
-}
-
-#[derive(Debug, Serialize)]
-struct SpiEdgeSet {
+struct NativeEdgeSet {
     channel: u8,
     samples: Vec<u64>,
 }
@@ -210,19 +199,19 @@ struct SpiSidecarOptions {
 }
 
 #[derive(Debug, Serialize)]
-struct SigrokSidecarRequest {
+struct NativeSidecarRequest {
     format: &'static str,
     sample_rate_hz: u64,
     sample_count: u64,
     channel_count: u8,
     initial_levels: Vec<u8>,
-    edges: Vec<SpiEdgeSet>,
-    decoder: SigrokSidecarSettings,
+    edges: Vec<NativeEdgeSet>,
+    decoder: NativeSidecarSettings,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "protocol", rename_all = "lowercase")]
-enum SigrokSidecarSettings {
+enum NativeSidecarSettings {
     Uart {
         channels: UartSidecarChannels,
         options: UartSidecarOptions,
@@ -367,7 +356,7 @@ impl DecoderBackend for SaleaeNativeDecoder {
                 kind: DecoderBackendKind::SaleaeNative,
                 display_name: "Saleae Native analyzer sidecar".to_string(),
                 available: false,
-                protocols: vec!["SPI".to_string()],
+                protocols: vec!["UART".to_string(), "I2C".to_string(), "SPI".to_string()],
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
                 detail: error.to_string(),
@@ -380,18 +369,14 @@ impl DecoderBackend for SaleaeNativeDecoder {
         capture: &CaptureData,
         settings: &AnalyzerDecodeSettings,
     ) -> Result<DecoderOutput> {
-        let AnalyzerDecodeSettings::Spi(settings) = settings else {
-            return Err(CoreError::Decode(
-                "Saleae Native PoC currently supports SPI only".to_string(),
-            ));
-        };
         let probe = self.probe()?;
         if !probe.available || !probe.abi_match {
             return Err(CoreError::Decode(
                 "Saleae Logic runtime does not match the pinned 2.4.43 ABI".to_string(),
             ));
         }
-        let request = build_spi_sidecar_request(capture, settings)?;
+        ensure_protocol_available(&probe.protocols, settings, "Saleae Native")?;
+        let request = build_native_sidecar_request(capture, settings)?;
         self.decode_request(&request)
     }
 
@@ -400,18 +385,14 @@ impl DecoderBackend for SaleaeNativeDecoder {
         capture: &SparseCaptureData,
         settings: &AnalyzerDecodeSettings,
     ) -> Result<DecoderOutput> {
-        let AnalyzerDecodeSettings::Spi(settings) = settings else {
-            return Err(CoreError::Decode(
-                "Saleae Native PoC currently supports SPI only".to_string(),
-            ));
-        };
         let probe = self.probe()?;
         if !probe.available || !probe.abi_match {
             return Err(CoreError::Decode(
                 "Saleae Logic runtime does not match the pinned 2.4.43 ABI".to_string(),
             ));
         }
-        let request = build_sparse_spi_sidecar_request(capture, settings)?;
+        ensure_protocol_available(&probe.protocols, settings, "Saleae Native")?;
+        let request = build_sparse_native_sidecar_request(capture, settings)?;
         self.decode_request(&request)
     }
 }
@@ -551,6 +532,8 @@ fn discover_saleae_runtime_root() -> Option<PathBuf> {
     }
     candidates.into_iter().find(|path| {
         path.join("libAnalyzer.dylib").is_file()
+            && path.join("Analyzers/libserial_analyzer.so").is_file()
+            && path.join("Analyzers/libi2c_analyzer.so").is_file()
             && path.join("Analyzers/libspi_analyzer.so").is_file()
     })
 }
@@ -594,7 +577,7 @@ impl DecoderBackend for SigrokNativeDecoder {
             ));
         }
         ensure_sigrok_protocol_available(&probe, settings)?;
-        let request = build_sigrok_sidecar_request(capture, settings)?;
+        let request = build_native_sidecar_request(capture, settings)?;
         self.decode_request(&request)
     }
 
@@ -610,142 +593,12 @@ impl DecoderBackend for SigrokNativeDecoder {
             ));
         }
         ensure_sigrok_protocol_available(&probe, settings)?;
-        let request = build_sparse_sigrok_sidecar_request(capture, settings)?;
+        let request = build_sparse_native_sidecar_request(capture, settings)?;
         self.decode_request(&request)
     }
 }
 
-fn build_spi_sidecar_request(
-    capture: &CaptureData,
-    settings: &crate::decode::SpiDecodeSettings,
-) -> Result<SpiSidecarRequest> {
-    if capture.metadata.sample_count == 0 {
-        return Err(CoreError::Decode(
-            "native SPI decoding requires at least one sample".to_string(),
-        ));
-    }
-    let first_word = capture_word(capture, 0)?;
-    let initial_levels = (0..capture.metadata.channel_count)
-        .map(|channel| u8::from(first_word & (1u32 << channel) != 0))
-        .collect();
-
-    let decoded_channels = configured_spi_channels(settings, capture.metadata.channel_count)?;
-
-    let mut edges = decoded_channels
-        .iter()
-        .map(|channel| SpiEdgeSet {
-            channel: *channel,
-            samples: Vec::new(),
-        })
-        .collect::<Vec<_>>();
-    let mut previous_word = first_word;
-    for sample in 1..capture.metadata.sample_count {
-        let word = capture_word(capture, sample)?;
-        let changed = previous_word ^ word;
-        if changed != 0 {
-            for edge_set in &mut edges {
-                if changed & (1u32 << edge_set.channel) != 0 {
-                    edge_set.samples.push(sample);
-                }
-            }
-        }
-        previous_word = word;
-    }
-
-    Ok(SpiSidecarRequest {
-        format: "pxlogic.decoder.spi.v1",
-        sample_rate_hz: capture.metadata.sample_rate_hz,
-        sample_count: capture.metadata.sample_count,
-        channel_count: capture.metadata.channel_count,
-        initial_levels,
-        edges,
-        decoder: SpiSidecarSettings {
-            protocol: "spi",
-            channels: SpiSidecarChannels {
-                mosi: settings.mosi_channel,
-                miso: settings.miso_channel,
-                clk: settings.clock_channel,
-                cs: settings.enable_channel,
-            },
-            options: SpiSidecarOptions {
-                cpol: u8::from(settings.clock_polarity),
-                cpha: u8::from(settings.clock_phase),
-                bit_order: if settings.msb_first {
-                    "msb_first"
-                } else {
-                    "lsb_first"
-                },
-                word_size: settings.bits_per_transfer,
-                cs_polarity: if settings.enable_active_low {
-                    "active_low"
-                } else {
-                    "active_high"
-                },
-            },
-        },
-    })
-}
-
-fn build_sparse_spi_sidecar_request(
-    capture: &SparseCaptureData,
-    settings: &crate::decode::SpiDecodeSettings,
-) -> Result<SpiSidecarRequest> {
-    if capture.metadata.sample_count == 0 {
-        return Err(CoreError::Decode(
-            "native SPI decoding requires at least one sample".to_string(),
-        ));
-    }
-    let decoded_channels = configured_spi_channels(settings, capture.metadata.channel_count)?;
-    let mut initial_levels = vec![0u8; usize::from(capture.metadata.channel_count)];
-    let mut available = BTreeSet::new();
-    let mut edges = Vec::new();
-    for sparse_channel in &capture.channels {
-        if sparse_channel.channel >= capture.metadata.channel_count
-            || !available.insert(sparse_channel.channel)
-            || sparse_channel
-                .transitions
-                .windows(2)
-                .any(|window| window[0] >= window[1])
-            || sparse_channel
-                .transitions
-                .iter()
-                .any(|sample| *sample == 0 || *sample >= capture.metadata.sample_count)
-        {
-            return Err(CoreError::Decode(
-                "invalid sparse transition channel data".to_string(),
-            ));
-        }
-        initial_levels[usize::from(sparse_channel.channel)] = u8::from(sparse_channel.initial_high);
-    }
-    for channel in &decoded_channels {
-        if !available.contains(channel) {
-            return Err(CoreError::Decode(format!(
-                "native SPI channel D{channel} is not present in the sparse capture"
-            )));
-        }
-        let sparse_channel = capture
-            .channels
-            .iter()
-            .find(|candidate| candidate.channel == *channel)
-            .expect("available sparse channel was just validated");
-        edges.push(SpiEdgeSet {
-            channel: *channel,
-            samples: sparse_channel.transitions.clone(),
-        });
-    }
-
-    Ok(SpiSidecarRequest {
-        format: "pxlogic.decoder.spi.v1",
-        sample_rate_hz: capture.metadata.sample_rate_hz,
-        sample_count: capture.metadata.sample_count,
-        channel_count: capture.metadata.channel_count,
-        initial_levels,
-        edges,
-        decoder: spi_sidecar_settings(settings),
-    })
-}
-
-fn sigrok_protocol_name(settings: &AnalyzerDecodeSettings) -> &'static str {
+fn native_protocol_name(settings: &AnalyzerDecodeSettings) -> &'static str {
     match settings {
         AnalyzerDecodeSettings::Uart(_) => "UART",
         AnalyzerDecodeSettings::I2c(_) => "I2C",
@@ -757,21 +610,28 @@ fn ensure_sigrok_protocol_available(
     probe: &SigrokSidecarProbe,
     settings: &AnalyzerDecodeSettings,
 ) -> Result<()> {
-    let protocol = sigrok_protocol_name(settings);
-    if probe
-        .protocols
+    ensure_protocol_available(&probe.protocols, settings, "PXView Sigrok C")
+}
+
+fn ensure_protocol_available(
+    protocols: &[String],
+    settings: &AnalyzerDecodeSettings,
+    backend: &str,
+) -> Result<()> {
+    let protocol = native_protocol_name(settings);
+    if protocols
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(protocol))
     {
         Ok(())
     } else {
         Err(CoreError::Decode(format!(
-            "PXView Sigrok C decoder for {protocol} is not available"
+            "{backend} decoder for {protocol} is not available"
         )))
     }
 }
 
-fn configured_sigrok_channels(
+fn configured_native_channels(
     settings: &AnalyzerDecodeSettings,
     channel_count: u8,
 ) -> Result<BTreeSet<u8>> {
@@ -785,7 +645,7 @@ fn configured_sigrok_channels(
     if channels.iter().any(|channel| *channel >= channel_count) {
         return Err(CoreError::Decode(format!(
             "native {} channel is outside the capture",
-            sigrok_protocol_name(settings)
+            native_protocol_name(settings)
         )));
     }
     Ok(channels)
@@ -794,14 +654,14 @@ fn configured_sigrok_channels(
 fn packed_transition_sets(
     capture: &CaptureData,
     channels: &BTreeSet<u8>,
-) -> Result<(Vec<u8>, Vec<SpiEdgeSet>)> {
+) -> Result<(Vec<u8>, Vec<NativeEdgeSet>)> {
     let first_word = capture_word(capture, 0)?;
     let initial_levels = (0..capture.metadata.channel_count)
         .map(|channel| u8::from(first_word & (1u32 << channel) != 0))
         .collect();
     let mut edges = channels
         .iter()
-        .map(|channel| SpiEdgeSet {
+        .map(|channel| NativeEdgeSet {
             channel: *channel,
             samples: Vec::new(),
         })
@@ -825,7 +685,7 @@ fn packed_transition_sets(
 fn sparse_transition_sets(
     capture: &SparseCaptureData,
     channels: &BTreeSet<u8>,
-) -> Result<(Vec<u8>, Vec<SpiEdgeSet>)> {
+) -> Result<(Vec<u8>, Vec<NativeEdgeSet>)> {
     let mut initial_levels = vec![0u8; usize::from(capture.metadata.channel_count)];
     let mut available = BTreeSet::new();
     for sparse_channel in &capture.channels {
@@ -858,7 +718,7 @@ fn sparse_transition_sets(
             .iter()
             .find(|candidate| candidate.channel == *channel)
             .expect("available sparse channel was just validated");
-        edges.push(SpiEdgeSet {
+        edges.push(NativeEdgeSet {
             channel: *channel,
             samples: sparse_channel.transitions.clone(),
         });
@@ -866,9 +726,9 @@ fn sparse_transition_sets(
     Ok((initial_levels, edges))
 }
 
-fn sigrok_sidecar_settings(settings: &AnalyzerDecodeSettings) -> SigrokSidecarSettings {
+fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSettings {
     match settings {
-        AnalyzerDecodeSettings::Uart(settings) => SigrokSidecarSettings::Uart {
+        AnalyzerDecodeSettings::Uart(settings) => NativeSidecarSettings::Uart {
             channels: UartSidecarChannels {
                 rx: Some(settings.channel),
                 tx: None,
@@ -892,7 +752,7 @@ fn sigrok_sidecar_settings(settings: &AnalyzerDecodeSettings) -> SigrokSidecarSe
                 invert_tx: 0,
             },
         },
-        AnalyzerDecodeSettings::I2c(settings) => SigrokSidecarSettings::I2c {
+        AnalyzerDecodeSettings::I2c(settings) => NativeSidecarSettings::I2c {
             channels: I2cSidecarChannels {
                 scl: settings.scl_channel,
                 sda: settings.sda_channel,
@@ -905,7 +765,7 @@ fn sigrok_sidecar_settings(settings: &AnalyzerDecodeSettings) -> SigrokSidecarSe
         },
         AnalyzerDecodeSettings::Spi(settings) => {
             let spi = spi_sidecar_settings(settings);
-            SigrokSidecarSettings::Spi {
+            NativeSidecarSettings::Spi {
                 channels: spi.channels,
                 options: spi.options,
             }
@@ -913,47 +773,47 @@ fn sigrok_sidecar_settings(settings: &AnalyzerDecodeSettings) -> SigrokSidecarSe
     }
 }
 
-fn build_sigrok_sidecar_request(
+fn build_native_sidecar_request(
     capture: &CaptureData,
     settings: &AnalyzerDecodeSettings,
-) -> Result<SigrokSidecarRequest> {
+) -> Result<NativeSidecarRequest> {
     if capture.metadata.sample_count == 0 {
         return Err(CoreError::Decode(
             "native decoding requires at least one sample".to_string(),
         ));
     }
-    let channels = configured_sigrok_channels(settings, capture.metadata.channel_count)?;
+    let channels = configured_native_channels(settings, capture.metadata.channel_count)?;
     let (initial_levels, edges) = packed_transition_sets(capture, &channels)?;
-    Ok(SigrokSidecarRequest {
+    Ok(NativeSidecarRequest {
         format: "pxlogic.decoder.v1",
         sample_rate_hz: capture.metadata.sample_rate_hz,
         sample_count: capture.metadata.sample_count,
         channel_count: capture.metadata.channel_count,
         initial_levels,
         edges,
-        decoder: sigrok_sidecar_settings(settings),
+        decoder: native_sidecar_settings(settings),
     })
 }
 
-fn build_sparse_sigrok_sidecar_request(
+fn build_sparse_native_sidecar_request(
     capture: &SparseCaptureData,
     settings: &AnalyzerDecodeSettings,
-) -> Result<SigrokSidecarRequest> {
+) -> Result<NativeSidecarRequest> {
     if capture.metadata.sample_count == 0 {
         return Err(CoreError::Decode(
             "native decoding requires at least one sample".to_string(),
         ));
     }
-    let channels = configured_sigrok_channels(settings, capture.metadata.channel_count)?;
+    let channels = configured_native_channels(settings, capture.metadata.channel_count)?;
     let (initial_levels, edges) = sparse_transition_sets(capture, &channels)?;
-    Ok(SigrokSidecarRequest {
+    Ok(NativeSidecarRequest {
         format: "pxlogic.decoder.v1",
         sample_rate_hz: capture.metadata.sample_rate_hz,
         sample_count: capture.metadata.sample_count,
         channel_count: capture.metadata.channel_count,
         initial_levels,
         edges,
-        decoder: sigrok_sidecar_settings(settings),
+        decoder: native_sidecar_settings(settings),
     })
 }
 
@@ -1303,7 +1163,8 @@ mod tests {
             ..SpiDecodeSettings::default()
         };
 
-        let request = build_spi_sidecar_request(&capture, &settings).unwrap();
+        let request =
+            build_native_sidecar_request(&capture, &AnalyzerDecodeSettings::Spi(settings)).unwrap();
         assert_eq!(request.initial_levels, vec![0, 0, 0, 1]);
         let edges = request
             .edges
@@ -1317,15 +1178,15 @@ mod tests {
     }
 
     #[test]
-    fn sigrok_requests_cover_uart_and_i2c_without_unrelated_channels() {
+    fn native_requests_cover_uart_and_i2c_without_unrelated_channels() {
         let (uart_capture, uart_settings) = uart_capture_and_settings();
-        let uart = build_sigrok_sidecar_request(&uart_capture, &uart_settings).unwrap();
+        let uart = build_native_sidecar_request(&uart_capture, &uart_settings).unwrap();
         assert_eq!(uart.edges.len(), 1);
         assert_eq!(uart.edges[0].channel, 0);
-        assert!(matches!(uart.decoder, SigrokSidecarSettings::Uart { .. }));
+        assert!(matches!(uart.decoder, NativeSidecarSettings::Uart { .. }));
 
         let (i2c_capture, i2c_settings) = i2c_capture_and_settings();
-        let i2c = build_sigrok_sidecar_request(&i2c_capture, &i2c_settings).unwrap();
+        let i2c = build_native_sidecar_request(&i2c_capture, &i2c_settings).unwrap();
         assert_eq!(
             i2c.edges
                 .iter()
@@ -1333,7 +1194,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
-        assert!(matches!(i2c.decoder, SigrokSidecarSettings::I2c { .. }));
+        assert!(matches!(i2c.decoder, NativeSidecarSettings::I2c { .. }));
     }
 
     fn sparse_mode_zero_capture_and_settings() -> (SparseCaptureData, AnalyzerDecodeSettings) {
@@ -1383,12 +1244,8 @@ mod tests {
 
     #[test]
     fn sparse_sidecar_request_preserves_transition_indexes_beyond_u32() {
-        let (capture, AnalyzerDecodeSettings::Spi(settings)) =
-            sparse_mode_zero_capture_and_settings()
-        else {
-            unreachable!();
-        };
-        let request = build_sparse_spi_sidecar_request(&capture, &settings).unwrap();
+        let (capture, settings) = sparse_mode_zero_capture_and_settings();
+        let request = build_sparse_native_sidecar_request(&capture, &settings).unwrap();
         assert_eq!(request.sample_count, 50_000_000_000);
         assert_eq!(request.initial_levels, vec![1, 0, 0, 1]);
         assert_eq!(request.edges[0].samples[0], 49_000_000_015);
@@ -1496,6 +1353,63 @@ mod tests {
         assert_eq!(output.backend, DecoderBackendKind::SaleaeNative);
         assert!(output.frames[0].start_sample > u64::from(u32::MAX));
         assert_mode_zero_output(&output);
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_native_sidecar_decodes_uart_and_i2c_fixtures() {
+        let (uart_capture, uart_settings) = uart_capture_and_settings();
+        let uart = SaleaeNativeDecoder::from_env()
+            .unwrap()
+            .decode(&uart_capture, &uart_settings)
+            .unwrap();
+        assert_eq!(uart.protocol, "Async Serial");
+        assert_eq!(uart.frames.len(), 1);
+        assert_eq!(uart.frames[0].channel_values[0].value, 0xA5);
+
+        let (i2c_capture, i2c_settings) = i2c_capture_and_settings();
+        let i2c = SaleaeNativeDecoder::from_env()
+            .unwrap()
+            .decode(&i2c_capture, &i2c_settings)
+            .unwrap();
+        assert_eq!(i2c.protocol, "I2C");
+        assert_eq!(
+            i2c.frames
+                .iter()
+                .flat_map(|frame| frame.channel_values.iter())
+                .map(|value| value.value)
+                .collect::<Vec<_>>(),
+            vec![0x50, 0xA5]
+        );
+        assert_eq!(i2c.frames.first().unwrap().row, "start");
+        assert_eq!(i2c.frames.last().unwrap().row, "stop");
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_uart_sparse_fixture_preserves_u64_indexes() {
+        const OFFSET: u64 = 49_000_000_000;
+        let capture = sparse_transition_capture(
+            "saleae-uart-sparse-test",
+            1_000_000,
+            50_000_000_000,
+            OFFSET,
+            &[1],
+            &[(0, vec![10, 20, 30, 40, 50, 70, 80, 90])],
+        );
+        let output = SaleaeNativeDecoder::from_env()
+            .unwrap()
+            .decode_sparse(
+                &capture,
+                &AnalyzerDecodeSettings::Uart(UartDecodeSettings {
+                    channel: 0,
+                    baud_rate: 100_000,
+                    ..UartDecodeSettings::default()
+                }),
+            )
+            .unwrap();
+        assert_eq!(output.frames[0].channel_values[0].value, 0xA5);
+        assert!(output.frames[0].start_sample > u64::from(u32::MAX));
     }
 
     #[test]

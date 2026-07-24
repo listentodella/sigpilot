@@ -397,8 +397,9 @@ export function decoderBackendLabel(backend: DecoderBackendKind) {
 }
 
 export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
-  if (type === "SPI") return ["saleae_native", "sigrok_native", "legacy_rust"];
-  if (type === "Async Serial" || type === "I2C") return ["sigrok_native", "legacy_rust"];
+  if (type === "SPI" || type === "Async Serial" || type === "I2C") {
+    return ["saleae_native", "sigrok_native", "legacy_rust"];
+  }
   return ["legacy_rust"];
 }
 
@@ -409,7 +410,11 @@ export interface AnalyzerCatalogGroup {
 }
 
 export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
-  { backend: "saleae_native", label: "Saleae Native", analyzers: ["SPI"] },
+  {
+    backend: "saleae_native",
+    label: "Saleae Native",
+    analyzers: ["Async Serial", "I2C", "SPI"],
+  },
   {
     backend: "sigrok_native",
     label: "Sigrok Native (PXView)",

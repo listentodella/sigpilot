@@ -182,3 +182,5 @@ chore: 说明内容
   - 过滤 Saleae Native SPI 控制 frame 的伪数据气泡，恢复 Type/MOSI/MISO 动态表格列，并隔离普通新 session 与显式 setup duplicate 的通道名称继承语义。
 - `docs/ported-features/2026-07-24-analyzer-table-navigation-keyboard-viewport.md`
   - 搬运 Data Table 可视右边界 `GoToButton`、原版 goto SVG，以及 Up/Down/Left/Right 与 W/S/A/D 的 0.5x/2x 缩放和三分之一屏平移动画。
+- `docs/ported-features/2026-07-24-saleae-native-uart-i2c-sidecar.md`
+  - 直接加载 Logic 2.4.43 原版 Async Serial/I2C/SPI 插件，共用 packed/sparse transition bridge；`.sal` 三协议恢复改回 Saleae Native，Rust 仅保留 sidecar 适配职责。

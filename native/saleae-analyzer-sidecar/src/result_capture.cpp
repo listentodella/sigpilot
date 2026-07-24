@@ -99,8 +99,9 @@ void AnalyzerResults::AddFrameV2(const FrameV2& frame, const char* type, U64 sta
     const std::string row = type == nullptr ? "" : type;
     if (!store->legacy_frame_indices.empty()) {
         auto& legacy = store->frames.at(store->legacy_frame_indices.back());
-        if ((row == "result" || row == "error") && legacy.start_sample == static_cast<S64>(starting_sample) &&
-            legacy.end_sample + 1 == static_cast<S64>(ending_sample)) {
+        const auto v2_end = static_cast<S64>(ending_sample);
+        if (legacy.start_sample == static_cast<S64>(starting_sample) &&
+            (legacy.end_sample == v2_end || legacy.end_sample + 1 == v2_end)) {
             legacy.row = row;
             legacy.fields = frame.mInternals->fields;
             return;
