@@ -5,7 +5,7 @@ Saleae-style desktop frontend for PXLogic logic analyzers.
 ## Layout
 
 - `crates/pxlogic-core`: capture core, protocol constants, fake backend, optional `rusb` backend.
-- `crates/pxlogic-file`: `.pxcap`, `.sr`, and VCD read/write helpers.
+- `crates/pxlogic-file`: `.pxcap`, `.sr`, VCD, and sparse `.sal` file adapters.
 - `crates/pxlogic-waveform`: viewport tile generation for waveform rendering.
 - `native`: isolated Saleae Graph/Analyzer and PXView libsigrokdecode sidecars.
 - `src-tauri`: Tauri command/event adapter only.
@@ -30,7 +30,7 @@ native/saleae-analyzer-sidecar/verify.sh /path/to/Logic-2.4.43-macos-arm64.zip
 
 It uses a pinned Analyzer SDK test host and the locally supplied Logic 2.4.43 SPI plugin. Saleae binaries are extracted only into ignored `target/` storage and are never copied into the repository.
 
-Both native SPI backends consume transition-indexed captures. Sigrok Native uses the same sparse path for UART and I2C. Saleae `.sal` files are imported through the original GraphServer and remain sparse even when the capture spans tens of billions of samples.
+Both native SPI backends consume transition-indexed captures. Sigrok Native uses the same sparse path for UART and I2C. Saleae `.sal` files are imported and exported through the original GraphServer and remain sparse even when the capture spans tens of billions of samples.
 
 ## Commands
 

@@ -1,7 +1,7 @@
 use std::{
-    fs::File,
-    io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    fs::{self, File},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
 };
 
 use chrono::Utc;
@@ -9,7 +9,7 @@ use pxlogic_core::{
     capture::read_sample_word, resolve_enabled_channels, CaptureData, CaptureMetadata,
     SparseCaptureData, SparseDigitalChannel,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -44,6 +44,191 @@ struct SaleaeTransitionManifest {
 struct SaleaeTransitionChannel {
     channel: u8,
     file: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SaleaeExportManifest {
+    format: &'static str,
+    name: String,
+    source_device: String,
+    sample_rate_hz: u64,
+    channel_count: u8,
+    sample_count: u64,
+    captured_at_unix_milliseconds: i64,
+    channels: Vec<SaleaeExportChannel>,
+}
+
+#[derive(Debug, Serialize)]
+struct SaleaeExportChannel {
+    channel: u8,
+    label: String,
+    initial_high: bool,
+    transitions_file: String,
+}
+
+pub fn write_saleae_packed_export_manifest(
+    directory: impl AsRef<Path>,
+    capture: &CaptureData,
+) -> Result<PathBuf> {
+    validate_saleae_export_metadata(&capture.metadata)?;
+    let channels = export_channels(&capture.metadata)?;
+    let initial_word = read_sample_word(&capture.samples, capture.metadata.unitsize, 0)
+        .ok_or(FileError::InvalidCapture)?;
+    let directory = directory.as_ref();
+    fs::create_dir_all(directory)?;
+
+    struct ChannelWriter {
+        channel: u8,
+        initial_high: bool,
+        file_name: String,
+        writer: BufWriter<File>,
+    }
+
+    let mut writers = channels
+        .iter()
+        .map(|&channel| {
+            let file_name = format!("transitions-{channel}.u64");
+            Ok(ChannelWriter {
+                channel,
+                initial_high: initial_word & (1u32 << channel) != 0,
+                writer: BufWriter::new(File::create(directory.join(&file_name))?),
+                file_name,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut previous_word = initial_word;
+    for sample in 1..capture.metadata.sample_count {
+        let word = read_sample_word(&capture.samples, capture.metadata.unitsize, sample)
+            .ok_or(FileError::InvalidCapture)?;
+        let changed = previous_word ^ word;
+        if changed != 0 {
+            for channel in &mut writers {
+                if changed & (1u32 << channel.channel) != 0 {
+                    channel.writer.write_all(&sample.to_le_bytes())?;
+                }
+            }
+        }
+        previous_word = word;
+    }
+
+    let manifest_channels = writers
+        .into_iter()
+        .map(|mut writer| {
+            writer.writer.flush()?;
+            Ok(SaleaeExportChannel {
+                channel: writer.channel,
+                label: capture
+                    .metadata
+                    .labels
+                    .get(usize::from(writer.channel))
+                    .cloned()
+                    .unwrap_or_else(|| format!("D{}", writer.channel)),
+                initial_high: writer.initial_high,
+                transitions_file: writer.file_name,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    write_saleae_export_manifest(directory, &capture.metadata, manifest_channels)
+}
+
+pub fn write_saleae_sparse_export_manifest(
+    directory: impl AsRef<Path>,
+    capture: &SparseCaptureData,
+) -> Result<PathBuf> {
+    validate_saleae_export_metadata(&capture.metadata)?;
+    let enabled_channels = export_channels(&capture.metadata)?;
+    let mut channels = capture.channels.iter().collect::<Vec<_>>();
+    channels.sort_by_key(|channel| channel.channel);
+    if channels.len() != enabled_channels.len()
+        || channels
+            .iter()
+            .map(|channel| channel.channel)
+            .ne(enabled_channels.iter().copied())
+    {
+        return Err(FileError::InvalidSaleae(
+            "sparse channels do not match enabled capture channels".to_string(),
+        ));
+    }
+
+    let directory = directory.as_ref();
+    fs::create_dir_all(directory)?;
+    let mut manifest_channels = Vec::with_capacity(channels.len());
+    for channel in channels {
+        if channel.channel >= capture.metadata.channel_count
+            || channel
+                .transitions
+                .iter()
+                .any(|&sample| sample >= capture.metadata.sample_count)
+            || channel
+                .transitions
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(FileError::InvalidSaleae(format!(
+                "D{} contains invalid sparse transitions",
+                channel.channel
+            )));
+        }
+        let file_name = format!("transitions-{}.u64", channel.channel);
+        let mut writer = BufWriter::new(File::create(directory.join(&file_name))?);
+        for &sample in &channel.transitions {
+            writer.write_all(&sample.to_le_bytes())?;
+        }
+        writer.flush()?;
+        manifest_channels.push(SaleaeExportChannel {
+            channel: channel.channel,
+            label: capture
+                .metadata
+                .labels
+                .get(usize::from(channel.channel))
+                .cloned()
+                .unwrap_or_else(|| format!("D{}", channel.channel)),
+            initial_high: channel.initial_high,
+            transitions_file: file_name,
+        });
+    }
+    write_saleae_export_manifest(directory, &capture.metadata, manifest_channels)
+}
+
+fn validate_saleae_export_metadata(metadata: &CaptureMetadata) -> Result<()> {
+    let expected_unitsize = match metadata.channel_count {
+        1..=8 => 1,
+        9..=16 => 2,
+        17..=32 => 4,
+        _ => return Err(FileError::InvalidCapture),
+    };
+    if !(1..=32).contains(&metadata.channel_count)
+        || metadata.sample_rate_hz == 0
+        || metadata.sample_count == 0
+        || metadata.unitsize != expected_unitsize
+    {
+        return Err(FileError::InvalidCapture);
+    }
+    Ok(())
+}
+
+fn write_saleae_export_manifest(
+    directory: &Path,
+    metadata: &CaptureMetadata,
+    channels: Vec<SaleaeExportChannel>,
+) -> Result<PathBuf> {
+    if channels.is_empty() {
+        return Err(FileError::InvalidCapture);
+    }
+    let manifest = SaleaeExportManifest {
+        format: "pxlogic.saleae-export.v1",
+        name: "PXLogic Capture".to_string(),
+        source_device: metadata.source_device.clone(),
+        sample_rate_hz: metadata.sample_rate_hz,
+        channel_count: metadata.channel_count,
+        sample_count: metadata.sample_count,
+        captured_at_unix_milliseconds: metadata.captured_at.timestamp_millis(),
+        channels,
+    };
+    let path = directory.join("manifest.json");
+    serde_json::to_writer_pretty(File::create(&path)?, &manifest)?;
+    Ok(path)
 }
 
 pub fn open_saleae_transition_manifest(path: impl AsRef<Path>) -> Result<SparseCaptureData> {
@@ -582,6 +767,66 @@ mod tests {
     }
 
     #[test]
+    fn writes_packed_saleae_export_manifest_as_transition_indexes() {
+        let directory = temp_directory("saleae-packed-export");
+        let mut capture = sparse_capture();
+        capture.metadata.sample_count = 4;
+        capture.samples = vec![0x10, 0x01, 0x11, 0x00];
+
+        let manifest_path = write_saleae_packed_export_manifest(&directory, &capture).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_reader(File::open(manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["format"], "pxlogic.saleae-export.v1");
+        assert_eq!(manifest["sample_count"], 4);
+        assert_eq!(manifest["channels"][0]["channel"], 0);
+        assert_eq!(manifest["channels"][0]["initial_high"], false);
+        assert_eq!(manifest["channels"][1]["channel"], 4);
+        assert_eq!(manifest["channels"][1]["initial_high"], true);
+        assert_eq!(
+            read_u64_file(directory.join("transitions-0.u64")),
+            vec![1, 3]
+        );
+        assert_eq!(
+            read_u64_file(directory.join("transitions-4.u64")),
+            vec![1, 2, 3]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn writes_sparse_saleae_export_without_expanding_long_capture() {
+        let directory = temp_directory("saleae-sparse-export");
+        let mut metadata = sparse_capture().metadata;
+        metadata.sample_count = 49_000_000_001;
+        let capture = SparseCaptureData {
+            metadata,
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: vec![100, 4_294_967_300, 49_000_000_000],
+                },
+                SparseDigitalChannel {
+                    channel: 4,
+                    initial_high: true,
+                    transitions: vec![200],
+                },
+            ],
+        };
+
+        write_saleae_sparse_export_manifest(&directory, &capture).unwrap();
+        assert_eq!(
+            read_u64_file(directory.join("transitions-0.u64")),
+            vec![100, 4_294_967_300, 49_000_000_000]
+        );
+        assert_eq!(
+            read_u64_file(directory.join("transitions-4.u64")),
+            vec![200]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires PXLOGIC_SALEAE_MANIFEST from the native GraphServer sidecar"]
     fn opens_native_saleae_graphserver_export() {
         let manifest = std::env::var_os("PXLOGIC_SALEAE_MANIFEST")
@@ -598,5 +843,17 @@ mod tests {
 
     fn temp_file(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("pxlogic-file-{}-{name}", std::process::id()))
+    }
+
+    fn temp_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("pxlogic-file-{}-{name}", std::process::id()))
+    }
+
+    fn read_u64_file(path: impl AsRef<Path>) -> Vec<u64> {
+        fs::read(path)
+            .unwrap()
+            .chunks_exact(8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect()
     }
 }

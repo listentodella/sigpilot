@@ -4,7 +4,7 @@
 
 使用 Logic 2.4.43 原版 GraphServer 打开 `.sal`，再由原版 `ExportNode` 导出公开 Saleae digital binary；Rust 只解析公开格式并保存 transition index，不展开为逐采样数组。
 
-这里的“export”是 GraphServer 内部的 `.sal -> public digital binary` 转换，不是 PXLogic UI 的另存为 `.sal`。
+这里的“export”是 GraphServer 内部的 `.sal -> public digital binary` 转换。PXLogic UI 的另存为 `.sal` 已在后续 `2026-07-24-saleae-sal-native-export.md` 完成。
 
 ## 原版参考路径
 
@@ -30,7 +30,7 @@
 
 ## 复用方式
 
-- 直接调用原版 GraphServer 和 DigitalStore/ExportNode，不重写 `.sal` 私有序列化格式。
+- 导入直接调用原版 GraphServer 和 DigitalStore/ExportNode，不解析完整私有 transition store。
 - Rust 仅解析 Saleae 已公开的 digital binary 格式，并把时间转换为 sample index。
 - Graph sidecar 为 one-shot 进程；Logic 2.4.43 在 ExportNode 完成后可能仍持有私有 mutex，因此不调用 `DestroyGraphServer`/`dlclose`，由进程退出回收。
 
@@ -61,5 +61,4 @@ PXLOGIC_SALEAE_MANIFEST="$OUT/manifest.json" \
 
 - 仅导入数字通道；analog/waveform channel 尚未接入。
 - `.sal` session 的 save/trim/range measurement 仍需原生 sparse 实现，不能退回 packed `Vec<u8>`。
-- 当前不会生成新的 `.sal` 文件。
-- 当前工作树尚未创建独立 Git commit。
+- 新 `.sal` 导出、恒定通道和 32 通道 round-trip 见 `2026-07-24-saleae-sal-native-export.md`。

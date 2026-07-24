@@ -608,6 +608,80 @@ fn save_capture(session_id: String, path: String, state: State<'_, AppState>) ->
     pxlogic_file::save_pxcap(PathBuf::from(path), &capture).map_err(to_string)
 }
 
+fn export_saleae_capture(session: &GraphSession, path: &Path) -> CommandResult<()> {
+    let sidecar = locate_saleae_graph_sidecar().ok_or_else(|| {
+        "Saleae .sal export requires the native graph sidecar; build native/saleae-graph-sidecar/build.sh first"
+            .to_string()
+    })?;
+    let runtime_root = locate_saleae_runtime_root().ok_or_else(|| {
+        "Saleae .sal export requires Logic 2.4.43 runtime; set PXLOGIC_SALEAE_RUNTIME_ROOT"
+            .to_string()
+    })?;
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let staging = std::env::temp_dir().join(format!(
+        "pxlogic-saleae-export-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&staging).map_err(to_string)?;
+
+    let manifest_result = if let Some(capture) = session.capture() {
+        pxlogic_file::write_saleae_packed_export_manifest(&staging, &capture)
+    } else if let Some(capture) = session.sparse_capture() {
+        pxlogic_file::write_saleae_sparse_export_manifest(&staging, &capture)
+    } else {
+        let _ = fs::remove_dir_all(&staging);
+        return Err("no capture is loaded".to_string());
+    };
+    let manifest = match manifest_result {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error.to_string());
+        }
+    };
+    let temporary_output = staging.join("capture.sal");
+    let result = Command::new(&sidecar)
+        .arg("--runtime-root")
+        .arg(runtime_root)
+        .arg("--create-sal")
+        .arg(manifest)
+        .arg(&temporary_output)
+        .output()
+        .map_err(|error| format!("failed to start Saleae graph sidecar: {error}"));
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    if !result.status.success() {
+        let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
+        let _ = fs::remove_dir_all(&staging);
+        return Err(if detail.is_empty() {
+            format!("Saleae .sal export failed with {}", result.status)
+        } else {
+            format!("Saleae .sal export failed: {detail}")
+        });
+    }
+    if !temporary_output.is_file() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err("Saleae graph sidecar completed without a .sal archive".to_string());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(to_string)?;
+    }
+    let rename_result = fs::rename(&temporary_output, path).map_err(to_string);
+    let _ = fs::remove_dir_all(&staging);
+    rename_result
+}
+
 #[tauri::command]
 fn export_capture(
     session_id: String,
@@ -615,14 +689,18 @@ fn export_capture(
     format: ExportFormat,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    let capture = state
-        .existing_session(&session_id)?
+    let session = state.existing_session(&session_id)?;
+    if format == ExportFormat::Sal {
+        return export_saleae_capture(&session, Path::new(&path));
+    }
+    let capture = session
         .capture()
-        .ok_or_else(|| "no capture is loaded".to_string())?;
+        .ok_or_else(|| "this export format requires a packed capture".to_string())?;
     match format {
         ExportFormat::Pxcap => pxlogic_file::save_pxcap(PathBuf::from(path), &capture),
         ExportFormat::Sr => pxlogic_file::export_sr(PathBuf::from(path), &capture),
         ExportFormat::Vcd => pxlogic_file::export_vcd(PathBuf::from(path), &capture),
+        ExportFormat::Sal => unreachable!(),
     }
     .map_err(to_string)
 }

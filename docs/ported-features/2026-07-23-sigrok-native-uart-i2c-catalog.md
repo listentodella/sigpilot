@@ -60,4 +60,4 @@ pnpm build
 
 - 当前接入的是 PXView 三个 native C decoder；完整 Python decoder catalog、stacked decoder 和 streaming lifecycle 仍需后续目标。
 - Saleae Native 目前仍只接通 SPI。
-- 下一文件目标是完成 Logic 2 `.sal` 原生序列化导出，并用 Logic 2 回读验证。
+- Logic 2 `.sal` 原生序列化导出与回读已在 `2026-07-24-saleae-sal-native-export.md` 完成。

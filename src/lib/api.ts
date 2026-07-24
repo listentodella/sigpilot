@@ -134,7 +134,7 @@ export interface DiagnosticEvent {
   message: string;
 }
 
-export type ExportFormat = "Pxcap" | "Sr" | "Vcd";
+export type ExportFormat = "Pxcap" | "Sr" | "Vcd" | "Sal";
 
 export interface WaveformRequest {
   start_sample: number;

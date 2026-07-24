@@ -2132,7 +2132,7 @@ export default function App() {
   }
 
   async function handleSave() {
-    if (!activeSession?.summary) return;
+    if (!activeSession?.summary || activeSession.busy) return;
     try {
       const path = await saveDialog({
         defaultPath: `${activeSession.name || "capture"}.pxcap`,
@@ -2146,13 +2146,14 @@ export default function App() {
     }
   }
 
-  async function handleExport(format: "Sr" | "Vcd") {
-    if (!activeSession?.summary) return;
-    const ext = format === "Sr" ? "sr" : "vcd";
+  async function handleExport(format: "Sr" | "Vcd" | "Sal") {
+    if (!activeSession?.summary || activeSession.busy) return;
+    const ext = format === "Sr" ? "sr" : format === "Vcd" ? "vcd" : "sal";
+    const filterName = format === "Sr" ? "Sigrok Session" : format === "Vcd" ? "Value Change Dump" : "Saleae Logic Capture";
     try {
       const path = await saveDialog({
         defaultPath: `${activeSession.name || "capture"}.${ext}`,
-        filters: [{ name: format === "Sr" ? "Sigrok Session" : "Value Change Dump", extensions: [ext] }],
+        filters: [{ name: filterName, extensions: [ext] }],
       });
       if (!path) return;
       await exportCapture(activeSession.id, path, format);
@@ -3038,14 +3039,28 @@ export default function App() {
               <FolderOpen size={14} />
               Open
             </button>
-            <button className="tool-button" title="Save capture" onClick={handleSave} disabled={!activeSession?.summary}>
+            <button
+              className="tool-button"
+              title="Save capture"
+              onClick={handleSave}
+              disabled={!activeSession?.summary || activeSession.busy}
+            >
               <Save size={14} />
+            </button>
+            <button
+              className="tool-button text-tool"
+              title="Export Saleae Logic capture"
+              onClick={() => handleExport("Sal")}
+              disabled={!activeSession?.summary || activeSession.busy}
+            >
+              <FileDown size={14} />
+              SAL
             </button>
             <button
               className="tool-button text-tool"
               title="Export SR"
               onClick={() => handleExport("Sr")}
-              disabled={!activeSession?.summary}
+              disabled={!activeSession?.summary || activeSession.busy}
             >
               <FileDown size={14} />
               SR
@@ -3054,7 +3069,7 @@ export default function App() {
               className="tool-button text-tool"
               title="Export VCD"
               onClick={() => handleExport("Vcd")}
-              disabled={!activeSession?.summary}
+              disabled={!activeSession?.summary || activeSession.busy}
             >
               <Download size={14} />
               VCD
