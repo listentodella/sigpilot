@@ -17,6 +17,7 @@ DECODER_ROOT="$BUILD_DIR/decoders/c_decoders"
   and (.protocols | index("UART") != null)
   and (.protocols | index("I2C") != null)
   and (.protocols | index("SPI") != null)
+  and (.protocols | index("I2S") != null)
 ' >/dev/null
 
 failures=0

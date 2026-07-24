@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
@@ -141,6 +143,23 @@ pub struct SpiDecodeSettings {
     pub msb_first: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum NativeOptionValue {
+    Boolean(bool),
+    Integer(i64),
+    Text(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeDecodeSettings {
+    pub decoder_id: String,
+    pub protocol_name: String,
+    pub channels: BTreeMap<String, Option<u8>>,
+    pub options: BTreeMap<String, NativeOptionValue>,
+    pub primary_channel: u8,
+}
+
 impl Default for SpiDecodeSettings {
     fn default() -> Self {
         Self {
@@ -163,6 +182,7 @@ pub enum AnalyzerDecodeSettings {
     Uart(UartDecodeSettings),
     I2c(I2cDecodeSettings),
     Spi(SpiDecodeSettings),
+    Native(NativeDecodeSettings),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -243,6 +263,10 @@ pub fn decode_analyzer(
         AnalyzerDecodeSettings::Uart(settings) => decode_uart(capture, settings),
         AnalyzerDecodeSettings::I2c(settings) => decode_i2c(capture, settings),
         AnalyzerDecodeSettings::Spi(settings) => decode_spi(capture, settings),
+        AnalyzerDecodeSettings::Native(settings) => Err(CoreError::Decode(format!(
+            "{} requires a Saleae Native or Sigrok Native decoder backend",
+            settings.protocol_name
+        ))),
     }
 }
 

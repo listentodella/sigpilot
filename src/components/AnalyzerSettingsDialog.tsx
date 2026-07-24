@@ -62,6 +62,18 @@ export function AnalyzerSettingsDialog({
       spiClockPhase: false,
       spiBitsPerTransfer: 8,
       spiMsbFirst: true,
+      nativePrimaryChannel: 0,
+      nativeChannels: { sck: 0, ws: 1, sd: 2 },
+      nativeOptions: {
+        bit_order: "msb-first",
+        clk_edge: "falling-edge",
+        word_size: 16,
+        frame_transitions: "once-each-word",
+        bit_align: "left-aligned",
+        bit_shift: "right-shifted by one",
+        signed: false,
+        ws_polarity: "right-high",
+      },
       showInDataTable: true,
       streamToTerminal: false,
     }));
@@ -77,6 +89,8 @@ export function AnalyzerSettingsDialog({
           ? draft.i2cSdaChannel
           : draft.type === "SPI"
             ? draft.spiMosiChannel ?? draft.spiMisoChannel ?? draft.spiClockChannel
+            : draft.type === "I2S"
+              ? draft.nativeChannels.sd ?? draft.nativePrimaryChannel
             : draft.channel,
     });
   }
@@ -279,6 +293,163 @@ export function AnalyzerSettingsDialog({
                 >
                   <option value="msb">Most Significant Bit First</option>
                   <option value="lsb">Least Significant Bit First</option>
+                </select>
+              </AnalyzerSettingRow>
+            </>
+          )}
+
+          {draft.type === "I2S" && (
+            <>
+              <AnalyzerSettingRow label="CLOCK channel" required>
+                <ChannelSelect
+                  {...channelSelectProps}
+                  autoFocus
+                  onChange={(channel) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativePrimaryChannel: channel ?? 0,
+                      nativeChannels: { ...current.nativeChannels, sck: channel ?? 0 },
+                    }))
+                  }
+                  value={draft.nativeChannels.sck ?? 0}
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="FRAME" required>
+                <ChannelSelect
+                  {...channelSelectProps}
+                  onChange={(channel) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeChannels: { ...current.nativeChannels, ws: channel ?? 0 },
+                    }))
+                  }
+                  value={draft.nativeChannels.ws ?? 0}
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="DATA" required>
+                <ChannelSelect
+                  {...channelSelectProps}
+                  onChange={(channel) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeChannels: { ...current.nativeChannels, sd: channel ?? 0 },
+                    }))
+                  }
+                  value={draft.nativeChannels.sd ?? 0}
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="DATA Significant Bit">
+                <select
+                  value={String(draft.nativeOptions.bit_order)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, bit_order: event.target.value },
+                    }))
+                  }
+                >
+                  <option value="msb-first">Most Significant Bit Sent First</option>
+                  <option value="lsb-first">Least Significant Bit Sent First</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="CLOCK State">
+                <select
+                  value={String(draft.nativeOptions.clk_edge)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, clk_edge: event.target.value },
+                    }))
+                  }
+                >
+                  <option value="falling-edge">Falling edge</option>
+                  <option value="rising-edge">Rising edge</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Audio Bit Depth (bits/sample)" required>
+                <input
+                  max={draft.decoderBackend === "saleae_native" ? 64 : 32}
+                  min={2}
+                  step={1}
+                  type="number"
+                  value={Number(draft.nativeOptions.word_size)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, word_size: Number(event.target.value) },
+                    }))
+                  }
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="FRAME Signal Transitions">
+                <select
+                  value={String(draft.nativeOptions.frame_transitions)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, frame_transitions: event.target.value },
+                    }))
+                  }
+                >
+                  <option value="twice-each-word">Twice each word</option>
+                  <option value="once-each-word">Once each word (I2S, PCM standard)</option>
+                  <option value="twice-every-4-words">Twice every 4 words</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="DATA Bits Alignment">
+                <select
+                  value={String(draft.nativeOptions.bit_align)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, bit_align: event.target.value },
+                    }))
+                  }
+                >
+                  <option value="left-aligned">Left aligned</option>
+                  <option value="right-aligned">Right aligned</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="DATA Bits Shift">
+                <select
+                  value={String(draft.nativeOptions.bit_shift)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, bit_shift: event.target.value },
+                    }))
+                  }
+                >
+                  <option value="right-shifted by one">Right-shifted by one (I2S typical)</option>
+                  <option value="none">No shift (PCM standard)</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Signed/Unsigned">
+                <select
+                  value={draft.nativeOptions.signed === true ? "signed" : "unsigned"}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, signed: event.target.value === "signed" },
+                    }))
+                  }
+                >
+                  <option value="unsigned">Unsigned</option>
+                  <option value="signed">Signed (two&apos;s complement)</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Word Select High">
+                <select
+                  value={String(draft.nativeOptions.ws_polarity)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, ws_polarity: event.target.value },
+                    }))
+                  }
+                >
+                  <option value="right-high">Channel 2 (right - I2S typical)</option>
+                  <option value="left-high">Channel 1 (left - inverted)</option>
                 </select>
               </AnalyzerSettingRow>
             </>
@@ -567,6 +738,21 @@ function validateAnalyzer(analyzer: UiAnalyzerInstance) {
       analyzer.spiEnableChannel,
     ].filter((channel): channel is number => channel !== null);
     if (new Set(assigned).size !== assigned.length) return "SPI inputs must use different channels.";
+  }
+  if (analyzer.type === "I2S") {
+    const assigned = [
+      analyzer.nativeChannels.sck,
+      analyzer.nativeChannels.ws,
+      analyzer.nativeChannels.sd,
+    ].filter((channel): channel is number => channel !== null && channel !== undefined);
+    if (assigned.length !== 3 || new Set(assigned).size !== assigned.length) {
+      return "CLOCK, FRAME, and DATA must use different channels.";
+    }
+    const wordSize = Number(analyzer.nativeOptions.word_size);
+    const maximumWordSize = analyzer.decoderBackend === "saleae_native" ? 64 : 32;
+    if (!Number.isInteger(wordSize) || wordSize < 2 || wordSize > maximumWordSize) {
+      return `Audio bit depth must be between 2 and ${maximumWordSize} bits.`;
+    }
   }
   return "";
 }

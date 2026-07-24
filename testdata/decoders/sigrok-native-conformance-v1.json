@@ -61,6 +61,52 @@
       },
       "expected_rows": ["Address write", "Data write"],
       "expected_values": [80, 165]
+    },
+    {
+      "id": "i2s-16bit-left-right",
+      "sample_rate_hz": 1000000,
+      "sample_count": 400,
+      "channel_count": 3,
+      "initial_levels": [0, 0, 0],
+      "edges": [
+        {
+          "channel": 0,
+          "samples": [
+            10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80,
+            85, 90, 95, 100, 105, 110, 115, 120, 125, 130, 135, 140, 145,
+            150, 155, 160, 165, 170, 175, 180, 185, 190, 195, 200, 205,
+            210, 215, 220, 225, 230, 235, 240, 245, 250, 255, 260, 265,
+            270, 275, 280, 285, 290, 295, 300, 305, 310, 315, 320, 325,
+            330, 335, 340, 345, 350, 355, 360, 365, 370, 375, 380, 385,
+            390, 395
+          ]
+        },
+        {
+          "channel": 1,
+          "samples": [48, 208, 368]
+        },
+        {
+          "channel": 2,
+          "samples": [
+            78, 88, 108, 118, 148, 168, 178, 188, 218, 228, 238, 248,
+            258, 278, 298, 338, 368, 378, 398
+          ]
+        }
+      ],
+      "decoder": {
+        "protocol": "i2s",
+        "channels": { "sck": 0, "ws": 1, "sd": 2 },
+        "options": {
+          "ws_polarity": "left-high",
+          "clk_edge": "rising-edge",
+          "bit_shift": "none",
+          "bit_align": "left-aligned",
+          "bit_order": "msb-first",
+          "word_size": 16
+        }
+      },
+      "expected_rows": ["Left", "Right"],
+      "expected_values": [4660, 22136]
     }
   ]
 }

@@ -49,6 +49,11 @@ export interface UiAnalyzerInstance {
   spiClockPhase: boolean;
   spiBitsPerTransfer: number;
   spiMsbFirst: boolean;
+  nativeDecoderId: string;
+  nativeProtocolName: string;
+  nativePrimaryChannel: number;
+  nativeChannels: Record<string, number | null>;
+  nativeOptions: Record<string, boolean | number | string>;
   showInDataTable: boolean;
   streamToTerminal: boolean;
   displayRadix: string;
@@ -112,6 +117,24 @@ export function createAnalyzerInstance(
     spiClockPhase: false,
     spiBitsPerTransfer: 8,
     spiMsbFirst: true,
+    nativeDecoderId: type === "I2S" ? "i2s" : type.toLowerCase().split(" ").join("_"),
+    nativeProtocolName: type,
+    nativePrimaryChannel: channel,
+    nativeChannels: {
+      sck: channel,
+      ws: nextChannel(1),
+      sd: nextChannel(2),
+    },
+    nativeOptions: {
+      bit_order: "msb-first",
+      clk_edge: "falling-edge",
+      word_size: 16,
+      frame_transitions: "once-each-word",
+      bit_align: "left-aligned",
+      bit_shift: "right-shifted by one",
+      signed: false,
+      ws_polarity: "right-high",
+    },
     showInDataTable: true,
     streamToTerminal: false,
     displayRadix: "Hexadecimal",
@@ -180,6 +203,23 @@ export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChan
     ].filter((role): role is AnalyzerChannelRole => role !== null);
   }
 
+  if (analyzer.type === "I2S") {
+    const sck = analyzer.nativeChannels.sck;
+    const ws = analyzer.nativeChannels.ws;
+    const sd = analyzer.nativeChannels.sd;
+    return [
+      typeof sd === "number"
+        ? { channel: sd, hasBubbles: true, hasMarkers: false, title: "DATA" }
+        : null,
+      typeof sck === "number"
+        ? { channel: sck, hasBubbles: false, hasMarkers: true, title: "CLOCK" }
+        : null,
+      typeof ws === "number"
+        ? { channel: ws, hasBubbles: false, hasMarkers: false, title: "FRAME" }
+        : null,
+    ].filter((role): role is AnalyzerChannelRole => role !== null);
+  }
+
   return [
     {
       channel: analyzer.channel,
@@ -211,7 +251,7 @@ export function analyzerStripInsetForChannel(analyzers: UiAnalyzerInstance[], ch
 }
 
 export function analyzerSupportsDecoding(analyzer: Pick<UiAnalyzerInstance, "type">) {
-  return analyzer.type === "Async Serial" || analyzer.type === "I2C" || analyzer.type === "SPI";
+  return analyzer.type === "Async Serial" || analyzer.type === "I2C" || analyzer.type === "SPI" || analyzer.type === "I2S";
 }
 
 export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDecodeSettings | null {
@@ -255,6 +295,18 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
       },
     };
   }
+  if (analyzer.type === "I2S") {
+    return {
+      protocol: "Native",
+      settings: {
+        decoder_id: analyzer.nativeDecoderId,
+        protocol_name: analyzer.nativeProtocolName,
+        channels: analyzer.nativeChannels,
+        options: analyzer.nativeOptions,
+        primary_channel: analyzer.nativePrimaryChannel,
+      },
+    };
+  }
   return null;
 }
 
@@ -262,7 +314,12 @@ export function restoreSaleaeAnalyzer(
   metadata: SaleaeAnalyzerMetadata,
   analyzers: UiAnalyzerInstance[],
 ): UiAnalyzerInstance {
-  const type = metadata.type === "Serial" ? "Async Serial" : metadata.type;
+  const type =
+    metadata.type === "Serial"
+      ? "Async Serial"
+      : metadata.type === "I2S / PCM"
+        ? "I2S"
+        : metadata.type;
   const settings = metadata.decode_settings;
   const primaryChannel =
     settings?.protocol === "Uart"
@@ -271,6 +328,8 @@ export function restoreSaleaeAnalyzer(
         ? settings.settings.sda_channel
         : settings?.protocol === "Spi"
           ? (settings.settings.mosi_channel ?? settings.settings.miso_channel ?? settings.settings.clock_channel)
+          : settings?.protocol === "Native"
+            ? settings.settings.primary_channel
           : 0;
   const restored = {
     ...createAnalyzerInstance(type, analyzers, primaryChannel, metadata.decoder_backend),
@@ -319,6 +378,17 @@ export function restoreSaleaeAnalyzer(
       spiClockPhase: settings.settings.clock_phase,
       spiBitsPerTransfer: settings.settings.bits_per_transfer,
       spiMsbFirst: settings.settings.msb_first,
+    };
+  }
+  if (settings?.protocol === "Native") {
+    return {
+      ...restored,
+      channel: settings.settings.primary_channel,
+      nativeDecoderId: settings.settings.decoder_id,
+      nativeProtocolName: settings.settings.protocol_name,
+      nativePrimaryChannel: settings.settings.primary_channel,
+      nativeChannels: settings.settings.channels,
+      nativeOptions: settings.settings.options,
     };
   }
   return restored;
@@ -400,6 +470,7 @@ export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
   if (type === "SPI" || type === "Async Serial" || type === "I2C") {
     return ["saleae_native", "sigrok_native", "legacy_rust"];
   }
+  if (type === "I2S") return ["saleae_native", "sigrok_native"];
   return ["legacy_rust"];
 }
 
@@ -413,16 +484,16 @@ export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
   {
     backend: "saleae_native",
     label: "Saleae Native",
-    analyzers: ["Async Serial", "I2C", "SPI"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S"],
   },
   {
     backend: "sigrok_native",
     label: "Sigrok Native (PXView)",
-    analyzers: ["Async Serial", "I2C", "SPI"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S"],
   },
   {
     backend: "legacy_rust",
     label: "Compatibility",
-    analyzers: ["Async Serial", "I2C", "SPI", "CAN", "I2S", "Manchester"],
+    analyzers: ["Async Serial", "I2C", "SPI", "CAN", "Manchester"],
   },
 ];

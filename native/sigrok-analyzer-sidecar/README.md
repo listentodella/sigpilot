@@ -2,7 +2,8 @@
 
 This GPL-2.0-or-later executable hosts PXView's `libsigrokdecode` fork outside
 the Tauri process. The build references the existing `pxview-fork` source tree
-directly and loads its native C `uart_c`, `i2c_c`, and `spi_c` decoders.
+directly and loads its native C `uart_c`, `i2c_c`, `spi_c`, and `i2s_c`
+decoders.
 
 Build and verify:
 
@@ -22,7 +23,8 @@ The executable accepts `--probe` and `--decode`. Decode requests use the
 remains accepted for Saleae/SPI fixture compatibility), and responses use the
 backend-neutral Rust `DecoderOutput` JSON shape.
 
-All three C decoders run against a transition-indexed `srd_decoder_runtime`.
+All four C decoders run against a transition-indexed `srd_decoder_runtime`.
 Decode cost and memory therefore scale with relevant edges rather than total
 capture duration; `verify.sh` covers UART, I2C, SPI, and transactions near
-sample 49 billion.
+sample 49 billion. I2S is covered in packed and sparse form with independent
+left/right word assertions.

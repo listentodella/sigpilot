@@ -414,6 +414,10 @@ impl DigitalGraph {
             AnalyzerDecodeSettings::Uart(settings) => self.decode_uart_from(settings, start_sample),
             AnalyzerDecodeSettings::I2c(settings) => self.decode_i2c_from(settings, start_sample),
             AnalyzerDecodeSettings::Spi(settings) => self.decode_spi_from(settings, start_sample),
+            AnalyzerDecodeSettings::Native(settings) => Err(GraphError::InvalidAnalyzer(format!(
+                "{} requires a Saleae Native or Sigrok Native decoder backend",
+                settings.protocol_name
+            ))),
         }
     }
 
@@ -991,6 +995,12 @@ impl GraphSession {
             backend,
             DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust
         ) {
+            if let AnalyzerDecodeSettings::Native(settings) = settings {
+                return Err(GraphError::InvalidAnalyzer(format!(
+                    "{} cannot use the Legacy Rust decoder backend",
+                    settings.protocol_name
+                )));
+            }
             return self.decode_frames(settings);
         }
         let packed_capture = self.capture();
@@ -998,6 +1008,9 @@ impl GraphSession {
         if packed_capture.is_none() && sparse_capture.is_none() {
             // Native sidecars are batch decoders. Keep live bubbles available
             // from the indexed graph, then replace them after finish_capture().
+            if matches!(settings, AnalyzerDecodeSettings::Native(_)) {
+                return Ok(Arc::new(Vec::new()));
+            }
             return self.decode_frames(settings);
         }
 
@@ -1218,6 +1231,7 @@ fn sparse_native_analysis_windows(
         AnalyzerDecodeSettings::Uart(settings) => settings.channel,
         AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
         AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
+        AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
     };
     let driver = capture
         .channels

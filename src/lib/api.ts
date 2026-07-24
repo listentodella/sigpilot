@@ -247,10 +247,21 @@ export interface SpiDecodeSettings {
   msb_first: boolean;
 }
 
+export type NativeOptionValue = boolean | number | string;
+
+export interface NativeDecodeSettings {
+  decoder_id: string;
+  protocol_name: string;
+  channels: Record<string, number | null>;
+  options: Record<string, NativeOptionValue>;
+  primary_channel: number;
+}
+
 export type AnalyzerDecodeSettings =
   | { protocol: "Uart"; settings: UartDecodeSettings }
   | { protocol: "I2c"; settings: I2cDecodeSettings }
-  | { protocol: "Spi"; settings: SpiDecodeSettings };
+  | { protocol: "Spi"; settings: SpiDecodeSettings }
+  | { protocol: "Native"; settings: NativeDecodeSettings };
 
 export type DecoderBackendKind = "auto" | "saleae_native" | "sigrok_native" | "legacy_rust";
 
@@ -448,6 +459,8 @@ function buildPreviewDemoSignals(
       claim(channels[1], { kind: "I2c", role: "Scl", settings: analyzer.settings });
       return;
     }
+
+    if (analyzer.protocol === "Native") return;
 
     const roles = [
       analyzer.settings.mosi_channel === null
@@ -944,6 +957,7 @@ export function releaseGraphSession(sessionId: string): Promise<void> {
 
 function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFrame[] {
   if (settings.protocol === "Uart") return buildPreviewUartFrames(settings.settings);
+  if (settings.protocol === "Native") return [];
   const metadata = previewCapture.metadata;
   const requestedChannels =
     settings.protocol === "I2c"

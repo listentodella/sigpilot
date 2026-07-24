@@ -210,20 +210,10 @@ struct NativeSidecarRequest {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "protocol", rename_all = "lowercase")]
-enum NativeSidecarSettings {
-    Uart {
-        channels: UartSidecarChannels,
-        options: UartSidecarOptions,
-    },
-    I2c {
-        channels: I2cSidecarChannels,
-        options: I2cSidecarOptions,
-    },
-    Spi {
-        channels: SpiSidecarChannels,
-        options: SpiSidecarOptions,
-    },
+struct NativeSidecarSettings {
+    protocol: String,
+    channels: serde_json::Value,
+    options: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -356,7 +346,12 @@ impl DecoderBackend for SaleaeNativeDecoder {
                 kind: DecoderBackendKind::SaleaeNative,
                 display_name: "Saleae Native analyzer sidecar".to_string(),
                 available: false,
-                protocols: vec!["UART".to_string(), "I2C".to_string(), "SPI".to_string()],
+                protocols: vec![
+                    "UART".to_string(),
+                    "I2C".to_string(),
+                    "SPI".to_string(),
+                    "I2S".to_string(),
+                ],
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
                 detail: error.to_string(),
@@ -535,6 +530,7 @@ fn discover_saleae_runtime_root() -> Option<PathBuf> {
             && path.join("Analyzers/libserial_analyzer.so").is_file()
             && path.join("Analyzers/libi2c_analyzer.so").is_file()
             && path.join("Analyzers/libspi_analyzer.so").is_file()
+            && path.join("Analyzers/libi2s_analyzer.so").is_file()
     })
 }
 
@@ -557,7 +553,12 @@ impl DecoderBackend for SigrokNativeDecoder {
                 kind: DecoderBackendKind::SigrokNative,
                 display_name: "Sigrok Native analyzer sidecar".to_string(),
                 available: false,
-                protocols: vec!["UART".to_string(), "I2C".to_string(), "SPI".to_string()],
+                protocols: vec![
+                    "UART".to_string(),
+                    "I2C".to_string(),
+                    "SPI".to_string(),
+                    "I2S".to_string(),
+                ],
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
                 detail: error.to_string(),
@@ -598,11 +599,12 @@ impl DecoderBackend for SigrokNativeDecoder {
     }
 }
 
-fn native_protocol_name(settings: &AnalyzerDecodeSettings) -> &'static str {
+fn native_protocol_name(settings: &AnalyzerDecodeSettings) -> &str {
     match settings {
         AnalyzerDecodeSettings::Uart(_) => "UART",
         AnalyzerDecodeSettings::I2c(_) => "I2C",
         AnalyzerDecodeSettings::Spi(_) => "SPI",
+        AnalyzerDecodeSettings::Native(settings) => &settings.protocol_name,
     }
 }
 
@@ -641,6 +643,16 @@ fn configured_native_channels(
             BTreeSet::from([settings.sda_channel, settings.scl_channel])
         }
         AnalyzerDecodeSettings::Spi(settings) => configured_spi_channels(settings, channel_count)?,
+        AnalyzerDecodeSettings::Native(settings) => {
+            let channels: BTreeSet<u8> = settings.channels.values().flatten().copied().collect();
+            if !channels.contains(&settings.primary_channel) {
+                return Err(CoreError::Decode(format!(
+                    "native {} primary channel is not configured",
+                    settings.protocol_name
+                )));
+            }
+            channels
+        }
     };
     if channels.iter().any(|channel| *channel >= channel_count) {
         return Err(CoreError::Decode(format!(
@@ -727,13 +739,15 @@ fn sparse_transition_sets(
 }
 
 fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSettings {
-    match settings {
-        AnalyzerDecodeSettings::Uart(settings) => NativeSidecarSettings::Uart {
-            channels: UartSidecarChannels {
+    let (protocol, channels, options) = match settings {
+        AnalyzerDecodeSettings::Uart(settings) => (
+            "uart".to_string(),
+            serde_json::to_value(UartSidecarChannels {
                 rx: Some(settings.channel),
                 tx: None,
-            },
-            options: UartSidecarOptions {
+            })
+            .expect("UART sidecar channels serialize"),
+            serde_json::to_value(UartSidecarOptions {
                 baudrate: settings.baud_rate,
                 data_bits: settings.data_bits,
                 stop_bits: settings.stop_bits.as_f64(),
@@ -750,26 +764,41 @@ fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSe
                 format: "hex",
                 invert_rx: u8::from(settings.inverted),
                 invert_tx: 0,
-            },
-        },
-        AnalyzerDecodeSettings::I2c(settings) => NativeSidecarSettings::I2c {
-            channels: I2cSidecarChannels {
+            })
+            .expect("UART sidecar options serialize"),
+        ),
+        AnalyzerDecodeSettings::I2c(settings) => (
+            "i2c".to_string(),
+            serde_json::to_value(I2cSidecarChannels {
                 scl: settings.scl_channel,
                 sda: settings.sda_channel,
-            },
-            options: I2cSidecarOptions {
+            })
+            .expect("I2C sidecar channels serialize"),
+            serde_json::to_value(I2cSidecarOptions {
                 address_format: "shifted",
                 packets_format: "hex",
                 show_data_point: 0,
-            },
-        },
+            })
+            .expect("I2C sidecar options serialize"),
+        ),
         AnalyzerDecodeSettings::Spi(settings) => {
             let spi = spi_sidecar_settings(settings);
-            NativeSidecarSettings::Spi {
-                channels: spi.channels,
-                options: spi.options,
-            }
+            (
+                "spi".to_string(),
+                serde_json::to_value(spi.channels).expect("SPI sidecar channels serialize"),
+                serde_json::to_value(spi.options).expect("SPI sidecar options serialize"),
+            )
         }
+        AnalyzerDecodeSettings::Native(settings) => (
+            settings.decoder_id.clone(),
+            serde_json::to_value(&settings.channels).expect("native sidecar channels serialize"),
+            serde_json::to_value(&settings.options).expect("native sidecar options serialize"),
+        ),
+    };
+    NativeSidecarSettings {
+        protocol,
+        channels,
+        options,
     }
 }
 
@@ -950,6 +979,12 @@ impl DecoderBackend for LegacyRustDecoder {
             AnalyzerDecodeSettings::Uart(_) => "UART",
             AnalyzerDecodeSettings::I2c(_) => "I2C",
             AnalyzerDecodeSettings::Spi(_) => "SPI",
+            AnalyzerDecodeSettings::Native(settings) => {
+                return Err(CoreError::Decode(format!(
+                    "{} is not implemented by the Legacy Rust decoder",
+                    settings.protocol_name
+                )))
+            }
         };
         let frames = crate::decode::decode_analyzer(capture, settings)?
             .into_iter()
@@ -975,11 +1010,16 @@ impl DecoderBackend for LegacyRustDecoder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use chrono::Utc;
 
     use super::*;
     use crate::{
-        decode::{I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings},
+        decode::{
+            I2cDecodeSettings, NativeDecodeSettings, NativeOptionValue, SpiDecodeSettings,
+            UartDecodeSettings,
+        },
         models::{CaptureMetadata, SparseDigitalChannel},
     };
 
@@ -1103,6 +1143,98 @@ mod tests {
         )
     }
 
+    fn i2s_edge_sets() -> Vec<(u8, Vec<u64>)> {
+        let mut edges = vec![(0, Vec::new()), (1, Vec::new()), (2, Vec::new())];
+        let mut levels = [false; 3];
+        let words = [0x1234u16, 0x5678, 0x9abc];
+        let bits = words
+            .into_iter()
+            .flat_map(|word| (0..16).rev().map(move |bit| word & (1 << bit) != 0))
+            .collect::<Vec<_>>();
+        for sample in 1..400u64 {
+            let bit = sample.checked_sub(48).map(|offset| (offset / 10) as usize);
+            let next = [
+                sample >= 10 && (sample - 10) % 10 < 5,
+                (48..208).contains(&sample) || sample >= 368,
+                bit.and_then(|index| bits.get(index))
+                    .copied()
+                    .unwrap_or(false),
+            ];
+            for channel in 0..3 {
+                if next[channel] != levels[channel] {
+                    edges[channel].1.push(sample);
+                    levels[channel] = next[channel];
+                }
+            }
+        }
+        edges
+    }
+
+    fn i2s_settings() -> AnalyzerDecodeSettings {
+        AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+            decoder_id: "i2s".to_string(),
+            protocol_name: "I2S".to_string(),
+            channels: BTreeMap::from([
+                ("sck".to_string(), Some(0)),
+                ("ws".to_string(), Some(1)),
+                ("sd".to_string(), Some(2)),
+            ]),
+            options: BTreeMap::from([
+                (
+                    "bit_order".to_string(),
+                    NativeOptionValue::Text("msb-first".to_string()),
+                ),
+                (
+                    "clk_edge".to_string(),
+                    NativeOptionValue::Text("rising-edge".to_string()),
+                ),
+                ("word_size".to_string(), NativeOptionValue::Integer(16)),
+                (
+                    "frame_transitions".to_string(),
+                    NativeOptionValue::Text("once-each-word".to_string()),
+                ),
+                (
+                    "bit_align".to_string(),
+                    NativeOptionValue::Text("left-aligned".to_string()),
+                ),
+                (
+                    "bit_shift".to_string(),
+                    NativeOptionValue::Text("none".to_string()),
+                ),
+                ("signed".to_string(), NativeOptionValue::Boolean(false)),
+                (
+                    "ws_polarity".to_string(),
+                    NativeOptionValue::Text("left-high".to_string()),
+                ),
+            ]),
+            primary_channel: 0,
+        })
+    }
+
+    fn i2s_capture() -> CaptureData {
+        transition_capture(
+            "native-i2s-test",
+            1_000_000,
+            400,
+            &[0, 0, 0],
+            &i2s_edge_sets(),
+        )
+    }
+
+    fn assert_i2s_output(output: &DecoderOutput) {
+        assert_eq!(
+            output
+                .frames
+                .iter()
+                .flat_map(|frame| frame.channel_values.iter())
+                .map(|value| value.value)
+                .take(2)
+                .collect::<Vec<_>>(),
+            vec![0x1234, 0x5678]
+        );
+        assert!(output.frames.iter().all(|frame| !frame.texts.is_empty()));
+    }
+
     #[test]
     fn legacy_backend_is_explicitly_discoverable() {
         let info = LegacyRustDecoder.info();
@@ -1136,6 +1268,25 @@ mod tests {
             .unwrap();
         assert_eq!(output.backend, DecoderBackendKind::LegacyRust);
         assert_eq!(output.protocol, "SPI");
+    }
+
+    #[test]
+    fn external_settings_never_fall_back_to_legacy_rust() {
+        let error = LegacyRustDecoder
+            .decode(&i2s_capture(), &i2s_settings())
+            .unwrap_err();
+        assert!(error.to_string().contains("not implemented"));
+    }
+
+    #[test]
+    fn generic_native_request_preserves_i2s_contract() {
+        let request = build_native_sidecar_request(&i2s_capture(), &i2s_settings()).unwrap();
+        let decoder = serde_json::to_value(request.decoder).unwrap();
+        assert_eq!(decoder["protocol"], "i2s");
+        assert_eq!(decoder["channels"]["sck"], 0);
+        assert_eq!(decoder["channels"]["ws"], 1);
+        assert_eq!(decoder["channels"]["sd"], 2);
+        assert_eq!(decoder["options"]["word_size"], 16);
     }
 
     #[test]
@@ -1183,7 +1334,7 @@ mod tests {
         let uart = build_native_sidecar_request(&uart_capture, &uart_settings).unwrap();
         assert_eq!(uart.edges.len(), 1);
         assert_eq!(uart.edges[0].channel, 0);
-        assert!(matches!(uart.decoder, NativeSidecarSettings::Uart { .. }));
+        assert_eq!(uart.decoder.protocol, "uart");
 
         let (i2c_capture, i2c_settings) = i2c_capture_and_settings();
         let i2c = build_native_sidecar_request(&i2c_capture, &i2c_settings).unwrap();
@@ -1194,7 +1345,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
-        assert!(matches!(i2c.decoder, NativeSidecarSettings::I2c { .. }));
+        assert_eq!(i2c.decoder.protocol, "i2c");
     }
 
     fn sparse_mode_zero_capture_and_settings() -> (SparseCaptureData, AnalyzerDecodeSettings) {
@@ -1413,6 +1564,28 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_native_sidecar_decodes_i2s_packed_and_sparse_fixtures() {
+        let decoder = SaleaeNativeDecoder::from_env().unwrap();
+        let packed = decoder.decode(&i2s_capture(), &i2s_settings()).unwrap();
+        assert_eq!(packed.protocol, "I2S / PCM");
+        assert_i2s_output(&packed);
+
+        const OFFSET: u64 = 49_000_000_000;
+        let sparse = sparse_transition_capture(
+            "saleae-i2s-sparse-test",
+            1_000_000,
+            50_000_000_000,
+            OFFSET,
+            &[0, 0, 0],
+            &i2s_edge_sets(),
+        );
+        let output = decoder.decode_sparse(&sparse, &i2s_settings()).unwrap();
+        assert_i2s_output(&output);
+        assert!(output.frames[0].start_sample > u64::from(u32::MAX));
+    }
+
+    #[test]
     #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_mode_zero_fixture() {
         let (capture, settings) = mode_zero_capture_and_settings();
@@ -1511,5 +1684,27 @@ mod tests {
             .unwrap();
         assert_eq!(i2c.frames[0].channel_values[0].value, 0x50);
         assert!(i2c.frames[0].start_sample > u64::from(u32::MAX));
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    fn sigrok_native_sidecar_decodes_i2s_packed_and_sparse_fixtures() {
+        let decoder = SigrokNativeDecoder::from_env().unwrap();
+        let packed = decoder.decode(&i2s_capture(), &i2s_settings()).unwrap();
+        assert_eq!(packed.protocol, "I2S");
+        assert_i2s_output(&packed);
+
+        const OFFSET: u64 = 49_000_000_000;
+        let sparse = sparse_transition_capture(
+            "sigrok-i2s-sparse-test",
+            1_000_000,
+            50_000_000_000,
+            OFFSET,
+            &[0, 0, 0],
+            &i2s_edge_sets(),
+        );
+        let output = decoder.decode_sparse(&sparse, &i2s_settings()).unwrap();
+        assert_i2s_output(&output);
+        assert!(output.frames[0].start_sample > u64::from(u32::MAX));
     }
 }

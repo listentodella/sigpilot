@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs::{self, File},
     io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -7,8 +8,9 @@ use std::{
 use chrono::Utc;
 use pxlogic_core::{
     capture::read_sample_word, resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData,
-    CaptureMetadata, DecoderBackendKind, I2cDecodeSettings, SparseCaptureData,
-    SparseDigitalChannel, SpiDecodeSettings, UartDecodeSettings, UartParity, UartStopBits,
+    CaptureMetadata, DecoderBackendKind, I2cDecodeSettings, NativeDecodeSettings,
+    NativeOptionValue, SparseCaptureData, SparseDigitalChannel, SpiDecodeSettings,
+    UartDecodeSettings, UartParity, UartStopBits,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -418,7 +420,9 @@ fn normalize_saleae_analyzer(raw: Value) -> Option<SaleaeAnalyzerMetadata> {
         return None;
     }
     let decoder_backend = match analyzer_type.as_str() {
-        "SPI" | "Async Serial" | "Serial" | "I2C" => DecoderBackendKind::SaleaeNative,
+        "SPI" | "Async Serial" | "Serial" | "I2C" | "I2S" | "I2S / PCM" => {
+            DecoderBackendKind::SaleaeNative
+        }
         _ => DecoderBackendKind::LegacyRust,
     };
     let decode_settings = normalize_saleae_decode_settings(&analyzer_type, &raw);
@@ -504,6 +508,118 @@ fn normalize_saleae_decode_settings(
                 )?,
                 parity,
                 msb_first: saleae_setting_u64(analyzer, &["Significant Bit"]).unwrap_or(0) != 0,
+            }))
+        }
+        "I2S" | "I2S / PCM" => {
+            let sck = saleae_setting_u8(analyzer, &["CLOCK channel", "PCM CLOCK", "SCK"])?;
+            let ws = saleae_setting_u8(analyzer, &["FRAME", "PCM FRAME", "WS"])?;
+            let sd = saleae_setting_u8(analyzer, &["DATA", "PCM DATA", "SD"])?;
+            Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "i2s".to_string(),
+                protocol_name: "I2S".to_string(),
+                channels: BTreeMap::from([
+                    ("sck".to_string(), Some(sck)),
+                    ("ws".to_string(), Some(ws)),
+                    ("sd".to_string(), Some(sd)),
+                ]),
+                options: BTreeMap::from(
+                    [
+                        (
+                            "bit_order".to_string(),
+                            NativeOptionValue::Text(
+                                if saleae_setting_u64(analyzer, &["DATA Significant Bit"])
+                                    .unwrap_or(0)
+                                    == 0
+                                {
+                                    "msb-first"
+                                } else {
+                                    "lsb-first"
+                                }
+                                .to_string(),
+                            ),
+                        ),
+                        (
+                            "clk_edge".to_string(),
+                            NativeOptionValue::Text(
+                                if saleae_setting_u64(analyzer, &["CLOCK State"]).unwrap_or(1) == 0
+                                {
+                                    "rising-edge"
+                                } else {
+                                    "falling-edge"
+                                }
+                                .to_string(),
+                            ),
+                        ),
+                        (
+                            "word_size".to_string(),
+                            NativeOptionValue::Integer(
+                                saleae_setting_u64(analyzer, &["Audio Bit Depth (bits/sample)"])
+                                    .unwrap_or(16) as i64,
+                            ),
+                        ),
+                        (
+                            "frame_transitions".to_string(),
+                            NativeOptionValue::Text(
+                                match saleae_setting_u64(analyzer, &["FRAME Signal Transitions"])
+                                    .unwrap_or(1)
+                                {
+                                    0 => "twice-each-word",
+                                    2 => "twice-every-4-words",
+                                    _ => "once-each-word",
+                                }
+                                .to_string(),
+                            ),
+                        ),
+                        (
+                            "bit_align".to_string(),
+                            NativeOptionValue::Text(
+                                if saleae_setting_u64(analyzer, &["DATA Bits Alignment"])
+                                    .unwrap_or(0)
+                                    == 0
+                                {
+                                    "left-aligned"
+                                } else {
+                                    "right-aligned"
+                                }
+                                .to_string(),
+                            ),
+                        ),
+                        (
+                            "bit_shift".to_string(),
+                            NativeOptionValue::Text(
+                                if saleae_setting_u64(analyzer, &["DATA Bits Shift"]).unwrap_or(0)
+                                    == 0
+                                {
+                                    "right-shifted by one"
+                                } else {
+                                    "none"
+                                }
+                                .to_string(),
+                            ),
+                        ),
+                        (
+                            "signed".to_string(),
+                            NativeOptionValue::Boolean(
+                                saleae_setting_u64(analyzer, &["Signed/Unsigned"]).unwrap_or(0)
+                                    != 0,
+                            ),
+                        ),
+                        (
+                            "ws_polarity".to_string(),
+                            NativeOptionValue::Text(
+                                if saleae_setting_u64(analyzer, &["Word Select High"]).unwrap_or(1)
+                                    == 1
+                                {
+                                    "right-high"
+                                } else {
+                                    "left-high"
+                                }
+                                .to_string(),
+                            ),
+                        ),
+                    ],
+                ),
+                primary_channel: sck,
             }))
         }
         _ => None,
@@ -1081,6 +1197,76 @@ mod tests {
             Some(AnalyzerDecodeSettings::I2c(I2cDecodeSettings {
                 sda_channel: 7,
                 scl_channel: 9,
+            }))
+        );
+    }
+
+    #[test]
+    fn normalizes_saleae_i2s_analyzer_settings_to_native_contract() {
+        let raw = serde_json::json!({
+            "name": "I2S / PCM [codec]",
+            "type": "I2S / PCM",
+            "color": "#E6A45A",
+            "displayRadix": "Hexadecimal",
+            "showInDataTable": true,
+            "streamToTerminal": false,
+            "settings": [
+                { "title": "CLOCK channel", "setting": { "type": "Channel", "value": 4 } },
+                { "title": "FRAME", "setting": { "type": "Channel", "value": 5 } },
+                { "title": "DATA", "setting": { "type": "Channel", "value": 6 } },
+                { "title": "DATA Significant Bit", "setting": { "type": "NumberList", "value": 1 } },
+                { "title": "CLOCK State", "setting": { "type": "NumberList", "value": 1 } },
+                { "title": "Audio Bit Depth (bits/sample)", "setting": { "type": "Integer", "value": 24 } },
+                { "title": "FRAME Signal Transitions", "setting": { "type": "NumberList", "value": 2 } },
+                { "title": "DATA Bits Alignment", "setting": { "type": "NumberList", "value": 1 } },
+                { "title": "DATA Bits Shift", "setting": { "type": "NumberList", "value": 1 } },
+                { "title": "Signed/Unsigned", "setting": { "type": "NumberList", "value": 1 } },
+                { "title": "Word Select High", "setting": { "type": "NumberList", "value": 0 } }
+            ]
+        });
+
+        let analyzer = normalize_saleae_analyzer(raw.clone()).unwrap();
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SaleaeNative);
+        assert_eq!(analyzer.saleae_metadata, raw);
+        assert_eq!(
+            analyzer.decode_settings,
+            Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "i2s".to_string(),
+                protocol_name: "I2S".to_string(),
+                channels: BTreeMap::from([
+                    ("sck".to_string(), Some(4)),
+                    ("ws".to_string(), Some(5)),
+                    ("sd".to_string(), Some(6)),
+                ]),
+                options: BTreeMap::from([
+                    (
+                        "bit_order".to_string(),
+                        NativeOptionValue::Text("lsb-first".to_string()),
+                    ),
+                    (
+                        "clk_edge".to_string(),
+                        NativeOptionValue::Text("falling-edge".to_string()),
+                    ),
+                    ("word_size".to_string(), NativeOptionValue::Integer(24)),
+                    (
+                        "frame_transitions".to_string(),
+                        NativeOptionValue::Text("twice-every-4-words".to_string()),
+                    ),
+                    (
+                        "bit_align".to_string(),
+                        NativeOptionValue::Text("right-aligned".to_string()),
+                    ),
+                    (
+                        "bit_shift".to_string(),
+                        NativeOptionValue::Text("none".to_string()),
+                    ),
+                    ("signed".to_string(), NativeOptionValue::Boolean(true)),
+                    (
+                        "ws_polarity".to_string(),
+                        NativeOptionValue::Text("left-high".to_string()),
+                    ),
+                ]),
+                primary_channel: 4,
             }))
         );
     }

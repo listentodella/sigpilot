@@ -991,6 +991,7 @@ fn demo_signals_for_analyzers(
                 }
                 roles
             }
+            AnalyzerDecodeSettings::Native(_) => continue,
         };
 
         for (channel, signal) in roles {

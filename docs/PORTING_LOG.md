@@ -184,3 +184,5 @@ chore: 说明内容
   - 搬运 Data Table 可视右边界 `GoToButton`、原版 goto SVG，以及 Up/Down/Left/Right 与 W/S/A/D 的 0.5x/2x 缩放和三分之一屏平移动画。
 - `docs/ported-features/2026-07-24-saleae-native-uart-i2c-sidecar.md`
   - 直接加载 Logic 2.4.43 原版 Async Serial/I2C/SPI 插件，共用 packed/sparse transition bridge；`.sal` 三协议恢复改回 Saleae Native，Rust 仅保留 sidecar 适配职责。
+- `docs/ported-features/2026-07-24-saleae-sigrok-native-i2s.md`
+  - 直接接入 Logic 2.4.43 原版 I2S / PCM 插件与 PXView `i2s_c`；共用通用 Native contract，覆盖 packed/sparse、`.sal` 恢复与 490 亿 sample 索引，未新增 Rust 协议解码器。

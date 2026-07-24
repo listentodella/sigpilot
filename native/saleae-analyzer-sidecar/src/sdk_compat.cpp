@@ -33,6 +33,20 @@ U32 AnalyzerHelpers::Diff32(U32 a, U32 b)
     return a >= b ? a - b : b - a;
 }
 
+S64 AnalyzerHelpers::ConvertToSignedNumber(U64 number, U32 num_bits)
+{
+    if (num_bits == 0) {
+        return 0;
+    }
+    if (num_bits >= 64) {
+        return static_cast<S64>(number);
+    }
+    const U64 mask = (U64{1} << num_bits) - 1;
+    const U64 sign = U64{1} << (num_bits - 1);
+    const U64 value = number & mask;
+    return static_cast<S64>((value ^ sign) - sign);
+}
+
 bool AnalyzerChannelData::DoMoreTransitionsExistInCurrentData()
 {
     auto* data = reinterpret_cast<AnalyzerTest::MockChannelData*>(this);

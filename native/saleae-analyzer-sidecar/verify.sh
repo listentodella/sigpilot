@@ -14,6 +14,7 @@ unzip -q -o "$ZIP_PATH" \
   'Saleae Logic.app/Contents/Resources/macos-arm64/Analyzers/libserial_analyzer.so' \
   'Saleae Logic.app/Contents/Resources/macos-arm64/Analyzers/libi2c_analyzer.so' \
   'Saleae Logic.app/Contents/Resources/macos-arm64/Analyzers/libspi_analyzer.so' \
+  'Saleae Logic.app/Contents/Resources/macos-arm64/Analyzers/libi2s_analyzer.so' \
   -d "$EXTRACT_DIR"
 
 EXTRACTED_ROOT="$EXTRACT_DIR/Saleae Logic.app/Contents/Resources/macos-arm64"
@@ -21,10 +22,12 @@ ditto --norsrc "$EXTRACTED_ROOT/libAnalyzer.dylib" "$RUNTIME_DIR/libAnalyzer.dyl
 ditto --norsrc "$EXTRACTED_ROOT/Analyzers/libserial_analyzer.so" "$RUNTIME_DIR/Analyzers/libserial_analyzer.so"
 ditto --norsrc "$EXTRACTED_ROOT/Analyzers/libi2c_analyzer.so" "$RUNTIME_DIR/Analyzers/libi2c_analyzer.so"
 ditto --norsrc "$EXTRACTED_ROOT/Analyzers/libspi_analyzer.so" "$RUNTIME_DIR/Analyzers/libspi_analyzer.so"
+ditto --norsrc "$EXTRACTED_ROOT/Analyzers/libi2s_analyzer.so" "$RUNTIME_DIR/Analyzers/libi2s_analyzer.so"
 xattr -d com.apple.quarantine "$RUNTIME_DIR/libAnalyzer.dylib" 2>/dev/null || true
 xattr -d com.apple.quarantine "$RUNTIME_DIR/Analyzers/libserial_analyzer.so" 2>/dev/null || true
 xattr -d com.apple.quarantine "$RUNTIME_DIR/Analyzers/libi2c_analyzer.so" 2>/dev/null || true
 xattr -d com.apple.quarantine "$RUNTIME_DIR/Analyzers/libspi_analyzer.so" 2>/dev/null || true
+xattr -d com.apple.quarantine "$RUNTIME_DIR/Analyzers/libi2s_analyzer.so" 2>/dev/null || true
 
 "$SIDECAR" --runtime-root "$RUNTIME_DIR" --probe
 "$SIDECAR" \

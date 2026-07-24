@@ -33,6 +33,7 @@ typedef struct {
     uint64_t start_sample;
     uint64_t end_sample;
     int bin_class;
+    uint64_t size;
     uint64_t value;
 } binary_item;
 
@@ -80,10 +81,23 @@ typedef struct {
     int show_data_point;
 } i2c_settings;
 
+typedef struct {
+    int sck;
+    int ws;
+    int sd;
+    int word_size;
+    int msb_first;
+    int left_high;
+    int rising_edge;
+    const char *bit_shift;
+    const char *bit_align;
+} i2s_settings;
+
 typedef enum {
     DECODER_SPI,
     DECODER_UART,
     DECODER_I2C,
+    DECODER_I2S,
 } decoder_protocol;
 
 static void fatal(const char *message)
@@ -201,6 +215,7 @@ static void collect_binary(struct srd_proto_data *pdata, void *user_data)
     item->start_sample = pdata->start_sample;
     item->end_sample = pdata->end_sample;
     item->bin_class = binary->bin_class;
+    item->size = binary->size;
     item->value = 0;
     for (uint64_t index = 0; index < binary->size; index++)
         item->value = (item->value << 8) | binary->data[index];
@@ -246,7 +261,9 @@ static decoder_protocol parse_protocol(cJSON *request)
         return DECODER_I2C;
     if (strcmp(protocol, "spi") == 0)
         return DECODER_SPI;
-    fatal("decoder.protocol must be one of uart, i2c, or spi");
+    if (strcmp(protocol, "i2s") == 0)
+        return DECODER_I2S;
+    fatal("decoder.protocol must be one of uart, i2c, spi, or i2s");
     return DECODER_SPI;
 }
 
@@ -312,6 +329,29 @@ static void parse_i2c_settings(cJSON *request, i2c_settings *settings)
     settings->show_data_point = json_int(options, "show_data_point", 1) != 0;
     if (settings->scl < 0 || settings->sda < 0 || settings->scl == settings->sda)
         fatal("I2C requires distinct SCL and SDA channels");
+}
+
+static void parse_i2s_settings(cJSON *request, i2s_settings *settings)
+{
+    cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
+    cJSON *channels = decoder ? cJSON_GetObjectItem(decoder, "channels") : NULL;
+    cJSON *options = decoder ? cJSON_GetObjectItem(decoder, "options") : NULL;
+    if (!decoder || !channels || !options)
+        fatal("decoder channels/options are required");
+
+    settings->sck = optional_channel(channels, "sck");
+    settings->ws = optional_channel(channels, "ws");
+    settings->sd = optional_channel(channels, "sd");
+    settings->word_size = json_int(options, "word_size", json_int(options, "wordsize", 16));
+    settings->msb_first = strcmp(json_string(options, "bit_order", "msb-first"), "lsb-first") != 0;
+    settings->left_high = strcmp(json_string(options, "ws_polarity", "right-high"), "right-high") != 0;
+    settings->rising_edge = strcmp(json_string(options, "clk_edge", "rising-edge"), "falling-edge") != 0;
+    settings->bit_shift = json_string(options, "bit_shift", "right-shifted by one");
+    settings->bit_align = json_string(options, "bit_align", "left-aligned");
+    if (settings->sck < 0 || settings->ws < 0 || settings->sd < 0 ||
+        settings->sck == settings->ws || settings->sck == settings->sd || settings->ws == settings->sd ||
+        settings->word_size < 1 || settings->word_size > 32)
+        fatal("I2S requires distinct SCK, WS, and SD channels and a 1-32 bit word size");
 }
 
 typedef struct {
@@ -884,6 +924,50 @@ static cJSON *render_i2c_output(const decode_collector *collector, const i2c_set
     return root;
 }
 
+static cJSON *render_i2s_output(const decode_collector *collector, const i2s_settings *settings)
+{
+    enum { I2S_LEFT = 0, I2S_RIGHT = 1, I2S_WARNING = 2 };
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "backend", "sigrok_native");
+    cJSON_AddStringToObject(root, "protocol", "I2S");
+    cJSON *frames = add_array(root, "frames");
+    uint64_t frame_id = 0;
+
+    for (size_t index = 0; index < collector->binaries.count; index++) {
+        const binary_item *item = &collector->binaries.items[index];
+        if (item->bin_class != 0)
+            continue;
+        const char *left = annotation_text_for(collector, I2S_LEFT,
+                                               item->start_sample, item->end_sample);
+        const char *right = annotation_text_for(collector, I2S_RIGHT,
+                                                item->start_sample, item->end_sample);
+        if (!left && !right)
+            continue;
+        const int is_left = left != NULL;
+        uint64_t value = 0;
+        for (uint64_t byte = 0; byte < item->size; byte++)
+            value |= ((item->value >> ((item->size - byte - 1) * 8)) & 0xffu) << (byte * 8);
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample,
+                                 is_left ? "Left" : "Right");
+        add_protocol_value(frame, is_left ? "left" : "right",
+                           is_left ? "Left" : "Right", settings->sd, value,
+                           is_left ? left : right, (settings->word_size + 3) / 4);
+        cJSON_AddItemToArray(frames, frame);
+    }
+
+    cJSON *diagnostics = add_array(root, "diagnostics");
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if (item->ann_class != I2S_WARNING || item->text_count == 0)
+            continue;
+        cJSON *diagnostic = cJSON_CreateObject();
+        cJSON_AddStringToObject(diagnostic, "level", "warning");
+        cJSON_AddStringToObject(diagnostic, "message", item->texts[0]);
+        cJSON_AddItemToArray(diagnostics, diagnostic);
+    }
+    return root;
+}
+
 static struct srd_decoder *initialize_decoder(const char *decoder_root, const char *decoder_id)
 {
     if (srd_init(NULL) != SRD_OK)
@@ -909,9 +993,11 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     spi_settings spi;
     uart_settings uart;
     i2c_settings i2c;
+    i2s_settings i2s;
     memset(&spi, 0, sizeof(spi));
     memset(&uart, 0, sizeof(uart));
     memset(&i2c, 0, sizeof(i2c));
+    memset(&i2s, 0, sizeof(i2s));
     const char *decoder_id;
     if (protocol == DECODER_UART) {
         parse_uart_settings(request, &uart);
@@ -919,6 +1005,9 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     } else if (protocol == DECODER_I2C) {
         parse_i2c_settings(request, &i2c);
         decoder_id = "i2c_c";
+    } else if (protocol == DECODER_I2S) {
+        parse_i2s_settings(request, &i2s);
+        decoder_id = "i2s_c";
     } else {
         parse_spi_settings(request, &spi);
         decoder_id = "spi_c";
@@ -950,6 +1039,13 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
         add_option_string(options, "address_format", i2c.address_format);
         add_option_string(options, "packets_format", i2c.packets_format);
         add_option_string(options, "show_data_point", i2c.show_data_point ? "yes" : "no");
+    } else if (protocol == DECODER_I2S) {
+        add_option_string(options, "ws_polarity", i2s.left_high ? "left-high" : "right-high");
+        add_option_string(options, "clk_edge", i2s.rising_edge ? "rising-edge" : "falling-edge");
+        add_option_string(options, "bit_shift", i2s.bit_shift);
+        add_option_string(options, "bit_align", i2s.bit_align);
+        add_option_string(options, "bitorder", i2s.msb_first ? "msb-first" : "lsb-first");
+        add_option_u64(options, "wordsize", (uint64_t)i2s.word_size);
     } else {
         add_option_string(options, "cs_polarity", spi.cs_active_low ? "active-low" : "active-high");
         add_option_u64(options, "cpol", (uint64_t)spi.cpol);
@@ -972,6 +1068,10 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     } else if (protocol == DECODER_I2C) {
         add_channel(channels, "scl", i2c.scl);
         add_channel(channels, "sda", i2c.sda);
+    } else if (protocol == DECODER_I2S) {
+        add_channel(channels, "sck", i2s.sck);
+        add_channel(channels, "ws", i2s.ws);
+        add_channel(channels, "sd", i2s.sd);
     } else {
         add_channel(channels, "clk", spi.clk);
         add_channel(channels, "miso", spi.miso);
@@ -1000,7 +1100,9 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
                         ? render_uart_output(&collector, &uart)
                         : protocol == DECODER_I2C
                               ? render_i2c_output(&collector, &i2c)
-                              : render_output(&collector, &spi);
+                              : protocol == DECODER_I2S
+                                    ? render_i2s_output(&collector, &i2s)
+                                    : render_output(&collector, &spi);
     srd_session_destroy(session);
     srd_exit();
     free_sparse_input(&input);
@@ -1013,8 +1115,9 @@ static cJSON *probe(const char *decoder_root)
     struct srd_decoder *uart = initialize_decoder(decoder_root, "uart_c");
     struct srd_decoder *i2c = srd_decoder_get_by_id("i2c_c");
     struct srd_decoder *spi = srd_decoder_get_by_id("spi_c");
+    struct srd_decoder *i2s = srd_decoder_get_by_id("i2s_c");
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "available", uart != NULL || i2c != NULL || spi != NULL);
+    cJSON_AddBoolToObject(root, "available", uart != NULL || i2c != NULL || spi != NULL || i2s != NULL);
     cJSON *protocols = add_array(root, "protocols");
     if (uart)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("UART"));
@@ -1022,9 +1125,11 @@ static cJSON *probe(const char *decoder_root)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("I2C"));
     if (spi)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("SPI"));
+    if (i2s)
+        cJSON_AddItemToArray(protocols, cJSON_CreateString("I2S"));
     cJSON_AddBoolToObject(root, "supports_streaming", 0);
     cJSON_AddStringToObject(root, "decoder_name", "PXView native C decoder pack");
-    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c");
+    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c");
     cJSON_AddNumberToObject(root, "api_version", SRD_C_DECODER_API_VERSION);
     srd_exit();
     return root;
