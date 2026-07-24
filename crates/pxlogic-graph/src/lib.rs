@@ -12,7 +12,7 @@ use pxlogic_core::{
     resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData, CaptureMetadata,
     CaptureTriggerMetadata, DecodedChannelValue, DecodedFrame, DecoderBackend, DecoderBackendKind,
     I2cDecodeSettings, SaleaeNativeDecoder, SigrokNativeDecoder, SparseCaptureData,
-    SpiDecodeSettings, UartDecodeSettings,
+    SparseDigitalChannel, SpiDecodeSettings, UartDecodeSettings,
 };
 use pxlogic_waveform::{ChannelTile, DigitalSegment, WaveformBin, WaveformRequest, WaveformTile};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,11 @@ const DENSE_BUBBLE_THRESHOLD: usize = MAX_ANALYZER_MARKER_RESULTS * 4;
 const MAX_COARSE_EDGE_MARKERS: usize = 400;
 const PACKED_DIGITAL_BIN_BYTES: usize = 16;
 const MAX_EXACT_SAMPLES_PER_PIXEL: u64 = 8;
+const NATIVE_VIEW_EDGE_BUDGET: usize = 32_768;
+const NATIVE_FIT_MAX_CHUNKS: usize = 16;
+const NATIVE_FIT_EDGES_PER_CHUNK: usize = 1_024;
+const NATIVE_CONTEXT_EDGES: usize = 256;
+const MAX_ANALYZER_WINDOW_CACHE_ENTRIES: usize = 64;
 
 pub type Result<T> = std::result::Result<T, GraphError>;
 
@@ -1038,6 +1043,28 @@ impl GraphSession {
         Ok(frames)
     }
 
+    pub fn decode_frames_with_backend_for_view(
+        &self,
+        settings: &AnalyzerDecodeSettings,
+        backend: DecoderBackendKind,
+        waveform: &WaveformRequest,
+    ) -> Result<Arc<Vec<DecodedFrame>>> {
+        if matches!(
+            backend,
+            DecoderBackendKind::SaleaeNative | DecoderBackendKind::SigrokNative
+        ) {
+            if let Some(capture) = self.sparse_capture() {
+                return self.decode_sparse_frames_for_view(
+                    capture.as_ref(),
+                    settings,
+                    backend,
+                    waveform,
+                );
+            }
+        }
+        self.decode_frames_with_backend(settings, backend)
+    }
+
     pub fn render_frame(&self, request: &GraphFrameRequest) -> Result<GraphFrameResponse> {
         let tile = self
             .graph
@@ -1070,7 +1097,8 @@ impl GraphSession {
         request: &AnalyzerRenderRequest,
         waveform: &WaveformRequest,
     ) -> Result<AnalyzerRenderResult> {
-        let frames = self.decode_frames_with_backend(&request.settings, request.backend)?;
+        let frames =
+            self.decode_frames_with_backend_for_view(&request.settings, request.backend, waveform)?;
         let tracks = request
             .tracks
             .iter()
@@ -1082,9 +1110,279 @@ impl GraphSession {
         })
     }
 
+    fn decode_sparse_frames_for_view(
+        &self,
+        capture: &SparseCaptureData,
+        settings: &AnalyzerDecodeSettings,
+        backend: DecoderBackendKind,
+        waveform: &WaveformRequest,
+    ) -> Result<Arc<Vec<DecodedFrame>>> {
+        let windows = sparse_native_analysis_windows(capture, settings, waveform)?;
+        if windows.is_empty() {
+            return Ok(Arc::new(Vec::new()));
+        }
+
+        let key = serde_json::to_string(&("sparse-native-window-v1", backend, settings, &windows))?;
+        let sample_count = self.sample_count();
+        if let Some(entry) = self.analyzer_cache.lock().get(&key) {
+            if entry.decoded_sample_count == sample_count {
+                return Ok(entry.frames.clone());
+            }
+        }
+
+        let decoder: Box<dyn DecoderBackend> = match backend {
+            DecoderBackendKind::SaleaeNative => Box::new(
+                SaleaeNativeDecoder::from_env()
+                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?,
+            ),
+            DecoderBackendKind::SigrokNative => Box::new(
+                SigrokNativeDecoder::from_env()
+                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?,
+            ),
+            DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust => unreachable!(),
+        };
+
+        let mut frames = Vec::new();
+        let mut first_error = None;
+        for &(start, end) in &windows {
+            let window_capture = slice_sparse_capture(capture, start, end)?;
+            match decoder.decode_sparse(&window_capture, settings) {
+                Ok(output) => {
+                    frames.extend(output.into_decoded_frames().into_iter().map(|mut frame| {
+                        frame.start_sample = frame.start_sample.saturating_add(start);
+                        frame.end_sample = frame.end_sample.saturating_add(start);
+                        frame
+                    }));
+                }
+                Err(error) => {
+                    first_error.get_or_insert_with(|| error.to_string());
+                }
+            }
+        }
+        if frames.is_empty() {
+            if let Some(error) = first_error {
+                return Err(GraphError::DecoderBackend(error));
+            }
+        }
+
+        frames.sort_by_key(|frame| (frame.start_sample, frame.end_sample));
+        frames.dedup_by(|right, left| {
+            left.start_sample == right.start_sample
+                && left.end_sample == right.end_sample
+                && left.value == right.value
+                && left.channel_values == right.channel_values
+        });
+        for frame in &mut frames {
+            frame.frame_id = frame.start_sample;
+        }
+        if frames.len() > MAX_DECODED_FRAMES {
+            let stride = frames.len().div_ceil(MAX_DECODED_FRAMES);
+            frames = frames.into_iter().step_by(stride).collect();
+            for frame in &mut frames {
+                frame.frame_id = frame.start_sample;
+            }
+        }
+
+        let frames = Arc::new(frames);
+        let mut cache = self.analyzer_cache.lock();
+        if cache.len() >= MAX_ANALYZER_WINDOW_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            AnalyzerCacheEntry {
+                decoded_sample_count: sample_count,
+                frames: frames.clone(),
+            },
+        );
+        Ok(frames)
+    }
+
     fn bump_revision(&self) {
         self.revision.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn sparse_native_analysis_windows(
+    capture: &SparseCaptureData,
+    settings: &AnalyzerDecodeSettings,
+    waveform: &WaveformRequest,
+) -> Result<Vec<(u64, u64)>> {
+    if capture.metadata.sample_count == 0 || waveform.sample_count == 0 {
+        return Ok(Vec::new());
+    }
+    let driver_channel = match settings {
+        AnalyzerDecodeSettings::Uart(settings) => settings.channel,
+        AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
+        AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
+    };
+    let driver = capture
+        .channels
+        .iter()
+        .find(|channel| channel.channel == driver_channel)
+        .ok_or_else(|| {
+            GraphError::InvalidAnalyzer(format!(
+                "native decoder clock/input channel D{driver_channel} is not present"
+            ))
+        })?;
+    if driver.transitions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let view_start = waveform
+        .start_sample
+        .min(capture.metadata.sample_count.saturating_sub(1));
+    let view_end = waveform
+        .start_sample
+        .saturating_add(waveform.sample_count)
+        .min(capture.metadata.sample_count)
+        .max(view_start.saturating_add(1));
+    let edge_begin = driver
+        .transitions
+        .partition_point(|sample| *sample < view_start);
+    let edge_end = driver
+        .transitions
+        .partition_point(|sample| *sample < view_end);
+    let visible_edges = edge_end - edge_begin;
+    let mut edge_windows = Vec::new();
+    if visible_edges == 0 {
+        let center = edge_begin.min(driver.transitions.len() - 1);
+        edge_windows.push((
+            center.saturating_sub(NATIVE_CONTEXT_EDGES),
+            center
+                .saturating_add(NATIVE_CONTEXT_EDGES)
+                .saturating_add(1)
+                .min(driver.transitions.len()),
+        ));
+    } else if visible_edges <= NATIVE_VIEW_EDGE_BUDGET {
+        edge_windows.push((
+            edge_begin.saturating_sub(NATIVE_CONTEXT_EDGES),
+            edge_end
+                .saturating_add(NATIVE_CONTEXT_EDGES)
+                .min(driver.transitions.len()),
+        ));
+    } else {
+        let chunk_count = NATIVE_FIT_MAX_CHUNKS
+            .min((waveform.pixels.max(1) as usize).div_ceil(96))
+            .max(2);
+        for chunk in 0..chunk_count {
+            let center = edge_begin
+                + visible_edges.saturating_sub(1) * chunk / chunk_count.saturating_sub(1);
+            let body_start = center.saturating_sub(NATIVE_FIT_EDGES_PER_CHUNK / 2);
+            let body_end = center
+                .saturating_add(NATIVE_FIT_EDGES_PER_CHUNK / 2)
+                .saturating_add(1);
+            edge_windows.push((
+                body_start.saturating_sub(NATIVE_CONTEXT_EDGES),
+                body_end
+                    .saturating_add(NATIVE_CONTEXT_EDGES)
+                    .min(driver.transitions.len()),
+            ));
+        }
+    }
+
+    let mut windows = edge_windows
+        .into_iter()
+        .filter(|(begin, end)| begin < end)
+        .map(|(begin, end)| {
+            let start = driver.transitions[begin].saturating_sub(1);
+            let finish = driver.transitions[end - 1]
+                .saturating_add(2)
+                .min(capture.metadata.sample_count);
+            align_spi_window_to_enable(capture, settings, start, finish)
+        })
+        .filter(|(start, end)| start < end)
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
+    for (start, end) in windows {
+        if let Some(previous) = merged.last_mut() {
+            if start <= previous.1 {
+                previous.1 = previous.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    Ok(merged)
+}
+
+fn align_spi_window_to_enable(
+    capture: &SparseCaptureData,
+    settings: &AnalyzerDecodeSettings,
+    mut start: u64,
+    mut end: u64,
+) -> (u64, u64) {
+    let AnalyzerDecodeSettings::Spi(settings) = settings else {
+        return (start, end);
+    };
+    let Some(enable_channel) = settings.enable_channel else {
+        return (start, end);
+    };
+    let Some(enable) = capture
+        .channels
+        .iter()
+        .find(|channel| channel.channel == enable_channel)
+    else {
+        return (start, end);
+    };
+    let is_active = |high: bool| high != settings.enable_active_low;
+    if is_active(sparse_level_at(enable, start)) {
+        let previous = enable
+            .transitions
+            .partition_point(|sample| *sample <= start);
+        if previous > 0 {
+            start = enable.transitions[previous - 1].saturating_sub(1);
+        }
+    }
+    if end > 0 && is_active(sparse_level_at(enable, end - 1)) {
+        let next = enable.transitions.partition_point(|sample| *sample < end);
+        if let Some(sample) = enable.transitions.get(next) {
+            end = sample.saturating_add(1).min(capture.metadata.sample_count);
+        }
+    }
+    (start, end)
+}
+
+fn sparse_level_at(channel: &SparseDigitalChannel, sample: u64) -> bool {
+    channel.initial_high
+        ^ (channel
+            .transitions
+            .partition_point(|transition| *transition <= sample)
+            % 2
+            == 1)
+}
+
+fn slice_sparse_capture(
+    capture: &SparseCaptureData,
+    start: u64,
+    end: u64,
+) -> Result<SparseCaptureData> {
+    if start >= end || end > capture.metadata.sample_count {
+        return Err(GraphError::InvalidWaveformRequest);
+    }
+    let channels = capture
+        .channels
+        .iter()
+        .map(|channel| {
+            let begin = channel
+                .transitions
+                .partition_point(|sample| *sample <= start);
+            let finish = channel.transitions.partition_point(|sample| *sample < end);
+            SparseDigitalChannel {
+                channel: channel.channel,
+                initial_high: channel.initial_high ^ (begin % 2 == 1),
+                transitions: channel.transitions[begin..finish]
+                    .iter()
+                    .map(|sample| sample - start)
+                    .collect(),
+            }
+        })
+        .collect();
+    let mut metadata = capture.metadata.clone();
+    metadata.sample_count = end - start;
+    metadata.trigger = None;
+    Ok(SparseCaptureData { metadata, channels })
 }
 
 fn merge_incremental_frames(
@@ -1907,6 +2205,185 @@ mod tests {
         assert!(window.bubbles.len() <= MAX_ANALYZER_MARKER_RESULTS);
         assert_eq!(window.bubbles.first().unwrap().start_sample, 0);
         assert!(window.bubbles.last().unwrap().end_sample > 990_000);
+    }
+
+    #[test]
+    fn sparse_native_fit_windows_are_bounded_and_span_the_view() {
+        let clock_edges = (1..=100_000u64).map(|edge| edge * 100).collect::<Vec<_>>();
+        let capture = SparseCaptureData {
+            metadata: CaptureMetadata {
+                version: 1,
+                source_device: "sparse-window-test".to_string(),
+                sample_rate_hz: 100_000_000,
+                channel_count: 4,
+                enabled_channels: (0..4).collect(),
+                unitsize: 1,
+                sample_count: 10_000_100,
+                captured_at: Utc::now(),
+                labels: (0..4).map(|channel| format!("D{channel}")).collect(),
+                trigger: None,
+            },
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 1,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 2,
+                    initial_high: false,
+                    transitions: clock_edges,
+                },
+                SparseDigitalChannel {
+                    channel: 3,
+                    initial_high: true,
+                    transitions: Vec::new(),
+                },
+            ],
+        };
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(0),
+            miso_channel: Some(1),
+            clock_channel: 2,
+            enable_channel: None,
+            ..SpiDecodeSettings::default()
+        });
+        let view = WaveformRequest {
+            start_sample: 0,
+            sample_count: capture.metadata.sample_count,
+            pixels: 1_200,
+            channels: Vec::new(),
+        };
+
+        let windows = sparse_native_analysis_windows(&capture, &settings, &view).unwrap();
+        assert_eq!(windows.len(), 13);
+        assert!(windows.first().unwrap().0 < 1_000);
+        assert!(windows.last().unwrap().1 > 9_999_000);
+        let selected_clock_edges = windows
+            .iter()
+            .map(|&(start, end)| {
+                slice_sparse_capture(&capture, start, end).unwrap().channels[2]
+                    .transitions
+                    .len()
+            })
+            .sum::<usize>();
+        assert!(selected_clock_edges < 25_000);
+    }
+
+    #[test]
+    fn sparse_slice_preserves_level_and_offsets_transitions() {
+        let capture = SparseCaptureData {
+            metadata: CaptureMetadata {
+                version: 1,
+                source_device: "sparse-slice-test".to_string(),
+                sample_rate_hz: 1_000_000,
+                channel_count: 1,
+                enabled_channels: vec![0],
+                unitsize: 1,
+                sample_count: 1_000,
+                captured_at: Utc::now(),
+                labels: vec!["D0".to_string()],
+                trigger: None,
+            },
+            channels: vec![SparseDigitalChannel {
+                channel: 0,
+                initial_high: false,
+                transitions: vec![100, 200, 300, 400],
+            }],
+        };
+
+        let slice = slice_sparse_capture(&capture, 150, 350).unwrap();
+        assert!(slice.channels[0].initial_high);
+        assert_eq!(slice.channels[0].transitions, vec![50, 150]);
+        assert_eq!(slice.metadata.sample_count, 200);
+    }
+
+    #[test]
+    #[ignore = "requires a GraphServer manifest and both native analyzer sidecars"]
+    fn imported_saleae_capture_restores_native_bubbles_and_table_frames() {
+        let manifest = std::env::var_os("PXLOGIC_SALEAE_MANIFEST")
+            .map(std::path::PathBuf::from)
+            .expect("PXLOGIC_SALEAE_MANIFEST");
+        let imported = pxlogic_file::open_saleae_transition_session(manifest).unwrap();
+        let analyzer = imported
+            .session
+            .analyzers
+            .iter()
+            .find(|analyzer| analyzer.analyzer_type == "SPI")
+            .unwrap();
+        let settings = analyzer.decode_settings.clone().unwrap();
+        let sample_count = imported.capture.metadata.sample_count;
+        let clock_transitions = &imported
+            .capture
+            .channels
+            .iter()
+            .find(|channel| channel.channel == 3)
+            .unwrap()
+            .transitions;
+        let first_data_sample = *clock_transitions.first().unwrap();
+        let last_data_sample = *clock_transitions.last().unwrap();
+        let data_span = last_data_sample - first_data_sample;
+        let session = GraphSession::default();
+        session.replace_sparse_capture(imported.capture).unwrap();
+        let view = WaveformRequest {
+            start_sample: 0,
+            sample_count,
+            pixels: 1_200,
+            channels: Vec::new(),
+        };
+
+        for backend in [
+            DecoderBackendKind::SaleaeNative,
+            DecoderBackendKind::SigrokNative,
+        ] {
+            let table_frames = session
+                .decode_frames_with_backend_for_view(&settings, backend, &view)
+                .unwrap();
+            assert!(!table_frames.is_empty(), "backend={backend:?} table");
+            let result = session
+                .render_analyzer(
+                    &AnalyzerRenderRequest {
+                        analyzer_id: format!("{backend:?}"),
+                        backend,
+                        settings: settings.clone(),
+                        tracks: vec![
+                            AnalyzerTrackRequest {
+                                channel: 5,
+                                role: "MOSI".to_string(),
+                            },
+                            AnalyzerTrackRequest {
+                                channel: 0,
+                                role: "MISO".to_string(),
+                            },
+                        ],
+                    },
+                    &view,
+                )
+                .unwrap();
+            let bubbles = result
+                .tracks
+                .iter()
+                .flat_map(|track| &track.bubbles)
+                .collect::<Vec<_>>();
+            assert!(!bubbles.is_empty(), "backend={backend:?}");
+            assert!(
+                bubbles
+                    .iter()
+                    .any(|bubble| bubble.start_sample < first_data_sample + data_span / 10),
+                "backend={backend:?} has no bubbles near the first protocol data"
+            );
+            assert!(
+                bubbles
+                    .iter()
+                    .any(|bubble| bubble.end_sample > last_data_sample - data_span / 10),
+                "backend={backend:?} has no bubbles near the last protocol data"
+            );
+        }
     }
 
     #[test]

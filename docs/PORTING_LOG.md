@@ -176,3 +176,5 @@ chore: 说明内容
   - packed/sparse capture 通过 Logic 2.4.43 原版 DigitalStore 校验并序列化为 `.sal`；补齐 32 通道、恒定电平与 490 亿 sample 的无展开 round-trip。
 - `docs/ported-features/2026-07-24-saleae-sal-analyzer-restore.md`
   - 复用 Logic 2 persisted analyzer migration/startAnalysis 流程；`.sal` 导入自动恢复 SPI/I2C/Async Serial 配置并重新解码，导出可无损保留原始 analyzer metadata。
+- `docs/ported-features/2026-07-24-saleae-sparse-analyzer-progressive-restore.md`
+  - 修复长 `.sal` native analyzer 整段批处理阻塞；按 viewport/边沿窗口渐进解码，并同步恢复波形 bubbles 与右侧 Data Table 结果。

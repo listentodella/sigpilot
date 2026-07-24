@@ -2339,6 +2339,7 @@ dependencies = [
  "chrono",
  "parking_lot",
  "pxlogic-core",
+ "pxlogic-file",
  "pxlogic-waveform",
  "serde",
  "serde_json",

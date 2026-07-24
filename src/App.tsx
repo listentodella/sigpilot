@@ -2021,7 +2021,6 @@ export default function App() {
 
   useEffect(() => {
     if (
-      selectedPanel !== "analyzers" ||
       !activeSession?.summary ||
       activeSession.busy ||
       activeSession.analyzers.length === 0
@@ -2041,7 +2040,6 @@ export default function App() {
     activeSession?.summary?.metadata.captured_at,
     activeSession?.summary?.metadata.sample_count,
     analyzerDecodeSignature,
-    selectedPanel,
   ]);
 
   async function handleCancel() {
@@ -6582,7 +6580,9 @@ function AnalyzersPanel({
               {session.analyzers.length === 0 ? (
                 <div className="empty-result">No analyzers</div>
               ) : tableFrames.length === 0 ? (
-                <div className="empty-result">No frames</div>
+                <div className="empty-result">
+                  {session.analyzers.some((analyzer) => analyzer.decodeBusy) ? "Analyzing..." : "No frames"}
+                </div>
               ) : filteredTableFrames.length === 0 ? (
                 <div className="empty-result">No matching frames</div>
               ) : (
