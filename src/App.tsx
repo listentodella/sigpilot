@@ -12,7 +12,6 @@ import {
   FileDown,
   FolderOpen,
   GripVertical,
-  LocateFixed,
   Maximize2,
   MoreVertical,
   Plus,
@@ -1523,7 +1522,7 @@ export default function App() {
   );
 
   const animateViewport = useCallback(
-    (sessionId: string, start: number, samples: number) => {
+    (sessionId: string, start: number, samples: number, durationMs = 300) => {
       if (viewportAnimationRef.current !== null) {
         window.cancelAnimationFrame(viewportAnimationRef.current);
       }
@@ -1538,7 +1537,7 @@ export default function App() {
       const startedAt = performance.now();
 
       const step = (now: number) => {
-        const progress = Math.max(0, Math.min(1, (now - startedAt) / 300));
+        const progress = Math.max(0, Math.min(1, (now - startedAt) / durationMs));
         const eased = 1 - Math.pow(1 - progress, 3);
         updateViewport(
           sessionId,
@@ -3019,6 +3018,46 @@ export default function App() {
           invokeCommand(command);
         }
         return;
+      }
+
+      if (activeSession?.summary) {
+        const viewportCenter = activeSession.viewportStart + activeSession.viewportSamples / 2;
+        if (key === "arrowup" || key === "=" || key === "w") {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const samples = activeSession.viewportSamples * 0.5;
+          animateViewport(activeSession.id, viewportCenter - samples / 2, samples, 100);
+          return;
+        }
+        if (key === "arrowdown" || key === "-" || key === "s") {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          const samples = activeSession.viewportSamples * 2;
+          animateViewport(activeSession.id, viewportCenter - samples / 2, samples, 100);
+          return;
+        }
+        if (key === "arrowleft" || key === "a") {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          animateViewport(
+            activeSession.id,
+            activeSession.viewportStart - activeSession.viewportSamples / 3,
+            activeSession.viewportSamples,
+            100,
+          );
+          return;
+        }
+        if (key === "arrowright" || key === "d") {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          animateViewport(
+            activeSession.id,
+            activeSession.viewportStart + activeSession.viewportSamples / 3,
+            activeSession.viewportSamples,
+            100,
+          );
+          return;
+        }
       }
 
       if (key === "c" && getSidebarPanelAllowed("cursors", activeSession).isSelectable && activeSession) {
@@ -6503,6 +6542,12 @@ function AnalyzersPanel({
   }, [tableFrames]);
   const tableGridTemplate = `18px 75px 110px 80px${tableDataColumns.length > 0 ? ` repeat(${tableDataColumns.length}, minmax(75px, 1fr))` : ""}`;
   const tableMinimumWidth = 283 + tableDataColumns.length * 75;
+  const syncTableVisibleRight = useCallback(() => {
+    const table = tableBodyRef.current;
+    if (!table) return;
+    const visibleRight = Math.max(0, table.scrollWidth - table.clientWidth - table.scrollLeft);
+    table.style.setProperty("--table-visible-right", `${visibleRight}px`);
+  }, []);
   const terminalFrames = useMemo(
     () =>
       session.analyzers
@@ -6535,6 +6580,19 @@ function AnalyzersPanel({
         ?.scrollIntoView({ block: "nearest" });
     });
   }, [highlightedFrame?.analyzerId, highlightedFrame?.frameIndex, session.analyzerDataPane]);
+
+  useEffect(() => {
+    if (session.analyzerDataPane !== "table") return;
+    const table = tableBodyRef.current;
+    if (!table) return;
+    const observer = new ResizeObserver(syncTableVisibleRight);
+    observer.observe(table);
+    const frame = window.requestAnimationFrame(syncTableVisibleRight);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [session.analyzerDataPane, syncTableVisibleRight, tableMinimumWidth]);
 
   return (
     <div className="analyzersSidebarPanel">
@@ -6682,7 +6740,7 @@ function AnalyzersPanel({
                 <Copy size={12} />
               </button>
             </div>
-            <div className="analyzerFramesList" ref={tableBodyRef}>
+            <div className="analyzerFramesList" onScroll={syncTableVisibleRight} ref={tableBodyRef}>
               <div
                 className="analyzerTableHeader"
                 aria-hidden="true"
@@ -6752,7 +6810,7 @@ function AnalyzersPanel({
                       title={"Go to data\nDouble click to zoom"}
                       type="button"
                     >
-                      <LocateFixed size={13} />
+                      <SaleaeGoToIcon />
                     </button>
                   </div>
                 ))
@@ -6875,6 +6933,19 @@ function HighlightedAnalyzerText({ query, text }: { query: string; text: string 
       <mark>{text.slice(index, index + normalized.length)}</mark>
       {text.slice(index + normalized.length)}
     </>
+  );
+}
+
+function SaleaeGoToIcon() {
+  return (
+    <svg aria-hidden="true" height="8" viewBox="0 0 9 8" width="9">
+      <path
+        clipRule="evenodd"
+        d="M8.38251 3.28221L8.75336 2.90909L8.38251 2.53597L5.86198 0L5.11699 0.746248L6.77722 2.41665C5.40072 2.44137 4.30341 2.52756 3.43081 2.68882C2.38124 2.88278 1.60603 3.19407 1.06057 3.68567C0.502764 4.1884 0.24287 4.82691 0.119121 5.54781C-3.76701e-05 6.24197 -1.99676e-05 7.06173 0 7.96527V8H1C1 7.05398 1.00156 6.31786 1.10471 5.71699C1.20478 5.13398 1.39254 4.73268 1.73005 4.4285C2.0799 4.11319 2.64764 3.85048 3.61253 3.67217C4.40473 3.52577 5.4306 3.44213 6.76172 3.41712L5.11699 5.07193L5.86198 5.81818L8.38251 3.28221Z"
+        fill="currentColor"
+        fillRule="evenodd"
+      />
+    </svg>
   );
 }
 

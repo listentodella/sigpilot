@@ -2510,7 +2510,7 @@ button:disabled {
   align-items: center;
   justify-content: center;
   position: absolute;
-  right: 10px;
+  right: calc(var(--table-visible-right, 0px) + 10px);
   top: 2px;
   border: 1px solid var(--border-20);
   border-radius: 2px;
@@ -2521,7 +2521,6 @@ button:disabled {
 }
 
 .decode-row:hover .analyzerGoToButton,
-.decode-row.selected .analyzerGoToButton,
 .analyzerGoToButton:focus-visible {
   opacity: 1;
 }

@@ -180,3 +180,5 @@ chore: 说明内容
   - 修复长 `.sal` native analyzer 整段批处理阻塞；按 viewport/边沿窗口渐进解码，并同步恢复波形 bubbles 与右侧 Data Table 结果。
 - `docs/ported-features/2026-07-24-saleae-sal-frame-table-session-isolation.md`
   - 过滤 Saleae Native SPI 控制 frame 的伪数据气泡，恢复 Type/MOSI/MISO 动态表格列，并隔离普通新 session 与显式 setup duplicate 的通道名称继承语义。
+- `docs/ported-features/2026-07-24-analyzer-table-navigation-keyboard-viewport.md`
+  - 搬运 Data Table 可视右边界 `GoToButton`、原版 goto SVG，以及 Up/Down/Left/Right 与 W/S/A/D 的 0.5x/2x 缩放和三分之一屏平移动画。
