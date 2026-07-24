@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     capture::read_sample_word,
@@ -8,11 +8,95 @@ use crate::{
 
 const MAX_DECODED_FRAMES: usize = 100_000;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UartParity {
+    None,
+    Even,
+    Odd,
+}
+
+impl Default for UartParity {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UartStopBits {
+    One,
+    OnePointFive,
+    Two,
+}
+
+impl UartStopBits {
+    pub const fn as_f64(self) -> f64 {
+        match self {
+            Self::One => 1.0,
+            Self::OnePointFive => 1.5,
+            Self::Two => 2.0,
+        }
+    }
+
+    pub fn from_f64(value: f64) -> Option<Self> {
+        if (value - 1.0).abs() < f64::EPSILON {
+            Some(Self::One)
+        } else if (value - 1.5).abs() < f64::EPSILON {
+            Some(Self::OnePointFive)
+        } else if (value - 2.0).abs() < f64::EPSILON {
+            Some(Self::Two)
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for UartStopBits {
+    fn default() -> Self {
+        Self::One
+    }
+}
+
+impl Serialize for UartStopBits {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(self.as_f64())
+    }
+}
+
+impl<'de> Deserialize<'de> for UartStopBits {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        Self::from_f64(value).ok_or_else(|| D::Error::custom("UART stop bits must be 1, 1.5, or 2"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UartDecodeSettings {
     pub channel: u8,
     pub baud_rate: u32,
     pub inverted: bool,
+    #[serde(default = "default_uart_data_bits")]
+    pub data_bits: u8,
+    #[serde(default = "default_uart_stop_bits")]
+    pub stop_bits: UartStopBits,
+    #[serde(default)]
+    pub parity: UartParity,
+    #[serde(default)]
+    pub msb_first: bool,
+}
+
+const fn default_uart_data_bits() -> u8 {
+    8
+}
+
+const fn default_uart_stop_bits() -> UartStopBits {
+    UartStopBits::One
 }
 
 impl Default for UartDecodeSettings {
@@ -21,6 +105,10 @@ impl Default for UartDecodeSettings {
             channel: 0,
             baud_rate: 115_200,
             inverted: false,
+            data_bits: default_uart_data_bits(),
+            stop_bits: default_uart_stop_bits(),
+            parity: UartParity::None,
+            msb_first: false,
         }
     }
 }

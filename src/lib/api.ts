@@ -115,6 +115,11 @@ export interface CaptureSummary {
   bytes: number;
 }
 
+export interface OpenCaptureResult {
+  summary: CaptureSummary;
+  saleae_session: SaleaeSessionMetadata | null;
+}
+
 export interface TrimCaptureRequest {
   trim_before_sample?: number;
   trim_after_sample?: number;
@@ -219,6 +224,10 @@ export interface UartDecodeSettings {
   channel: number;
   baud_rate: number;
   inverted: boolean;
+  data_bits: number;
+  stop_bits: number;
+  parity: "none" | "even" | "odd";
+  msb_first: boolean;
 }
 
 export interface I2cDecodeSettings {
@@ -244,6 +253,24 @@ export type AnalyzerDecodeSettings =
   | { protocol: "Spi"; settings: SpiDecodeSettings };
 
 export type DecoderBackendKind = "auto" | "saleae_native" | "sigrok_native" | "legacy_rust";
+
+export interface SaleaeAnalyzerMetadata {
+  type: string;
+  name: string;
+  color: string;
+  display_radix: string;
+  show_in_data_table: boolean;
+  stream_to_terminal: boolean;
+  decoder_backend: DecoderBackendKind;
+  decode_settings?: AnalyzerDecodeSettings;
+  saleae_metadata?: unknown;
+}
+
+export interface SaleaeSessionMetadata {
+  name: string;
+  notes: string;
+  analyzers: SaleaeAnalyzerMetadata[];
+}
 
 type PreviewDemoSignal =
   | { kind: "Pulse" }
@@ -720,11 +747,11 @@ export function cancelCapture(): Promise<void> {
   return callBackend("cancel_capture");
 }
 
-export function openCapture(sessionId: string, path: string): Promise<CaptureSummary> {
+export function openCapture(sessionId: string, path: string): Promise<OpenCaptureResult> {
   if (!isTauriRuntime()) {
     previewCaptures.set(sessionId, previewCapture);
     previewCaptureRevisions.set(sessionId, (previewCaptureRevisions.get(sessionId) ?? 0) + 1);
-    return Promise.resolve(previewCapture);
+    return Promise.resolve({ summary: previewCapture, saleae_session: null });
   }
   return callBackend("open_capture", { sessionId, path });
 }
@@ -734,9 +761,14 @@ export function saveCapture(sessionId: string, path: string): Promise<void> {
   return callBackend("save_capture", { sessionId, path });
 }
 
-export function exportCapture(sessionId: string, path: string, format: ExportFormat): Promise<void> {
+export function exportCapture(
+  sessionId: string,
+  path: string,
+  format: ExportFormat,
+  saleaeSession?: SaleaeSessionMetadata,
+): Promise<void> {
   if (!isTauriRuntime()) return Promise.resolve();
-  return callBackend("export_capture", { sessionId, path, format });
+  return callBackend("export_capture", { sessionId, path, format, saleaeSession });
 }
 
 export function trimCapture(sessionId: string, request: TrimCaptureRequest): Promise<CaptureSummary> {

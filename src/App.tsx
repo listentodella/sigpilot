@@ -98,6 +98,7 @@ import {
   listDevices,
   measureDigitalRange,
   openCapture,
+  OpenCaptureResult,
   prepareDevice,
   releaseGraphSession,
   renderGraphFrame,
@@ -119,6 +120,8 @@ import {
   analyzerStripInsetForChannel,
   analyzerSupportsDecoding,
   createAnalyzerInstance,
+  restoreSaleaeAnalyzer,
+  saleaeAnalyzerMetadata,
   UiAnalyzerInstance,
 } from "./lib/analyzers";
 import {
@@ -2049,7 +2052,8 @@ export default function App() {
     }
   }
 
-  async function loadCaptureIntoSession(summary: CaptureSummary, targetSession?: UiSession) {
+  async function loadCaptureIntoSession(opened: OpenCaptureResult, targetSession?: UiSession) {
+    const { summary, saleae_session: saleaeSession } = opened;
     const target =
       targetSession ??
       (activeSession && !activeSession.summary
@@ -2058,8 +2062,14 @@ export default function App() {
     const labels = channelLabelsForCount(summary.metadata.channel_count, summary.metadata.labels);
     const enabledChannels = metadataEnabledChannels(summary.metadata);
     const initialViewport = initialCaptureViewport(summary);
+    const restoredAnalyzers = saleaeSession?.analyzers.reduce<UiAnalyzerInstance[]>(
+      (analyzers, metadata) => [...analyzers, restoreSaleaeAnalyzer(metadata, analyzers)],
+      [],
+    );
     updateSession(target.id, (session) => ({
       ...session,
+      name: saleaeSession?.name.trim() || session.name,
+      notes: saleaeSession?.notes ?? session.notes,
       selectedDevice: summary.metadata.source_device || session.selectedDevice,
       settings: {
         ...session.settings,
@@ -2083,17 +2093,22 @@ export default function App() {
       summary: summaryWithLabels(summary, labels),
       tile: null,
       ...initialViewport,
-      analyzers: session.analyzers.map((analyzer) => ({
-        ...analyzer,
-        protocolBubbles: [],
-        decodedFrames: [],
-        previousFrame: null,
-        nextFrame: null,
-        renderedTracks: [],
-        renderedDecodeSignature: null,
-        highlightedFrameIndex: null,
-      })),
-      message: "Capture opened",
+      analyzers:
+        restoredAnalyzers ??
+        session.analyzers.map((analyzer) => ({
+          ...analyzer,
+          protocolBubbles: [],
+          decodedFrames: [],
+          previousFrame: null,
+          nextFrame: null,
+          renderedTracks: [],
+          renderedDecodeSignature: null,
+          highlightedFrameIndex: null,
+        })),
+      message:
+        restoredAnalyzers && restoredAnalyzers.length > 0
+          ? `Capture opened - ${restoredAnalyzers.length} analyzer${restoredAnalyzers.length === 1 ? "" : "s"} restored`
+          : "Capture opened",
     }));
     setActiveSessionId(target.id);
   }
@@ -2110,16 +2125,16 @@ export default function App() {
         activeSession && !activeSession.summary
           ? activeSession
           : createSession(selectedDevice, activeSession ?? undefined);
-      const next = await openCapture(target.id, path);
-      await loadCaptureIntoSession(next, target);
+      const opened = await openCapture(target.id, path);
+      await loadCaptureIntoSession(opened, target);
     } catch (error) {
       try {
         target ??=
           activeSession && !activeSession.summary
             ? activeSession
             : createSession(selectedDevice, activeSession ?? undefined);
-        const next = await openCapture(target.id, "preview");
-        await loadCaptureIntoSession(next, target);
+        const opened = await openCapture(target.id, "preview");
+        await loadCaptureIntoSession(opened, target);
         updateSession(target.id, (session) => ({ ...session, message: "Preview capture loaded" }));
       } catch {
         if (activeSession) {
@@ -2156,7 +2171,18 @@ export default function App() {
         filters: [{ name: filterName, extensions: [ext] }],
       });
       if (!path) return;
-      await exportCapture(activeSession.id, path, format);
+      await exportCapture(
+        activeSession.id,
+        path,
+        format,
+        format === "Sal"
+          ? {
+              name: activeSession.name,
+              notes: activeSession.notes,
+              analyzers: activeSession.analyzers.map(saleaeAnalyzerMetadata),
+            }
+          : undefined,
+      );
       updateSession(activeSession.id, (session) => ({ ...session, message: `${ext.toUpperCase()} exported` }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));

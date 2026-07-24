@@ -34,6 +34,75 @@ File.write(
     sample_count: 10_000,
     captured_at_unix_milliseconds: 0,
     channels: channels,
+    session: {
+      name: 'Analyzer round trip',
+      notes: 'Analyzer settings survive the archive',
+      analyzers: [
+        {
+          type: 'SPI',
+          name: 'SPI [imported]',
+          color: '#7ACB8C',
+          display_radix: 'Hexadecimal',
+          show_in_data_table: true,
+          stream_to_terminal: false,
+          decoder_backend: 'saleae_native',
+          decode_settings: {
+            protocol: 'Spi',
+            settings: {
+              mosi_channel: 0,
+              miso_channel: 2,
+              clock_channel: 4,
+              enable_channel: 6,
+              enable_active_low: true,
+              clock_polarity: true,
+              clock_phase: false,
+              bits_per_transfer: 8,
+              msb_first: true,
+            },
+          },
+          saleae_metadata: nil,
+        },
+        {
+          type: 'I2C',
+          name: 'I2C [imported]',
+          color: '#75CACA',
+          display_radix: 'Hexadecimal',
+          show_in_data_table: false,
+          stream_to_terminal: true,
+          decoder_backend: 'sigrok_native',
+          decode_settings: {
+            protocol: 'I2c',
+            settings: {
+              sda_channel: 1,
+              scl_channel: 3,
+            },
+          },
+          saleae_metadata: nil,
+        },
+        {
+          type: 'Async Serial',
+          name: 'Async Serial [imported]',
+          color: '#D881F7',
+          display_radix: 'ASCII',
+          show_in_data_table: true,
+          stream_to_terminal: false,
+          decoder_backend: 'sigrok_native',
+          decode_settings: {
+            protocol: 'Uart',
+            settings: {
+              channel: 5,
+              baud_rate: 230400,
+              inverted: true,
+              data_bits: 7,
+              stop_bits: 1.5,
+              parity: 'odd',
+              msb_first: true,
+            },
+          },
+          saleae_metadata: nil,
+        },
+      ],
+    },
   ),
 )
 
@@ -88,6 +157,55 @@ channels_dir = File.join(root, 'channels-32', 'reimport')
 channels_manifest = JSON.parse(File.read(File.join(channels_dir, 'manifest.json')))
 raise '32-channel manifest count changed' unless channels_manifest.fetch('channel_count') == 32
 raise '32-channel sample count changed' unless channels_manifest.fetch('sample_count') == 10_000
+session = channels_manifest.fetch('session')
+raise 'session name changed' unless session.fetch('name') == 'Analyzer round trip'
+raise 'session notes changed' unless session.fetch('notes') == 'Analyzer settings survive the archive'
+analyzers = session.fetch('analyzers').to_h { |analyzer| [analyzer.fetch('type'), analyzer] }
+
+spi = analyzers.fetch('SPI')
+raise 'SPI analyzer name changed' unless spi.fetch('name') == 'SPI [imported]'
+raise 'SPI analyzer color changed' unless spi.fetch('color') == '#7ACB8C'
+spi_settings = spi.fetch('settings').to_h { |setting| [setting.fetch('title'), setting.fetch('setting')['value']] }
+expected_spi_settings = {
+  'MOSI' => 0,
+  'MISO' => 2,
+  'Clock' => 4,
+  'Enable' => 6,
+  'Significant Bit' => 0,
+  'Bits per Transfer' => 8,
+  'Clock State' => 1,
+  'Clock Phase' => 0,
+  'Enable Line' => 0,
+}
+raise "SPI analyzer settings changed: #{spi_settings.inspect}" unless spi_settings == expected_spi_settings
+
+i2c = analyzers.fetch('I2C')
+raise 'I2C analyzer name changed' unless i2c.fetch('name') == 'I2C [imported]'
+raise 'I2C analyzer table visibility changed' unless i2c.fetch('showInDataTable') == false
+raise 'I2C terminal visibility changed' unless i2c.fetch('streamToTerminal') == true
+i2c_settings = i2c.fetch('settings').to_h { |setting| [setting.fetch('title'), setting.fetch('setting')['value']] }
+expected_i2c_settings = {
+  'Serial Data Line' => 1,
+  'Serial Clock Line' => 3,
+}
+raise "I2C analyzer settings changed: #{i2c_settings.inspect}" unless i2c_settings == expected_i2c_settings
+
+uart = analyzers.fetch('Async Serial')
+raise 'UART analyzer name changed' unless uart.fetch('name') == 'Async Serial [imported]'
+raise 'UART display radix changed' unless uart.fetch('displayRadix') == 'ASCII'
+uart_settings = uart.fetch('settings').to_h { |setting| [setting.fetch('title'), setting.fetch('setting')['value']] }
+expected_uart_settings = {
+  'Input Channel' => 5,
+  'Bit Rate (Bits/s)' => 230400,
+  'Use Autobaud' => false,
+  'Bits per Frame' => 7,
+  'Stop Bits' => 1.5,
+  'Parity Bit' => 2,
+  'Significant Bit' => 1,
+  'Signal inversion' => 1,
+  'Mode' => 0,
+}
+raise "UART analyzer settings changed: #{uart_settings.inspect}" unless uart_settings == expected_uart_settings
 (0...32).each do |channel|
   initial_high, transitions = read_public_binary(File.join(channels_dir, "digital_#{channel}.bin"), 1_000_000)
   expected = channel.even? ? [100 + channel, 500 + channel] : []
@@ -104,5 +222,5 @@ expected = [100, 4_294_967_300, 49_000_000_000]
 raise "long capture transitions changed: #{transitions.inspect}" unless transitions == expected
 RUBY
 
-printf 'Saleae .sal round trips verified (32 channels and 49-billion-sample sparse capture).\n'
+printf 'Saleae .sal round trips verified (SPI/I2C/UART metadata, 32 channels, and 49-billion-sample sparse capture).\n'
 printf 'Artifacts: %s\n' "$WORK_DIR"

@@ -6,10 +6,12 @@ use std::{
 
 use chrono::Utc;
 use pxlogic_core::{
-    capture::read_sample_word, resolve_enabled_channels, CaptureData, CaptureMetadata,
-    SparseCaptureData, SparseDigitalChannel,
+    capture::read_sample_word, resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData,
+    CaptureMetadata, DecoderBackendKind, I2cDecodeSettings, SparseCaptureData,
+    SparseDigitalChannel, SpiDecodeSettings, UartDecodeSettings, UartParity, UartStopBits,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -38,12 +40,65 @@ struct SaleaeTransitionManifest {
     duration_seconds: f64,
     sample_count: u64,
     channels: Vec<SaleaeTransitionChannel>,
+    #[serde(default)]
+    session: SaleaeTransitionSession,
 }
 
 #[derive(Debug, Deserialize)]
 struct SaleaeTransitionChannel {
     channel: u8,
     file: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SaleaeTransitionSession {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    analyzers: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SaleaeSessionMetadata {
+    pub name: String,
+    pub notes: String,
+    pub analyzers: Vec<SaleaeAnalyzerMetadata>,
+}
+
+impl Default for SaleaeSessionMetadata {
+    fn default() -> Self {
+        Self {
+            name: "PXLogic Capture".to_string(),
+            notes: String::new(),
+            analyzers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SaleaeAnalyzerMetadata {
+    #[serde(rename = "type")]
+    pub analyzer_type: String,
+    pub name: String,
+    pub color: String,
+    pub display_radix: String,
+    pub show_in_data_table: bool,
+    pub stream_to_terminal: bool,
+    pub decoder_backend: DecoderBackendKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_settings: Option<AnalyzerDecodeSettings>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub saleae_metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SaleaeImportedCapture {
+    pub capture: SparseCaptureData,
+    pub session: SaleaeSessionMetadata,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +111,7 @@ struct SaleaeExportManifest {
     sample_count: u64,
     captured_at_unix_milliseconds: i64,
     channels: Vec<SaleaeExportChannel>,
+    session: SaleaeSessionMetadata,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +125,18 @@ struct SaleaeExportChannel {
 pub fn write_saleae_packed_export_manifest(
     directory: impl AsRef<Path>,
     capture: &CaptureData,
+) -> Result<PathBuf> {
+    write_saleae_packed_export_manifest_with_session(
+        directory,
+        capture,
+        &SaleaeSessionMetadata::default(),
+    )
+}
+
+pub fn write_saleae_packed_export_manifest_with_session(
+    directory: impl AsRef<Path>,
+    capture: &CaptureData,
+    session: &SaleaeSessionMetadata,
 ) -> Result<PathBuf> {
     validate_saleae_export_metadata(&capture.metadata)?;
     let channels = export_channels(&capture.metadata)?;
@@ -129,12 +197,24 @@ pub fn write_saleae_packed_export_manifest(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    write_saleae_export_manifest(directory, &capture.metadata, manifest_channels)
+    write_saleae_export_manifest(directory, &capture.metadata, manifest_channels, session)
 }
 
 pub fn write_saleae_sparse_export_manifest(
     directory: impl AsRef<Path>,
     capture: &SparseCaptureData,
+) -> Result<PathBuf> {
+    write_saleae_sparse_export_manifest_with_session(
+        directory,
+        capture,
+        &SaleaeSessionMetadata::default(),
+    )
+}
+
+pub fn write_saleae_sparse_export_manifest_with_session(
+    directory: impl AsRef<Path>,
+    capture: &SparseCaptureData,
+    session: &SaleaeSessionMetadata,
 ) -> Result<PathBuf> {
     validate_saleae_export_metadata(&capture.metadata)?;
     let enabled_channels = export_channels(&capture.metadata)?;
@@ -188,7 +268,7 @@ pub fn write_saleae_sparse_export_manifest(
             transitions_file: file_name,
         });
     }
-    write_saleae_export_manifest(directory, &capture.metadata, manifest_channels)
+    write_saleae_export_manifest(directory, &capture.metadata, manifest_channels, session)
 }
 
 fn validate_saleae_export_metadata(metadata: &CaptureMetadata) -> Result<()> {
@@ -212,19 +292,25 @@ fn write_saleae_export_manifest(
     directory: &Path,
     metadata: &CaptureMetadata,
     channels: Vec<SaleaeExportChannel>,
+    session: &SaleaeSessionMetadata,
 ) -> Result<PathBuf> {
     if channels.is_empty() {
         return Err(FileError::InvalidCapture);
     }
     let manifest = SaleaeExportManifest {
         format: "pxlogic.saleae-export.v1",
-        name: "PXLogic Capture".to_string(),
+        name: if session.name.trim().is_empty() {
+            "PXLogic Capture".to_string()
+        } else {
+            session.name.clone()
+        },
         source_device: metadata.source_device.clone(),
         sample_rate_hz: metadata.sample_rate_hz,
         channel_count: metadata.channel_count,
         sample_count: metadata.sample_count,
         captured_at_unix_milliseconds: metadata.captured_at.timestamp_millis(),
         channels,
+        session: session.clone(),
     };
     let path = directory.join("manifest.json");
     serde_json::to_writer_pretty(File::create(&path)?, &manifest)?;
@@ -232,6 +318,10 @@ fn write_saleae_export_manifest(
 }
 
 pub fn open_saleae_transition_manifest(path: impl AsRef<Path>) -> Result<SparseCaptureData> {
+    Ok(open_saleae_transition_session(path)?.capture)
+}
+
+pub fn open_saleae_transition_session(path: impl AsRef<Path>) -> Result<SaleaeImportedCapture> {
     let path = path.as_ref();
     let manifest: SaleaeTransitionManifest = serde_json::from_reader(File::open(path)?)?;
     if manifest.format != "pxlogic.saleae-transition.v1"
@@ -283,6 +373,17 @@ pub fn open_saleae_transition_manifest(path: impl AsRef<Path>) -> Result<SparseC
         17..=32 => 4,
         _ => unreachable!(),
     };
+    let labels = (0..manifest.channel_count)
+        .map(|channel| {
+            manifest
+                .session
+                .labels
+                .get(usize::from(channel))
+                .filter(|label| !label.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("D{channel}"))
+        })
+        .collect();
     let metadata = CaptureMetadata {
         version: 1,
         source_device: format!("Saleae {}", manifest.source),
@@ -292,12 +393,148 @@ pub fn open_saleae_transition_manifest(path: impl AsRef<Path>) -> Result<SparseC
         unitsize,
         sample_count: manifest.sample_count,
         captured_at: Utc::now(),
-        labels: (0..manifest.channel_count)
-            .map(|channel| format!("D{channel}"))
-            .collect(),
+        labels,
         trigger: None,
     };
-    Ok(SparseCaptureData { metadata, channels })
+    let analyzers = manifest
+        .session
+        .analyzers
+        .into_iter()
+        .filter_map(normalize_saleae_analyzer)
+        .collect();
+    Ok(SaleaeImportedCapture {
+        capture: SparseCaptureData { metadata, channels },
+        session: SaleaeSessionMetadata {
+            name: manifest.session.name,
+            notes: manifest.session.notes,
+            analyzers,
+        },
+    })
+}
+
+fn normalize_saleae_analyzer(raw: Value) -> Option<SaleaeAnalyzerMetadata> {
+    let analyzer_type = raw.get("type")?.as_str()?.trim().to_string();
+    if analyzer_type.is_empty() {
+        return None;
+    }
+    let decoder_backend = match analyzer_type.as_str() {
+        "SPI" => DecoderBackendKind::SaleaeNative,
+        "Async Serial" | "Serial" | "I2C" => DecoderBackendKind::SigrokNative,
+        _ => DecoderBackendKind::LegacyRust,
+    };
+    let decode_settings = normalize_saleae_decode_settings(&analyzer_type, &raw);
+    Some(SaleaeAnalyzerMetadata {
+        name: raw
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(&analyzer_type)
+            .to_string(),
+        color: raw
+            .get("color")
+            .and_then(Value::as_str)
+            .unwrap_or("#7EA0F8")
+            .to_string(),
+        display_radix: raw
+            .get("displayRadix")
+            .and_then(Value::as_str)
+            .unwrap_or("Hexadecimal")
+            .to_string(),
+        show_in_data_table: raw
+            .get("showInDataTable")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        stream_to_terminal: raw
+            .get("streamToTerminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        analyzer_type,
+        decoder_backend,
+        decode_settings,
+        saleae_metadata: raw,
+    })
+}
+
+fn normalize_saleae_decode_settings(
+    analyzer_type: &str,
+    analyzer: &Value,
+) -> Option<AnalyzerDecodeSettings> {
+    match analyzer_type {
+        "SPI" => {
+            let mosi_channel = saleae_setting_u8(analyzer, &["MOSI"]);
+            let miso_channel = saleae_setting_u8(analyzer, &["MISO"]);
+            if mosi_channel.is_none() && miso_channel.is_none() {
+                return None;
+            }
+            Some(AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+                mosi_channel,
+                miso_channel,
+                clock_channel: saleae_setting_u8(analyzer, &["Clock"])?,
+                enable_channel: saleae_setting_u8(analyzer, &["Enable"]),
+                enable_active_low: saleae_setting_u64(analyzer, &["Enable Line"]).unwrap_or(0) == 0,
+                clock_polarity: saleae_setting_u64(analyzer, &["Clock State"]).unwrap_or(0) != 0,
+                clock_phase: saleae_setting_u64(analyzer, &["Clock Phase"]).unwrap_or(0) != 0,
+                bits_per_transfer: u8::try_from(
+                    saleae_setting_u64(analyzer, &["Bits per Transfer"]).unwrap_or(8),
+                )
+                .ok()?,
+                msb_first: saleae_setting_u64(analyzer, &["Significant Bit"]).unwrap_or(0) == 0,
+            }))
+        }
+        "I2C" => Some(AnalyzerDecodeSettings::I2c(I2cDecodeSettings {
+            sda_channel: saleae_setting_u8(analyzer, &["Serial Data Line", "SDA"])?,
+            scl_channel: saleae_setting_u8(analyzer, &["Serial Clock Line", "SCL"])?,
+        })),
+        "Async Serial" | "Serial" => {
+            let parity = match saleae_setting_u64(analyzer, &["Parity Bit"]).unwrap_or(0) {
+                1 => UartParity::Even,
+                2 => UartParity::Odd,
+                _ => UartParity::None,
+            };
+            Some(AnalyzerDecodeSettings::Uart(UartDecodeSettings {
+                channel: saleae_setting_u8(analyzer, &["Input Channel"])?,
+                baud_rate: u32::try_from(saleae_setting_u64(analyzer, &["Bit Rate (Bits/s)"])?)
+                    .ok()?,
+                inverted: saleae_setting_u64(analyzer, &["Signal inversion"]).unwrap_or(0) != 0,
+                data_bits: u8::try_from(
+                    saleae_setting_u64(analyzer, &["Bits per Frame"]).unwrap_or(8),
+                )
+                .ok()?,
+                stop_bits: UartStopBits::from_f64(
+                    saleae_setting_number(analyzer, &["Stop Bits"]).unwrap_or(1.0),
+                )?,
+                parity,
+                msb_first: saleae_setting_u64(analyzer, &["Significant Bit"]).unwrap_or(0) != 0,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn saleae_setting_value<'a>(analyzer: &'a Value, titles: &[&str]) -> Option<&'a Value> {
+    analyzer
+        .get("settings")?
+        .as_array()?
+        .iter()
+        .find_map(|entry| {
+            let title = entry.get("title")?.as_str()?;
+            titles
+                .iter()
+                .any(|candidate| title.eq_ignore_ascii_case(candidate))
+                .then(|| entry.get("setting")?.get("value"))?
+        })
+}
+
+fn saleae_setting_number(analyzer: &Value, titles: &[&str]) -> Option<f64> {
+    saleae_setting_value(analyzer, titles)?.as_f64()
+}
+
+fn saleae_setting_u64(analyzer: &Value, titles: &[&str]) -> Option<u64> {
+    saleae_setting_value(analyzer, titles)?.as_u64()
+}
+
+fn saleae_setting_u8(analyzer: &Value, titles: &[&str]) -> Option<u8> {
+    u8::try_from(saleae_setting_u64(analyzer, titles)?).ok()
 }
 
 fn read_saleae_digital_binary(
@@ -752,18 +989,173 @@ mod tests {
                 "channel_count": 8,
                 "duration_seconds": 0.001,
                 "sample_count": 1_000,
-                "channels": [{ "channel": 3, "file": "digital_3.bin" }]
+                "channels": [{ "channel": 3, "file": "digital_3.bin" }],
+                "session": {
+                    "name": "SPI fixture",
+                    "notes": "restored note",
+                    "labels": ["D0", "D1", "D2", "clock", "D4", "D5", "D6", "D7"],
+                    "analyzers": [{
+                        "name": "SPI",
+                        "type": "SPI",
+                        "color": "#7ACB8C",
+                        "displayRadix": "Hexadecimal",
+                        "showInDataTable": true,
+                        "streamToTerminal": false,
+                        "settings": [
+                            { "title": "MOSI", "setting": { "type": "Channel", "value": 3 } },
+                            { "title": "MISO", "setting": { "type": "Channel" } },
+                            { "title": "Clock", "setting": { "type": "Channel", "value": 3 } },
+                            { "title": "Enable", "setting": { "type": "Channel" } },
+                            { "title": "Significant Bit", "setting": { "type": "NumberList", "value": 0 } },
+                            { "title": "Bits per Transfer", "setting": { "type": "NumberList", "value": 8 } },
+                            { "title": "Clock State", "setting": { "type": "NumberList", "value": 1 } },
+                            { "title": "Clock Phase", "setting": { "type": "NumberList", "value": 0 } },
+                            { "title": "Enable Line", "setting": { "type": "NumberList", "value": 0 } }
+                        ]
+                    }]
+                }
             }))
             .unwrap(),
         )
         .unwrap();
 
-        let capture = open_saleae_transition_manifest(&manifest_path).unwrap();
+        let imported = open_saleae_transition_session(&manifest_path).unwrap();
+        let capture = imported.capture;
         assert_eq!(capture.metadata.sample_count, 1_000);
         assert_eq!(capture.metadata.enabled_channels, vec![3]);
+        assert_eq!(capture.metadata.labels[3], "clock");
         assert!(capture.channels[0].initial_high);
         assert_eq!(capture.channels[0].transitions, vec![100, 400]);
+        assert_eq!(imported.session.name, "SPI fixture");
+        assert_eq!(imported.session.notes, "restored note");
+        assert_eq!(imported.session.analyzers.len(), 1);
+        let analyzer = &imported.session.analyzers[0];
+        assert_eq!(analyzer.name, "SPI");
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SaleaeNative);
+        assert_eq!(
+            analyzer.decode_settings,
+            Some(AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+                mosi_channel: Some(3),
+                miso_channel: None,
+                clock_channel: 3,
+                enable_channel: None,
+                enable_active_low: true,
+                clock_polarity: true,
+                clock_phase: false,
+                bits_per_transfer: 8,
+                msb_first: true,
+            }))
+        );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn normalizes_saleae_i2c_analyzer_settings() {
+        let raw = serde_json::json!({
+            "name": "I2C [sensors]",
+            "type": "I2C",
+            "color": "#75CACA",
+            "displayRadix": "Hexadecimal",
+            "showInDataTable": false,
+            "streamToTerminal": true,
+            "settings": [
+                {
+                    "title": "Serial Data Line",
+                    "setting": { "type": "Channel", "value": 7 }
+                },
+                {
+                    "title": "Serial Clock Line",
+                    "setting": { "type": "Channel", "value": 9 }
+                }
+            ]
+        });
+
+        let analyzer = normalize_saleae_analyzer(raw.clone()).unwrap();
+        assert_eq!(analyzer.name, "I2C [sensors]");
+        assert_eq!(analyzer.color, "#75CACA");
+        assert!(!analyzer.show_in_data_table);
+        assert!(analyzer.stream_to_terminal);
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SigrokNative);
+        assert_eq!(analyzer.saleae_metadata, raw);
+        assert_eq!(
+            analyzer.decode_settings,
+            Some(AnalyzerDecodeSettings::I2c(I2cDecodeSettings {
+                sda_channel: 7,
+                scl_channel: 9,
+            }))
+        );
+    }
+
+    #[test]
+    fn normalizes_and_serializes_complete_saleae_uart_settings() {
+        let raw = serde_json::json!({
+            "name": "Async Serial [console]",
+            "type": "Async Serial",
+            "color": "#D881F7",
+            "displayRadix": "ASCII",
+            "showInDataTable": true,
+            "streamToTerminal": false,
+            "settings": [
+                {
+                    "title": "Input Channel",
+                    "setting": { "type": "Channel", "value": 12 }
+                },
+                {
+                    "title": "Bit Rate (Bits/s)",
+                    "setting": { "type": "Integer", "value": 230400 }
+                },
+                {
+                    "title": "Use Autobaud",
+                    "setting": { "type": "Bool", "value": false }
+                },
+                {
+                    "title": "Bits per Frame",
+                    "setting": { "type": "NumberList", "value": 7 }
+                },
+                {
+                    "title": "Stop Bits",
+                    "setting": { "type": "NumberList", "value": 1.5 }
+                },
+                {
+                    "title": "Parity Bit",
+                    "setting": { "type": "NumberList", "value": 2 }
+                },
+                {
+                    "title": "Significant Bit",
+                    "setting": { "type": "NumberList", "value": 1 }
+                },
+                {
+                    "title": "Signal inversion",
+                    "setting": { "type": "NumberList", "value": 1 }
+                },
+                {
+                    "title": "Mode",
+                    "setting": { "type": "NumberList", "value": 2 }
+                }
+            ]
+        });
+
+        let analyzer = normalize_saleae_analyzer(raw.clone()).unwrap();
+        let expected = AnalyzerDecodeSettings::Uart(UartDecodeSettings {
+            channel: 12,
+            baud_rate: 230_400,
+            inverted: true,
+            data_bits: 7,
+            stop_bits: UartStopBits::OnePointFive,
+            parity: UartParity::Odd,
+            msb_first: true,
+        });
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SigrokNative);
+        assert_eq!(analyzer.decode_settings, Some(expected.clone()));
+        assert_eq!(analyzer.saleae_metadata, raw);
+
+        let serialized = serde_json::to_value(&expected).unwrap();
+        assert_eq!(serialized["settings"]["stop_bits"], 1.5);
+        assert_eq!(serialized["settings"]["parity"], "odd");
+        assert_eq!(
+            serde_json::from_value::<AnalyzerDecodeSettings>(serialized).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -832,13 +1224,36 @@ mod tests {
         let manifest = std::env::var_os("PXLOGIC_SALEAE_MANIFEST")
             .map(PathBuf::from)
             .expect("PXLOGIC_SALEAE_MANIFEST");
-        let capture = open_saleae_transition_manifest(manifest).unwrap();
+        let imported = open_saleae_transition_session(manifest).unwrap();
+        let capture = imported.capture;
         assert!(capture.metadata.sample_count > u64::from(u32::MAX));
         assert!(!capture.channels.is_empty());
         assert!(capture
             .channels
             .iter()
             .all(|channel| channel.transitions.windows(2).all(|pair| pair[0] < pair[1])));
+        let spi = imported
+            .session
+            .analyzers
+            .iter()
+            .find(|analyzer| analyzer.analyzer_type == "SPI")
+            .expect("demo-spi.sal should restore its SPI analyzer");
+        assert_eq!(spi.name, "SPI");
+        assert_eq!(spi.decoder_backend, DecoderBackendKind::SaleaeNative);
+        assert_eq!(
+            spi.decode_settings,
+            Some(AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+                mosi_channel: Some(5),
+                miso_channel: Some(0),
+                clock_channel: 3,
+                enable_channel: Some(4),
+                enable_active_low: true,
+                clock_polarity: false,
+                clock_phase: false,
+                bits_per_transfer: 8,
+                msb_first: true,
+            }))
+        );
     }
 
     fn temp_file(name: &str) -> PathBuf {

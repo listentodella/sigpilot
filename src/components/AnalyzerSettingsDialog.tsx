@@ -47,6 +47,10 @@ export function AnalyzerSettingsDialog({
       channel: 0,
       baudRate: 115_200,
       inverted: false,
+      uartDataBits: 8,
+      uartStopBits: 1,
+      uartParity: "none",
+      uartMsbFirst: false,
       i2cSdaChannel: 1,
       i2cSclChannel: 2,
       spiMosiChannel: 3,
@@ -67,6 +71,7 @@ export function AnalyzerSettingsDialog({
     if (!supported || validationError) return;
     onSave({
       ...draft,
+      configurationValid: true,
       channel:
         draft.type === "I2C"
           ? draft.i2cSdaChannel
@@ -110,6 +115,56 @@ export function AnalyzerSettingsDialog({
                   value={draft.baudRate}
                   onChange={(event) => setDraft((current) => ({ ...current, baudRate: Number(event.target.value) }))}
                 />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Bits per Frame" required>
+                <input
+                  max={9}
+                  min={5}
+                  step={1}
+                  type="number"
+                  value={draft.uartDataBits}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, uartDataBits: Number(event.target.value) }))
+                  }
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Stop Bits">
+                <select
+                  value={draft.uartStopBits}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, uartStopBits: Number(event.target.value) }))
+                  }
+                >
+                  <option value={1}>1 Stop Bit</option>
+                  <option value={1.5}>1.5 Stop Bits</option>
+                  <option value={2}>2 Stop Bits</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Parity Bit">
+                <select
+                  value={draft.uartParity}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      uartParity: event.target.value as typeof current.uartParity,
+                    }))
+                  }
+                >
+                  <option value="none">No Parity</option>
+                  <option value="even">Even Parity</option>
+                  <option value="odd">Odd Parity</option>
+                </select>
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Significant Bit">
+                <select
+                  value={draft.uartMsbFirst ? "msb" : "lsb"}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, uartMsbFirst: event.target.value === "msb" }))
+                  }
+                >
+                  <option value="lsb">Least Significant Bit First</option>
+                  <option value="msb">Most Significant Bit First</option>
+                </select>
               </AnalyzerSettingRow>
               <AnalyzerSettingRow label="Signal inversion">
                 <select
@@ -488,7 +543,13 @@ function ChannelOptionContent({
 }
 
 function validateAnalyzer(analyzer: UiAnalyzerInstance) {
-  if (analyzer.type === "Async Serial" && analyzer.baudRate <= 0) return "Bit rate must be greater than zero.";
+  if (analyzer.type === "Async Serial") {
+    if (analyzer.baudRate <= 0) return "Bit rate must be greater than zero.";
+    if (analyzer.uartDataBits < 5 || analyzer.uartDataBits > 9) {
+      return "Sigrok Native supports 5 to 9 data bits.";
+    }
+    if (![1, 1.5, 2].includes(analyzer.uartStopBits)) return "Select a supported stop-bit value.";
+  }
   if (analyzer.type === "I2C" && analyzer.i2cSdaChannel === analyzer.i2cSclChannel) {
     return "SDA and SCL must use different channels.";
   }

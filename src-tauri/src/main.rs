@@ -79,6 +79,12 @@ struct CaptureSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct OpenCaptureResult {
+    summary: CaptureSummary,
+    saleae_session: Option<pxlogic_file::SaleaeSessionMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct CaptureUpdatedEvent {
     session_id: String,
     summary: CaptureSummary,
@@ -561,7 +567,7 @@ fn open_capture(
     session_id: String,
     path: String,
     state: State<'_, AppState>,
-) -> CommandResult<CaptureSummary> {
+) -> CommandResult<OpenCaptureResult> {
     let source_path = PathBuf::from(&path);
     if source_path
         .extension()
@@ -569,10 +575,11 @@ fn open_capture(
         .is_some_and(|extension| extension.eq_ignore_ascii_case("sal"))
     {
         let converted = convert_saleae_capture(&source_path)?;
-        let result = pxlogic_file::open_saleae_transition_manifest(converted.join("manifest.json"))
+        let result = pxlogic_file::open_saleae_transition_session(converted.join("manifest.json"))
             .map_err(to_string);
         let _ = fs::remove_dir_all(&converted);
-        let capture = result?;
+        let imported = result?;
+        let capture = imported.capture;
         let bytes = fs::metadata(&source_path)
             .map(|metadata| usize::try_from(metadata.len()).unwrap_or(usize::MAX))
             .unwrap_or_default();
@@ -584,7 +591,10 @@ fn open_capture(
             .session(&session_id)
             .replace_sparse_capture(capture)
             .map_err(to_string)?;
-        return Ok(summary);
+        return Ok(OpenCaptureResult {
+            summary,
+            saleae_session: Some(imported.session),
+        });
     }
 
     let capture = pxlogic_file::open_pxcap(source_path).map_err(to_string)?;
@@ -596,7 +606,10 @@ fn open_capture(
         .session(&session_id)
         .replace_capture(capture)
         .map_err(to_string)?;
-    Ok(summary)
+    Ok(OpenCaptureResult {
+        summary,
+        saleae_session: None,
+    })
 }
 
 #[tauri::command]
@@ -608,7 +621,11 @@ fn save_capture(session_id: String, path: String, state: State<'_, AppState>) ->
     pxlogic_file::save_pxcap(PathBuf::from(path), &capture).map_err(to_string)
 }
 
-fn export_saleae_capture(session: &GraphSession, path: &Path) -> CommandResult<()> {
+fn export_saleae_capture(
+    session: &GraphSession,
+    path: &Path,
+    saleae_session: &pxlogic_file::SaleaeSessionMetadata,
+) -> CommandResult<()> {
     let sidecar = locate_saleae_graph_sidecar().ok_or_else(|| {
         "Saleae .sal export requires the native graph sidecar; build native/saleae-graph-sidecar/build.sh first"
             .to_string()
@@ -628,9 +645,17 @@ fn export_saleae_capture(session: &GraphSession, path: &Path) -> CommandResult<(
     fs::create_dir_all(&staging).map_err(to_string)?;
 
     let manifest_result = if let Some(capture) = session.capture() {
-        pxlogic_file::write_saleae_packed_export_manifest(&staging, &capture)
+        pxlogic_file::write_saleae_packed_export_manifest_with_session(
+            &staging,
+            &capture,
+            saleae_session,
+        )
     } else if let Some(capture) = session.sparse_capture() {
-        pxlogic_file::write_saleae_sparse_export_manifest(&staging, &capture)
+        pxlogic_file::write_saleae_sparse_export_manifest_with_session(
+            &staging,
+            &capture,
+            saleae_session,
+        )
     } else {
         let _ = fs::remove_dir_all(&staging);
         return Err("no capture is loaded".to_string());
@@ -687,11 +712,16 @@ fn export_capture(
     session_id: String,
     path: String,
     format: ExportFormat,
+    saleae_session: Option<pxlogic_file::SaleaeSessionMetadata>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     let session = state.existing_session(&session_id)?;
     if format == ExportFormat::Sal {
-        return export_saleae_capture(&session, Path::new(&path));
+        return export_saleae_capture(
+            &session,
+            Path::new(&path),
+            &saleae_session.unwrap_or_default(),
+        );
     }
     let capture = session
         .capture()

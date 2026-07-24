@@ -71,7 +71,7 @@ pnpm build
 
 ## 已知差距 / 后续任务
 
-- 当前 `.sal` 只覆盖 legacy digital channel；analog、MSO waveform、trigger store、analyzer 配置、measurement 和 notes 尚未写入。
+- Analyzer 配置与 Notes 已在后续 `2026-07-24-saleae-sal-analyzer-restore.md` 接入；analog、MSO waveform、trigger store 和 measurement 尚未写入。
 - packed capture 导出需要线性扫描一次样本；当前 Tauri 命令尚未向 UI 报告导出进度。
 - Logic runtime 与 Graph sidecar 目前只在 macOS arm64 / Logic 2.4.43 上固定验证。
 - 对应 Git 提交：本文所在的 `port: add Logic 2 sal export` 提交。

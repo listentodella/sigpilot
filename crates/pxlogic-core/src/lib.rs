@@ -24,6 +24,7 @@ pub use capture::{
 pub use decode::{
     decode_analyzer, decode_i2c, decode_spi, decode_uart, AnalyzerDecodeSettings,
     DecodedChannelValue, DecodedFrame, I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings,
+    UartParity, UartStopBits,
 };
 pub use decoder_backend::{
     DecoderAnnotation, DecoderAnnotationKind, DecoderBackend, DecoderBackendInfo,

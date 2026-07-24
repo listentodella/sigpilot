@@ -174,3 +174,5 @@ chore: 说明内容
   - 直接接入 PXView `uart_c`/`i2c_c`，与 `spi_c` 共用 transition runtime；顶部和右侧 Analyzer 选择器改为来源到协议的两级菜单，三协议均补齐 packed/sparse 与 490 亿 sample 回归。
 - `docs/ported-features/2026-07-24-saleae-sal-native-export.md`
   - packed/sparse capture 通过 Logic 2.4.43 原版 DigitalStore 校验并序列化为 `.sal`；补齐 32 通道、恒定电平与 490 亿 sample 的无展开 round-trip。
+- `docs/ported-features/2026-07-24-saleae-sal-analyzer-restore.md`
+  - 复用 Logic 2 persisted analyzer migration/startAnalysis 流程；`.sal` 导入自动恢复 SPI/I2C/Async Serial 配置并重新解码，导出可无损保留原始 analyzer metadata。

@@ -4,6 +4,7 @@ import type {
   AnalyzerTrackWindow,
   DecoderBackendKind,
   DecodedFrame,
+  SaleaeAnalyzerMetadata,
 } from "./api";
 
 // Ported from Logic 2.4.43 uikit/utils/colors.ts.
@@ -29,9 +30,14 @@ export interface UiAnalyzerInstance {
   name: string;
   color: string;
   decoderBackend: DecoderBackendKind;
+  configurationValid: boolean;
   channel: number;
   baudRate: number;
   inverted: boolean;
+  uartDataBits: number;
+  uartStopBits: number;
+  uartParity: "none" | "even" | "odd";
+  uartMsbFirst: boolean;
   i2cSdaChannel: number;
   i2cSclChannel: number;
   spiMosiChannel: number | null;
@@ -45,6 +51,8 @@ export interface UiAnalyzerInstance {
   spiMsbFirst: boolean;
   showInDataTable: boolean;
   streamToTerminal: boolean;
+  displayRadix: string;
+  saleaeMetadata: unknown | null;
   protocolBubbles: AnalyzerBubble[];
   decodedFrames: DecodedFrame[];
   previousFrame: DecodedFrame | null;
@@ -85,9 +93,14 @@ export function createAnalyzerInstance(
     name: analyzerDisplayName(type, analyzers),
     color: SALEAE_ANALYZER_COLORS[index % SALEAE_ANALYZER_COLORS.length],
     decoderBackend,
+    configurationValid: true,
     channel,
     baudRate: 115_200,
     inverted: false,
+    uartDataBits: 8,
+    uartStopBits: 1,
+    uartParity: "none",
+    uartMsbFirst: false,
     i2cSdaChannel: channel,
     i2cSclChannel: nextChannel(1),
     spiMosiChannel: channel,
@@ -101,6 +114,8 @@ export function createAnalyzerInstance(
     spiMsbFirst: true,
     showInDataTable: true,
     streamToTerminal: false,
+    displayRadix: "Hexadecimal",
+    saleaeMetadata: null,
     protocolBubbles: [],
     decodedFrames: [],
     previousFrame: null,
@@ -200,6 +215,7 @@ export function analyzerSupportsDecoding(analyzer: Pick<UiAnalyzerInstance, "typ
 }
 
 export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDecodeSettings | null {
+  if (!analyzer.configurationValid) return null;
   if (analyzer.type === "Async Serial") {
     return {
       protocol: "Uart",
@@ -207,6 +223,10 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
         channel: analyzer.channel,
         baud_rate: analyzer.baudRate,
         inverted: analyzer.inverted,
+        data_bits: analyzer.uartDataBits,
+        stop_bits: analyzer.uartStopBits,
+        parity: analyzer.uartParity,
+        msb_first: analyzer.uartMsbFirst,
       },
     };
   }
@@ -236,6 +256,87 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
     };
   }
   return null;
+}
+
+export function restoreSaleaeAnalyzer(
+  metadata: SaleaeAnalyzerMetadata,
+  analyzers: UiAnalyzerInstance[],
+): UiAnalyzerInstance {
+  const type = metadata.type === "Serial" ? "Async Serial" : metadata.type;
+  const settings = metadata.decode_settings;
+  const primaryChannel =
+    settings?.protocol === "Uart"
+      ? settings.settings.channel
+      : settings?.protocol === "I2c"
+        ? settings.settings.sda_channel
+        : settings?.protocol === "Spi"
+          ? (settings.settings.mosi_channel ?? settings.settings.miso_channel ?? settings.settings.clock_channel)
+          : 0;
+  const restored = {
+    ...createAnalyzerInstance(type, analyzers, primaryChannel, metadata.decoder_backend),
+    configurationValid: metadata.decode_settings !== undefined,
+    name: metadata.name || type,
+    color: metadata.color || SALEAE_ANALYZER_COLORS[analyzers.length % SALEAE_ANALYZER_COLORS.length],
+    displayRadix: metadata.display_radix || "Hexadecimal",
+    showInDataTable: metadata.show_in_data_table,
+    streamToTerminal: metadata.stream_to_terminal,
+    saleaeMetadata: metadata.saleae_metadata ?? null,
+  };
+
+  if (settings?.protocol === "Uart") {
+    return {
+      ...restored,
+      channel: settings.settings.channel,
+      baudRate: settings.settings.baud_rate,
+      inverted: settings.settings.inverted,
+      uartDataBits: settings.settings.data_bits,
+      uartStopBits: settings.settings.stop_bits,
+      uartParity: settings.settings.parity,
+      uartMsbFirst: settings.settings.msb_first,
+    };
+  }
+  if (settings?.protocol === "I2c") {
+    return {
+      ...restored,
+      channel: settings.settings.sda_channel,
+      i2cSdaChannel: settings.settings.sda_channel,
+      i2cSclChannel: settings.settings.scl_channel,
+    };
+  }
+  if (settings?.protocol === "Spi") {
+    return {
+      ...restored,
+      channel:
+        settings.settings.mosi_channel ??
+        settings.settings.miso_channel ??
+        settings.settings.clock_channel,
+      spiMosiChannel: settings.settings.mosi_channel,
+      spiMisoChannel: settings.settings.miso_channel,
+      spiClockChannel: settings.settings.clock_channel,
+      spiEnableChannel: settings.settings.enable_channel,
+      spiEnableActiveLow: settings.settings.enable_active_low,
+      spiClockPolarity: settings.settings.clock_polarity,
+      spiClockPhase: settings.settings.clock_phase,
+      spiBitsPerTransfer: settings.settings.bits_per_transfer,
+      spiMsbFirst: settings.settings.msb_first,
+    };
+  }
+  return restored;
+}
+
+export function saleaeAnalyzerMetadata(analyzer: UiAnalyzerInstance): SaleaeAnalyzerMetadata {
+  const decodeSettings = analyzerDecodeSettings(analyzer);
+  return {
+    type: analyzer.type,
+    name: analyzer.name,
+    color: analyzer.color,
+    display_radix: analyzer.displayRadix,
+    show_in_data_table: analyzer.showInDataTable,
+    stream_to_terminal: analyzer.streamToTerminal,
+    decoder_backend: analyzer.decoderBackend,
+    ...(decodeSettings ? { decode_settings: decodeSettings } : {}),
+    ...(analyzer.saleaeMetadata == null ? {} : { saleae_metadata: analyzer.saleaeMetadata }),
+  };
 }
 
 export function analyzerChannelIndexes(analyzer: UiAnalyzerInstance) {

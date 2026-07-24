@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     capture::read_sample_word,
-    decode::{AnalyzerDecodeSettings, DecodedChannelValue},
+    decode::{AnalyzerDecodeSettings, DecodedChannelValue, UartParity},
     error::{CoreError, Result},
     models::{CaptureData, SparseCaptureData},
 };
@@ -875,10 +875,18 @@ fn sigrok_sidecar_settings(settings: &AnalyzerDecodeSettings) -> SigrokSidecarSe
             },
             options: UartSidecarOptions {
                 baudrate: settings.baud_rate,
-                data_bits: 8,
-                stop_bits: 1.0,
-                parity: "none",
-                bit_order: "lsb-first",
+                data_bits: settings.data_bits,
+                stop_bits: settings.stop_bits.as_f64(),
+                parity: match settings.parity {
+                    UartParity::None => "none",
+                    UartParity::Even => "even",
+                    UartParity::Odd => "odd",
+                },
+                bit_order: if settings.msb_first {
+                    "msb-first"
+                } else {
+                    "lsb-first"
+                },
                 format: "hex",
                 invert_rx: u8::from(settings.inverted),
                 invert_tx: 0,
@@ -1199,6 +1207,7 @@ mod tests {
                 channel: 0,
                 baud_rate: 100_000,
                 inverted: false,
+                ..UartDecodeSettings::default()
             }),
         )
     }
@@ -1559,6 +1568,7 @@ mod tests {
                     channel: 0,
                     baud_rate: 100_000,
                     inverted: false,
+                    ..UartDecodeSettings::default()
                 }),
             )
             .unwrap();

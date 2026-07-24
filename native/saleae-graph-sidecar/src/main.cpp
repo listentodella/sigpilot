@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -340,6 +341,7 @@ struct SaleaeExportCapture {
     std::uint8_t channel_count = 0;
     std::uint64_t sample_count = 0;
     std::int64_t captured_at_unix_milliseconds = 0;
+    Json session = Json::object();
     std::vector<SaleaeExportChannel> channels;
 };
 
@@ -411,11 +413,15 @@ SaleaeExportCapture ReadSaleaeExportManifest(const fs::path& path)
         static_cast<std::uint8_t>(manifest.value("channel_count", 0)),
         manifest.value("sample_count", std::uint64_t{0}),
         manifest.value("captured_at_unix_milliseconds", std::int64_t{0}),
+        manifest.value("session", Json::object()),
         {},
     };
     if (capture.sample_rate_hz == 0 || capture.sample_count == 0 || capture.channel_count == 0 ||
         capture.channel_count > 32 || !manifest.contains("channels") || !manifest["channels"].is_array()) {
         throw std::runtime_error("Saleae export manifest metadata is invalid");
+    }
+    if (!capture.session.is_object()) {
+        throw std::runtime_error("Saleae export session metadata is invalid");
     }
 
     const fs::path directory = path.parent_path();
@@ -879,6 +885,231 @@ void WaitForSerialization(GraphRuntime& graph, std::vector<SaleaeExportChannel>&
     throw std::runtime_error("timed out waiting for Saleae DigitalStore serialization");
 }
 
+Json SaleaeAnalyzerSetting(const std::string& title, const std::string& tooltip, Json setting)
+{
+    return Json{{"title", title}, {"tooltip", tooltip}, {"disabled", false}, {"setting", std::move(setting)}};
+}
+
+Json SaleaeChannelSetting(const std::string& title, const std::string& tooltip, bool required,
+                          const Json& value)
+{
+    Json setting{{"type", "Channel"}, {"channelRequired", required}};
+    if (value.is_number_integer() || value.is_number_unsigned()) {
+        setting["value"] = value;
+    }
+    return SaleaeAnalyzerSetting(title, tooltip, std::move(setting));
+}
+
+Json SaleaeNumberOption(const std::string& text, const Json& value, const std::string& tooltip = "")
+{
+    return Json{{"dropdownText", text}, {"dropdownTooltip", tooltip}, {"value", value}};
+}
+
+Json SaleaeNumberListSetting(const std::string& title, const std::string& tooltip, Json options,
+                             const Json& value)
+{
+    return SaleaeAnalyzerSetting(
+        title, tooltip, Json{{"type", "NumberList"}, {"options", std::move(options)}, {"value", value}});
+}
+
+Json SaleaeBitsPerTransferOptions(const std::string& singular)
+{
+    Json options = Json::array();
+    for (int bits = 1; bits <= 64; ++bits) {
+        std::string text;
+        if (bits == 1) {
+            text = "1 Bit per Transfer";
+        } else if (bits == 8) {
+            text = "8 Bits per Transfer (Standard)";
+        } else {
+            text = std::to_string(bits) + " Bits per Transfer";
+        }
+        if (singular == "Frame") {
+            text = bits == 1 ? "1 Bit per Frame" : std::to_string(bits) + " Bits per Frame";
+            if (bits == 8) {
+                text += " (Standard)";
+            }
+        }
+        options.push_back(SaleaeNumberOption(text, bits));
+    }
+    return options;
+}
+
+Json BuildSaleaeSpiSettings(const Json& settings)
+{
+    Json significant_options = Json::array(
+        {SaleaeNumberOption("Most Significant Bit First (Standard)", 0,
+                            "Select if the most significant bit or least significant bit is transmitted first"),
+         SaleaeNumberOption("Least Significant Bit First", 1)});
+    Json clock_state_options = Json::array(
+        {SaleaeNumberOption("Clock is Low when inactive (CPOL = 0)", 0, "CPOL = 0 (Clock Polarity)"),
+         SaleaeNumberOption("Clock is High when inactive (CPOL = 1)", 1, "CPOL = 1 (Clock Polarity)")});
+    Json clock_phase_options = Json::array(
+        {SaleaeNumberOption("Data is Valid on Clock Leading Edge (CPHA = 0)", 0, "CPHA = 0 (Clock Phase)"),
+         SaleaeNumberOption("Data is Valid on Clock Trailing Edge (CPHA = 1)", 1,
+                            "CPHA = 1 (Clock Phase)")});
+    Json enable_options = Json::array({SaleaeNumberOption("Enable line is Active Low (Standard)", 0),
+                                       SaleaeNumberOption("Enable line is Active High", 1)});
+    return Json::array(
+        {SaleaeChannelSetting("MOSI", "Master Out, Slave In", false,
+                              settings.value("mosi_channel", Json(nullptr))),
+         SaleaeChannelSetting("MISO", "Master In, Slave Out", false,
+                              settings.value("miso_channel", Json(nullptr))),
+         SaleaeChannelSetting("Clock", "Clock (CLK)", true, settings.value("clock_channel", Json(nullptr))),
+         SaleaeChannelSetting("Enable", "Enable (SS, Slave Select)", false,
+                              settings.value("enable_channel", Json(nullptr))),
+         SaleaeNumberListSetting("Significant Bit", "", std::move(significant_options),
+                                 settings.value("msb_first", true) ? 0 : 1),
+         SaleaeNumberListSetting("Bits per Transfer", "", SaleaeBitsPerTransferOptions("Transfer"),
+                                 settings.value("bits_per_transfer", 8)),
+         SaleaeNumberListSetting("Clock State", "", std::move(clock_state_options),
+                                 settings.value("clock_polarity", false) ? 1 : 0),
+         SaleaeNumberListSetting("Clock Phase", "", std::move(clock_phase_options),
+                                 settings.value("clock_phase", false) ? 1 : 0),
+         SaleaeNumberListSetting("Enable Line", "", std::move(enable_options),
+                                 settings.value("enable_active_low", true) ? 0 : 1)});
+}
+
+Json BuildSaleaeI2cSettings(const Json& settings)
+{
+    return Json::array(
+        {SaleaeChannelSetting("Serial Data Line", "", true, settings.value("sda_channel", Json(nullptr))),
+         SaleaeChannelSetting("Serial Clock Line", "", true, settings.value("scl_channel", Json(nullptr)))});
+}
+
+Json BuildSaleaeUartSettings(const Json& settings)
+{
+    Json stop_options = Json::array({SaleaeNumberOption("1 Stop Bit (Standard)", 1.0),
+                                     SaleaeNumberOption("1.5 Stop Bits", 1.5),
+                                     SaleaeNumberOption("2 Stop Bits", 2.0)});
+    Json parity_options = Json::array({SaleaeNumberOption("No Parity Bit (Standard)", 0),
+                                       SaleaeNumberOption("Even Parity Bit", 1),
+                                       SaleaeNumberOption("Odd Parity Bit", 2)});
+    Json significant_options = Json::array(
+        {SaleaeNumberOption("Least Significant Bit Sent First (Standard)", 0),
+         SaleaeNumberOption("Most Significant Bit Sent First", 1)});
+    Json inversion_options = Json::array({SaleaeNumberOption("Non Inverted (Standard)", 0),
+                                          SaleaeNumberOption("Inverted", 1)});
+    Json mode_options = Json::array(
+        {SaleaeNumberOption("Normal", 0), SaleaeNumberOption("MP - Address indicated by MSB=0", 1),
+         SaleaeNumberOption("MDB - Address indicated by MSB=1 (TX only)", 2)});
+    const std::string parity = settings.value("parity", "none");
+    const int parity_value = parity == "even" ? 1 : parity == "odd" ? 2 : 0;
+
+    return Json::array(
+        {SaleaeChannelSetting("Input Channel", "Standard Async Serial", true,
+                              settings.value("channel", Json(nullptr))),
+         SaleaeAnalyzerSetting("Bit Rate (Bits/s)", "Specify the bit rate in bits per second.",
+                               Json{{"type", "Integer"},
+                                    {"minimumValue", 1},
+                                    {"maximumValue", std::numeric_limits<std::uint32_t>::max()},
+                                    {"value", settings.value("baud_rate", 115200)}}),
+         SaleaeAnalyzerSetting("Use Autobaud", "", Json{{"type", "Bool"},
+                                                           {"checkboxText", "Use Autobaud"},
+                                                           {"value", false}}),
+         SaleaeNumberListSetting("Bits per Frame", "Select the number of bits per frame",
+                                 SaleaeBitsPerTransferOptions("Frame"), settings.value("data_bits", 8)),
+         SaleaeNumberListSetting("Stop Bits", "Specify the number of stop bits.", std::move(stop_options),
+                                 settings.value("stop_bits", 1.0)),
+         SaleaeNumberListSetting("Parity Bit", "Specify None, Even, or Odd Parity.",
+                                 std::move(parity_options), parity_value),
+         SaleaeNumberListSetting("Significant Bit",
+                                 "Select if the most significant bit or least significant bit is transmitted first",
+                                 std::move(significant_options), settings.value("msb_first", false) ? 1 : 0),
+         SaleaeNumberListSetting("Signal inversion", "Specify if the serial signal is inverted",
+                                 std::move(inversion_options), settings.value("inverted", false) ? 1 : 0),
+         SaleaeNumberListSetting("Mode", "", std::move(mode_options), 0)});
+}
+
+Json BuildSaleaeAnalyzerSettings(const Json& decode_settings)
+{
+    if (!decode_settings.is_object() || !decode_settings.contains("settings") ||
+        !decode_settings["settings"].is_object()) {
+        return Json();
+    }
+    const std::string protocol = decode_settings.value("protocol", "");
+    const Json& settings = decode_settings["settings"];
+    if (protocol == "Spi") {
+        return BuildSaleaeSpiSettings(settings);
+    }
+    if (protocol == "I2c") {
+        return BuildSaleaeI2cSettings(settings);
+    }
+    if (protocol == "Uart") {
+        return BuildSaleaeUartSettings(settings);
+    }
+    return Json();
+}
+
+Json MergeSaleaeAnalyzerSettings(Json persisted, const Json& rebuilt)
+{
+    if (!persisted.is_array()) {
+        return rebuilt;
+    }
+    for (const Json& replacement : rebuilt) {
+        const std::string title = replacement.value("title", "");
+        const std::string type = replacement.value("setting", Json::object()).value("type", "");
+        const auto current = std::find_if(persisted.begin(), persisted.end(), [&](const Json& candidate) {
+            return candidate.value("title", "") == title &&
+                   candidate.value("setting", Json::object()).value("type", "") == type;
+        });
+        if (current == persisted.end()) {
+            persisted.push_back(replacement);
+            continue;
+        }
+        const Json& replacement_setting = replacement["setting"];
+        if (replacement_setting.contains("value")) {
+            (*current)["setting"]["value"] = replacement_setting["value"];
+        } else {
+            (*current)["setting"].erase("value");
+        }
+    }
+    return persisted;
+}
+
+Json RenderSaleaeAnalyzers(const SaleaeExportCapture& capture)
+{
+    Json result = Json::array();
+    const Json analyzers = capture.session.value("analyzers", Json::array());
+    if (!analyzers.is_array()) {
+        return result;
+    }
+    std::size_t index = 0;
+    for (const Json& analyzer : analyzers) {
+        if (!analyzer.is_object()) {
+            continue;
+        }
+        Json persisted = analyzer.value("saleae_metadata", Json::object());
+        const Json decode_settings = analyzer.value("decode_settings", Json());
+        const Json rebuilt_settings = BuildSaleaeAnalyzerSettings(decode_settings);
+        if (!persisted.is_object()) {
+            persisted = Json::object();
+        }
+        if (persisted.empty() && rebuilt_settings.is_null()) {
+            continue;
+        }
+        const std::string type = analyzer.value("type", persisted.value("type", ""));
+        if (type.empty()) {
+            continue;
+        }
+        persisted["type"] = type;
+        persisted["name"] = analyzer.value("name", persisted.value("name", type));
+        persisted["color"] = analyzer.value("color", persisted.value("color", "#7EA0F8"));
+        persisted["displayRadix"] =
+            analyzer.value("display_radix", persisted.value("displayRadix", "Hexadecimal"));
+        persisted["showInDataTable"] = analyzer.value("show_in_data_table", true);
+        persisted["streamToTerminal"] = analyzer.value("stream_to_terminal", false);
+        persisted["nodeId"] = static_cast<std::int32_t>(20000 + index);
+        if (!rebuilt_settings.is_null()) {
+            persisted["settings"] =
+                MergeSaleaeAnalyzerSettings(persisted.value("settings", Json::array()), rebuilt_settings);
+        }
+        result.push_back(std::move(persisted));
+        ++index;
+    }
+    return result;
+}
+
 Json RenderSaleaeMeta(const SaleaeExportCapture& capture)
 {
     const double duration_seconds = static_cast<double>(capture.sample_count) /
@@ -977,16 +1208,16 @@ Json RenderSaleaeMeta(const SaleaeExportCapture& capture)
         {"renderViewState", Json{{"leftEdgeTimeSec", 0.0},
                                   {"timeSecPerPixel", duration_seconds / 1200.0},
                                   {"navigationViewMode", "Timeline"}}},
-        {"analyzers", Json::array()},
+        {"analyzers", RenderSaleaeAnalyzers(capture)},
         {"rowsSettings", rows},
         {"captureSettings", capture_settings},
         {"digitalTriggerTime", -1},
-        {"name", capture.name},
+        {"name", capture.session.value("name", capture.name)},
         {"dataTable", Json{{"columns", columns}}},
         {"analyzerTrigger",
          Json{{"settings", Json{{"enabled", false}, {"searchQuery", ""}, {"holdoffSeconds", 0.2}}}}},
         {"timeManager", Json{{"t0", Json{{"type", "startOfCapture"}}}}},
-        {"captureNotes", ""},
+        {"captureNotes", capture.session.value("notes", "")},
     };
 
     Json bin_data = Json::array();
@@ -1056,8 +1287,43 @@ double ReadSaleaeBinaryDuration(const fs::path& path)
     return duration;
 }
 
-void WriteSaleaeManifest(const fs::path& output, const fs::path& input, const std::vector<SaleaeStore>& stores,
-                         std::uint8_t channel_count, double duration_seconds, std::uint64_t sample_rate_hz)
+Json ReadSaleaeSessionMetadata(const Json& meta, const fs::path& input, std::uint8_t channel_count)
+{
+    Json labels = Json::array();
+    for (std::uint8_t channel = 0; channel < channel_count; ++channel) {
+        labels.push_back("D" + std::to_string(channel));
+    }
+
+    Json session{{"name", input.stem().string()},
+                 {"notes", ""},
+                 {"labels", labels},
+                 {"analyzers", Json::array()}};
+    if (!meta.contains("data") || !meta["data"].is_object()) {
+        return session;
+    }
+    const Json& data = meta["data"];
+    session["name"] = data.value("name", input.stem().string());
+    session["notes"] = data.value("captureNotes", "");
+    if (data.contains("analyzers") && data["analyzers"].is_array()) {
+        session["analyzers"] = data["analyzers"];
+    }
+    if (data.contains("rowsSettings") && data["rowsSettings"].is_array()) {
+        for (const Json& row : data["rowsSettings"]) {
+            const Json channel = row.value("channel", Json::object());
+            const int index = channel.value("deviceChannel", -1);
+            if (channel.value("category", "") == "legacy" && channel.value("type", "") == "Digital" &&
+                index >= 0 && index < channel_count) {
+                session["labels"][static_cast<std::size_t>(index)] =
+                    row.value("name", "D" + std::to_string(index));
+            }
+        }
+    }
+    return session;
+}
+
+void WriteSaleaeManifest(const fs::path& output, const fs::path& input, const Json& meta,
+                         const std::vector<SaleaeStore>& stores, std::uint8_t channel_count,
+                         double duration_seconds, std::uint64_t sample_rate_hz)
 {
     Json manifest{
         {"format", "pxlogic.saleae-transition.v1"},
@@ -1067,6 +1333,7 @@ void WriteSaleaeManifest(const fs::path& output, const fs::path& input, const st
         {"duration_seconds", duration_seconds},
         {"sample_count", SampleCountFromDuration(duration_seconds, sample_rate_hz)},
         {"channels", Json::array()},
+        {"session", ReadSaleaeSessionMetadata(meta, input, channel_count)},
     };
     for (const SaleaeStore& store : stores) {
         manifest["channels"].push_back({
@@ -1204,7 +1471,7 @@ void ConvertSal(GraphRuntime& graph, const fs::path& input, const fs::path& outp
             throw std::runtime_error("Saleae export did not produce " + store.exported_file.string());
         }
     }
-    WriteSaleaeManifest(output, input, stores, channel_count, exported_duration, sample_rate);
+    WriteSaleaeManifest(output, input, meta, stores, channel_count, exported_duration, sample_rate);
 
     // DeleteGraphData is the same cleanup request used by Logic 2. We still
     // abandon the native object after its reply because the private runtime's
