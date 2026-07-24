@@ -39,6 +39,7 @@ constexpr const char* kSerialPluginSha256 = "d4bda764fc99ff552962f615f8bcbbf320f
 constexpr const char* kI2cPluginSha256 = "e3467f6e8183e57d324798e99cc8d680b2411e3fef11aeae42a52ae8e74781f9";
 constexpr const char* kSpiPluginSha256 = "366dfc0b312385f5e608245a9493c33194ed81723a785cc10248fe70593c1ce3";
 constexpr const char* kI2sPluginSha256 = "28c6864400d3f6f6baa3f71a4598f8cff8a00fa7b634148015d1707d9b443974";
+constexpr const char* kCanPluginSha256 = "ec1fcaa48d25930c43fe315e1c30917a475d01e7b85ad81d71e674ad81d1e251";
 
 enum class DecoderProtocol
 {
@@ -46,6 +47,7 @@ enum class DecoderProtocol
     I2c,
     Spi,
     I2s,
+    Can,
 };
 
 struct RuntimePaths
@@ -56,6 +58,7 @@ struct RuntimePaths
     fs::path i2c_plugin;
     fs::path spi_plugin;
     fs::path i2s_plugin;
+    fs::path can_plugin;
 
     const fs::path& PluginPath(DecoderProtocol protocol) const
     {
@@ -68,6 +71,8 @@ struct RuntimePaths
             return spi_plugin;
         case DecoderProtocol::I2s:
             return i2s_plugin;
+        case DecoderProtocol::Can:
+            return can_plugin;
         }
         throw std::runtime_error("unknown Saleae decoder protocol");
     }
@@ -118,7 +123,14 @@ struct I2sSettings
     bool word_select_high_is_right = true;
 };
 
-using DecoderSettings = std::variant<UartSettings, I2cSettings, SpiSettings, I2sSettings>;
+struct CanSettings
+{
+    U32 channel = 0;
+    U32 bit_rate = 1'000'000;
+    bool inverted = false;
+};
+
+using DecoderSettings = std::variant<UartSettings, I2cSettings, SpiSettings, I2sSettings, CanSettings>;
 
 std::string Sha256(const fs::path& path)
 {
@@ -155,12 +167,13 @@ RuntimePaths ValidateRuntimeRoot(const fs::path& root)
                        root / "Analyzers" / "libserial_analyzer.so",
                        root / "Analyzers" / "libi2c_analyzer.so",
                        root / "Analyzers" / "libspi_analyzer.so",
-                       root / "Analyzers" / "libi2s_analyzer.so"};
+                       root / "Analyzers" / "libi2s_analyzer.so",
+                       root / "Analyzers" / "libcan_analyzer.so"};
     if (!fs::is_regular_file(paths.runtime_library) || !fs::is_regular_file(paths.serial_plugin) ||
         !fs::is_regular_file(paths.i2c_plugin) || !fs::is_regular_file(paths.spi_plugin) ||
-        !fs::is_regular_file(paths.i2s_plugin)) {
+        !fs::is_regular_file(paths.i2s_plugin) || !fs::is_regular_file(paths.can_plugin)) {
         throw std::runtime_error(
-            "Saleae runtime root must contain libAnalyzer.dylib plus Serial, I2C, SPI, and I2S analyzer plugins: " +
+            "Saleae runtime root must contain libAnalyzer.dylib plus Serial, I2C, SPI, I2S, and CAN analyzer plugins: " +
             root.string());
     }
     return paths;
@@ -188,7 +201,8 @@ RuntimePaths LocateRuntime(const std::optional<fs::path>& explicit_root)
         if (fs::is_regular_file(candidate / "Analyzers" / "libserial_analyzer.so") &&
             fs::is_regular_file(candidate / "Analyzers" / "libi2c_analyzer.so") &&
             fs::is_regular_file(candidate / "Analyzers" / "libspi_analyzer.so") &&
-            fs::is_regular_file(candidate / "Analyzers" / "libi2s_analyzer.so")) {
+            fs::is_regular_file(candidate / "Analyzers" / "libi2s_analyzer.so") &&
+            fs::is_regular_file(candidate / "Analyzers" / "libcan_analyzer.so")) {
             return ValidateRuntimeRoot(candidate);
         }
     }
@@ -417,6 +431,15 @@ void ConfigureAnalyzer(Analyzer* analyzer, const I2sSettings& settings)
     CommitSettings(analyzer_settings, "I2S / PCM");
 }
 
+void ConfigureAnalyzer(Analyzer* analyzer, const CanSettings& settings)
+{
+    auto* analyzer_settings = AnalyzerSettingsFor(analyzer);
+    SetChannelSetting(analyzer_settings, "CAN", settings.channel);
+    SetNumberSetting(analyzer_settings, "Bit Rate (Bits/s)", settings.bit_rate);
+    SetNumberSetting(analyzer_settings, "", settings.inverted ? 1.0 : 0.0);
+    CommitSettings(analyzer_settings, "CAN");
+}
+
 std::optional<U32> OptionalChannel(const json& channels, const char* key)
 {
     if (!channels.contains(key) || channels.at(key).is_null()) {
@@ -441,7 +464,10 @@ DecoderProtocol ParseProtocol(const json& input)
     if (protocol == "i2s" || protocol == "i2s_pcm") {
         return DecoderProtocol::I2s;
     }
-    throw std::runtime_error("decoder.protocol must be uart, i2c, spi, or i2s");
+    if (protocol == "can") {
+        return DecoderProtocol::Can;
+    }
+    throw std::runtime_error("decoder.protocol must be uart, i2c, spi, i2s, or can");
 }
 
 UartSettings ParseUartSettings(const json& input)
@@ -533,6 +559,26 @@ I2sSettings ParseI2sSettings(const json& input)
     return settings;
 }
 
+CanSettings ParseCanSettings(const json& input)
+{
+    const auto& decoder = input.contains("decoder") ? input.at("decoder") : input;
+    const auto& channels = decoder.contains("channels") ? decoder.at("channels") : decoder.at("settings");
+    const auto& options = decoder.contains("options") ? decoder.at("options") : decoder.at("settings");
+    CanSettings settings;
+    const auto channel = channels.contains("can_rx") ? OptionalChannel(channels, "can_rx")
+                                                     : OptionalChannel(channels, "channel");
+    if (!channel.has_value()) {
+        throw std::runtime_error("CAN requires an input channel");
+    }
+    settings.channel = *channel;
+    settings.bit_rate = options.value("bitrate", options.value("bit_rate", 1'000'000u));
+    settings.inverted = options.value("inverted", false);
+    if (settings.bit_rate < 10'000 || settings.bit_rate > 25'000'000) {
+        throw std::runtime_error("CAN bit rate must be between 10000 and 25000000 bits/s");
+    }
+    return settings;
+}
+
 DecoderSettings ParseSettings(const json& input, DecoderProtocol protocol)
 {
     switch (protocol) {
@@ -544,6 +590,8 @@ DecoderSettings ParseSettings(const json& input, DecoderProtocol protocol)
         return ParseSpiSettings(input);
     case DecoderProtocol::I2s:
         return ParseI2sSettings(input);
+    case DecoderProtocol::Can:
+        return ParseCanSettings(input);
     }
     throw std::runtime_error("unknown Saleae decoder protocol");
 }
@@ -616,6 +664,8 @@ std::optional<U64> NumericFieldValue(const PxlogicSaleaeFieldValue& value)
                 return item >= 0 ? std::optional<U64>(static_cast<U64>(item)) : std::nullopt;
             } else if constexpr (std::is_same_v<Type, std::uint8_t>) {
                 return item;
+            } else if constexpr (std::is_same_v<Type, bool>) {
+                return item ? U64{1} : U64{0};
             } else if constexpr (std::is_same_v<Type, std::vector<std::uint8_t>>) {
                 if (item.empty() || item.size() > sizeof(U64)) {
                     return std::nullopt;
@@ -650,6 +700,8 @@ const char* ProtocolName(DecoderProtocol protocol)
         return "SPI";
     case DecoderProtocol::I2s:
         return "I2S / PCM";
+    case DecoderProtocol::Can:
+        return "CAN";
     }
     return "Unknown";
 }
@@ -672,6 +724,8 @@ std::vector<U32> BubbleChannels(const DecoderSettings& settings)
                     channels.push_back(*value.miso);
                 }
                 return channels;
+            } else if constexpr (std::is_same_v<Type, CanSettings>) {
+                return std::vector<U32>{value.channel};
             } else {
                 return std::vector<U32>{value.data};
             }
@@ -730,6 +784,18 @@ void AddFieldChannelValue(json& values, const DecoderSettings& settings, const s
                 }
                 if (lower_name.find("miso") != std::string::npos && decoder.miso.has_value()) {
                     AddChannelValue(values, *decoder.miso, "MISO", value, decoder.bits_per_transfer);
+                }
+            } else if constexpr (std::is_same_v<Type, CanSettings>) {
+                if (lower_name == "identifier") {
+                    AddChannelValue(values, decoder.channel, "Identifier", value, 11);
+                } else if (lower_name == "num_data_bytes") {
+                    AddChannelValue(values, decoder.channel, "DLC", value, 4);
+                } else if (lower_name == "data") {
+                    AddChannelValue(values, decoder.channel, "Data", value, 8);
+                } else if (lower_name == "crc") {
+                    AddChannelValue(values, decoder.channel, "CRC", value, 15);
+                } else if (lower_name == "ack") {
+                    AddChannelValue(values, decoder.channel, "ACK", value, 1);
                 }
             }
         },
@@ -925,22 +991,25 @@ json Probe(const RuntimePaths& runtime)
     Plugin i2c(runtime.i2c_plugin);
     Plugin spi(runtime.spi_plugin);
     Plugin i2s(runtime.i2s_plugin);
+    Plugin can(runtime.can_plugin);
     const auto runtime_hash = Sha256(runtime.runtime_library);
     const auto serial_hash = Sha256(runtime.serial_plugin);
     const auto i2c_hash = Sha256(runtime.i2c_plugin);
     const auto spi_hash = Sha256(runtime.spi_plugin);
     const auto i2s_hash = Sha256(runtime.i2s_plugin);
+    const auto can_hash = Sha256(runtime.can_plugin);
     const bool abi_match = runtime_hash == kRuntimeSha256 && serial_hash == kSerialPluginSha256 &&
                            i2c_hash == kI2cPluginSha256 && spi_hash == kSpiPluginSha256 &&
-                           i2s_hash == kI2sPluginSha256;
+                           i2s_hash == kI2sPluginSha256 && can_hash == kCanPluginSha256;
     return {{"kind", "saleae_native"},
             {"display_name", "Saleae Native analyzer sidecar"},
             {"available", abi_match},
-            {"protocols", json::array({"UART", "I2C", "SPI", "I2S"})},
+            {"protocols", json::array({"UART", "I2C", "SPI", "I2S", "CAN"})},
             {"supports_streaming", false},
             {"isolation", "sidecar"},
             {"analyzer_name",
-             std::string(serial.Name()) + ", " + i2c.Name() + ", " + spi.Name() + ", " + i2s.Name()},
+             std::string(serial.Name()) + ", " + i2c.Name() + ", " + spi.Name() + ", " + i2s.Name() + ", " +
+                 can.Name()},
             {"runtime_root", runtime.root.string()},
             {"runtime_sha256", runtime_hash},
             {"runtime_sha256_expected", kRuntimeSha256},
@@ -963,7 +1032,12 @@ json Probe(const RuntimePaths& runtime)
                            {"name", i2s.Name()},
                            {"sha256", i2s_hash},
                            {"sha256_expected", kI2sPluginSha256},
-                           {"settings_schema", SettingsSchema(i2s)}}})},
+                           {"settings_schema", SettingsSchema(i2s)}},
+                          {{"protocol", "CAN"},
+                           {"name", can.Name()},
+                           {"sha256", can_hash},
+                           {"sha256_expected", kCanPluginSha256},
+                           {"settings_schema", SettingsSchema(can)}}})},
             {"abi_match", abi_match}};
 }
 

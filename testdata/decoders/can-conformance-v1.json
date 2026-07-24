@@ -1,0 +1,39 @@
+{
+  "format": "pxlogic.native-can-fixture.v1",
+  "description": "Backend-neutral standard CAN frame fixture for Saleae Native and Sigrok Native.",
+  "cases": [
+    {
+      "id": "can-standard-123-a5-5a",
+      "sample_rate_hz": 1000000,
+      "sample_count": 840,
+      "channel_count": 1,
+      "initial_levels": [1],
+      "edges": [
+        {
+          "channel": 0,
+          "samples": [
+            100, 130, 140, 160, 170, 200, 220, 270, 290, 300, 310, 320,
+            330, 350, 360, 370, 380, 390, 400, 410, 430, 440, 450, 460,
+            470, 490, 500, 520, 530, 540, 550, 560, 590, 610, 620, 630
+          ]
+        }
+      ],
+      "decoder": {
+        "protocol": "can",
+        "channels": { "can_rx": 0 },
+        "options": {
+          "bitrate": 100000,
+          "sample_point": 70,
+          "inverted": false
+        }
+      },
+      "expected_roles": {
+        "Identifier": [291],
+        "DLC": [2],
+        "Data": [165, 90],
+        "CRC": [18780],
+        "ACK": [1]
+      }
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import type { UiAnalyzerInstance } from "../lib/analyzers";
 import {
   analyzerBackendOptions,
   analyzerSupportsDecoding,
+  createAnalyzerInstance,
   decoderBackendLabel,
 } from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
@@ -42,41 +43,37 @@ export function AnalyzerSettingsDialog({
   }, [onCancel]);
 
   function reset() {
-    setDraft((current) => ({
-      ...current,
-      channel: 0,
-      baudRate: 115_200,
-      inverted: false,
-      uartDataBits: 8,
-      uartStopBits: 1,
-      uartParity: "none",
-      uartMsbFirst: false,
-      i2cSdaChannel: 1,
-      i2cSclChannel: 2,
-      spiMosiChannel: 3,
-      spiMisoChannel: 4,
-      spiClockChannel: 5,
-      spiEnableChannel: 6,
-      spiEnableActiveLow: true,
-      spiClockPolarity: false,
-      spiClockPhase: false,
-      spiBitsPerTransfer: 8,
-      spiMsbFirst: true,
-      nativePrimaryChannel: 0,
-      nativeChannels: { sck: 0, ws: 1, sd: 2 },
-      nativeOptions: {
-        bit_order: "msb-first",
-        clk_edge: "falling-edge",
-        word_size: 16,
-        frame_transitions: "once-each-word",
-        bit_align: "left-aligned",
-        bit_shift: "right-shifted by one",
-        signed: false,
-        ws_polarity: "right-high",
-      },
-      showInDataTable: true,
-      streamToTerminal: false,
-    }));
+    setDraft((current) => {
+      const defaults = createAnalyzerInstance(current.type, [], 0, current.decoderBackend);
+      return {
+        ...current,
+        channel: 0,
+        baudRate: 115_200,
+        inverted: false,
+        uartDataBits: 8,
+        uartStopBits: 1,
+        uartParity: "none",
+        uartMsbFirst: false,
+        i2cSdaChannel: 1,
+        i2cSclChannel: 2,
+        spiMosiChannel: 3,
+        spiMisoChannel: 4,
+        spiClockChannel: 5,
+        spiEnableChannel: 6,
+        spiEnableActiveLow: true,
+        spiClockPolarity: false,
+        spiClockPhase: false,
+        spiBitsPerTransfer: 8,
+        spiMsbFirst: true,
+        nativeDecoderId: defaults.nativeDecoderId,
+        nativeProtocolName: defaults.nativeProtocolName,
+        nativePrimaryChannel: defaults.nativePrimaryChannel,
+        nativeChannels: defaults.nativeChannels,
+        nativeOptions: defaults.nativeOptions,
+        showInDataTable: true,
+        streamToTerminal: false,
+      };
+    });
   }
 
   function save() {
@@ -91,7 +88,9 @@ export function AnalyzerSettingsDialog({
             ? draft.spiMosiChannel ?? draft.spiMisoChannel ?? draft.spiClockChannel
             : draft.type === "I2S"
               ? draft.nativeChannels.sd ?? draft.nativePrimaryChannel
-            : draft.channel,
+              : draft.type === "CAN" || draft.type === "CAN-FD"
+                ? draft.nativeChannels.can_rx ?? draft.nativePrimaryChannel
+                : draft.channel,
     });
   }
 
@@ -455,6 +454,98 @@ export function AnalyzerSettingsDialog({
             </>
           )}
 
+          {(draft.type === "CAN" || draft.type === "CAN-FD") && (
+            <>
+              <AnalyzerSettingRow label={draft.type === "CAN" ? "CAN" : "CAN FD"} required>
+                <ChannelSelect
+                  {...channelSelectProps}
+                  autoFocus
+                  onChange={(channel) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativePrimaryChannel: channel ?? 0,
+                      nativeChannels: { ...current.nativeChannels, can_rx: channel ?? 0 },
+                    }))
+                  }
+                  value={draft.nativeChannels.can_rx ?? 0}
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow
+                label={draft.type === "CAN" ? "Bit Rate (Bits/s)" : "Nominal Bit Rate (Bits/s)"}
+                required
+              >
+                <input
+                  min={10_000}
+                  step={1}
+                  type="number"
+                  value={Number(
+                    draft.nativeOptions[draft.type === "CAN" ? "bitrate" : "nominal_bitrate"],
+                  )}
+                  onChange={(event) => {
+                    const key = draft.type === "CAN" ? "bitrate" : "nominal_bitrate";
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, [key]: Number(event.target.value) },
+                    }));
+                  }}
+                />
+              </AnalyzerSettingRow>
+              {draft.type === "CAN-FD" && (
+                <AnalyzerSettingRow label="Fast Bit Rate (Bits/s)" required>
+                  <input
+                    min={10_000}
+                    step={1}
+                    type="number"
+                    value={Number(draft.nativeOptions.fast_bitrate)}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        nativeOptions: { ...current.nativeOptions, fast_bitrate: Number(event.target.value) },
+                      }))
+                    }
+                  />
+                </AnalyzerSettingRow>
+              )}
+              {draft.decoderBackend === "sigrok_native" && (
+                <AnalyzerSettingRow label="Sample Point (%)" required>
+                  <input
+                    max={99}
+                    min={1}
+                    step={1}
+                    type="number"
+                    value={Number(draft.nativeOptions.sample_point)}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        nativeOptions: { ...current.nativeOptions, sample_point: Number(event.target.value) },
+                      }))
+                    }
+                  />
+                </AnalyzerSettingRow>
+              )}
+              {draft.type === "CAN" && (
+                <AnalyzerSettingRow>
+                  <label className="analyzerDialogCheckbox">
+                    <input
+                      checked={draft.nativeOptions.inverted === true}
+                      onChange={() =>
+                        setDraft((current) => ({
+                          ...current,
+                          nativeOptions: {
+                            ...current.nativeOptions,
+                            inverted: current.nativeOptions.inverted !== true,
+                          },
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                    <span>Inverted (CAN High)</span>
+                  </label>
+                </AnalyzerSettingRow>
+              )}
+            </>
+          )}
+
           <AnalyzerSettingRow label="Decoder Library">
             <select
               value={draft.decoderBackend}
@@ -752,6 +843,26 @@ function validateAnalyzer(analyzer: UiAnalyzerInstance) {
     const maximumWordSize = analyzer.decoderBackend === "saleae_native" ? 64 : 32;
     if (!Number.isInteger(wordSize) || wordSize < 2 || wordSize > maximumWordSize) {
       return `Audio bit depth must be between 2 and ${maximumWordSize} bits.`;
+    }
+  }
+  if (analyzer.type === "CAN" || analyzer.type === "CAN-FD") {
+    if (typeof analyzer.nativeChannels.can_rx !== "number") return "Select a CAN input channel.";
+    const nominal = Number(
+      analyzer.nativeOptions[analyzer.type === "CAN" ? "bitrate" : "nominal_bitrate"],
+    );
+    if (!Number.isInteger(nominal) || nominal < 10_000) return "Bit rate must be at least 10,000 bits/s.";
+    if (analyzer.type === "CAN" && analyzer.decoderBackend === "saleae_native" && nominal > 25_000_000) {
+      return "Saleae CAN bit rate must not exceed 25,000,000 bits/s.";
+    }
+    if (analyzer.type === "CAN-FD") {
+      const fast = Number(analyzer.nativeOptions.fast_bitrate);
+      if (!Number.isInteger(fast) || fast < 10_000) return "Fast bit rate must be at least 10,000 bits/s.";
+    }
+    if (analyzer.decoderBackend === "sigrok_native") {
+      const samplePoint = Number(analyzer.nativeOptions.sample_point);
+      if (!Number.isFinite(samplePoint) || samplePoint <= 0 || samplePoint >= 100) {
+        return "Sample point must be between 0 and 100 percent.";
+      }
     }
   }
   return "";

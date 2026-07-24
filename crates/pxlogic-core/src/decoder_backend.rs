@@ -351,6 +351,7 @@ impl DecoderBackend for SaleaeNativeDecoder {
                     "I2C".to_string(),
                     "SPI".to_string(),
                     "I2S".to_string(),
+                    "CAN".to_string(),
                 ],
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
@@ -531,6 +532,7 @@ fn discover_saleae_runtime_root() -> Option<PathBuf> {
             && path.join("Analyzers/libi2c_analyzer.so").is_file()
             && path.join("Analyzers/libspi_analyzer.so").is_file()
             && path.join("Analyzers/libi2s_analyzer.so").is_file()
+            && path.join("Analyzers/libcan_analyzer.so").is_file()
     })
 }
 
@@ -558,6 +560,8 @@ impl DecoderBackend for SigrokNativeDecoder {
                     "I2C".to_string(),
                     "SPI".to_string(),
                     "I2S".to_string(),
+                    "CAN".to_string(),
+                    "CAN-FD".to_string(),
                 ],
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
@@ -1235,6 +1239,64 @@ mod tests {
         assert!(output.frames.iter().all(|frame| !frame.texts.is_empty()));
     }
 
+    fn can_edge_sets() -> Vec<(u8, Vec<u64>)> {
+        vec![(
+            0,
+            vec![
+                100, 130, 140, 160, 170, 200, 220, 270, 290, 300, 310, 320, 330, 350, 360, 370,
+                380, 390, 400, 410, 430, 440, 450, 460, 470, 490, 500, 520, 530, 540, 550, 560,
+                590, 610, 620, 630,
+            ],
+        )]
+    }
+
+    fn can_settings(decoder_id: &str, protocol_name: &str) -> AnalyzerDecodeSettings {
+        let mut options = BTreeMap::from([
+            ("sample_point".to_string(), NativeOptionValue::Integer(70)),
+            ("inverted".to_string(), NativeOptionValue::Boolean(false)),
+        ]);
+        if decoder_id == "can_fd" {
+            options.insert(
+                "nominal_bitrate".to_string(),
+                NativeOptionValue::Integer(100_000),
+            );
+            options.insert(
+                "fast_bitrate".to_string(),
+                NativeOptionValue::Integer(200_000),
+            );
+        } else {
+            options.insert("bitrate".to_string(), NativeOptionValue::Integer(100_000));
+        }
+        AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+            decoder_id: decoder_id.to_string(),
+            protocol_name: protocol_name.to_string(),
+            channels: BTreeMap::from([("can_rx".to_string(), Some(0))]),
+            options,
+            primary_channel: 0,
+        })
+    }
+
+    fn can_capture() -> CaptureData {
+        transition_capture("native-can-test", 1_000_000, 840, &[1], &can_edge_sets())
+    }
+
+    fn assert_can_output(output: &DecoderOutput) {
+        let values_for = |role: &str| {
+            output
+                .frames
+                .iter()
+                .flat_map(|frame| frame.channel_values.iter())
+                .filter(|value| value.role == role)
+                .map(|value| value.value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values_for("Identifier"), vec![0x123]);
+        assert_eq!(values_for("DLC"), vec![2]);
+        assert_eq!(values_for("Data"), vec![0xA5, 0x5A]);
+        assert_eq!(values_for("CRC"), vec![0x495C]);
+        assert_eq!(values_for("ACK"), vec![1]);
+    }
+
     #[test]
     fn legacy_backend_is_explicitly_discoverable() {
         let info = LegacyRustDecoder.info();
@@ -1287,6 +1349,18 @@ mod tests {
         assert_eq!(decoder["channels"]["ws"], 1);
         assert_eq!(decoder["channels"]["sd"], 2);
         assert_eq!(decoder["options"]["word_size"], 16);
+    }
+
+    #[test]
+    fn generic_native_request_preserves_can_contract_without_rust_protocol_logic() {
+        let request =
+            build_native_sidecar_request(&can_capture(), &can_settings("can", "CAN")).unwrap();
+        let decoder = serde_json::to_value(request.decoder).unwrap();
+        assert_eq!(decoder["protocol"], "can");
+        assert_eq!(decoder["channels"]["can_rx"], 0);
+        assert_eq!(decoder["options"]["bitrate"], 100_000);
+        assert_eq!(decoder["options"]["sample_point"], 70);
+        assert_eq!(decoder["options"]["inverted"], false);
     }
 
     #[test]
@@ -1586,6 +1660,32 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_native_sidecar_decodes_can_packed_and_sparse_fixtures() {
+        let decoder = SaleaeNativeDecoder::from_env().unwrap();
+        let packed = decoder
+            .decode(&can_capture(), &can_settings("can", "CAN"))
+            .unwrap();
+        assert_eq!(packed.protocol, "CAN");
+        assert_can_output(&packed);
+
+        const OFFSET: u64 = 49_000_000_000;
+        let sparse = sparse_transition_capture(
+            "saleae-can-sparse-test",
+            1_000_000,
+            50_000_000_000,
+            OFFSET,
+            &[1],
+            &can_edge_sets(),
+        );
+        let output = decoder
+            .decode_sparse(&sparse, &can_settings("can", "CAN"))
+            .unwrap();
+        assert_can_output(&output);
+        assert!(output.frames[0].start_sample > u64::from(u32::MAX));
+    }
+
+    #[test]
     #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_mode_zero_fixture() {
         let (capture, settings) = mode_zero_capture_and_settings();
@@ -1706,5 +1806,30 @@ mod tests {
         let output = decoder.decode_sparse(&sparse, &i2s_settings()).unwrap();
         assert_i2s_output(&output);
         assert!(output.frames[0].start_sample > u64::from(u32::MAX));
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    fn sigrok_native_sidecar_decodes_can_and_can_fd_packed_and_sparse_fixtures() {
+        let decoder = SigrokNativeDecoder::from_env().unwrap();
+        for (decoder_id, protocol_name) in [("can", "CAN"), ("can_fd", "CAN-FD")] {
+            let settings = can_settings(decoder_id, protocol_name);
+            let packed = decoder.decode(&can_capture(), &settings).unwrap();
+            assert_eq!(packed.protocol, protocol_name);
+            assert_can_output(&packed);
+
+            const OFFSET: u64 = 49_000_000_000;
+            let sparse = sparse_transition_capture(
+                "sigrok-can-sparse-test",
+                1_000_000,
+                50_000_000_000,
+                OFFSET,
+                &[1],
+                &can_edge_sets(),
+            );
+            let output = decoder.decode_sparse(&sparse, &settings).unwrap();
+            assert_can_output(&output);
+            assert!(output.frames[0].start_sample > u64::from(u32::MAX));
+        }
     }
 }

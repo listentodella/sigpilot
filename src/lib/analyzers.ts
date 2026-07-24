@@ -92,6 +92,45 @@ export function createAnalyzerInstance(
 ): UiAnalyzerInstance {
   const index = analyzers.length;
   const nextChannel = (offset: number) => (channel + offset) % 32;
+  const nativeDefaults: {
+    decoderId: string;
+    protocolName: string;
+    primaryChannel: number;
+    channels: Record<string, number | null>;
+    options: Record<string, boolean | number | string>;
+  } =
+    type === "CAN"
+      ? {
+          decoderId: "can",
+          protocolName: "CAN",
+          primaryChannel: channel,
+          channels: { can_rx: channel },
+          options: { bitrate: 1_000_000, sample_point: 70, inverted: false },
+        }
+      : type === "CAN-FD"
+        ? {
+            decoderId: "can_fd",
+            protocolName: "CAN-FD",
+            primaryChannel: channel,
+            channels: { can_rx: channel },
+            options: { nominal_bitrate: 1_000_000, fast_bitrate: 2_000_000, sample_point: 70 },
+          }
+        : {
+            decoderId: "i2s",
+            protocolName: "I2S",
+            primaryChannel: channel,
+            channels: { sck: channel, ws: nextChannel(1), sd: nextChannel(2) },
+            options: {
+              bit_order: "msb-first",
+              clk_edge: "falling-edge",
+              word_size: 16,
+              frame_transitions: "once-each-word",
+              bit_align: "left-aligned",
+              bit_shift: "right-shifted by one",
+              signed: false,
+              ws_polarity: "right-high",
+            },
+          };
   return {
     id: `analyzer-${Date.now()}-${index}`,
     type,
@@ -117,24 +156,11 @@ export function createAnalyzerInstance(
     spiClockPhase: false,
     spiBitsPerTransfer: 8,
     spiMsbFirst: true,
-    nativeDecoderId: type === "I2S" ? "i2s" : type.toLowerCase().split(" ").join("_"),
-    nativeProtocolName: type,
-    nativePrimaryChannel: channel,
-    nativeChannels: {
-      sck: channel,
-      ws: nextChannel(1),
-      sd: nextChannel(2),
-    },
-    nativeOptions: {
-      bit_order: "msb-first",
-      clk_edge: "falling-edge",
-      word_size: 16,
-      frame_transitions: "once-each-word",
-      bit_align: "left-aligned",
-      bit_shift: "right-shifted by one",
-      signed: false,
-      ws_polarity: "right-high",
-    },
+    nativeDecoderId: nativeDefaults.decoderId,
+    nativeProtocolName: nativeDefaults.protocolName,
+    nativePrimaryChannel: nativeDefaults.primaryChannel,
+    nativeChannels: nativeDefaults.channels,
+    nativeOptions: nativeDefaults.options,
     showInDataTable: true,
     streamToTerminal: false,
     displayRadix: "Hexadecimal",
@@ -220,6 +246,13 @@ export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChan
     ].filter((role): role is AnalyzerChannelRole => role !== null);
   }
 
+  if (analyzer.type === "CAN" || analyzer.type === "CAN-FD") {
+    const can = analyzer.nativeChannels.can_rx;
+    return typeof can === "number"
+      ? [{ channel: can, hasBubbles: true, hasMarkers: true, title: analyzer.type }]
+      : [];
+  }
+
   return [
     {
       channel: analyzer.channel,
@@ -251,7 +284,14 @@ export function analyzerStripInsetForChannel(analyzers: UiAnalyzerInstance[], ch
 }
 
 export function analyzerSupportsDecoding(analyzer: Pick<UiAnalyzerInstance, "type">) {
-  return analyzer.type === "Async Serial" || analyzer.type === "I2C" || analyzer.type === "SPI" || analyzer.type === "I2S";
+  return (
+    analyzer.type === "Async Serial" ||
+    analyzer.type === "I2C" ||
+    analyzer.type === "SPI" ||
+    analyzer.type === "I2S" ||
+    analyzer.type === "CAN" ||
+    analyzer.type === "CAN-FD"
+  );
 }
 
 export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDecodeSettings | null {
@@ -295,7 +335,7 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
       },
     };
   }
-  if (analyzer.type === "I2S") {
+  if (analyzer.type === "I2S" || analyzer.type === "CAN" || analyzer.type === "CAN-FD") {
     return {
       protocol: "Native",
       settings: {
@@ -470,7 +510,8 @@ export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
   if (type === "SPI" || type === "Async Serial" || type === "I2C") {
     return ["saleae_native", "sigrok_native", "legacy_rust"];
   }
-  if (type === "I2S") return ["saleae_native", "sigrok_native"];
+  if (type === "I2S" || type === "CAN") return ["saleae_native", "sigrok_native"];
+  if (type === "CAN-FD") return ["sigrok_native"];
   return ["legacy_rust"];
 }
 
@@ -484,16 +525,16 @@ export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
   {
     backend: "saleae_native",
     label: "Saleae Native",
-    analyzers: ["Async Serial", "I2C", "SPI", "I2S"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "CAN"],
   },
   {
     backend: "sigrok_native",
     label: "Sigrok Native (PXView)",
-    analyzers: ["Async Serial", "I2C", "SPI", "I2S"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "CAN", "CAN-FD"],
   },
   {
     backend: "legacy_rust",
     label: "Compatibility",
-    analyzers: ["Async Serial", "I2C", "SPI", "CAN", "Manchester"],
+    analyzers: ["Async Serial", "I2C", "SPI", "Manchester"],
   },
 ];

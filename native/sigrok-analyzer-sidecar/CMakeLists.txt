@@ -60,6 +60,8 @@ add_pxview_c_decoder(uart)
 add_pxview_c_decoder(i2c)
 add_pxview_c_decoder(spi)
 add_pxview_c_decoder(i2s)
+add_pxview_c_decoder(can)
+add_pxview_c_decoder(can_fd)
 
 add_executable(pxlogic-sigrok-sidecar src/main.c)
 target_compile_definitions(pxlogic-sigrok-sidecar PRIVATE CJSON_IMPLEMENTATION)
@@ -74,4 +76,11 @@ target_link_libraries(pxlogic-sigrok-sidecar PRIVATE
     PkgConfig::GLIB
     Python3::Python
 )
-add_dependencies(pxlogic-sigrok-sidecar pxview_uart_c pxview_i2c_c pxview_spi_c pxview_i2s_c)
+add_dependencies(pxlogic-sigrok-sidecar
+    pxview_uart_c
+    pxview_i2c_c
+    pxview_spi_c
+    pxview_i2s_c
+    pxview_can_c
+    pxview_can_fd_c
+)

@@ -420,7 +420,7 @@ fn normalize_saleae_analyzer(raw: Value) -> Option<SaleaeAnalyzerMetadata> {
         return None;
     }
     let decoder_backend = match analyzer_type.as_str() {
-        "SPI" | "Async Serial" | "Serial" | "I2C" | "I2S" | "I2S / PCM" => {
+        "SPI" | "Async Serial" | "Serial" | "I2C" | "I2S" | "I2S / PCM" | "CAN" => {
             DecoderBackendKind::SaleaeNative
         }
         _ => DecoderBackendKind::LegacyRust,
@@ -622,6 +622,31 @@ fn normalize_saleae_decode_settings(
                 primary_channel: sck,
             }))
         }
+        "CAN" => {
+            let can_rx = saleae_setting_u8(analyzer, &["CAN"])?;
+            Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "can".to_string(),
+                protocol_name: "CAN".to_string(),
+                channels: BTreeMap::from([("can_rx".to_string(), Some(can_rx))]),
+                options: BTreeMap::from([
+                    (
+                        "bitrate".to_string(),
+                        NativeOptionValue::Integer(
+                            saleae_setting_u64(analyzer, &["Bit Rate (Bits/s)"])
+                                .unwrap_or(1_000_000) as i64,
+                        ),
+                    ),
+                    ("sample_point".to_string(), NativeOptionValue::Integer(70)),
+                    (
+                        "inverted".to_string(),
+                        NativeOptionValue::Boolean(
+                            saleae_setting_bool(analyzer, &[""]).unwrap_or(false),
+                        ),
+                    ),
+                ]),
+                primary_channel: can_rx,
+            }))
+        }
         _ => None,
     }
 }
@@ -646,6 +671,13 @@ fn saleae_setting_number(analyzer: &Value, titles: &[&str]) -> Option<f64> {
 
 fn saleae_setting_u64(analyzer: &Value, titles: &[&str]) -> Option<u64> {
     saleae_setting_value(analyzer, titles)?.as_u64()
+}
+
+fn saleae_setting_bool(analyzer: &Value, titles: &[&str]) -> Option<bool> {
+    let value = saleae_setting_value(analyzer, titles)?;
+    value
+        .as_bool()
+        .or_else(|| value.as_u64().map(|value| value != 0))
 }
 
 fn saleae_setting_u8(analyzer: &Value, titles: &[&str]) -> Option<u8> {
@@ -1267,6 +1299,41 @@ mod tests {
                     ),
                 ]),
                 primary_channel: 4,
+            }))
+        );
+    }
+
+    #[test]
+    fn normalizes_saleae_can_analyzer_settings_to_native_contract() {
+        let raw = serde_json::json!({
+            "name": "CAN [powertrain]",
+            "type": "CAN",
+            "color": "#7ACB8C",
+            "displayRadix": "Hexadecimal",
+            "showInDataTable": true,
+            "streamToTerminal": false,
+            "settings": [
+                { "title": "CAN", "setting": { "type": "Channel", "value": 12 } },
+                { "title": "Bit Rate (Bits/s)", "setting": { "type": "Integer", "value": 500000 } },
+                { "title": "", "setting": { "type": "Bool", "value": true } }
+            ]
+        });
+
+        let analyzer = normalize_saleae_analyzer(raw.clone()).unwrap();
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SaleaeNative);
+        assert_eq!(analyzer.saleae_metadata, raw);
+        assert_eq!(
+            analyzer.decode_settings,
+            Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "can".to_string(),
+                protocol_name: "CAN".to_string(),
+                channels: BTreeMap::from([("can_rx".to_string(), Some(12))]),
+                options: BTreeMap::from([
+                    ("bitrate".to_string(), NativeOptionValue::Integer(500_000)),
+                    ("sample_point".to_string(), NativeOptionValue::Integer(70)),
+                    ("inverted".to_string(), NativeOptionValue::Boolean(true)),
+                ]),
+                primary_channel: 12,
             }))
         );
     }

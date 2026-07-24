@@ -186,3 +186,5 @@ chore: 说明内容
   - 直接加载 Logic 2.4.43 原版 Async Serial/I2C/SPI 插件，共用 packed/sparse transition bridge；`.sal` 三协议恢复改回 Saleae Native，Rust 仅保留 sidecar 适配职责。
 - `docs/ported-features/2026-07-24-saleae-sigrok-native-i2s.md`
   - 直接接入 Logic 2.4.43 原版 I2S / PCM 插件与 PXView `i2s_c`；共用通用 Native contract，覆盖 packed/sparse、`.sal` 恢复与 490 亿 sample 索引，未新增 Rust 协议解码器。
+- `docs/ported-features/2026-07-24-saleae-sigrok-native-can.md`
+  - 直接接入 Logic 2.4.43 原版 CAN 插件与 PXView `can_c`/`can_fd_c`；统一恢复 `.sal` CAN 配置、气泡和 Identifier/DLC/Data/CRC/ACK 表格字段，未新增 Rust 协议解码器。

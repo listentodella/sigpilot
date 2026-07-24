@@ -93,11 +93,21 @@ typedef struct {
     const char *bit_align;
 } i2s_settings;
 
+typedef struct {
+    int can_rx;
+    uint64_t nominal_bitrate;
+    uint64_t fast_bitrate;
+    double sample_point;
+    int inverted;
+} can_settings;
+
 typedef enum {
     DECODER_SPI,
     DECODER_UART,
     DECODER_I2C,
     DECODER_I2S,
+    DECODER_CAN,
+    DECODER_CAN_FD,
 } decoder_protocol;
 
 static void fatal(const char *message)
@@ -245,6 +255,12 @@ static const char *json_string(cJSON *object, const char *key, const char *fallb
     return cJSON_IsString(value) ? value->valuestring : fallback;
 }
 
+static double json_double(cJSON *object, const char *key, double fallback)
+{
+    cJSON *value = cJSON_GetObjectItem(object, key);
+    return cJSON_IsNumber(value) ? value->valuedouble : fallback;
+}
+
 static int optional_channel(cJSON *channels, const char *key)
 {
     cJSON *value = cJSON_GetObjectItem(channels, key);
@@ -263,7 +279,11 @@ static decoder_protocol parse_protocol(cJSON *request)
         return DECODER_SPI;
     if (strcmp(protocol, "i2s") == 0)
         return DECODER_I2S;
-    fatal("decoder.protocol must be one of uart, i2c, spi, or i2s");
+    if (strcmp(protocol, "can") == 0)
+        return DECODER_CAN;
+    if (strcmp(protocol, "can_fd") == 0 || strcmp(protocol, "can-fd") == 0)
+        return DECODER_CAN_FD;
+    fatal("decoder.protocol must be one of uart, i2c, spi, i2s, can, or can_fd");
     return DECODER_SPI;
 }
 
@@ -352,6 +372,26 @@ static void parse_i2s_settings(cJSON *request, i2s_settings *settings)
         settings->sck == settings->ws || settings->sck == settings->sd || settings->ws == settings->sd ||
         settings->word_size < 1 || settings->word_size > 32)
         fatal("I2S requires distinct SCK, WS, and SD channels and a 1-32 bit word size");
+}
+
+static void parse_can_settings(cJSON *request, can_settings *settings, int can_fd)
+{
+    cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
+    cJSON *channels = decoder ? cJSON_GetObjectItem(decoder, "channels") : NULL;
+    cJSON *options = decoder ? cJSON_GetObjectItem(decoder, "options") : NULL;
+    if (!decoder || !channels || !options)
+        fatal("decoder channels/options are required");
+
+    settings->can_rx = optional_channel(channels, "can_rx");
+    settings->nominal_bitrate = (uint64_t)json_int(
+        options, can_fd ? "nominal_bitrate" : "bitrate", 1000000);
+    settings->fast_bitrate = (uint64_t)json_int(options, "fast_bitrate", 2000000);
+    settings->sample_point = json_double(options, "sample_point", 70.0);
+    settings->inverted = json_int(options, "inverted", 0) != 0;
+    if (settings->can_rx < 0 || settings->nominal_bitrate == 0 ||
+        (can_fd && settings->fast_bitrate == 0) || settings->sample_point <= 0.0 ||
+        settings->sample_point >= 100.0)
+        fatal("invalid CAN channel, bitrate, or sample point");
 }
 
 typedef struct {
@@ -968,6 +1008,183 @@ static cJSON *render_i2s_output(const decode_collector *collector, const i2s_set
     return root;
 }
 
+static int annotation_overlaps_class(const decode_collector *collector, int ann_class,
+                                     uint64_t start_sample, uint64_t end_sample)
+{
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if (item->ann_class == ann_class && item->start_sample <= end_sample &&
+            item->end_sample >= start_sample)
+            return 1;
+    }
+    return 0;
+}
+
+static int parse_hex_text(const char *text, uint64_t *value)
+{
+    const char *hex = text ? strstr(text, "0x") : NULL;
+    if (!hex)
+        return 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(hex + 2, &end, 16);
+    if (end == hex + 2)
+        return 0;
+    *value = (uint64_t)parsed;
+    return 1;
+}
+
+static int parse_decimal_text(const char *text, uint64_t *value)
+{
+    const char *cursor = text ? strchr(text, ':') : NULL;
+    cursor = cursor ? cursor + 1 : text;
+    while (cursor && *cursor && (*cursor < '0' || *cursor > '9'))
+        cursor++;
+    if (!cursor || !*cursor)
+        return 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(cursor, &end, 10);
+    if (end == cursor)
+        return 0;
+    *value = (uint64_t)parsed;
+    return 1;
+}
+
+static cJSON *field_value_boolean(int value)
+{
+    cJSON *tagged = cJSON_CreateObject();
+    cJSON_AddBoolToObject(tagged, "Boolean", value != 0);
+    return tagged;
+}
+
+static void add_can_value(cJSON *frame, const char *name, const char *role, int channel,
+                          uint64_t value, const char *label, int boolean_value)
+{
+    cJSON *fields = cJSON_GetObjectItem(frame, "fields");
+    cJSON *field = cJSON_CreateObject();
+    cJSON_AddStringToObject(field, "name", name);
+    cJSON_AddItemToObject(field, "value",
+                          boolean_value ? field_value_boolean(value != 0) : field_value_unsigned(value));
+    cJSON_AddItemToArray(fields, field);
+
+    cJSON *channel_values = cJSON_GetObjectItem(frame, "channel_values");
+    cJSON *channel_value = cJSON_CreateObject();
+    cJSON_AddNumberToObject(channel_value, "channel", channel);
+    cJSON_AddStringToObject(channel_value, "role", role);
+    cJSON_AddStringToObject(channel_value, "label", label);
+    cJSON_AddNumberToObject(channel_value, "value", (double)value);
+    cJSON_AddItemToArray(channel_values, channel_value);
+}
+
+static void add_can_texts(cJSON *frame, const annotation_item *item,
+                          const char *short_text, const char *medium_text)
+{
+    cJSON *texts = cJSON_GetObjectItem(frame, "texts");
+    cJSON_AddItemToArray(texts, cJSON_CreateString(short_text));
+    if (medium_text && strcmp(medium_text, short_text) != 0)
+        cJSON_AddItemToArray(texts, cJSON_CreateString(medium_text));
+    for (int text_index = 0; text_index < item->text_count; text_index++) {
+        const char *text = item->texts[text_index];
+        if (strcmp(text, short_text) != 0 && (!medium_text || strcmp(text, medium_text) != 0))
+            cJSON_AddItemToArray(texts, cJSON_CreateString(text));
+    }
+}
+
+static cJSON *render_can_output(const decode_collector *collector, const can_settings *settings,
+                                int can_fd)
+{
+    enum {
+        CAN_ANN_DATA = 0,
+        CAN_ANN_ID = 3,
+        CAN_ANN_FULL_ID = 5,
+        CAN_ANN_DLC = 10,
+        CAN_ANN_CRC = 11,
+        CAN_ANN_ACK = 13,
+        CAN_ANN_WARNING = 16,
+    };
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "backend", "sigrok_native");
+    cJSON_AddStringToObject(root, "protocol", can_fd ? "CAN-FD" : "CAN");
+    cJSON *frames = add_array(root, "frames");
+    uint64_t frame_id = 0;
+
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if (item->text_count == 0)
+            continue;
+        if (item->ann_class == CAN_ANN_ID &&
+            annotation_overlaps_class(collector, CAN_ANN_FULL_ID,
+                                      item->start_sample, item->end_sample))
+            continue;
+
+        const char *field_name = NULL;
+        const char *role = NULL;
+        const char *row = NULL;
+        uint64_t value = 0;
+        int parsed = 0;
+        int boolean_value = 0;
+        char short_text[40];
+        char medium_text[64];
+
+        if (item->ann_class == CAN_ANN_ID || item->ann_class == CAN_ANN_FULL_ID) {
+            field_name = "identifier";
+            role = "Identifier";
+            row = "identifier_field";
+            parsed = parse_hex_text(item->texts[0], &value);
+            snprintf(short_text, sizeof(short_text), "0x%llX", (unsigned long long)value);
+            snprintf(medium_text, sizeof(medium_text), "ID: %s", short_text);
+        } else if (item->ann_class == CAN_ANN_DLC) {
+            field_name = "num_data_bytes";
+            role = "DLC";
+            row = "control_field";
+            parsed = parse_decimal_text(item->texts[0], &value);
+            snprintf(short_text, sizeof(short_text), "%llu", (unsigned long long)value);
+            snprintf(medium_text, sizeof(medium_text), "DLC: %s", short_text);
+        } else if (item->ann_class == CAN_ANN_DATA) {
+            field_name = "data";
+            role = "Data";
+            row = "data_field";
+            parsed = parse_hex_text(item->texts[0], &value);
+            snprintf(short_text, sizeof(short_text), "0x%02llX", (unsigned long long)value);
+            snprintf(medium_text, sizeof(medium_text), "Data: %s", short_text);
+        } else if (item->ann_class == CAN_ANN_CRC && strstr(item->texts[0], "CRC-")) {
+            field_name = "crc";
+            role = "CRC";
+            row = "crc_field";
+            parsed = parse_hex_text(item->texts[0], &value);
+            snprintf(short_text, sizeof(short_text), "CRC");
+            snprintf(medium_text, sizeof(medium_text), "CRC: 0x%04llX", (unsigned long long)value);
+        } else if (item->ann_class == CAN_ANN_ACK && strstr(item->texts[0], "ACK slot:")) {
+            field_name = "ack";
+            role = "ACK";
+            row = "ack_field";
+            value = strstr(item->texts[0], "NACK") == NULL;
+            parsed = 1;
+            boolean_value = 1;
+            snprintf(short_text, sizeof(short_text), "%s", value ? "ACK" : "NACK");
+            snprintf(medium_text, sizeof(medium_text), "%s", short_text);
+        }
+        if (!parsed)
+            continue;
+
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample, row);
+        add_can_texts(frame, item, short_text, medium_text);
+        add_can_value(frame, field_name, role, settings->can_rx, value, short_text, boolean_value);
+        cJSON_AddItemToArray(frames, frame);
+    }
+
+    cJSON *diagnostics = add_array(root, "diagnostics");
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if (item->ann_class != CAN_ANN_WARNING || item->text_count == 0)
+            continue;
+        cJSON *diagnostic = cJSON_CreateObject();
+        cJSON_AddStringToObject(diagnostic, "level", "warning");
+        cJSON_AddStringToObject(diagnostic, "message", item->texts[0]);
+        cJSON_AddItemToArray(diagnostics, diagnostic);
+    }
+    return root;
+}
+
 static struct srd_decoder *initialize_decoder(const char *decoder_root, const char *decoder_id)
 {
     if (srd_init(NULL) != SRD_OK)
@@ -994,10 +1211,12 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     uart_settings uart;
     i2c_settings i2c;
     i2s_settings i2s;
+    can_settings can;
     memset(&spi, 0, sizeof(spi));
     memset(&uart, 0, sizeof(uart));
     memset(&i2c, 0, sizeof(i2c));
     memset(&i2s, 0, sizeof(i2s));
+    memset(&can, 0, sizeof(can));
     const char *decoder_id;
     if (protocol == DECODER_UART) {
         parse_uart_settings(request, &uart);
@@ -1008,11 +1227,19 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     } else if (protocol == DECODER_I2S) {
         parse_i2s_settings(request, &i2s);
         decoder_id = "i2s_c";
+    } else if (protocol == DECODER_CAN) {
+        parse_can_settings(request, &can, 0);
+        decoder_id = "can_c";
+    } else if (protocol == DECODER_CAN_FD) {
+        parse_can_settings(request, &can, 1);
+        decoder_id = "can_fd_c";
     } else {
         parse_spi_settings(request, &spi);
         decoder_id = "spi_c";
     }
     sparse_input input = build_sparse_input(request, channel_count, sample_count);
+    if ((protocol == DECODER_CAN || protocol == DECODER_CAN_FD) && can.inverted)
+        input.channels[can.can_rx].initial_level ^= 1u;
 
     struct srd_decoder *decoder = initialize_decoder(decoder_root, decoder_id);
     if (!decoder)
@@ -1046,6 +1273,13 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
         add_option_string(options, "bit_align", i2s.bit_align);
         add_option_string(options, "bitorder", i2s.msb_first ? "msb-first" : "lsb-first");
         add_option_u64(options, "wordsize", (uint64_t)i2s.word_size);
+    } else if (protocol == DECODER_CAN) {
+        add_option_i64(options, "bitrate", (int64_t)can.nominal_bitrate);
+        add_option_double(options, "sample_point", can.sample_point);
+    } else if (protocol == DECODER_CAN_FD) {
+        add_option_i64(options, "nominal_bitrate", (int64_t)can.nominal_bitrate);
+        add_option_i64(options, "fast_bitrate", (int64_t)can.fast_bitrate);
+        add_option_double(options, "sample_point", can.sample_point);
     } else {
         add_option_string(options, "cs_polarity", spi.cs_active_low ? "active-low" : "active-high");
         add_option_u64(options, "cpol", (uint64_t)spi.cpol);
@@ -1072,6 +1306,8 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
         add_channel(channels, "sck", i2s.sck);
         add_channel(channels, "ws", i2s.ws);
         add_channel(channels, "sd", i2s.sd);
+    } else if (protocol == DECODER_CAN || protocol == DECODER_CAN_FD) {
+        add_channel(channels, "can_rx", can.can_rx);
     } else {
         add_channel(channels, "clk", spi.clk);
         add_channel(channels, "miso", spi.miso);
@@ -1102,7 +1338,11 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
                               ? render_i2c_output(&collector, &i2c)
                               : protocol == DECODER_I2S
                                     ? render_i2s_output(&collector, &i2s)
-                                    : render_output(&collector, &spi);
+                                    : protocol == DECODER_CAN
+                                          ? render_can_output(&collector, &can, 0)
+                                          : protocol == DECODER_CAN_FD
+                                                ? render_can_output(&collector, &can, 1)
+                                                : render_output(&collector, &spi);
     srd_session_destroy(session);
     srd_exit();
     free_sparse_input(&input);
@@ -1116,8 +1356,12 @@ static cJSON *probe(const char *decoder_root)
     struct srd_decoder *i2c = srd_decoder_get_by_id("i2c_c");
     struct srd_decoder *spi = srd_decoder_get_by_id("spi_c");
     struct srd_decoder *i2s = srd_decoder_get_by_id("i2s_c");
+    struct srd_decoder *can = srd_decoder_get_by_id("can_c");
+    struct srd_decoder *can_fd = srd_decoder_get_by_id("can_fd_c");
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "available", uart != NULL || i2c != NULL || spi != NULL || i2s != NULL);
+    cJSON_AddBoolToObject(root, "available",
+                          uart != NULL || i2c != NULL || spi != NULL || i2s != NULL ||
+                              can != NULL || can_fd != NULL);
     cJSON *protocols = add_array(root, "protocols");
     if (uart)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("UART"));
@@ -1127,9 +1371,13 @@ static cJSON *probe(const char *decoder_root)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("SPI"));
     if (i2s)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("I2S"));
+    if (can)
+        cJSON_AddItemToArray(protocols, cJSON_CreateString("CAN"));
+    if (can_fd)
+        cJSON_AddItemToArray(protocols, cJSON_CreateString("CAN-FD"));
     cJSON_AddBoolToObject(root, "supports_streaming", 0);
     cJSON_AddStringToObject(root, "decoder_name", "PXView native C decoder pack");
-    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c");
+    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c,can_c,can_fd_c");
     cJSON_AddNumberToObject(root, "api_version", SRD_C_DECODER_API_VERSION);
     srd_exit();
     return root;
