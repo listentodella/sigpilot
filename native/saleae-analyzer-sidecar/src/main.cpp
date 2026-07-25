@@ -40,6 +40,7 @@ constexpr const char* kI2cPluginSha256 = "e3467f6e8183e57d324798e99cc8d680b2411e
 constexpr const char* kSpiPluginSha256 = "366dfc0b312385f5e608245a9493c33194ed81723a785cc10248fe70593c1ce3";
 constexpr const char* kI2sPluginSha256 = "28c6864400d3f6f6baa3f71a4598f8cff8a00fa7b634148015d1707d9b443974";
 constexpr const char* kCanPluginSha256 = "ec1fcaa48d25930c43fe315e1c30917a475d01e7b85ad81d71e674ad81d1e251";
+constexpr const char* kLinPluginSha256 = "ce565e316ba9bdfc3d2d15bff609deedef6ef276e3b187a0ed150c4389e1bccc";
 
 enum class DecoderProtocol
 {
@@ -48,6 +49,7 @@ enum class DecoderProtocol
     Spi,
     I2s,
     Can,
+    Lin,
 };
 
 struct RuntimePaths
@@ -59,6 +61,7 @@ struct RuntimePaths
     fs::path spi_plugin;
     fs::path i2s_plugin;
     fs::path can_plugin;
+    fs::path lin_plugin;
 
     const fs::path& PluginPath(DecoderProtocol protocol) const
     {
@@ -73,6 +76,8 @@ struct RuntimePaths
             return i2s_plugin;
         case DecoderProtocol::Can:
             return can_plugin;
+        case DecoderProtocol::Lin:
+            return lin_plugin;
         }
         throw std::runtime_error("unknown Saleae decoder protocol");
     }
@@ -130,7 +135,14 @@ struct CanSettings
     bool inverted = false;
 };
 
-using DecoderSettings = std::variant<UartSettings, I2cSettings, SpiSettings, I2sSettings, CanSettings>;
+struct LinSettings
+{
+    U32 channel = 0;
+    U32 bit_rate = 19'200;
+    U32 version = 2;
+};
+
+using DecoderSettings = std::variant<UartSettings, I2cSettings, SpiSettings, I2sSettings, CanSettings, LinSettings>;
 
 std::string Sha256(const fs::path& path)
 {
@@ -168,12 +180,14 @@ RuntimePaths ValidateRuntimeRoot(const fs::path& root)
                        root / "Analyzers" / "libi2c_analyzer.so",
                        root / "Analyzers" / "libspi_analyzer.so",
                        root / "Analyzers" / "libi2s_analyzer.so",
-                       root / "Analyzers" / "libcan_analyzer.so"};
+                       root / "Analyzers" / "libcan_analyzer.so",
+                       root / "Analyzers" / "liblin_analyzer.so"};
     if (!fs::is_regular_file(paths.runtime_library) || !fs::is_regular_file(paths.serial_plugin) ||
         !fs::is_regular_file(paths.i2c_plugin) || !fs::is_regular_file(paths.spi_plugin) ||
-        !fs::is_regular_file(paths.i2s_plugin) || !fs::is_regular_file(paths.can_plugin)) {
+        !fs::is_regular_file(paths.i2s_plugin) || !fs::is_regular_file(paths.can_plugin) ||
+        !fs::is_regular_file(paths.lin_plugin)) {
         throw std::runtime_error(
-            "Saleae runtime root must contain libAnalyzer.dylib plus Serial, I2C, SPI, I2S, and CAN analyzer plugins: " +
+            "Saleae runtime root must contain libAnalyzer.dylib plus Serial, I2C, SPI, I2S, CAN, and LIN analyzer plugins: " +
             root.string());
     }
     return paths;
@@ -202,7 +216,8 @@ RuntimePaths LocateRuntime(const std::optional<fs::path>& explicit_root)
             fs::is_regular_file(candidate / "Analyzers" / "libi2c_analyzer.so") &&
             fs::is_regular_file(candidate / "Analyzers" / "libspi_analyzer.so") &&
             fs::is_regular_file(candidate / "Analyzers" / "libi2s_analyzer.so") &&
-            fs::is_regular_file(candidate / "Analyzers" / "libcan_analyzer.so")) {
+            fs::is_regular_file(candidate / "Analyzers" / "libcan_analyzer.so") &&
+            fs::is_regular_file(candidate / "Analyzers" / "liblin_analyzer.so")) {
             return ValidateRuntimeRoot(candidate);
         }
     }
@@ -440,6 +455,15 @@ void ConfigureAnalyzer(Analyzer* analyzer, const CanSettings& settings)
     CommitSettings(analyzer_settings, "CAN");
 }
 
+void ConfigureAnalyzer(Analyzer* analyzer, const LinSettings& settings)
+{
+    auto* analyzer_settings = AnalyzerSettingsFor(analyzer);
+    SetChannelSetting(analyzer_settings, "Serial", settings.channel);
+    SetNumberSetting(analyzer_settings, "LIN Version", settings.version);
+    SetNumberSetting(analyzer_settings, "Bit Rate (Bits/s)", settings.bit_rate);
+    CommitSettings(analyzer_settings, "LIN");
+}
+
 std::optional<U32> OptionalChannel(const json& channels, const char* key)
 {
     if (!channels.contains(key) || channels.at(key).is_null()) {
@@ -467,7 +491,10 @@ DecoderProtocol ParseProtocol(const json& input)
     if (protocol == "can") {
         return DecoderProtocol::Can;
     }
-    throw std::runtime_error("decoder.protocol must be uart, i2c, spi, i2s, or can");
+    if (protocol == "lin") {
+        return DecoderProtocol::Lin;
+    }
+    throw std::runtime_error("decoder.protocol must be uart, i2c, spi, i2s, can, or lin");
 }
 
 UartSettings ParseUartSettings(const json& input)
@@ -579,6 +606,25 @@ CanSettings ParseCanSettings(const json& input)
     return settings;
 }
 
+LinSettings ParseLinSettings(const json& input)
+{
+    const auto& decoder = input.contains("decoder") ? input.at("decoder") : input;
+    const auto& channels = decoder.contains("channels") ? decoder.at("channels") : decoder.at("settings");
+    const auto& options = decoder.contains("options") ? decoder.at("options") : decoder.at("settings");
+    LinSettings settings;
+    const auto channel = channels.contains("rx") ? OptionalChannel(channels, "rx") : OptionalChannel(channels, "channel");
+    if (!channel.has_value()) {
+        throw std::runtime_error("LIN requires an input channel");
+    }
+    settings.channel = *channel;
+    settings.bit_rate = options.value("baudrate", options.value("bit_rate", 19'200u));
+    settings.version = options.value("version", 2u);
+    if (settings.bit_rate == 0 || (settings.version != 1 && settings.version != 2)) {
+        throw std::runtime_error("LIN requires a positive bit rate and version 1 or 2");
+    }
+    return settings;
+}
+
 DecoderSettings ParseSettings(const json& input, DecoderProtocol protocol)
 {
     switch (protocol) {
@@ -592,6 +638,8 @@ DecoderSettings ParseSettings(const json& input, DecoderProtocol protocol)
         return ParseI2sSettings(input);
     case DecoderProtocol::Can:
         return ParseCanSettings(input);
+    case DecoderProtocol::Lin:
+        return ParseLinSettings(input);
     }
     throw std::runtime_error("unknown Saleae decoder protocol");
 }
@@ -702,6 +750,8 @@ const char* ProtocolName(DecoderProtocol protocol)
         return "I2S / PCM";
     case DecoderProtocol::Can:
         return "CAN";
+    case DecoderProtocol::Lin:
+        return "LIN";
     }
     return "Unknown";
 }
@@ -725,6 +775,8 @@ std::vector<U32> BubbleChannels(const DecoderSettings& settings)
                 }
                 return channels;
             } else if constexpr (std::is_same_v<Type, CanSettings>) {
+                return std::vector<U32>{value.channel};
+            } else if constexpr (std::is_same_v<Type, LinSettings>) {
                 return std::vector<U32>{value.channel};
             } else {
                 return std::vector<U32>{value.data};
@@ -797,6 +849,11 @@ void AddFieldChannelValue(json& values, const DecoderSettings& settings, const s
                 } else if (lower_name == "ack") {
                     AddChannelValue(values, decoder.channel, "ACK", value, 1);
                 }
+            } else if constexpr (std::is_same_v<Type, LinSettings>) {
+                (void)values;
+                (void)decoder;
+                (void)lower_name;
+                (void)value;
             }
         },
         settings);
@@ -946,14 +1003,37 @@ json Decode(const RuntimePaths& runtime, const json& input)
         json channel_values = json::array();
 
         for (const auto& [name, value] : captured.fields) {
-            fields.push_back({{"name", name}, {"value", FieldValue(value)}});
+            const auto is_checksum_alias = std::holds_alternative<LinSettings>(settings) &&
+                                           captured.row == "data_or_checksum" && Lower(name) == "data";
+            if (!is_checksum_alias) {
+                fields.push_back({{"name", name}, {"value", FieldValue(value)}});
+            }
             const auto numeric = NumericFieldValue(value);
-            if (numeric.has_value()) {
+            if (numeric.has_value() && !is_checksum_alias) {
                 AddFieldChannelValue(channel_values, settings, name, *numeric);
             }
         }
         AddI2sFrameValues(captured, settings, texts, channel_values);
         AddLegacyFields(captured, texts, settings, fields, channel_values);
+        if (const auto* decoder = std::get_if<LinSettings>(&settings)) {
+            const auto inter_byte_space = std::find(texts.begin(), texts.end(), "IBS") != texts.end();
+            if (!inter_byte_space) {
+                U64 display_value = captured.row == "header_sync" ? 0x55 : 0;
+                for (const auto& [name, value] : captured.fields) {
+                    const auto lower_name = Lower(name);
+                    const auto is_checksum_alias = captured.row == "data_or_checksum" && lower_name == "data";
+                    if (lower_name == "protected_id" || lower_name == "identifier" || lower_name == "checksum" ||
+                        (lower_name == "data" && !is_checksum_alias)) {
+                        if (const auto numeric = NumericFieldValue(value); numeric.has_value()) {
+                            display_value = *numeric;
+                        }
+                    }
+                }
+                const auto label = texts.empty() ? ProtocolName(protocol) : texts.front();
+                channel_values.push_back(
+                    {{"channel", decoder->channel}, {"role", "LIN"}, {"label", label}, {"value", display_value}});
+            }
+        }
 
         const std::string row = captured.row.empty() ? ProtocolName(protocol) : captured.row;
 
@@ -992,24 +1072,27 @@ json Probe(const RuntimePaths& runtime)
     Plugin spi(runtime.spi_plugin);
     Plugin i2s(runtime.i2s_plugin);
     Plugin can(runtime.can_plugin);
+    Plugin lin(runtime.lin_plugin);
     const auto runtime_hash = Sha256(runtime.runtime_library);
     const auto serial_hash = Sha256(runtime.serial_plugin);
     const auto i2c_hash = Sha256(runtime.i2c_plugin);
     const auto spi_hash = Sha256(runtime.spi_plugin);
     const auto i2s_hash = Sha256(runtime.i2s_plugin);
     const auto can_hash = Sha256(runtime.can_plugin);
+    const auto lin_hash = Sha256(runtime.lin_plugin);
     const bool abi_match = runtime_hash == kRuntimeSha256 && serial_hash == kSerialPluginSha256 &&
                            i2c_hash == kI2cPluginSha256 && spi_hash == kSpiPluginSha256 &&
-                           i2s_hash == kI2sPluginSha256 && can_hash == kCanPluginSha256;
+                           i2s_hash == kI2sPluginSha256 && can_hash == kCanPluginSha256 &&
+                           lin_hash == kLinPluginSha256;
     return {{"kind", "saleae_native"},
             {"display_name", "Saleae Native analyzer sidecar"},
             {"available", abi_match},
-            {"protocols", json::array({"UART", "I2C", "SPI", "I2S", "CAN"})},
+            {"protocols", json::array({"UART", "I2C", "SPI", "I2S", "CAN", "LIN"})},
             {"supports_streaming", false},
             {"isolation", "sidecar"},
             {"analyzer_name",
              std::string(serial.Name()) + ", " + i2c.Name() + ", " + spi.Name() + ", " + i2s.Name() + ", " +
-                 can.Name()},
+                 can.Name() + ", " + lin.Name()},
             {"runtime_root", runtime.root.string()},
             {"runtime_sha256", runtime_hash},
             {"runtime_sha256_expected", kRuntimeSha256},
@@ -1037,7 +1120,12 @@ json Probe(const RuntimePaths& runtime)
                            {"name", can.Name()},
                            {"sha256", can_hash},
                            {"sha256_expected", kCanPluginSha256},
-                           {"settings_schema", SettingsSchema(can)}}})},
+                           {"settings_schema", SettingsSchema(can)}},
+                          {{"protocol", "LIN"},
+                           {"name", lin.Name()},
+                           {"sha256", lin_hash},
+                           {"sha256_expected", kLinPluginSha256},
+                           {"settings_schema", SettingsSchema(lin)}}})},
             {"abi_match", abi_match}};
 }
 

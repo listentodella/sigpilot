@@ -1297,6 +1297,48 @@ mod tests {
         assert_eq!(values_for("ACK"), vec![1]);
     }
 
+    fn lin_edge_sets() -> Vec<(u8, Vec<u64>)> {
+        vec![(
+            0,
+            vec![
+                100, 240, 260, 270, 280, 290, 300, 310, 320, 330, 340, 350, 360, 380, 390, 410,
+                420, 440, 460, 470, 480, 490, 500, 520, 530, 540, 560, 580, 590, 600, 620, 630,
+                640, 650, 660, 670, 680, 690, 710, 720, 740, 750,
+            ],
+        )]
+    }
+
+    fn lin_settings() -> AnalyzerDecodeSettings {
+        AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+            decoder_id: "lin".to_string(),
+            protocol_name: "LIN".to_string(),
+            channels: BTreeMap::from([("rx".to_string(), Some(0))]),
+            options: BTreeMap::from([
+                ("baudrate".to_string(), NativeOptionValue::Integer(100_000)),
+                ("version".to_string(), NativeOptionValue::Integer(2)),
+            ]),
+            primary_channel: 0,
+        })
+    }
+
+    fn lin_capture() -> CaptureData {
+        transition_capture("native-lin-test", 1_000_000, 860, &[1], &lin_edge_sets())
+    }
+
+    fn assert_lin_output(output: &DecoderOutput) {
+        assert_eq!(output.protocol, "LIN");
+        assert_eq!(
+            output
+                .frames
+                .iter()
+                .flat_map(|frame| frame.channel_values.iter())
+                .filter(|value| value.role == "LIN")
+                .map(|value| value.value)
+                .collect::<Vec<_>>(),
+            vec![0, 0x55, 0x12, 0xA5, 0x5A, 0x6D]
+        );
+    }
+
     #[test]
     fn legacy_backend_is_explicitly_discoverable() {
         let info = LegacyRustDecoder.info();
@@ -1361,6 +1403,16 @@ mod tests {
         assert_eq!(decoder["options"]["bitrate"], 100_000);
         assert_eq!(decoder["options"]["sample_point"], 70);
         assert_eq!(decoder["options"]["inverted"], false);
+    }
+
+    #[test]
+    fn generic_native_request_preserves_lin_contract_without_rust_protocol_logic() {
+        let request = build_native_sidecar_request(&lin_capture(), &lin_settings()).unwrap();
+        let decoder = serde_json::to_value(request.decoder).unwrap();
+        assert_eq!(decoder["protocol"], "lin");
+        assert_eq!(decoder["channels"]["rx"], 0);
+        assert_eq!(decoder["options"]["baudrate"], 100_000);
+        assert_eq!(decoder["options"]["version"], 2);
     }
 
     #[test]
@@ -1686,6 +1738,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_native_sidecar_decodes_lin_packed_and_sparse_fixtures() {
+        let decoder = SaleaeNativeDecoder::from_env().unwrap();
+        let packed = decoder.decode(&lin_capture(), &lin_settings()).unwrap();
+        assert_lin_output(&packed);
+
+        const OFFSET: u64 = 49_000_000_000;
+        let sparse = sparse_transition_capture(
+            "saleae-lin-sparse-test",
+            1_000_000,
+            50_000_000_000,
+            OFFSET,
+            &[1],
+            &lin_edge_sets(),
+        );
+        let output = decoder.decode_sparse(&sparse, &lin_settings()).unwrap();
+        assert_lin_output(&output);
+        assert!(output.frames[0].start_sample > u64::from(u32::MAX));
+    }
+
+    #[test]
     #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_mode_zero_fixture() {
         let (capture, settings) = mode_zero_capture_and_settings();
@@ -1831,5 +1904,26 @@ mod tests {
             assert_can_output(&output);
             assert!(output.frames[0].start_sample > u64::from(u32::MAX));
         }
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    fn sigrok_native_sidecar_decodes_lin_packed_and_sparse_fixtures() {
+        let decoder = SigrokNativeDecoder::from_env().unwrap();
+        let packed = decoder.decode(&lin_capture(), &lin_settings()).unwrap();
+        assert_lin_output(&packed);
+
+        const OFFSET: u64 = 49_000_000_000;
+        let sparse = sparse_transition_capture(
+            "sigrok-lin-sparse-test",
+            1_000_000,
+            50_000_000_000,
+            OFFSET,
+            &[1],
+            &lin_edge_sets(),
+        );
+        let output = decoder.decode_sparse(&sparse, &lin_settings()).unwrap();
+        assert_lin_output(&output);
+        assert!(output.frames[0].start_sample > u64::from(u32::MAX));
     }
 }

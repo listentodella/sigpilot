@@ -19,6 +19,7 @@ typedef struct {
     uint64_t start_sample;
     uint64_t end_sample;
     int ann_class;
+    char *decoder_id;
     char **texts;
     int text_count;
 } annotation_item;
@@ -101,6 +102,12 @@ typedef struct {
     int inverted;
 } can_settings;
 
+typedef struct {
+    int rx;
+    uint64_t baudrate;
+    int version;
+} lin_settings;
+
 typedef enum {
     DECODER_SPI,
     DECODER_UART,
@@ -108,6 +115,7 @@ typedef enum {
     DECODER_I2S,
     DECODER_CAN,
     DECODER_CAN_FD,
+    DECODER_LIN,
 } decoder_protocol;
 
 static void fatal(const char *message)
@@ -200,6 +208,10 @@ static void collect_annotation(struct srd_proto_data *pdata, void *user_data)
     item->start_sample = pdata->start_sample;
     item->end_sample = pdata->end_sample;
     item->ann_class = annotation->ann_class;
+    item->decoder_id = strdup(
+        pdata->pdo && pdata->pdo->di && pdata->pdo->di->decoder ? pdata->pdo->di->decoder->id : "");
+    if (!item->decoder_id)
+        fatal("out of memory while copying annotation decoder id");
 
     while (annotation->ann_text && annotation->ann_text[item->text_count])
         item->text_count++;
@@ -238,6 +250,7 @@ static void free_collector(decode_collector *collector)
         for (int text_index = 0; text_index < item->text_count; text_index++)
             free(item->texts[text_index]);
         free(item->texts);
+        free(item->decoder_id);
     }
     free(collector->annotations.items);
     free(collector->binaries.items);
@@ -283,7 +296,9 @@ static decoder_protocol parse_protocol(cJSON *request)
         return DECODER_CAN;
     if (strcmp(protocol, "can_fd") == 0 || strcmp(protocol, "can-fd") == 0)
         return DECODER_CAN_FD;
-    fatal("decoder.protocol must be one of uart, i2c, spi, i2s, can, or can_fd");
+    if (strcmp(protocol, "lin") == 0)
+        return DECODER_LIN;
+    fatal("decoder.protocol must be one of uart, i2c, spi, i2s, can, can_fd, or lin");
     return DECODER_SPI;
 }
 
@@ -392,6 +407,24 @@ static void parse_can_settings(cJSON *request, can_settings *settings, int can_f
         (can_fd && settings->fast_bitrate == 0) || settings->sample_point <= 0.0 ||
         settings->sample_point >= 100.0)
         fatal("invalid CAN channel, bitrate, or sample point");
+}
+
+static void parse_lin_settings(cJSON *request, lin_settings *settings)
+{
+    cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
+    cJSON *channels = decoder ? cJSON_GetObjectItem(decoder, "channels") : NULL;
+    cJSON *options = decoder ? cJSON_GetObjectItem(decoder, "options") : NULL;
+    if (!decoder || !channels || !options)
+        fatal("decoder channels/options are required");
+
+    settings->rx = optional_channel(channels, "rx");
+    if (settings->rx < 0)
+        settings->rx = optional_channel(channels, "channel");
+    settings->baudrate = (uint64_t)json_int(options, "baudrate", json_int(options, "bit_rate", 19200));
+    settings->version = json_int(options, "version", 2);
+    if (settings->rx < 0 || settings->baudrate == 0 ||
+        (settings->version != 1 && settings->version != 2))
+        fatal("LIN requires an input channel, a positive bit rate, and version 1 or 2");
 }
 
 typedef struct {
@@ -1049,6 +1082,22 @@ static int parse_decimal_text(const char *text, uint64_t *value)
     return 1;
 }
 
+static int parse_hex_after_colon(const char *text, uint64_t *value)
+{
+    const char *cursor = text ? strchr(text, ':') : NULL;
+    cursor = cursor ? cursor + 1 : text;
+    while (cursor && *cursor && (*cursor == ' ' || *cursor == '\t'))
+        cursor++;
+    if (!cursor || !*cursor)
+        return 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(cursor, &end, 16);
+    if (end == cursor)
+        return 0;
+    *value = (uint64_t)parsed;
+    return 1;
+}
+
 static cJSON *field_value_boolean(int value)
 {
     cJSON *tagged = cJSON_CreateObject();
@@ -1185,6 +1234,114 @@ static cJSON *render_can_output(const decode_collector *collector, const can_set
     return root;
 }
 
+static cJSON *render_lin_output(const decode_collector *collector, const lin_settings *settings)
+{
+    enum {
+        LIN_ANN_DATA = 0,
+        LIN_ANN_CONTROL = 1,
+        LIN_ANN_ERROR = 2,
+        LIN_ANN_INLINE_ERROR = 3,
+    };
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "backend", "sigrok_native");
+    cJSON_AddStringToObject(root, "protocol", "LIN");
+    cJSON *frames = add_array(root, "frames");
+    cJSON *diagnostics = add_array(root, "diagnostics");
+    uint64_t frame_id = 0;
+
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if (strcmp(item->decoder_id, "lin_c") != 0)
+            continue;
+        if (item->ann_class == LIN_ANN_ERROR || item->ann_class == LIN_ANN_INLINE_ERROR) {
+            if (item->text_count > 0) {
+                cJSON *diagnostic = cJSON_CreateObject();
+                cJSON_AddStringToObject(diagnostic, "level", "warning");
+                cJSON_AddStringToObject(diagnostic, "message", item->texts[0]);
+                cJSON_AddItemToArray(diagnostics, diagnostic);
+            }
+            if (item->ann_class == LIN_ANN_ERROR)
+                continue;
+        }
+        if ((item->ann_class != LIN_ANN_DATA && item->ann_class != LIN_ANN_CONTROL &&
+             item->ann_class != LIN_ANN_INLINE_ERROR) || item->text_count == 0)
+            continue;
+
+        const char *text = item->texts[0];
+        const char *name = NULL;
+        const char *role = NULL;
+        const char *row = "control_field";
+        uint64_t value = 0;
+        if (strstr(text, "ID:") != NULL &&
+            (parse_hex_text(text, &value) || parse_hex_after_colon(text, &value))) {
+            name = "identifier";
+            role = "Identifier";
+            row = "identifier_field";
+        } else if (strstr(text, "Data:") != NULL && parse_hex_text(text, &value)) {
+            name = "data";
+            role = "Data";
+            row = "data_field";
+        } else if (strstr(text, "Checksum:") != NULL && parse_hex_text(text, &value)) {
+            name = "checksum";
+            role = "Checksum";
+            row = "checksum_field";
+        } else if (strcmp(text, "Sync") == 0) {
+            name = "sync";
+            role = "Sync";
+            value = 0x55;
+        } else if (strstr(text, "Break") != NULL) {
+            name = "break";
+            role = "Break";
+        }
+        if (!name)
+            continue;
+
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample, row);
+        if (role && strcmp(role, "Break") != 0) {
+            char identifier_label[32];
+            const char *label = text;
+            if (strcmp(role, "Identifier") == 0) {
+                snprintf(identifier_label, sizeof(identifier_label), "ID: 0x%02llX",
+                         (unsigned long long)value);
+                label = identifier_label;
+            }
+            cJSON *texts = cJSON_GetObjectItem(frame, "texts");
+            cJSON_AddItemToArray(texts, cJSON_CreateString(label));
+            cJSON *fields = cJSON_GetObjectItem(frame, "fields");
+            cJSON *field = cJSON_CreateObject();
+            cJSON_AddStringToObject(field, "name", name);
+            cJSON_AddItemToObject(field, "value", field_value_unsigned(value));
+            cJSON_AddItemToArray(fields, field);
+            cJSON *channel_values = cJSON_GetObjectItem(frame, "channel_values");
+            cJSON *channel_value = cJSON_CreateObject();
+            cJSON_AddNumberToObject(channel_value, "channel", settings->rx);
+            cJSON_AddStringToObject(channel_value, "role", "LIN");
+            cJSON_AddStringToObject(channel_value, "label", label);
+            cJSON_AddNumberToObject(channel_value, "value", (double)value);
+            cJSON_AddItemToArray(channel_values, channel_value);
+        } else {
+            cJSON *texts = cJSON_GetObjectItem(frame, "texts");
+            cJSON_AddItemToArray(texts, cJSON_CreateString(text));
+            cJSON *fields = cJSON_GetObjectItem(frame, "fields");
+            cJSON *field = cJSON_CreateObject();
+            cJSON_AddStringToObject(field, "name", name);
+            cJSON *tagged = cJSON_CreateObject();
+            cJSON_AddStringToObject(tagged, "Text", text);
+            cJSON_AddItemToObject(field, "value", tagged);
+            cJSON_AddItemToArray(fields, field);
+            cJSON *channel_values = cJSON_GetObjectItem(frame, "channel_values");
+            cJSON *channel_value = cJSON_CreateObject();
+            cJSON_AddNumberToObject(channel_value, "channel", settings->rx);
+            cJSON_AddStringToObject(channel_value, "role", "LIN");
+            cJSON_AddStringToObject(channel_value, "label", text);
+            cJSON_AddNumberToObject(channel_value, "value", 0);
+            cJSON_AddItemToArray(channel_values, channel_value);
+        }
+        cJSON_AddItemToArray(frames, frame);
+    }
+    return root;
+}
+
 static struct srd_decoder *initialize_decoder(const char *decoder_root, const char *decoder_id)
 {
     if (srd_init(NULL) != SRD_OK)
@@ -1212,11 +1369,13 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     i2c_settings i2c;
     i2s_settings i2s;
     can_settings can;
+    lin_settings lin;
     memset(&spi, 0, sizeof(spi));
     memset(&uart, 0, sizeof(uart));
     memset(&i2c, 0, sizeof(i2c));
     memset(&i2s, 0, sizeof(i2s));
     memset(&can, 0, sizeof(can));
+    memset(&lin, 0, sizeof(lin));
     const char *decoder_id;
     if (protocol == DECODER_UART) {
         parse_uart_settings(request, &uart);
@@ -1233,6 +1392,9 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     } else if (protocol == DECODER_CAN_FD) {
         parse_can_settings(request, &can, 1);
         decoder_id = "can_fd_c";
+    } else if (protocol == DECODER_LIN) {
+        parse_lin_settings(request, &lin);
+        decoder_id = "lin_c";
     } else {
         parse_spi_settings(request, &spi);
         decoder_id = "spi_c";
@@ -1280,6 +1442,8 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
         add_option_i64(options, "nominal_bitrate", (int64_t)can.nominal_bitrate);
         add_option_i64(options, "fast_bitrate", (int64_t)can.fast_bitrate);
         add_option_double(options, "sample_point", can.sample_point);
+    } else if (protocol == DECODER_LIN) {
+        add_option_i64(options, "version", lin.version);
     } else {
         add_option_string(options, "cs_polarity", spi.cs_active_low ? "active-low" : "active-high");
         add_option_u64(options, "cpol", (uint64_t)spi.cpol);
@@ -1308,6 +1472,8 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
         add_channel(channels, "sd", i2s.sd);
     } else if (protocol == DECODER_CAN || protocol == DECODER_CAN_FD) {
         add_channel(channels, "can_rx", can.can_rx);
+    } else if (protocol == DECODER_LIN) {
+        /* LIN consumes UART protocol output, so its source instance gets the physical RX map below. */
     } else {
         add_channel(channels, "clk", spi.clk);
         add_channel(channels, "miso", spi.miso);
@@ -1316,9 +1482,35 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     }
     srd_inst_channel_set_all(instance, channels);
     g_hash_table_destroy(channels);
-    instance->runtime = &sparse_runtime;
-    instance->inbuf_const = (const uint8_t *)&input;
-    instance->abs_end_samplenum = sample_count - 1;
+    struct srd_decoder_inst *source_instance = instance;
+    if (protocol == DECODER_LIN) {
+        GHashTable *uart_options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                         (GDestroyNotify)g_variant_unref);
+        add_option_i64(uart_options, "baudrate", (int64_t)lin.baudrate);
+        add_option_i64(uart_options, "data_bits", 8);
+        add_option_double(uart_options, "stop_bits", 1.0);
+        add_option_string(uart_options, "parity", "none");
+        add_option_string(uart_options, "bit_order", "lsb-first");
+        add_option_string(uart_options, "format", "hex");
+        add_option_string(uart_options, "invert_rx", "no");
+        add_option_string(uart_options, "invert_tx", "no");
+        add_option_string(uart_options, "show_data_point", "no");
+        add_option_string(uart_options, "show_start_stop", "yes");
+        source_instance = srd_inst_new(session, "uart_c", uart_options);
+        g_hash_table_destroy(uart_options);
+        if (!source_instance)
+            fatal("failed to create LIN UART source decoder");
+        GHashTable *uart_channels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                          (GDestroyNotify)g_variant_unref);
+        add_channel(uart_channels, "rx", lin.rx);
+        srd_inst_channel_set_all(source_instance, uart_channels);
+        g_hash_table_destroy(uart_channels);
+        if (srd_inst_stack(session, source_instance, instance) != SRD_OK)
+            fatal("failed to stack LIN decoder on UART source");
+    }
+    source_instance->runtime = &sparse_runtime;
+    source_instance->inbuf_const = (const uint8_t *)&input;
+    source_instance->abs_end_samplenum = sample_count - 1;
 
     decode_collector collector;
     memset(&collector, 0, sizeof(collector));
@@ -1329,7 +1521,7 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     char *error = NULL;
     if (srd_session_start(session, &error) != SRD_OK)
         fatal(error ? error : "failed to start libsigrokdecode session");
-    instance->c_dec_inst->decode(instance);
+    source_instance->c_dec_inst->decode(source_instance);
     srd_session_end(session, &error);
 
     cJSON *output = protocol == DECODER_UART
@@ -1342,6 +1534,8 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
                                           ? render_can_output(&collector, &can, 0)
                                           : protocol == DECODER_CAN_FD
                                                 ? render_can_output(&collector, &can, 1)
+                                                : protocol == DECODER_LIN
+                                                      ? render_lin_output(&collector, &lin)
                                                 : render_output(&collector, &spi);
     srd_session_destroy(session);
     srd_exit();
@@ -1358,10 +1552,11 @@ static cJSON *probe(const char *decoder_root)
     struct srd_decoder *i2s = srd_decoder_get_by_id("i2s_c");
     struct srd_decoder *can = srd_decoder_get_by_id("can_c");
     struct srd_decoder *can_fd = srd_decoder_get_by_id("can_fd_c");
+    struct srd_decoder *lin = srd_decoder_get_by_id("lin_c");
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "available",
                           uart != NULL || i2c != NULL || spi != NULL || i2s != NULL ||
-                              can != NULL || can_fd != NULL);
+                              can != NULL || can_fd != NULL || lin != NULL);
     cJSON *protocols = add_array(root, "protocols");
     if (uart)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("UART"));
@@ -1375,9 +1570,11 @@ static cJSON *probe(const char *decoder_root)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("CAN"));
     if (can_fd)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("CAN-FD"));
+    if (lin)
+        cJSON_AddItemToArray(protocols, cJSON_CreateString("LIN"));
     cJSON_AddBoolToObject(root, "supports_streaming", 0);
     cJSON_AddStringToObject(root, "decoder_name", "PXView native C decoder pack");
-    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c,can_c,can_fd_c");
+    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c,can_c,can_fd_c,lin_c");
     cJSON_AddNumberToObject(root, "api_version", SRD_C_DECODER_API_VERSION);
     srd_exit();
     return root;

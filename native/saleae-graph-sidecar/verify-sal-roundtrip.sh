@@ -101,6 +101,31 @@ File.write(
           },
           saleae_metadata: nil,
         },
+        {
+          type: 'LIN',
+          name: 'LIN [body bus]',
+          color: '#D881F7',
+          display_radix: 'Hexadecimal',
+          show_in_data_table: true,
+          stream_to_terminal: false,
+          decoder_backend: 'saleae_native',
+          decode_settings: {
+            protocol: 'Native',
+            settings: {
+              decoder_id: 'lin',
+              protocol_name: 'LIN',
+              channels: {
+                rx: 7,
+              },
+              options: {
+                baudrate: 19200,
+                version: 1,
+              },
+              primary_channel: 7,
+            },
+          },
+          saleae_metadata: nil,
+        },
       ],
     },
   ),
@@ -206,6 +231,17 @@ expected_uart_settings = {
   'Mode' => 0,
 }
 raise "UART analyzer settings changed: #{uart_settings.inspect}" unless uart_settings == expected_uart_settings
+
+lin = analyzers.fetch('LIN')
+raise 'LIN analyzer name changed' unless lin.fetch('name') == 'LIN [body bus]'
+raise 'LIN analyzer color changed' unless lin.fetch('color') == '#D881F7'
+lin_settings = lin.fetch('settings').to_h { |setting| [setting.fetch('title'), setting.fetch('setting')['value']] }
+expected_lin_settings = {
+  'Serial' => 7,
+  'LIN Version' => 1,
+  'Bit Rate (Bits/s)' => 19200,
+}
+raise "LIN analyzer settings changed: #{lin_settings.inspect}" unless lin_settings == expected_lin_settings
 (0...32).each do |channel|
   initial_high, transitions = read_public_binary(File.join(channels_dir, "digital_#{channel}.bin"), 1_000_000)
   expected = channel.even? ? [100 + channel, 500 + channel] : []
@@ -222,5 +258,5 @@ expected = [100, 4_294_967_300, 49_000_000_000]
 raise "long capture transitions changed: #{transitions.inspect}" unless transitions == expected
 RUBY
 
-printf 'Saleae .sal round trips verified (SPI/I2C/UART metadata, 32 channels, and 49-billion-sample sparse capture).\n'
+printf 'Saleae .sal round trips verified (SPI/I2C/UART/LIN metadata, 32 channels, and 49-billion-sample sparse capture).\n'
 printf 'Artifacts: %s\n' "$WORK_DIR"

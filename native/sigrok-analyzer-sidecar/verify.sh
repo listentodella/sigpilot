@@ -7,6 +7,7 @@ BUILD_DIR="${PXLOGIC_SIGROK_BUILD_DIR:-$SIDECAR_DIR/target}"
 FIXTURES="${1:-$ROOT_DIR/testdata/decoders/spi-conformance-v1.json}"
 NATIVE_FIXTURES="${2:-$ROOT_DIR/testdata/decoders/sigrok-native-conformance-v1.json}"
 CAN_FIXTURES="${3:-$ROOT_DIR/testdata/decoders/can-conformance-v1.json}"
+LIN_FIXTURES="${4:-$ROOT_DIR/testdata/decoders/lin-conformance-v1.json}"
 
 "$SIDECAR_DIR/build.sh" >/dev/null
 
@@ -21,6 +22,7 @@ DECODER_ROOT="$BUILD_DIR/decoders/c_decoders"
   and (.protocols | index("I2S") != null)
   and (.protocols | index("CAN") != null)
   and (.protocols | index("CAN-FD") != null)
+  and (.protocols | index("LIN") != null)
 ' >/dev/null
 
 failures=0
@@ -140,6 +142,43 @@ while IFS= read -r fixture; do
     fi
   done
 done < <(jq -c '.cases[]' "$CAN_FIXTURES")
+
+while IFS= read -r fixture; do
+  fixture_id="$(jq -r '.id' <<<"$fixture")"
+  request="$(jq -c '{
+    format: "pxlogic.decoder.v1",
+    sample_rate_hz,
+    sample_count,
+    channel_count,
+    initial_levels,
+    edges,
+    decoder
+  }' <<<"$fixture")"
+  output="$(printf '%s' "$request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  if jq -e --argjson expected "$(jq -c '.expected_roles' <<<"$fixture")" '
+    .protocol == "LIN"
+    and ([.frames[].channel_values[] | select(.role == "LIN") | .value] == $expected.LIN)
+  ' >/dev/null <<<"$output"; then
+    printf 'PASS %s-lin\n' "$fixture_id"
+  else
+    printf 'FAIL %s-lin native LIN fields did not match\n' "$fixture_id" >&2
+    failures=$((failures + 1))
+  fi
+
+  large_request="$(jq -c '
+    .sample_count = 50000000000
+    | .edges |= map(.samples |= map(. + 49000000000))
+  ' <<<"$request")"
+  large_output="$(printf '%s' "$large_request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  large_start="$(jq -r '[.frames[].start_sample] | min' <<<"$large_output")"
+  if (( large_start <= 4294967295 )); then
+    printf 'FAIL %s-lin-large-index expected a sample beyond uint32, got %s\n' \
+      "$fixture_id" "$large_start" >&2
+    failures=$((failures + 1))
+  else
+    printf 'PASS %s-lin-large-index (%s)\n' "$fixture_id" "$large_start"
+  fi
+done < <(jq -c '.cases[]' "$LIN_FIXTURES")
 
 # The sparse contract must remain sparse. This case moves a normal SPI
 # transaction near sample 49 billion; a packed implementation would either

@@ -1021,6 +1021,25 @@ Json BuildSaleaeUartSettings(const Json& settings)
          SaleaeNumberListSetting("Mode", "", std::move(mode_options), 0)});
 }
 
+Json BuildSaleaeLinSettings(const Json& settings)
+{
+    const Json channels = settings.value("channels", Json::object());
+    const Json options = settings.value("options", Json::object());
+    Json version_options = Json::array(
+        {SaleaeNumberOption("Version 1.x", 1, "LIN Protocol Specification Version 1.x"),
+         SaleaeNumberOption("Version 2.x", 2, "LIN Protocol Specification Version 2.x")});
+
+    return Json::array(
+        {SaleaeChannelSetting("Serial", "Standard LIN", true, channels.value("rx", Json(nullptr))),
+         SaleaeNumberListSetting("LIN Version", "Specify the LIN protocol version 1 or 2.",
+                                 std::move(version_options), options.value("version", 2)),
+         SaleaeAnalyzerSetting("Bit Rate (Bits/s)", "Specify the bit rate in bits per second.",
+                               Json{{"type", "Integer"},
+                                    {"minimumValue", 1},
+                                    {"maximumValue", std::numeric_limits<std::uint32_t>::max()},
+                                    {"value", options.value("baudrate", 20000)}})});
+}
+
 Json BuildSaleaeAnalyzerSettings(const Json& decode_settings)
 {
     if (!decode_settings.is_object() || !decode_settings.contains("settings") ||
@@ -1037,6 +1056,9 @@ Json BuildSaleaeAnalyzerSettings(const Json& decode_settings)
     }
     if (protocol == "Uart") {
         return BuildSaleaeUartSettings(settings);
+    }
+    if (protocol == "Native" && settings.value("decoder_id", "") == "lin") {
+        return BuildSaleaeLinSettings(settings);
     }
     return Json();
 }

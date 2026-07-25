@@ -99,7 +99,15 @@ export function createAnalyzerInstance(
     channels: Record<string, number | null>;
     options: Record<string, boolean | number | string>;
   } =
-    type === "CAN"
+    type === "LIN"
+      ? {
+          decoderId: "lin",
+          protocolName: "LIN",
+          primaryChannel: channel,
+          channels: { rx: channel },
+          options: { baudrate: 19_200, version: 2 },
+        }
+      : type === "CAN"
       ? {
           decoderId: "can",
           protocolName: "CAN",
@@ -246,6 +254,13 @@ export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChan
     ].filter((role): role is AnalyzerChannelRole => role !== null);
   }
 
+  if (analyzer.type === "LIN") {
+    const rx = analyzer.nativeChannels.rx;
+    return typeof rx === "number"
+      ? [{ channel: rx, hasBubbles: true, hasMarkers: true, title: "LIN" }]
+      : [];
+  }
+
   if (analyzer.type === "CAN" || analyzer.type === "CAN-FD") {
     const can = analyzer.nativeChannels.can_rx;
     return typeof can === "number"
@@ -289,6 +304,7 @@ export function analyzerSupportsDecoding(analyzer: Pick<UiAnalyzerInstance, "typ
     analyzer.type === "I2C" ||
     analyzer.type === "SPI" ||
     analyzer.type === "I2S" ||
+    analyzer.type === "LIN" ||
     analyzer.type === "CAN" ||
     analyzer.type === "CAN-FD"
   );
@@ -335,7 +351,12 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
       },
     };
   }
-  if (analyzer.type === "I2S" || analyzer.type === "CAN" || analyzer.type === "CAN-FD") {
+  if (
+    analyzer.type === "I2S" ||
+    analyzer.type === "LIN" ||
+    analyzer.type === "CAN" ||
+    analyzer.type === "CAN-FD"
+  ) {
     return {
       protocol: "Native",
       settings: {
@@ -510,7 +531,9 @@ export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
   if (type === "SPI" || type === "Async Serial" || type === "I2C") {
     return ["saleae_native", "sigrok_native", "legacy_rust"];
   }
-  if (type === "I2S" || type === "CAN") return ["saleae_native", "sigrok_native"];
+  if (type === "I2S" || type === "LIN" || type === "CAN") {
+    return ["saleae_native", "sigrok_native"];
+  }
   if (type === "CAN-FD") return ["sigrok_native"];
   return ["legacy_rust"];
 }
@@ -525,12 +548,12 @@ export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
   {
     backend: "saleae_native",
     label: "Saleae Native",
-    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "CAN"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "LIN", "CAN"],
   },
   {
     backend: "sigrok_native",
     label: "Sigrok Native (PXView)",
-    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "CAN", "CAN-FD"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "LIN", "CAN", "CAN-FD"],
   },
   {
     backend: "legacy_rust",

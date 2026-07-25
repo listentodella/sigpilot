@@ -420,7 +420,7 @@ fn normalize_saleae_analyzer(raw: Value) -> Option<SaleaeAnalyzerMetadata> {
         return None;
     }
     let decoder_backend = match analyzer_type.as_str() {
-        "SPI" | "Async Serial" | "Serial" | "I2C" | "I2S" | "I2S / PCM" | "CAN" => {
+        "SPI" | "Async Serial" | "Serial" | "I2C" | "I2S" | "I2S / PCM" | "CAN" | "LIN" => {
             DecoderBackendKind::SaleaeNative
         }
         _ => DecoderBackendKind::LegacyRust,
@@ -645,6 +645,30 @@ fn normalize_saleae_decode_settings(
                     ),
                 ]),
                 primary_channel: can_rx,
+            }))
+        }
+        "LIN" => {
+            let rx = saleae_setting_u8(analyzer, &["Serial"])?;
+            Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "lin".to_string(),
+                protocol_name: "LIN".to_string(),
+                channels: BTreeMap::from([("rx".to_string(), Some(rx))]),
+                options: BTreeMap::from([
+                    (
+                        "baudrate".to_string(),
+                        NativeOptionValue::Integer(
+                            saleae_setting_u64(analyzer, &["Bit Rate (Bits/s)"]).unwrap_or(20_000)
+                                as i64,
+                        ),
+                    ),
+                    (
+                        "version".to_string(),
+                        NativeOptionValue::Integer(
+                            saleae_setting_u64(analyzer, &["LIN Version"]).unwrap_or(2) as i64,
+                        ),
+                    ),
+                ]),
+                primary_channel: rx,
             }))
         }
         _ => None,
@@ -1334,6 +1358,40 @@ mod tests {
                     ("inverted".to_string(), NativeOptionValue::Boolean(true)),
                 ]),
                 primary_channel: 12,
+            }))
+        );
+    }
+
+    #[test]
+    fn normalizes_saleae_lin_analyzer_settings_to_native_contract() {
+        let raw = serde_json::json!({
+            "name": "LIN [body bus]",
+            "type": "LIN",
+            "color": "#D881F7",
+            "displayRadix": "Hexadecimal",
+            "showInDataTable": true,
+            "streamToTerminal": false,
+            "settings": [
+                { "title": "Serial", "setting": { "type": "Channel", "value": 7 } },
+                { "title": "LIN Version", "setting": { "type": "NumberList", "value": 1 } },
+                { "title": "Bit Rate (Bits/s)", "setting": { "type": "Integer", "value": 19200 } }
+            ]
+        });
+
+        let analyzer = normalize_saleae_analyzer(raw.clone()).unwrap();
+        assert_eq!(analyzer.decoder_backend, DecoderBackendKind::SaleaeNative);
+        assert_eq!(analyzer.saleae_metadata, raw);
+        assert_eq!(
+            analyzer.decode_settings,
+            Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "lin".to_string(),
+                protocol_name: "LIN".to_string(),
+                channels: BTreeMap::from([("rx".to_string(), Some(7))]),
+                options: BTreeMap::from([
+                    ("baudrate".to_string(), NativeOptionValue::Integer(19_200)),
+                    ("version".to_string(), NativeOptionValue::Integer(1)),
+                ]),
+                primary_channel: 7,
             }))
         );
     }

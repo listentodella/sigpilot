@@ -190,3 +190,5 @@ chore: 说明内容
   - 直接接入 Logic 2.4.43 原版 CAN 插件与 PXView `can_c`/`can_fd_c`；统一恢复 `.sal` CAN 配置、气泡和 Identifier/DLC/Data/CRC/ACK 表格字段，未新增 Rust 协议解码器。
 - `docs/ported-features/2026-07-24-channel-context-menu-screenshots.md`
   - 搬运原版 300ms 延迟、row crop、全局 destination 和文件命名规则；macOS Tauri 使用 WKWebView 原生 snapshot 完成通道/整窗 PNG、JPEG 与剪贴板输出。
+- `docs/ported-features/2026-07-25-saleae-sigrok-native-lin.md`
+  - 直接接入 Logic 2.4.43 原版 LIN 插件与 PXView `uart_c -> lin_c` decoder stack；补齐 packed/sparse、`.sal` 恢复/导出和 490 亿 sample 索引，Rust 不包含 LIN 协议状态机。

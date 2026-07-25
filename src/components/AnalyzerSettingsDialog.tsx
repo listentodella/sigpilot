@@ -88,7 +88,9 @@ export function AnalyzerSettingsDialog({
             ? draft.spiMosiChannel ?? draft.spiMisoChannel ?? draft.spiClockChannel
             : draft.type === "I2S"
               ? draft.nativeChannels.sd ?? draft.nativePrimaryChannel
-              : draft.type === "CAN" || draft.type === "CAN-FD"
+              : draft.type === "LIN"
+                ? draft.nativeChannels.rx ?? draft.nativePrimaryChannel
+                : draft.type === "CAN" || draft.type === "CAN-FD"
                 ? draft.nativeChannels.can_rx ?? draft.nativePrimaryChannel
                 : draft.channel,
     });
@@ -449,6 +451,53 @@ export function AnalyzerSettingsDialog({
                 >
                   <option value="right-high">Channel 2 (right - I2S typical)</option>
                   <option value="left-high">Channel 1 (left - inverted)</option>
+                </select>
+              </AnalyzerSettingRow>
+            </>
+          )}
+
+          {draft.type === "LIN" && (
+            <>
+              <AnalyzerSettingRow label="Serial" required>
+                <ChannelSelect
+                  {...channelSelectProps}
+                  autoFocus
+                  onChange={(channel) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativePrimaryChannel: channel ?? 0,
+                      nativeChannels: { ...current.nativeChannels, rx: channel ?? 0 },
+                    }))
+                  }
+                  value={draft.nativeChannels.rx ?? 0}
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Bit Rate (Bits/s)" required>
+                <input
+                  min={1}
+                  step={1}
+                  type="number"
+                  value={Number(draft.nativeOptions.baudrate)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, baudrate: Number(event.target.value) },
+                    }))
+                  }
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="LIN Version" required>
+                <select
+                  value={Number(draft.nativeOptions.version)}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: { ...current.nativeOptions, version: Number(event.target.value) },
+                    }))
+                  }
+                >
+                  <option value={1}>Version 1.x</option>
+                  <option value={2}>Version 2.x</option>
                 </select>
               </AnalyzerSettingRow>
             </>
@@ -844,6 +893,13 @@ function validateAnalyzer(analyzer: UiAnalyzerInstance) {
     if (!Number.isInteger(wordSize) || wordSize < 2 || wordSize > maximumWordSize) {
       return `Audio bit depth must be between 2 and ${maximumWordSize} bits.`;
     }
+  }
+  if (analyzer.type === "LIN") {
+    if (typeof analyzer.nativeChannels.rx !== "number") return "Select a LIN serial channel.";
+    const bitRate = Number(analyzer.nativeOptions.baudrate);
+    if (!Number.isInteger(bitRate) || bitRate <= 0) return "Bit rate must be greater than zero.";
+    const version = Number(analyzer.nativeOptions.version);
+    if (version !== 1 && version !== 2) return "Select LIN Version 1.x or 2.x.";
   }
   if (analyzer.type === "CAN" || analyzer.type === "CAN-FD") {
     if (typeof analyzer.nativeChannels.can_rx !== "number") return "Select a CAN input channel.";

@@ -1,0 +1,36 @@
+{
+  "format": "pxlogic.native-lin-fixture.v1",
+  "description": "Backend-neutral LIN frame fixture for Saleae Native and Sigrok Native.",
+  "cases": [
+    {
+      "id": "lin-v2-id12-a5-5a",
+      "sample_rate_hz": 1000000,
+      "sample_count": 860,
+      "channel_count": 1,
+      "initial_levels": [1],
+      "edges": [
+        {
+          "channel": 0,
+          "samples": [
+            100, 240, 260, 270, 280, 290, 300, 310, 320, 330, 340,
+            350, 360, 380, 390, 410, 420, 440, 460, 470, 480, 490,
+            500, 520, 530, 540, 560, 580, 590, 600, 620, 630, 640,
+            650, 660, 670, 680, 690, 710, 720, 740, 750
+          ]
+        }
+      ],
+      "decoder": {
+        "protocol": "lin",
+        "channels": { "rx": 0 },
+        "options": {
+          "baudrate": 100000,
+          "version": 2
+        }
+      },
+      "expected_roles": {
+        "LIN": [0, 85, 18, 165, 90, 109]
+      },
+      "expected_texts_any": ["Break", "Sync", "0x12", "0xA5", "0x5A", "0x6D"]
+    }
+  ]
+}
