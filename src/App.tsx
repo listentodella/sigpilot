@@ -110,6 +110,10 @@ import {
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
 import {
+  isChannelDeleteDataVisible,
+  resolveChannelTrimAnchorSample,
+} from "./lib/channelContextMenu";
+import {
   ANALYZER_CATALOG_GROUPS,
   analyzerChannelIndexes,
   analyzerChannelRoleLabel,
@@ -2553,7 +2557,11 @@ export default function App() {
     const total = activeSession.summary.metadata.sample_count;
     if (total <= 1) return;
 
-    const clickedSample = Math.max(0, Math.min(total, Math.round(menu.sample ?? activeSession.viewportStart)));
+    const clickedSample = resolveChannelTrimAnchorSample(
+      menu.sample,
+      activeSession.viewportStart,
+      total,
+    );
     const trimStart =
       mode === "before"
         ? Math.min(total - 1, clickedSample)
@@ -3395,7 +3403,6 @@ export default function App() {
                         hasCapture={Boolean(activeSession.summary)}
                         hasHiddenChannels={contextMenuChannelRows.some((row) => row.isSelectable && row.isHidden)}
                         interactiveMeasurementVisible={activeSession.showInteractiveMeasurement}
-                        isChannelLabel={channelContextMenu.source === "label"}
                         onClose={() => setChannelContextMenu(null)}
                         onDeleteDataAfter={() => void deleteDataFromContext("after")}
                         onDeleteDataBefore={() => void deleteDataFromContext("before")}
@@ -3887,7 +3894,6 @@ function ChannelContextMenu({
   hasCapture,
   hasHiddenChannels,
   interactiveMeasurementVisible,
-  isChannelLabel,
   onClose,
   onDeleteDataAfter,
   onDeleteDataBefore,
@@ -3916,7 +3922,6 @@ function ChannelContextMenu({
   hasCapture: boolean;
   hasHiddenChannels: boolean;
   interactiveMeasurementVisible: boolean;
-  isChannelLabel: boolean;
   onClose: () => void;
   onDeleteDataAfter: () => void;
   onDeleteDataBefore: () => void;
@@ -3985,22 +3990,16 @@ function ChannelContextMenu({
         tooltip="Display a measurement as the mouse moves over the waveform."
       />
       <ChannelMenuSeparator />
-      <ChannelMenuSubmenu
-        disabled={!hasCapture || isChannelLabel}
-        label="Delete Data"
-        tooltip={
-          isChannelLabel
-            ? "Logic exposes Delete Data from the graph area context menu."
-            : hasCapture
-              ? undefined
-              : "Load or capture data before deleting samples."
-        }
-      >
-        <ChannelMenuSelectionItem label="Before This Point" onClick={() => run(onDeleteDataBefore)} />
-        <ChannelMenuSelectionItem label="After This Point" onClick={() => run(onDeleteDataAfter)} />
-        <ChannelMenuSelectionItem label="Off Screen" onClick={() => run(onDeleteDataOffscreen)} />
-      </ChannelMenuSubmenu>
-      <ChannelMenuSeparator />
+      {isChannelDeleteDataVisible(hasCapture) && (
+        <>
+          <ChannelMenuSubmenu label="Delete Data">
+            <ChannelMenuSelectionItem label="Before This Point" onClick={() => run(onDeleteDataBefore)} />
+            <ChannelMenuSelectionItem label="After This Point" onClick={() => run(onDeleteDataAfter)} />
+            <ChannelMenuSelectionItem label="Off Screen" onClick={() => run(onDeleteDataOffscreen)} />
+          </ChannelMenuSubmenu>
+          <ChannelMenuSeparator />
+        </>
+      )}
       <ChannelMenuSelectionItem label="Hide Channel" onClick={() => run(onHideChannel)} />
       <ChannelMenuSubmenu label="Show/Hide Channels">
         <ChannelMenuItem
