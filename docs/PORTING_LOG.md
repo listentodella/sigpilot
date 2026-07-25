@@ -192,3 +192,5 @@ chore: 说明内容
   - 搬运原版 300ms 延迟、row crop、全局 destination 和文件命名规则；macOS Tauri 使用 WKWebView 原生 snapshot 完成通道/整窗 PNG、JPEG 与剪贴板输出。
 - `docs/ported-features/2026-07-25-saleae-sigrok-native-lin.md`
   - 直接接入 Logic 2.4.43 原版 LIN 插件与 PXView `uart_c -> lin_c` decoder stack；补齐 packed/sparse、`.sal` 恢复/导出和 490 亿 sample 索引，Rust 不包含 LIN 协议状态机。
+- `docs/ported-features/2026-07-25-channel-context-menu-preferences.md`
+  - 将右键 Settings 从 Device Settings 占位替换为应用级 Preferences；接通波形颜色、捕获结束触发点定位和保存重命名，并按原版 active rows 修正 Show/Hide Channels。

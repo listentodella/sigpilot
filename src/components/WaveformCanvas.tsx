@@ -17,6 +17,7 @@ interface WaveformCanvasProps {
   rowTopInsets?: number[];
   tile: WaveformTile | null;
   onWidthChange: (width: number) => void;
+  matchChannelColors?: boolean;
   sampleRateHz: number;
   timeOriginSample?: number;
   showInteractiveMeasurement?: boolean;
@@ -73,6 +74,7 @@ export function WaveformCanvas({
   rowTopInsets = [],
   tile,
   onWidthChange,
+  matchChannelColors = true,
   sampleRateHz,
   timeOriginSample = 0,
   showInteractiveMeasurement = true,
@@ -97,6 +99,7 @@ export function WaveformCanvas({
   const onWidthChangeRef = useRef(onWidthChange);
   const hoverRef = useRef<HoverMeasurement | null>(null);
   const showInteractiveMeasurementRef = useRef(showInteractiveMeasurement);
+  const matchChannelColorsRef = useRef(matchChannelColors);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
   const viewportFrameRef = useRef<number | null>(null);
@@ -133,6 +136,7 @@ export function WaveformCanvas({
       rowHeightsRef.current !== rowHeights ||
       rowTopInsetsRef.current !== rowTopInsets;
     const interactionChanged = showInteractiveMeasurementRef.current !== showInteractiveMeasurement;
+    const colorsChanged = matchChannelColorsRef.current !== matchChannelColors;
 
     tileRef.current = tile;
     viewportPropsRef.current = { start: viewportStart, samples: viewportSamples };
@@ -142,14 +146,15 @@ export function WaveformCanvas({
     sampleRateRef.current = sampleRateHz;
     timeOriginSampleRef.current = timeOriginSample;
     showInteractiveMeasurementRef.current = showInteractiveMeasurement;
+    matchChannelColorsRef.current = matchChannelColors;
     totalSamplesRef.current = totalSamples;
     rowHeightsRef.current = rowHeights;
     rowTopInsetsRef.current = rowTopInsets;
     if (!showInteractiveMeasurement) hoverRef.current = null;
-    if (tileChanged || viewportChanged || graphLayoutChanged || interactionChanged) {
+    if (tileChanged || viewportChanged || graphLayoutChanged || interactionChanged || colorsChanged) {
       scheduleDraw();
     }
-  }, [rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
+  }, [matchChannelColors, rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
@@ -181,6 +186,7 @@ export function WaveformCanvas({
       timeOriginSampleRef.current,
       rowHeightsRef.current,
       rowTopInsetsRef.current,
+      matchChannelColorsRef.current,
     );
   }
 
@@ -462,6 +468,7 @@ export function WaveformCanvas({
     <div
       ref={hostRef}
       className="waveformCanvasHost"
+      data-match-channel-colors={matchChannelColors}
       onContextMenu={handleContextMenu}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -588,6 +595,7 @@ function draw(
   timeOriginSample: number,
   rowHeights: number[],
   rowTopInsets: number[],
+  matchChannelColors: boolean,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -633,9 +641,10 @@ function draw(
     ctx.lineTo(width, Math.floor(layout.outerTop) + 0.5);
     ctx.stroke();
 
+    const channelColor = matchChannelColors ? saleaeLegacyChannelColor(channel.channel) : "#ffffff";
     if (channel.segments.length > 0) {
       drawDigitalSegments(ctx, {
-        color: saleaeLegacyChannelColor(channel.channel),
+        color: channelColor,
         highY,
         lowY,
         left,
@@ -647,7 +656,7 @@ function draw(
       });
     } else {
       drawDigitalChannel(ctx, {
-        color: saleaeLegacyChannelColor(channel.channel),
+        color: channelColor,
         highY,
         lowY,
         left,

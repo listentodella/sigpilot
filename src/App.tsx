@@ -68,6 +68,7 @@ import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
+import { PreferencesDialog } from "./components/PreferencesDialog";
 import { SaleaeIcon } from "./components/SaleaeIcon";
 import { AnalyzerLibraryMenu } from "./components/AnalyzerLibraryMenu";
 import { StripChartScrollbar } from "./components/StripChartScrollbar";
@@ -165,6 +166,11 @@ import {
   ScreenshotDestination,
   takeScreenshot,
 } from "./lib/screenshots";
+import {
+  captureNameFromSavedPath,
+  loadUiPreferences,
+  persistUiPreferences,
+} from "./lib/preferences";
 import {
   copyRangeMeasurementValues,
   DEFAULT_DIGITAL_RANGE_MEASUREMENTS,
@@ -789,6 +795,18 @@ function initialCaptureViewport(summary: CaptureSummary) {
   return { viewportSamples, viewportStart };
 }
 
+function preserveCaptureViewport(session: UiSession, summary: CaptureSummary) {
+  const totalSamples = Math.max(1, summary.metadata.sample_count);
+  const viewportSamples = Math.max(
+    1,
+    Math.min(totalSamples, session.viewportSamples || Math.min(totalSamples, 100_000)),
+  );
+  return {
+    viewportSamples,
+    viewportStart: Math.max(0, Math.min(totalSamples - viewportSamples, session.viewportStart)),
+  };
+}
+
 function applyCaptureTrigger(session: UiSession, trigger: CaptureTriggerMetadata): UiSession {
   return {
     ...session,
@@ -1117,6 +1135,8 @@ export default function App() {
   const [channelReorderActive, setChannelReorderActive] = useState(false);
   const [channelContextMenu, setChannelContextMenu] = useState<ChannelContextMenuState | null>(null);
   const [screenshotSettings, setScreenshotSettings] = useState(loadScreenshotSettings);
+  const [preferences, setPreferences] = useState(loadUiPreferences);
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [analyzerInEdit, setAnalyzerInEdit] = useState<AnalyzerEditState | null>(null);
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [graphRequestEpoch, setGraphRequestEpoch] = useState(0);
@@ -1150,6 +1170,8 @@ export default function App() {
   const sessionCounter = useRef(1);
   const preparingDeviceIdsRef = useRef(new Set<string>());
   const screenshotInProgressRef = useRef(false);
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -1162,6 +1184,10 @@ export default function App() {
   useEffect(() => {
     persistScreenshotSettings(screenshotSettings);
   }, [screenshotSettings]);
+
+  useEffect(() => {
+    persistUiPreferences(preferences);
+  }, [preferences]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -1374,7 +1400,9 @@ export default function App() {
         if (!targetId) return;
         updateSession(targetId, (session) => {
           const syncedSession = syncSessionWithEffectiveCaptureMetadata(session, event.payload);
-          const initialViewport = initialCaptureViewport(event.payload);
+          const initialViewport = preferencesRef.current.panToTrigger
+            ? initialCaptureViewport(event.payload)
+            : preserveCaptureViewport(session, event.payload);
           return {
             ...syncedSession,
             rangePlacement: null,
@@ -1459,12 +1487,14 @@ export default function App() {
       if (!activeSession) return [];
       const count = Math.max(32, captureChannelLimit(activeSession), activeSession.channelLabels.length);
       const labels = channelLabelsForCount(count, activeSession.channelLabels);
-      return Array.from({ length: count }, (_, index) => ({
-        index,
-        isHidden: activeSession.hiddenDigitalChannels[index] ?? false,
-        isSelectable: isDigitalChannelEnabled(activeSession, index),
-        label: labels[index] ?? `D${index}`,
-      }));
+      return channelOrderForCount(count, activeSession.channelOrder)
+        .filter((index) => isDigitalChannelEnabled(activeSession, index))
+        .map((index) => ({
+          index,
+          isHidden: activeSession.hiddenDigitalChannels[index] ?? false,
+          isSelectable: true,
+          label: labels[index] ?? `D${index}`,
+        }));
     },
     [activeSession],
   );
@@ -2185,7 +2215,12 @@ export default function App() {
       });
       if (!path) return;
       await saveCapture(activeSession.id, path);
-      updateSession(activeSession.id, (session) => ({ ...session, message: "Capture saved" }));
+      const savedName = preferences.renameTabToSavedCapture ? captureNameFromSavedPath(path) : null;
+      updateSession(activeSession.id, (session) => ({
+        ...session,
+        name: savedName || session.name,
+        message: "Capture saved",
+      }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
     }
@@ -3368,7 +3403,7 @@ export default function App() {
                         onFitAllRows={fitAllRowsToWindowHeight}
                         onHideChannel={() => hideChannelRow(channelContextMenu.channelIndex)}
                         onMatchAllHeights={() => matchAllDigitalChannelHeights(channelContextMenu.channelIndex)}
-                        onOpenSettings={() => openSidebarPanel("devices")}
+                        onOpenSettings={() => setPreferencesOpen(true)}
                         onResetChannelNames={resetChannelNames}
                         onScreenshotChannel={() => takeContextScreenshot("channel")}
                         onScreenshotWindow={() => takeContextScreenshot("window")}
@@ -3388,6 +3423,7 @@ export default function App() {
                         rowHeights={visibleOuterRowHeights}
                         rowTopInsets={visibleAnalyzerInsets}
                         tile={visibleTile}
+                        matchChannelColors={preferences.matchChannelColors}
                         onWidthChange={(width) =>
                           updateSession(activeSession.id, (session) => ({ ...session, canvasWidth: width }))
                         }
@@ -3564,6 +3600,14 @@ export default function App() {
             }
             onCancel={() => setAnalyzerInEdit(null)}
             onSave={saveAnalyzerSettings}
+          />
+        )}
+
+        {preferencesOpen && (
+          <PreferencesDialog
+            onChange={setPreferences}
+            onClose={() => setPreferencesOpen(false)}
+            preferences={preferences}
           />
         )}
 
@@ -3906,6 +3950,9 @@ function ChannelContextMenu({
     if (close) onClose();
   }
 
+  const screenshotDestinationLabel =
+    screenshotDestination === "File" ? "Save to File" : "Copy to Clipboard";
+
   return (
     <div
       className={`channelContextMenu saleaeContextMenu ${opensLeft ? "submenuLeft" : ""}`}
@@ -3991,14 +4038,14 @@ function ChannelContextMenu({
         label="Screenshot Window"
         onClick={() => run(onScreenshotWindow)}
       />
-      <ChannelMenuSubmenu label={`Screenshot Destination [${screenshotDestination}]`}>
+      <ChannelMenuSubmenu label={`Screenshot Destination [${screenshotDestinationLabel}]`}>
         <ChannelMenuSelectionItem
-          label="File"
+          label="Save to File"
           onClick={() => run(() => onSetScreenshotDestination("File"), false)}
           selected={screenshotDestination === "File"}
         />
         <ChannelMenuSelectionItem
-          label="Clipboard"
+          label="Copy to Clipboard"
           onClick={() => run(() => onSetScreenshotDestination("Clipboard"), false)}
           selected={screenshotDestination === "Clipboard"}
         />

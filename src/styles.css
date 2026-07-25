@@ -1392,6 +1392,99 @@ button:disabled {
   left: auto;
 }
 
+.preferencesBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.preferencesDialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: min(599px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  color: var(--on-background-10);
+  background: #212224;
+  box-shadow: var(--box-shadow);
+}
+
+.preferencesHeader {
+  height: 58px;
+  flex: 0 0 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(var(--white-base), 0.08);
+  padding: 0 18px 0 20px;
+}
+
+.preferencesHeader h2 {
+  margin: 0;
+  color: var(--on-background-0);
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.preferencesHeader button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--on-background-20);
+  background: transparent;
+  cursor: pointer;
+}
+
+.preferencesHeader button:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.preferencesContent {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 36px 20px 42px;
+  scrollbar-color: var(--grey100) transparent;
+  scrollbar-width: thin;
+}
+
+.preferencesSection + .preferencesSection {
+  margin-top: 36px;
+}
+
+.preferencesSection h3 {
+  margin: 0 0 12px;
+  color: var(--on-background-0);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.preferencesCheckbox {
+  width: fit-content;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--on-background-10);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.preferencesCheckbox input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--selected-highlight);
+}
+
 .graphViewport {
   min-width: 0;
   min-height: 0;
