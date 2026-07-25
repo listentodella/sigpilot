@@ -194,3 +194,5 @@ chore: 说明内容
   - 直接接入 Logic 2.4.43 原版 LIN 插件与 PXView `uart_c -> lin_c` decoder stack；补齐 packed/sparse、`.sal` 恢复/导出和 490 亿 sample 索引，Rust 不包含 LIN 协议状态机。
 - `docs/ported-features/2026-07-25-channel-context-menu-preferences.md`
   - 将右键 Settings 从 Device Settings 占位替换为应用级 Preferences；接通波形颜色、捕获结束触发点定位和保存重命名，并按原版 active rows 修正 Show/Hide Channels。
+- `docs/ported-features/2026-07-25-external-decoder-only-catalog.md`
+  - Analyzer 新建与后端选择只展示 Saleae Native / Sigrok Native；Legacy Rust 退为旧 session 只读兼容入口，不再接收协议实现或出现在 catalog。

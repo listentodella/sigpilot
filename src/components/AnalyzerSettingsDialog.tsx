@@ -605,6 +605,11 @@ export function AnalyzerSettingsDialog({
                 }))
               }
             >
+              {draft.decoderBackend === "legacy_rust" && (
+                <option disabled value="legacy_rust">
+                  {decoderBackendLabel("legacy_rust")}
+                </option>
+              )}
               {analyzerBackendOptions(draft.type).map((backend) => (
                 <option key={backend} value={backend}>
                   {decoderBackendLabel(backend)}

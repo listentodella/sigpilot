@@ -524,18 +524,18 @@ export function decoderBackendLabel(backend: DecoderBackendKind) {
   if (backend === "saleae_native") return "Saleae Native";
   if (backend === "sigrok_native") return "Sigrok Native";
   if (backend === "auto") return "Automatic";
-  return "Compatibility";
+  return "Legacy Rust (compatibility only)";
 }
 
 export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
   if (type === "SPI" || type === "Async Serial" || type === "I2C") {
-    return ["saleae_native", "sigrok_native", "legacy_rust"];
+    return ["saleae_native", "sigrok_native"];
   }
   if (type === "I2S" || type === "LIN" || type === "CAN") {
     return ["saleae_native", "sigrok_native"];
   }
   if (type === "CAN-FD") return ["sigrok_native"];
-  return ["legacy_rust"];
+  return [];
 }
 
 export interface AnalyzerCatalogGroup {
@@ -554,10 +554,5 @@ export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
     backend: "sigrok_native",
     label: "Sigrok Native (PXView)",
     analyzers: ["Async Serial", "I2C", "SPI", "I2S", "LIN", "CAN", "CAN-FD"],
-  },
-  {
-    backend: "legacy_rust",
-    label: "Compatibility",
-    analyzers: ["Async Serial", "I2C", "SPI", "Manchester"],
   },
 ];
