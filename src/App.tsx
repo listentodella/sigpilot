@@ -71,6 +71,7 @@ import { LogicToolbar } from "./components/LogicToolbar";
 import { PreferencesDialog } from "./components/PreferencesDialog";
 import { SaleaeIcon } from "./components/SaleaeIcon";
 import { AnalyzerLibraryMenu } from "./components/AnalyzerLibraryMenu";
+import type { AnalyzerLibraryChoice } from "./components/AnalyzerLibraryMenu";
 import { StripChartScrollbar } from "./components/StripChartScrollbar";
 import { TimingDisplayCanvas } from "./components/TimingDisplayCanvas";
 import {
@@ -87,6 +88,8 @@ import {
   CaptureTriggerMetadata,
   configurePwm,
   decodeAnalyzerFrames,
+  DecodedChannelValue,
+  DecodedFrame,
   DecoderBackendKind,
   deviceCapabilities,
   DeviceInfo,
@@ -104,8 +107,12 @@ import {
   releaseGraphSession,
   renderGraphFrame,
   saveCapture,
+  SigrokDecoderCatalog,
+  sigrokDecoderCatalog,
+  SigrokDecoderCatalogItem,
   startCapture,
   trimCapture,
+  writeTextFile,
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
@@ -117,6 +124,9 @@ import {
 } from "./lib/channelContextMenu";
 import {
   ANALYZER_CATALOG_GROUPS,
+  AnalyzerDisplayRadix,
+  analyzerCanRunDecoder,
+  analyzerCatalogChoiceKey,
   analyzerChannelIndexes,
   analyzerChannelRoleLabel,
   analyzerChannelRoles,
@@ -124,12 +134,18 @@ import {
   analyzerDecodeSettings,
   analyzerDecodeSignature as getAnalyzerDecodeSignature,
   decoderBackendLabel,
+  DISPLAY_RADIX_OPTIONS,
+  formatAnalyzerText,
   analyzerStripInsetForChannel,
+  createAnalyzerInstanceFromSigrokCatalog,
   mergeAnalyzerTrackFrames,
-  analyzerSupportsDecoding,
+  normalizeAnalyzerDisplayRadix,
+  SALEAE_ANALYZER_COLORS,
   createAnalyzerInstance,
   restoreSaleaeAnalyzer,
   saleaeAnalyzerMetadata,
+  sigrokCatalogDetailName,
+  sigrokCatalogDisplayName,
   UiAnalyzerInstance,
 } from "./lib/analyzers";
 import {
@@ -258,12 +274,6 @@ interface AnalyzerEditState {
   analyzer: UiAnalyzerInstance;
   isNew: boolean;
   sessionId: string;
-}
-
-interface AnalyzerChoice {
-  backend: DecoderBackendKind;
-  name: string;
-  source: string;
 }
 
 type UiRecordingMode = "FreeRun" | "Timer" | "Trigger";
@@ -400,6 +410,28 @@ function clampSidebarPanelWidth(width: number) {
           window.innerWidth - SIDEBAR_TABS_CHANGER_WIDTH - GRAPH_ROW_LABEL_MAX_WIDTH - GRAPH_MIN_WIDTH,
         );
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(maxWidth, Math.round(width)));
+}
+
+function clampFixedPopoverRect(
+  anchorRect: DOMRect,
+  width: number,
+  height: number,
+  options: { align?: "start" | "end"; gap?: number } = {},
+) {
+  const align = options.align ?? "end";
+  const gap = options.gap ?? 6;
+  const viewportWidth = typeof window === "undefined" ? width + 16 : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? height + 16 : window.innerHeight;
+  const preferredLeft = align === "start" ? anchorRect.left : anchorRect.right - width;
+  const preferredTop = anchorRect.bottom + gap;
+  const top =
+    preferredTop + height > viewportHeight - 8
+      ? Math.max(8, anchorRect.top - height - gap)
+      : Math.max(8, preferredTop);
+  return {
+    left: Math.max(8, Math.min(preferredLeft, viewportWidth - width - 8)),
+    top,
+  };
 }
 
 const panelMeta: Record<
@@ -1149,6 +1181,7 @@ export default function App() {
   const [draftSelectedDevice, setDraftSelectedDevice] = useState(DEFAULT_DEVICE_ID);
   const [sessions, setSessions] = useState<UiSession[]>([]);
   const [extensions, setExtensions] = useState<UiExtensionRecord[]>(loadUiExtensions);
+  const [sigrokCatalog, setSigrokCatalog] = useState<SigrokDecoderCatalog | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedPanel, setSelectedPanel] = useState<SidebarPanel | undefined>(undefined);
   const [sidebarPanelWidth, setSidebarPanelWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
@@ -1290,6 +1323,39 @@ export default function App() {
     (deviceId: string) => deviceCapabilitiesById[deviceId] ?? null,
     [deviceCapabilitiesById],
   );
+  const availableAnalyzers = useMemo<AnalyzerLibraryChoice[]>(() => {
+    const choices: AnalyzerLibraryChoice[] = [
+      ...ANALYZER_CATALOG_GROUPS.flatMap((group) =>
+        group.analyzers.map((name) => ({ name, backend: group.backend, source: group.label })),
+      ),
+      ...(sigrokCatalog?.decoders ?? [])
+        .filter((item) => item.id || item.name || item.longname)
+        .map((item) => ({
+          backend: "sigrok_native" as const,
+          catalogItem: item,
+          description: [sigrokCatalogDetailName(item), item.desc?.trim()]
+            .filter((part, index, parts) => part && parts.indexOf(part) === index)
+            .join(" - ") || null,
+          name: sigrokCatalogDisplayName(item),
+          runnerStatus: item.runner_status,
+          source: item.kind === "python" ? "Sigrok Python Decoders" : "Sigrok C Decoders",
+        })),
+      ...extensions
+        .filter((extension) => extension.installed && extension.enabled)
+        .flatMap((extension) =>
+          Object.entries(extension.manifest.extensions)
+            .filter(([, feature]) => feature.type === "HighLevelAnalyzer")
+            .map(([name]) => ({ name, backend: "legacy_rust" as const, source: "Extension" })),
+        ),
+    ];
+    const seen = new Set<string>();
+    return choices.filter((choice) => {
+      const key = analyzerCatalogChoiceKey(choice);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [extensions, sigrokCatalog]);
 
   const updateSession = useCallback((sessionId: string, updater: (session: UiSession) => UiSession) => {
     setSessions((current) => current.map((session) => (session.id === sessionId ? updater(session) : session)));
@@ -1347,6 +1413,30 @@ export default function App() {
   useEffect(() => {
     refreshDevices();
   }, [refreshDevices]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void sigrokDecoderCatalog()
+      .then((catalog) => {
+        if (cancelled) return;
+        setSigrokCatalog(catalog);
+        const total = catalog.decoders.length;
+        setStartupMessage(
+          (current) =>
+            current === "Ready"
+              ? total > 0
+                ? `Loaded ${total} Sigrok decoder${total === 1 ? "" : "s"}`
+                : "Sigrok decoder catalog is empty"
+              : current,
+        );
+      })
+      .catch((error) => {
+        if (!cancelled) setStartupMessage(`Sigrok catalog: ${String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1511,7 +1601,7 @@ export default function App() {
   const visibleChannelSignature = visibleChannelIndexes.join(",");
   const graphAnalyzerDecodeSignature =
     activeSession?.analyzers
-      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}`)
+      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}:${analyzer.displayRadix}`)
       .join("|") ?? "";
   const visibleChannelLabels = useMemo(
     () => visibleChannelIndexes.map((channelIndex) => channelLabels[channelIndex] ?? `D${channelIndex}`),
@@ -1559,7 +1649,7 @@ export default function App() {
             analyzerStripInsetForChannel(activeSession.analyzers, channelIndex),
           )
         : [],
-    [graphAnalyzerDecodeSignature, visibleChannelSignature],
+    [activeSession?.analyzers, graphAnalyzerDecodeSignature, visibleChannelSignature],
   );
   const visibleOuterRowHeights = useMemo(
     () => visibleChannelHeights.map((height, index) => height + (visibleAnalyzerInsets[index] ?? 0)),
@@ -1766,7 +1856,7 @@ export default function App() {
     const sessionSnapshot = activeSession;
     const analyzerRequests = sessionSnapshot.analyzers.flatMap((analyzer) => {
       const settings = analyzerDecodeSettings(analyzer);
-      if (!settings || !analyzerSupportsDecoding(analyzer)) return [];
+      if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
       return [
         {
           analyzer_id: analyzer.id,
@@ -2010,6 +2100,7 @@ export default function App() {
     }));
     try {
       const demoAnalyzers = session.analyzers
+        .filter(analyzerCanRunDecoder)
         .map(analyzerDecodeSettings)
         .filter((settings): settings is NonNullable<typeof settings> => settings !== null);
       const next = await startCapture(
@@ -2071,7 +2162,7 @@ export default function App() {
   async function handleDecodeAnalyzer(sessionId: string, analyzerId: string, silent = false) {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
     const analyzer = session?.analyzers.find((item) => item.id === analyzerId);
-    if (!session?.summary || !analyzer || !analyzerSupportsDecoding(analyzer)) return;
+    if (!session?.summary || !analyzer || !analyzerCanRunDecoder(analyzer)) return;
     const settings = analyzerDecodeSettings(analyzer);
     if (!settings) return;
     const requestKey = `${sessionId}:${analyzerId}`;
@@ -2132,7 +2223,7 @@ export default function App() {
     ) return;
     const timeout = window.setTimeout(() => {
       activeSession.analyzers.forEach((analyzer) => {
-        if (analyzerSupportsDecoding(analyzer)) {
+        if (analyzerCanRunDecoder(analyzer)) {
           void handleDecodeAnalyzer(activeSession.id, analyzer.id, true);
         }
       });
@@ -2792,16 +2883,15 @@ export default function App() {
     name: string,
     channelIndex?: number,
     decoderBackend: DecoderBackendKind = "sigrok_native",
+    catalogItem?: SigrokDecoderCatalogItem | null,
   ) {
     if (!activeSession) return;
     const firstEnabledChannel = activeSession.deviceSettings.digitalChannels.findIndex(Boolean);
+    const startChannel = channelIndex ?? Math.max(0, firstEnabledChannel);
     setAnalyzerInEdit({
-      analyzer: createAnalyzerInstance(
-        name,
-        activeSession.analyzers,
-        channelIndex ?? Math.max(0, firstEnabledChannel),
-        decoderBackend,
-      ),
+      analyzer: catalogItem
+        ? createAnalyzerInstanceFromSigrokCatalog(catalogItem, activeSession.analyzers, startChannel)
+        : createAnalyzerInstance(name, activeSession.analyzers, startChannel, decoderBackend),
       isNew: true,
       sessionId: activeSession.id,
     });
@@ -2821,12 +2911,14 @@ export default function App() {
       const digitalChannels = [...session.deviceSettings.digitalChannels];
       const hiddenDigitalChannels = makeHiddenDigitalChannels(session.hiddenDigitalChannels);
       const analyzerChannels = analyzerChannelIndexes(analyzer);
-      const highestAnalyzerChannel = Math.max(0, ...analyzerChannels);
-      while (digitalChannels.length <= highestAnalyzerChannel) digitalChannels.push(false);
-      analyzerChannels.forEach((channel) => {
-        digitalChannels[channel] = true;
-        hiddenDigitalChannels[channel] = false;
-      });
+      const highestAnalyzerChannel = analyzerChannels.length > 0 ? Math.max(...analyzerChannels) : -1;
+      if (highestAnalyzerChannel >= 0) {
+        while (digitalChannels.length <= highestAnalyzerChannel) digitalChannels.push(false);
+        analyzerChannels.forEach((channel) => {
+          digitalChannels[channel] = true;
+          hiddenDigitalChannels[channel] = false;
+        });
+      }
       const channelCount = Math.max(session.settings.channel_count, highestAnalyzerChannel + 1);
       const enabledChannels = enabledChannelIndexes(digitalChannels, channelCount);
       const nextAnalyzers = editor.isNew
@@ -2939,7 +3031,24 @@ export default function App() {
     }
 
     if (command === AnalyzerCommands.AddAnalyzer) {
-      handleAddAnalyzer(payload?.analyzerName ?? "Async Serial", payload?.analyzerBackend ?? "sigrok_native");
+      const catalogItem = payload?.analyzerCatalogId
+        ? sigrokCatalog?.decoders.find((item) => item.id === payload.analyzerCatalogId)
+        : undefined;
+      handleAddAnalyzer(
+        catalogItem
+          ? {
+              backend: "sigrok_native",
+              catalogItem,
+              description: [sigrokCatalogDetailName(catalogItem), catalogItem.desc?.trim()]
+                .filter((part, index, parts) => part && parts.indexOf(part) === index)
+                .join(" - ") || null,
+              name: sigrokCatalogDisplayName(catalogItem),
+              runnerStatus: catalogItem.runner_status,
+              source: catalogItem.kind === "python" ? "Sigrok Python Decoders" : "Sigrok C Decoders",
+            }
+          : payload?.analyzerName ?? "Async Serial",
+        payload?.analyzerBackend ?? "sigrok_native",
+      );
       return;
     }
 
@@ -2958,8 +3067,15 @@ export default function App() {
     }
   }
 
-  function handleAddAnalyzer(name: string, backend: DecoderBackendKind = "sigrok_native") {
-    beginAddAnalyzer(name, undefined, backend);
+  function handleAddAnalyzer(
+    choiceOrName: AnalyzerLibraryChoice | string,
+    backend: DecoderBackendKind = "sigrok_native",
+  ) {
+    if (typeof choiceOrName === "string") {
+      beginAddAnalyzer(choiceOrName, undefined, backend);
+      return;
+    }
+    beginAddAnalyzer(choiceOrName.name, undefined, choiceOrName.backend, choiceOrName.catalogItem);
   }
 
   function handleAddRangeMeasurement() {
@@ -3401,6 +3517,7 @@ export default function App() {
                   viewportStart={activeSession?.summary ? activeSession.viewportStart : 0}
                 />
                 <LogicToolbar
+                  availableAnalyzers={availableAnalyzers}
                   busy={Boolean(activeSession?.busy)}
                   hasCapture={Boolean(activeSession?.summary)}
                   onCommand={invokeCommand}
@@ -3673,6 +3790,7 @@ export default function App() {
           </section>
 
           <RightSidebar
+            availableAnalyzers={availableAnalyzers}
             devices={devices}
             extensions={extensions}
             onChangeExtensions={(updater) => setExtensions((current) => updater(current))}
@@ -5795,6 +5913,7 @@ function DeviceMenuRows({
 }
 
 function RightSidebar({
+  availableAnalyzers,
   devices,
   extensions,
   onChangeExtensions,
@@ -5820,10 +5939,11 @@ function RightSidebar({
   sidebarPanelWidth,
   session,
 }: {
+  availableAnalyzers: AnalyzerLibraryChoice[];
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
-  onAddAnalyzer: (name: string, backend?: DecoderBackendKind) => void;
+  onAddAnalyzer: (choiceOrName: AnalyzerLibraryChoice | string, backend?: DecoderBackendKind) => void;
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
   onAddSingleMarker: () => void;
@@ -5915,6 +6035,7 @@ function RightSidebar({
             role="separator"
           />
           <SidebarPanelContent
+            availableAnalyzers={availableAnalyzers}
             devices={devices}
             extensions={extensions}
             onChangeExtensions={onChangeExtensions}
@@ -5974,6 +6095,7 @@ function RightSidebar({
 }
 
 function SidebarPanelContent({
+  availableAnalyzers,
   devices,
   extensions,
   onChangeExtensions,
@@ -5997,10 +6119,11 @@ function SidebarPanelContent({
   selectedDevice,
   session,
 }: {
+  availableAnalyzers: AnalyzerLibraryChoice[];
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
-  onAddAnalyzer: (name: string, backend?: DecoderBackendKind) => void;
+  onAddAnalyzer: (choiceOrName: AnalyzerLibraryChoice | string, backend?: DecoderBackendKind) => void;
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
   onAddSingleMarker: () => void;
@@ -6053,23 +6176,7 @@ function SidebarPanelContent({
       )}
       {panel === "analyzers" && session && (
         <AnalyzersPanel
-          availableAnalyzers={[
-            ...ANALYZER_CATALOG_GROUPS.flatMap((group) =>
-              group.analyzers.map((name) => ({ name, backend: group.backend, source: group.label })),
-            ),
-            ...extensions
-              .filter((extension) => extension.installed && extension.enabled)
-              .flatMap((extension) =>
-                Object.entries(extension.manifest.extensions)
-                  .filter(([, feature]) => feature.type === "HighLevelAnalyzer")
-                  .map(([name]) => ({ name, backend: "legacy_rust" as const, source: "Extension" })),
-              ),
-          ].filter(
-            (choice, index, choices) =>
-              choices.findIndex(
-                (candidate) => candidate.name === choice.name && candidate.backend === choice.backend,
-              ) === index,
-          )}
+          availableAnalyzers={availableAnalyzers}
           onAddAnalyzer={onAddAnalyzer}
           onDecodeAnalyzer={onDecodeAnalyzer}
           onEditAnalyzer={onEditAnalyzer}
@@ -6939,8 +7046,8 @@ function AnalyzersPanel({
   onUpdateSession,
   session,
 }: {
-  availableAnalyzers: AnalyzerChoice[];
-  onAddAnalyzer: (name: string, backend?: DecoderBackendKind) => void;
+  availableAnalyzers: AnalyzerLibraryChoice[];
+  onAddAnalyzer: (choiceOrName: AnalyzerLibraryChoice | string, backend?: DecoderBackendKind) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
   onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean) => void;
@@ -6948,12 +7055,28 @@ function AnalyzersPanel({
   session: UiSession;
 }) {
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [selectorAnchorRect, setSelectorAnchorRect] = useState<DOMRect | null>(null);
+  const [activeAnalyzerMenu, setActiveAnalyzerMenu] = useState<{ analyzerId: string; anchorRect: DOMRect } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const selectorButtonRef = useRef<HTMLButtonElement>(null);
   const tableBodyRef = useRef<HTMLDivElement>(null);
 
-  function addAnalyzer(choice: AnalyzerChoice) {
+  function addAnalyzer(choice: AnalyzerLibraryChoice) {
     setSelectorOpen(false);
-    onAddAnalyzer(choice.name, choice.backend);
+    setSelectorAnchorRect(null);
+    onAddAnalyzer(choice);
+  }
+
+  function toggleAnalyzerSelector() {
+    setActiveAnalyzerMenu(null);
+    if (selectorOpen) {
+      setSelectorOpen(false);
+      setSelectorAnchorRect(null);
+      return;
+    }
+    const rect = selectorButtonRef.current?.getBoundingClientRect();
+    if (rect) setSelectorAnchorRect(rect);
+    setSelectorOpen(true);
   }
 
   function removeAnalyzer(analyzerId: string) {
@@ -6975,6 +7098,37 @@ function AnalyzersPanel({
     });
   }
 
+  function reorderAnalyzer(sourceIndex: number, destinationIndex: number) {
+    if (sourceIndex === destinationIndex) return;
+    onUpdateSession((current) => {
+      if (
+        sourceIndex < 0 ||
+        sourceIndex >= current.analyzers.length ||
+        destinationIndex < 0 ||
+        destinationIndex >= current.analyzers.length
+      ) {
+        return current;
+      }
+      const analyzers = [...current.analyzers];
+      const [moved] = analyzers.splice(sourceIndex, 1);
+      analyzers.splice(destinationIndex, 0, moved);
+      return { ...current, analyzers, message: `${moved.name} moved` };
+    });
+  }
+
+  function finishAnalyzerReorder(result: DropResult) {
+    if (!result.destination) return;
+    setActiveAnalyzerMenu(null);
+    reorderAnalyzer(result.source.index, result.destination.index);
+  }
+
+  function updateAnalyzerItem(analyzerId: string, updater: (analyzer: UiAnalyzerInstance) => UiAnalyzerInstance) {
+    onUpdateSession((current) => ({
+      ...current,
+      analyzers: current.analyzers.map((analyzer) => (analyzer.id === analyzerId ? updater(analyzer) : analyzer)),
+    }));
+  }
+
   const tableFrames = useMemo(
     () =>
       session.analyzers
@@ -6994,8 +7148,8 @@ function AnalyzersPanel({
     () =>
       normalizedSearch
         ? tableFrames.filter(({ analyzer, frame }) =>
-            `${analyzer.name} ${frame.frame_type} ${frame.label} ${frame.channel_values
-              .map((value) => `${value.role} ${value.label}`)
+            `${analyzer.name} ${frame.frame_type} ${formatAnalyzerFrameLabel(analyzer, frame)} ${frame.channel_values
+              .map((value) => `${value.role} ${formatAnalyzerChannelValue(analyzer, value)}`)
               .join(" ")}`
               .toLowerCase()
               .includes(normalizedSearch),
@@ -7035,12 +7189,41 @@ function AnalyzersPanel({
     [session.analyzers],
   );
   const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
+
+  async function exportAnalyzer(analyzerId: string, format: "csv" | "txt") {
+    const analyzer = session.analyzers.find((item) => item.id === analyzerId);
+    if (!analyzer || analyzer.decodedFrames.length === 0) return;
+    try {
+      const path = await saveDialog({
+        defaultPath: `${safeExportFileName(session.name || "capture")}-${safeExportFileName(analyzer.name || analyzer.type)}.${format}`,
+        filters: [
+          {
+            name: format === "csv" ? "CSV" : "Text",
+            extensions: [format],
+          },
+        ],
+      });
+      if (!path) return;
+      await writeTextFile(path, analyzerExportText(analyzer, sampleRateHz, format));
+      onUpdateSession((current) => ({
+        ...current,
+        message: `${analyzer.name} ${format.toUpperCase()} exported`,
+      }));
+    } catch (error) {
+      onUpdateSession((current) => ({ ...current, message: String(error) }));
+    }
+  }
+
   const highlightedFrame = session.analyzers
     .map((analyzer) => ({
       analyzerId: analyzer.id,
       frameIndex: analyzer.highlightedFrameIndex,
-    }))
+      }))
     .find(({ frameIndex }) => frameIndex !== null);
+  const suggestedAnalyzers = availableAnalyzers.filter((choice) => !choice.catalogItem).slice(0, 4);
+  const openAnalyzerMenu = activeAnalyzerMenu
+    ? session.analyzers.find((analyzer) => analyzer.id === activeAnalyzerMenu.analyzerId) ?? null
+    : null;
 
   useEffect(() => {
     if (!highlightedFrame || session.analyzerDataPane !== "table") return;
@@ -7066,29 +7249,62 @@ function AnalyzersPanel({
     };
   }, [session.analyzerDataPane, syncTableVisibleRight, tableMinimumWidth]);
 
+  useEffect(() => {
+    if (!selectorOpen && !activeAnalyzerMenu) return;
+    const close = () => {
+      setSelectorOpen(false);
+      setSelectorAnchorRect(null);
+      setActiveAnalyzerMenu(null);
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("resize", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [activeAnalyzerMenu, selectorOpen]);
+
   return (
     <div className="analyzersSidebarPanel">
       <section className="analyzersSelectorSection">
         <div className="sidebarTitleRow">
           <div className="sidebarTitleText">Analyzers</div>
-          <button className={`sidebarCircleButton ${selectorOpen ? "active" : ""}`} onClick={() => setSelectorOpen((open) => !open)} type="button">
+          <button
+            aria-expanded={selectorOpen}
+            aria-haspopup="menu"
+            className={`sidebarCircleButton ${selectorOpen ? "active" : ""}`}
+            onClick={toggleAnalyzerSelector}
+            ref={selectorButtonRef}
+            type="button"
+          >
             <Plus size={13} />
           </button>
         </div>
 
-        {selectorOpen && (
-          <div className="analyzerSelectionPopover">
-            <AnalyzerLibraryMenu choices={availableAnalyzers} onSelect={addAnalyzer} />
-          </div>
+        {selectorOpen && selectorAnchorRect && (
+          <AnalyzerSelectionPopover
+            anchorRect={selectorAnchorRect}
+            choices={availableAnalyzers}
+            onClose={() => {
+              setSelectorOpen(false);
+              setSelectorAnchorRect(null);
+            }}
+            onSelect={addAnalyzer}
+          />
         )}
 
         {session.analyzers.length === 0 ? (
           <div className="suggestedAnalyzers">
             <div className="suggestedAnalyzersTitle">Suggested Analyzers</div>
-            {availableAnalyzers.slice(0, 4).map((choice) => (
+            {suggestedAnalyzers.map((choice) => (
               <button
                 className="suggestedAnalyzerItem"
-                key={`${choice.backend}:${choice.name}`}
+                key={analyzerCatalogChoiceKey(choice)}
                 onClick={() => addAnalyzer(choice)}
                 type="button"
               >
@@ -7099,49 +7315,90 @@ function AnalyzersPanel({
             ))}
           </div>
         ) : (
-          <div className="activeAnalyzerList">
-            {session.analyzers.map((analyzer, index) => (
-              <div className="activeAnalyzerItem" key={analyzer.id}>
-                <div className="activeAnalyzerHeader">
-                  <GripVertical size={13} />
-                  <span className="analyzerColorIndicator" style={{ background: analyzer.color }} />
-                  <button className="analyzerNameButton" onClick={() => onEditAnalyzer(analyzer.id)} type="button">
-                    <strong>{analyzer.name}</strong>
-                    <small>
-                      {decoderBackendLabel(analyzer.decoderBackend)} · D{analyzer.channel}
-                    </small>
-                  </button>
-                  <div className="analyzerRowActions">
-                    <button disabled={index === 0} onClick={() => moveAnalyzer(analyzer.id, -1)} title="Move up" type="button">
-                      <ChevronUp size={12} />
-                    </button>
-                    <button
-                      disabled={index === session.analyzers.length - 1}
-                      onClick={() => moveAnalyzer(analyzer.id, 1)}
-                      title="Move down"
-                      type="button"
-                    >
-                      <ChevronDown size={12} />
-                    </button>
-                    <button onClick={() => onEditAnalyzer(analyzer.id)} title="Settings" type="button">
-                      <Settings2 size={12} />
-                    </button>
-                    <button
-                      disabled={!session.summary || analyzer.decodeBusy || !analyzerSupportsDecoding(analyzer)}
-                      onClick={() => onDecodeAnalyzer(analyzer.id)}
-                      title="Restart analyzer"
-                      type="button"
-                    >
-                      <RefreshCw size={12} />
-                    </button>
-                    <button onClick={() => removeAnalyzer(analyzer.id)} title="Delete" type="button">
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
+          <DragDropContext onDragEnd={finishAnalyzerReorder} onDragStart={() => setActiveAnalyzerMenu(null)}>
+            <StrictModeDroppable droppableId={`analyzer-list-${session.id}`}>
+              {(droppableProvided) => (
+                <div
+                  className="activeAnalyzerList"
+                  ref={droppableProvided.innerRef}
+                  {...droppableProvided.droppableProps}
+                >
+                  {session.analyzers.map((analyzer, index) => (
+                    <Draggable draggableId={analyzer.id} index={index} key={analyzer.id}>
+                      {(draggableProvided, draggableSnapshot) => (
+                        <div
+                          className={`activeAnalyzerItem ${draggableSnapshot.isDragging ? "dragging" : ""}`}
+                          ref={draggableProvided.innerRef}
+                          {...draggableProvided.draggableProps}
+                          style={{
+                            ...draggableProvided.draggableProps.style,
+                            zIndex: draggableSnapshot.isDragging ? 5000 : undefined,
+                          }}
+                        >
+                          <div className="activeAnalyzerHeader">
+                            <span
+                              aria-label={`Move ${analyzer.name}`}
+                              className="analyzerDragHandle"
+                              title="Drag to reorder"
+                              {...draggableProvided.dragHandleProps}
+                            >
+                              <GripVertical size={13} />
+                            </span>
+                            <span className="analyzerColorIndicator" style={{ background: analyzer.color }} />
+                            <button className="analyzerNameButton" onDoubleClick={() => onEditAnalyzer(analyzer.id)} type="button">
+                              <strong title={analyzer.nativeCatalogDescription ?? analyzer.type}>{analyzer.name}</strong>
+                              <small>
+                                {decoderBackendLabel(analyzer.decoderBackend)} · {analyzerPhysicalChannelSummary(analyzer)}
+                                {analyzer.nativeRunnerStatus === "catalog_only" ? " · Catalog only" : ""}
+                              </small>
+                            </button>
+                            <button
+                              aria-expanded={activeAnalyzerMenu?.analyzerId === analyzer.id}
+                              aria-haspopup="menu"
+                              className={`analyzerKebabButton ${activeAnalyzerMenu?.analyzerId === analyzer.id ? "active" : ""}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                setSelectorOpen(false);
+                                setSelectorAnchorRect(null);
+                                setActiveAnalyzerMenu((current) =>
+                                  current?.analyzerId === analyzer.id ? null : { analyzerId: analyzer.id, anchorRect: rect },
+                                );
+                              }}
+                              title="Analyzer menu"
+                              type="button"
+                            >
+                              <MoreVertical size={15} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </Draggable>
+                  ))}
+                  {droppableProvided.placeholder}
                 </div>
-              </div>
-            ))}
-          </div>
+              )}
+            </StrictModeDroppable>
+          </DragDropContext>
+        )}
+        {activeAnalyzerMenu && openAnalyzerMenu && (
+          <AnalyzerItemMenu
+            anchorRect={activeAnalyzerMenu.anchorRect}
+            analyzer={openAnalyzerMenu}
+            canMoveDown={
+              session.analyzers.findIndex((candidate) => candidate.id === openAnalyzerMenu.id) <
+              session.analyzers.length - 1
+            }
+            canMoveUp={session.analyzers.findIndex((candidate) => candidate.id === openAnalyzerMenu.id) > 0}
+            canRestart={Boolean(session.summary) && !openAnalyzerMenu.decodeBusy && analyzerCanRunDecoder(openAnalyzerMenu)}
+            onClose={() => setActiveAnalyzerMenu(null)}
+            onDelete={() => removeAnalyzer(openAnalyzerMenu.id)}
+            onEdit={() => onEditAnalyzer(openAnalyzerMenu.id)}
+            onExport={(format) => void exportAnalyzer(openAnalyzerMenu.id, format)}
+            onMove={(direction) => moveAnalyzer(openAnalyzerMenu.id, direction)}
+            onRestart={() => onDecodeAnalyzer(openAnalyzerMenu.id)}
+            onUpdate={(updater) => updateAnalyzerItem(openAnalyzerMenu.id, updater)}
+          />
         )}
       </section>
 
@@ -7194,13 +7451,16 @@ function AnalyzersPanel({
                 disabled={filteredTableFrames.length === 0}
                 onClick={() => {
                   const header = ["Type", "Start", "Duration", ...tableDataColumns].join("\t");
-                  const rows = filteredTableFrames.map(({ frame }) =>
+                  const rows = filteredTableFrames.map(({ analyzer, frame }) =>
                     [
                       frame.frame_type,
                       formatSeconds(frame.start_sample / Math.max(1, sampleRateHz)),
                       formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz)),
                       ...tableDataColumns.map(
-                        (role) => frame.channel_values.find((value) => value.role === role)?.label ?? "",
+                        (role) => {
+                          const value = frame.channel_values.find((item) => item.role === role);
+                          return value ? formatAnalyzerChannelValue(analyzer, value) : "";
+                        },
                       ),
                     ].join("\t"),
                   );
@@ -7265,7 +7525,7 @@ function AnalyzersPanel({
                       <span className="analyzerDataCell" key={role}>
                         <HighlightedAnalyzerText
                           query={searchQuery}
-                          text={frame.channel_values.find((value) => value.role === role)?.label ?? ""}
+                          text={formatAnalyzerTableRoleValue(analyzer, frame, role)}
                         />
                       </span>
                     ))}
@@ -7297,7 +7557,7 @@ function AnalyzersPanel({
               terminalFrames.slice(0, 500).map(({ analyzer, frame, frameIndex }) => (
                 <div className="terminalLine" key={`${analyzer.id}-${frame.start_sample}-${frameIndex}`}>
                   <span>{formatSamples(frame.start_sample)}</span>
-                  <strong>{frame.label}</strong>
+                  <strong>{formatAnalyzerFrameLabel(analyzer, frame)}</strong>
                 </div>
               ))
             )}
@@ -7306,6 +7566,247 @@ function AnalyzersPanel({
       </section>
     </div>
   );
+}
+
+function AnalyzerSelectionPopover({
+  anchorRect,
+  choices,
+  onClose,
+  onSelect,
+}: {
+  anchorRect: DOMRect;
+  choices: AnalyzerLibraryChoice[];
+  onClose: () => void;
+  onSelect: (choice: AnalyzerLibraryChoice) => void;
+}) {
+  const width = 432;
+  const height = Math.min(460, Math.max(260, typeof window === "undefined" ? 460 : window.innerHeight - 86));
+  const position = clampFixedPopoverRect(anchorRect, width, height, { align: "end", gap: 8 });
+  return createPortal(
+    <div className="analyzerFloatingLayer" onPointerDown={onClose} role="presentation">
+      <div
+        className="analyzerSelectionPopover"
+        onPointerDown={(event) => event.stopPropagation()}
+        role="presentation"
+        style={{ ...position, width }}
+      >
+        <AnalyzerLibraryMenu choices={choices} onSelect={onSelect} />
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function AnalyzerItemMenu({
+  analyzer,
+  anchorRect,
+  canMoveDown,
+  canMoveUp,
+  canRestart,
+  onClose,
+  onDelete,
+  onEdit,
+  onExport,
+  onMove,
+  onRestart,
+  onUpdate,
+}: {
+  analyzer: UiAnalyzerInstance;
+  anchorRect: DOMRect;
+  canMoveDown: boolean;
+  canMoveUp: boolean;
+  canRestart: boolean;
+  onClose: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onExport: (format: "csv" | "txt") => void;
+  onMove: (direction: -1 | 1) => void;
+  onRestart: () => void;
+  onUpdate: (updater: (analyzer: UiAnalyzerInstance) => UiAnalyzerInstance) => void;
+}) {
+  const width = 238;
+  const position = clampFixedPopoverRect(anchorRect, width, 500, { align: "end", gap: 4 });
+  const runAction = (action: () => void) => {
+    onClose();
+    action();
+  };
+  const restartTitle = analyzerCanRunDecoder(analyzer)
+    ? "Restart analyzer"
+    : "Decoder runner is not available yet";
+  const canExport = analyzer.decodedFrames.length > 0;
+
+  return createPortal(
+    <div className="analyzerFloatingLayer" onPointerDown={onClose} role="presentation">
+      <div
+        className="activeAnalyzerMenu saleaeContextMenu"
+        onPointerDown={(event) => event.stopPropagation()}
+        role="menu"
+        style={{ ...position, width }}
+      >
+        <button onClick={() => runAction(onEdit)} role="menuitem" type="button">
+          <Settings2 size={13} />
+          <span>Settings...</span>
+        </button>
+        <div className="analyzerMenuColorBlock" role="group" aria-label="Select Color">
+          <span>Select Color</span>
+          <div className="analyzerMenuColorGrid">
+            {SALEAE_ANALYZER_COLORS.map((color) => (
+              <button
+                aria-label={`Color ${color}`}
+                className={color.toLowerCase() === analyzer.color.toLowerCase() ? "selected" : ""}
+                key={color}
+                onClick={() => runAction(() => onUpdate((item) => ({ ...item, color })))}
+                style={{ "--swatch-color": color } as CSSProperties}
+                type="button"
+              >
+                {color.toLowerCase() === analyzer.color.toLowerCase() && <Check size={11} />}
+              </button>
+            ))}
+          </div>
+        </div>
+        <button
+          disabled={!canRestart}
+          onClick={() => runAction(onRestart)}
+          role="menuitem"
+          title={canRestart ? "Restart analyzer" : restartTitle}
+          type="button"
+        >
+          <RefreshCw size={13} />
+          <span>Restart</span>
+        </button>
+        <button disabled={!canMoveUp} onClick={() => runAction(() => onMove(-1))} role="menuitem" type="button">
+          <ChevronUp size={13} />
+          <span>Move Up</span>
+        </button>
+        <button disabled={!canMoveDown} onClick={() => runAction(() => onMove(1))} role="menuitem" type="button">
+          <ChevronDown size={13} />
+          <span>Move Down</span>
+        </button>
+        <div className="analyzerMenuDivider" role="separator" />
+        <button
+          aria-checked={analyzer.streamToTerminal}
+          onClick={() => runAction(() => onUpdate((item) => ({ ...item, streamToTerminal: !item.streamToTerminal })))}
+          role="menuitemcheckbox"
+          type="button"
+        >
+          <span className="analyzerMenuCheck">{analyzer.streamToTerminal && <Check size={12} />}</span>
+          <span>Stream to Terminal</span>
+        </button>
+        <button
+          aria-checked={analyzer.showInDataTable}
+          onClick={() => runAction(() => onUpdate((item) => ({ ...item, showInDataTable: !item.showInDataTable })))}
+          role="menuitemcheckbox"
+          type="button"
+        >
+          <span className="analyzerMenuCheck">{analyzer.showInDataTable && <Check size={12} />}</span>
+          <span>Show in Data Table</span>
+        </button>
+        <div className="analyzerMenuDivider" role="separator" />
+        {DISPLAY_RADIX_OPTIONS.map((radix) => (
+          <button
+            aria-checked={analyzer.displayRadix === radix}
+            key={radix}
+            onClick={() => runAction(() => onUpdate((item) => ({ ...item, displayRadix: normalizeAnalyzerDisplayRadix(radix) })))}
+            role="menuitemradio"
+            type="button"
+          >
+            <span className="analyzerMenuCheck">{analyzer.displayRadix === radix && <Check size={12} />}</span>
+            <span>{radix}</span>
+          </button>
+        ))}
+        <div className="analyzerMenuDivider" role="separator" />
+        <button
+          disabled={!canExport}
+          onClick={() => runAction(() => onExport("csv"))}
+          role="menuitem"
+          title={canExport ? "Export decoded analyzer data to CSV" : "No decoded frames to export"}
+          type="button"
+        >
+          <FileDown size={13} />
+          <span>Export CSV</span>
+        </button>
+        <button
+          disabled={!canExport}
+          onClick={() => runAction(() => onExport("txt"))}
+          role="menuitem"
+          title={canExport ? "Export decoded analyzer data to TXT" : "No decoded frames to export"}
+          type="button"
+        >
+          <FileDown size={13} />
+          <span>Export TXT</span>
+        </button>
+        <div className="analyzerMenuDivider" role="separator" />
+        <button className="danger" onClick={() => runAction(onDelete)} role="menuitem" type="button">
+          <Trash2 size={13} />
+          <span>Delete</span>
+        </button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function analyzerPhysicalChannelSummary(analyzer: UiAnalyzerInstance) {
+  const channels = analyzerChannelIndexes(analyzer);
+  if (channels.length === 0) return "Catalog";
+  if (channels.length === 1) return `D${channels[0]}`;
+  return `${channels.length} channels`;
+}
+
+function formatAnalyzerFrameLabel(analyzer: UiAnalyzerInstance, frame: DecodedFrame) {
+  return formatAnalyzerText(frame.label, analyzer.displayRadix, frame.value);
+}
+
+function formatAnalyzerChannelValue(analyzer: UiAnalyzerInstance, value: DecodedChannelValue) {
+  return formatAnalyzerText(value.label, analyzer.displayRadix, value.value);
+}
+
+function formatAnalyzerTableRoleValue(
+  analyzer: UiAnalyzerInstance,
+  frame: DecodedFrame,
+  role: string,
+) {
+  const value = frame.channel_values.find((item) => item.role === role);
+  return value ? formatAnalyzerChannelValue(analyzer, value) : "";
+}
+
+function analyzerExportText(
+  analyzer: UiAnalyzerInstance,
+  sampleRateHz: number,
+  format: "csv" | "txt",
+) {
+  const roles: string[] = [];
+  analyzer.decodedFrames.forEach((frame) => {
+    frame.channel_values.forEach((value) => {
+      if (!roles.includes(value.role)) roles.push(value.role);
+    });
+  });
+  const headers = ["Type", "Start", "Duration", "Label", ...roles];
+  const rows = analyzer.decodedFrames
+    .slice()
+    .sort((left, right) => left.start_sample - right.start_sample || left.frame_id - right.frame_id)
+    .map((frame) => [
+      frame.frame_type,
+      formatSeconds(frame.start_sample / Math.max(1, sampleRateHz)),
+      formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz)),
+      formatAnalyzerFrameLabel(analyzer, frame),
+      ...roles.map((role) => formatAnalyzerTableRoleValue(analyzer, frame, role)),
+    ]);
+  const delimiter = format === "csv" ? "," : "\t";
+  const escapeCell = format === "csv" ? csvCell : txtCell;
+  return [headers, ...rows].map((row) => row.map(escapeCell).join(delimiter)).join("\n");
+}
+
+function csvCell(value: string) {
+  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, "\"\"")}"` : value;
+}
+
+function txtCell(value: string) {
+  return value.replace(/\r?\n/g, " ");
+}
+
+function safeExportFileName(value: string) {
+  return value.replace(/[<>:"/\\|?*\x00-\x1f]+/g, "_").trim() || "analyzer";
 }
 
 function AnalyzerTriggerView({

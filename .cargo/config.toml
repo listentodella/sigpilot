@@ -1,5 +1,4 @@
 [build]
-target-dir = "/Volumes/tp7100s/work/pxlogic/target"
-
-[env]
-PXLOGIC_APP_DATA = "/Volumes/tp7100s/work/pxlogic/.app-data"
+# Keep Cargo output inside the workspace so local builds and CI use the same
+# portable layout.
+target-dir = "target"

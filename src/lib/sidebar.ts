@@ -51,6 +51,7 @@ export type UiCommand =
 
 export interface CommandPayload {
   analyzerBackend?: "auto" | "saleae_native" | "sigrok_native" | "legacy_rust";
+  analyzerCatalogId?: string;
   analyzerName?: string;
 }
 

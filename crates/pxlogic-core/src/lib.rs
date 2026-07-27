@@ -30,7 +30,8 @@ pub use decoder_backend::{
     DecoderAnnotation, DecoderAnnotationKind, DecoderBackend, DecoderBackendInfo,
     DecoderBackendIsolation, DecoderBackendKind, DecoderDiagnostic, DecoderField,
     DecoderFieldValue, DecoderMarker, DecoderOutput, DecoderOutputFrame, LegacyRustDecoder,
-    SaleaeNativeDecoder, SigrokNativeDecoder,
+    SaleaeNativeDecoder, SigrokDecoderCatalog, SigrokDecoderCatalogItem, SigrokDecoderChannel,
+    SigrokDecoderOption, SigrokNativeDecoder,
 };
 pub use error::{CoreError, Result};
 pub use fake::FakeBackend;

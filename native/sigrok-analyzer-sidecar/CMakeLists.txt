@@ -38,6 +38,7 @@ target_include_directories(pxview_sigrokdecode PRIVATE
 target_link_libraries(pxview_sigrokdecode PRIVATE PkgConfig::GLIB Python3::Python)
 
 set(DECODER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/decoders/c_decoders")
+set(PXVIEW_C_DECODER_TARGETS)
 function(add_pxview_c_decoder protocol)
     set(target "pxview_${protocol}_c")
     add_library(${target} MODULE
@@ -54,16 +55,18 @@ function(add_pxview_c_decoder protocol)
         OUTPUT_NAME ${protocol}_c
         LIBRARY_OUTPUT_DIRECTORY "${DECODER_OUTPUT_DIR}"
     )
+    list(APPEND PXVIEW_C_DECODER_TARGETS ${target})
+    set(PXVIEW_C_DECODER_TARGETS "${PXVIEW_C_DECODER_TARGETS}" PARENT_SCOPE)
 endfunction()
 
-add_pxview_c_decoder(uart)
-add_pxview_c_decoder(i2c)
-add_pxview_c_decoder(spi)
-add_pxview_c_decoder(i2s)
-add_pxview_c_decoder(lin)
-add_pxview_c_decoder(can)
-add_pxview_c_decoder(can_fd)
-add_pxview_c_decoder(parallel)
+file(GLOB PXVIEW_C_DECODER_SOURCES CONFIGURE_DEPENDS
+    "${PXVIEW_ROOT}/libsigrokdecode/c_decoders/*_c.c"
+)
+foreach(decoder_source IN LISTS PXVIEW_C_DECODER_SOURCES)
+    get_filename_component(decoder_file "${decoder_source}" NAME_WE)
+    string(REGEX REPLACE "_c$" "" decoder_protocol "${decoder_file}")
+    add_pxview_c_decoder("${decoder_protocol}")
+endforeach()
 
 add_executable(pxlogic-sigrok-sidecar src/main.c)
 target_compile_definitions(pxlogic-sigrok-sidecar PRIVATE CJSON_IMPLEMENTATION)
@@ -79,12 +82,5 @@ target_link_libraries(pxlogic-sigrok-sidecar PRIVATE
     Python3::Python
 )
 add_dependencies(pxlogic-sigrok-sidecar
-    pxview_uart_c
-    pxview_i2c_c
-    pxview_spi_c
-    pxview_i2s_c
-    pxview_lin_c
-    pxview_can_c
-    pxview_can_fd_c
-    pxview_parallel_c
+    ${PXVIEW_C_DECODER_TARGETS}
 )

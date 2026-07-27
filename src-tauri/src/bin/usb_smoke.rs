@@ -630,9 +630,10 @@ fn default_output_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/Volumes/tp7100s/work/pxlogic/debug-captures/usb-smoke-{timestamp}.pxcap"
-    ))
+    let file_name = format!("usb-smoke-{timestamp}.pxcap");
+    env::current_dir()
+        .map(|dir| dir.join("debug-captures").join(&file_name))
+        .unwrap_or_else(|_| env::temp_dir().join(file_name))
 }
 
 fn print_sample_summary(capture: &pxlogic_core::CaptureData) {

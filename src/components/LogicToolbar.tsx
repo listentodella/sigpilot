@@ -7,8 +7,7 @@ import {
   MeasurementCommands,
   UiCommand,
 } from "../lib/sidebar";
-import { ANALYZER_CATALOG_GROUPS } from "../lib/analyzers";
-import { AnalyzerLibraryMenu } from "./AnalyzerLibraryMenu";
+import { AnalyzerLibraryChoice, AnalyzerLibraryMenu } from "./AnalyzerLibraryMenu";
 
 type MenuName = "analyzers" | "markers" | null;
 
@@ -18,6 +17,7 @@ interface LogicToolbarProps {
   onStart: () => void;
   onStop: () => void;
   onCommand: (command: UiCommand, payload?: CommandPayload) => void;
+  availableAnalyzers: AnalyzerLibraryChoice[];
   onZoomIn: () => void;
   onZoomOut: () => void;
   onFit: () => void;
@@ -26,6 +26,7 @@ interface LogicToolbarProps {
 export function LogicToolbar({
   busy,
   hasCapture,
+  availableAnalyzers,
   onStart,
   onStop,
   onCommand,
@@ -74,12 +75,11 @@ export function LogicToolbar({
         {openMenu === "analyzers" && (
           <ToolbarMenu className="analyzerMenu">
             <AnalyzerLibraryMenu
-              choices={ANALYZER_CATALOG_GROUPS.flatMap((group) =>
-                group.analyzers.map((name) => ({ name, backend: group.backend, source: group.label })),
-              )}
+              choices={availableAnalyzers}
               onSelect={(choice) => {
                 setOpenMenu(null);
                 onCommand(AnalyzerCommands.AddAnalyzer, {
+                  analyzerCatalogId: choice.catalogItem?.id ?? undefined,
                   analyzerName: choice.name,
                   analyzerBackend: choice.backend,
                 });

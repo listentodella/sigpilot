@@ -14,6 +14,7 @@ PARALLEL_FIXTURES="${5:-$ROOT_DIR/testdata/decoders/parallel-conformance-v1.json
 
 SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar"
 DECODER_ROOT="$BUILD_DIR/decoders/c_decoders"
+PYTHON_DECODER_ROOT="$ROOT_DIR/pxview-fork/libsigrokdecode/decoders"
 
 "$SIDECAR" --decoder-root "$DECODER_ROOT" --probe | jq -e '
   .available == true
@@ -26,6 +27,23 @@ DECODER_ROOT="$BUILD_DIR/decoders/c_decoders"
   and (.protocols | index("LIN") != null)
   and (.protocols | index("Parallel") != null)
 ' >/dev/null
+
+"$SIDECAR" \
+  --decoder-root "$DECODER_ROOT" \
+  --python-decoder-root "$PYTHON_DECODER_ROOT" \
+  --probe \
+  --catalog | jq -e '
+    .available == true
+    and .catalog_included == true
+    and .c_decoder_count >= 200
+    and .python_decoder_count >= 200
+    and (.decoder_catalog | map(select(.id == "qspi_c" and .kind == "c")) | length == 1)
+    and (.decoder_catalog | map(select(.id == "modbus_c" and .kind == "c")) | length == 1)
+    and (.decoder_catalog | map(select(.id == "usb_power_delivery" and .kind == "python")) | length == 1)
+    and (.decoder_catalog | map(select(.id == "jtag" and .kind == "python")) | length == 1)
+    and (.decoder_catalog | map(select(.id == "spi_c" and .runner_status == "verified_sparse_c")) | length == 1)
+    and (.decoder_catalog | map(select(.id == "modbus" and .runner_status == "catalog_only")) | length == 1)
+  ' >/dev/null
 
 failures=0
 while IFS= read -r fixture; do

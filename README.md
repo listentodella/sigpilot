@@ -35,13 +35,14 @@ Both native backends consume transition-indexed captures. Saleae Native currentl
 ## Commands
 
 ```bash
-pnpm install --store-dir /Volumes/tp7100s/.pnpm-store
+pnpm install
 cargo test --workspace
+node --test tests/*.test.ts
 pnpm build
 pnpm tauri dev
 ```
 
-Cargo output is configured in `.cargo/config.toml` to use `/Volumes/tp7100s/work/pxlogic/target`.
+Cargo output stays in the workspace-local `target/` directory.
 
 ## Real Hardware
 

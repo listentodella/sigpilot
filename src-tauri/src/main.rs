@@ -19,7 +19,8 @@ use pxlogic_core::{
     AnalyzerDecodeSettings, CaptureBackend, CaptureData, CaptureMetadata, CaptureProgress,
     CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DeviceInfo,
     DeviceKind, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
-    HardwareCaptureCapabilities, PwmConfiguration, PwmSettings, PxUsbSpeed,
+    HardwareCaptureCapabilities, PwmConfiguration, PwmSettings, PxUsbSpeed, SigrokDecoderCatalog,
+    SigrokNativeDecoder,
 };
 use pxlogic_graph::{GraphFrameRequest, GraphFrameResponse, GraphSession};
 use pxlogic_waveform::{
@@ -115,6 +116,13 @@ struct ScreenshotPathRequest {
 #[serde(rename_all = "camelCase")]
 struct WriteScreenshotRequest {
     data_base64: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteTextFileRequest {
+    contents: String,
     path: String,
 }
 
@@ -511,12 +519,13 @@ fn locate_saleae_runtime_root() -> Option<PathBuf> {
     let mut candidates = vec![
         PathBuf::from("/Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
         PathBuf::from("/Applications/Logic 2.app/Contents/Resources/macos-arm64"),
-        PathBuf::from("/Volumes/tp7100s/Downloads/Saleae Logic.app/Contents/Resources/macos-arm64"),
     ];
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         candidates.push(home.join("Applications/Saleae Logic.app/Contents/Resources/macos-arm64"));
         candidates.push(home.join("Applications/Logic 2.app/Contents/Resources/macos-arm64"));
+        candidates.push(home.join("Downloads/Saleae Logic.app/Contents/Resources/macos-arm64"));
+        candidates.push(home.join("Downloads/Logic 2.app/Contents/Resources/macos-arm64"));
     }
     candidates
         .into_iter()
@@ -965,6 +974,26 @@ fn write_screenshot_file(request: WriteScreenshotRequest) -> CommandResult<()> {
     fs::write(path, bytes).map_err(to_string)
 }
 
+#[tauri::command]
+fn write_text_file(request: WriteTextFileRequest) -> CommandResult<()> {
+    let path = PathBuf::from(&request.path);
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "csv" | "txt") {
+        return Err("analyzer exports must use a .csv or .txt extension".to_string());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(to_string)?;
+    }
+    fs::write(path, request.contents).map_err(to_string)
+}
+
 #[cfg(target_os = "macos")]
 #[tauri::command]
 async fn capture_screenshot_png(app: AppHandle) -> CommandResult<String> {
@@ -1125,6 +1154,31 @@ mod screenshot_tests {
         })
         .is_err());
     }
+
+    #[test]
+    fn analyzer_text_writer_allows_csv_and_txt_only() {
+        let path = std::env::temp_dir().join(format!(
+            "pxlogic-analyzer-export-{}-{}.csv",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        write_text_file(WriteTextFileRequest {
+            contents: "Type,Value\nData,0x5A\n".to_string(),
+            path: path.to_string_lossy().to_string(),
+        })
+        .expect("valid analyzer export should be written");
+        assert_eq!(
+            fs::read_to_string(&path).expect("analyzer export should exist"),
+            "Type,Value\nData,0x5A\n"
+        );
+        fs::remove_file(&path).expect("temporary analyzer export should be removable");
+
+        assert!(write_text_file(WriteTextFileRequest {
+            contents: "not html".to_string(),
+            path: path.with_extension("html").to_string_lossy().to_string(),
+        })
+        .is_err());
+    }
 }
 
 #[tauri::command]
@@ -1188,6 +1242,17 @@ async fn decode_analyzer_frames(
                 },
             )
             .map(|frames| frames.as_ref().clone())
+            .map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn sigrok_decoder_catalog() -> CommandResult<SigrokDecoderCatalog> {
+    tauri::async_runtime::spawn_blocking(move || {
+        SigrokNativeDecoder::from_env()
+            .and_then(|decoder| decoder.decoder_catalog())
             .map_err(to_string)
     })
     .await
@@ -1349,10 +1414,12 @@ fn main() {
             capture_screenshot_png,
             next_screenshot_path,
             write_screenshot_file,
+            write_text_file,
             get_waveform_tile,
             render_graph_frame,
             measure_digital_range,
             decode_analyzer_frames,
+            sigrok_decoder_catalog,
             release_graph_session,
             read_extension_package,
             create_extension_template,

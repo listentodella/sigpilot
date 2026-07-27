@@ -3,7 +3,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ZIP_PATH="${1:-/Volumes/tp7100s/Downloads/Logic-2.4.43-macos-arm64.zip}"
+ZIP_PATH="${1:-${PXLOGIC_SALEAE_LOGIC_ZIP:-}}"
+if [[ -z "$ZIP_PATH" && -n "${HOME:-}" && -f "$HOME/Downloads/Logic-2.4.43-macos-arm64.zip" ]]; then
+  ZIP_PATH="$HOME/Downloads/Logic-2.4.43-macos-arm64.zip"
+fi
+if [[ -z "$ZIP_PATH" ]]; then
+  printf 'Usage: %s /path/to/Logic-2.4.43-macos-arm64.zip\n' "$0" >&2
+  printf 'Or set PXLOGIC_SALEAE_LOGIC_ZIP to the local Logic 2.4.43 zip.\n' >&2
+  exit 1
+fi
 EXTRACT_DIR="$ROOT_DIR/target/native/saleae-runtime-extracted"
 RUNTIME_DIR="$ROOT_DIR/target/native/saleae-runtime-2.4.43"
 SIDECAR="$($ROOT_DIR/native/saleae-analyzer-sidecar/build.sh)"

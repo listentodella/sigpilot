@@ -3,6 +3,7 @@ name: Build macOS
 on:
   push:
     branches:
+      - codex/graph-server-32ch
       - main
       - master
       - develop
@@ -10,56 +11,38 @@ on:
       - "v*"
   pull_request:
     branches:
+      - codex/graph-server-32ch
       - main
       - master
       - develop
   workflow_dispatch:
 
-jobs:
-  build-macos:
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            target: aarch64-apple-darwin
-          - arch: x86_64
-            target: x86_64-apple-darwin
+permissions:
+  contents: write
 
-    name: Build macOS (${{ matrix.arch }})
+jobs:
+  checks:
+    name: Checks
+    runs-on: macos-26
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
 
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Setup pnpm cache
-        uses: actions/cache@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
@@ -69,32 +52,87 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Run UI logic tests
+        run: node --test tests/*.test.ts
+
       - name: Build frontend
         run: pnpm build
 
+  build-macos:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            runner: macos-26
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            runner: macos-26-intel
+
+    runs-on: ${{ matrix.runner }}
+
+    name: Build macOS (${{ matrix.arch }})
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.7.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: ./src-tauri
-          args: ${{ matrix.arch == 'aarch64' && '--target aarch64-apple-darwin' || '--target x86_64-apple-darwin' }}
+          projectPath: .
+          args: --target ${{ matrix.target }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: pxlogic-macos-${{ matrix.arch }}
           path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+            target/${{ matrix.target }}/release/pxlogic-desktop
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/bundle/macos/*.app
+          if-no-files-found: error
           retention-days: 30
 
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/pxlogic-desktop
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           draft: false
           prerelease: false
         env:

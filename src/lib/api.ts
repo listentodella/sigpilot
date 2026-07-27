@@ -249,6 +249,50 @@ export interface SpiDecodeSettings {
 
 export type NativeOptionValue = boolean | number | string;
 
+export interface SigrokDecoderCatalog {
+  decoders: SigrokDecoderCatalogItem[];
+  c_decoder_count: number;
+  python_decoder_count: number;
+}
+
+export interface SigrokDecoderCatalogItem {
+  id?: string | null;
+  name?: string | null;
+  longname?: string | null;
+  desc?: string | null;
+  license?: string | null;
+  kind?: string | null;
+  runner_status?: string | null;
+  inputs: string[];
+  outputs: string[];
+  tags: string[];
+  channels: SigrokDecoderChannel[];
+  optional_channels: SigrokDecoderChannel[];
+  options: SigrokDecoderOption[];
+  annotations?: unknown[];
+  annotation_rows?: unknown[];
+  binary?: unknown[];
+}
+
+export interface SigrokDecoderChannel {
+  id?: string | null;
+  name?: string | null;
+  desc?: string | null;
+  order: number;
+  type: number;
+  type_name?: string | null;
+  idn?: string | null;
+}
+
+export interface SigrokDecoderOption {
+  id?: string | null;
+  idn?: string | null;
+  desc?: string | null;
+  value_type?: string | null;
+  default?: unknown;
+  values: unknown[];
+}
+
 export interface NativeDecodeSettings {
   decoder_id: string;
   protocol_name: string;
@@ -428,6 +472,115 @@ const PREVIEW_SAMPLE_RATES = [
 ];
 const PREVIEW_PULSE_SIGNAL: PreviewDemoSignal = { kind: "Pulse" };
 const PREVIEW_BIN_EDGE_SCAN_LIMIT = 96;
+const PREVIEW_SIGROK_DECODER_CATALOG: SigrokDecoderCatalog = {
+  c_decoder_count: 3,
+  python_decoder_count: 2,
+  decoders: [
+    {
+      id: "spi_c",
+      name: "SPI(C)",
+      longname: "Serial Peripheral Interface (C)",
+      desc: "SPI protocol decoder (C implementation, faster than Python)",
+      license: "gplv2+",
+      kind: "c",
+      runner_status: "verified_sparse_c",
+      inputs: ["logic"],
+      outputs: ["spi"],
+      tags: ["Embedded/industrial"],
+      channels: [{ id: "clk", name: "CLK", desc: "Clock", order: 0, type: 0, type_name: "clock" }],
+      optional_channels: [
+        { id: "miso", name: "MISO", desc: "Master in, slave out", order: 1, type: 1, type_name: "serial_data" },
+        { id: "mosi", name: "MOSI", desc: "Master out, slave in", order: 2, type: 1, type_name: "serial_data" },
+        { id: "cs", name: "CS#", desc: "Chip-select", order: 3, type: -1, type_name: "common" },
+      ],
+      options: [
+        { id: "cs_polarity", desc: "CS# polarity", value_type: "s", default: "active-low", values: ["active-low", "active-high"] },
+        { id: "cpol", desc: "Clock polarity", value_type: "t", default: 0, values: [0, 1] },
+        { id: "cpha", desc: "Clock phase", value_type: "t", default: 0, values: [0, 1] },
+        { id: "bitorder", desc: "Bit order", value_type: "s", default: "msb-first", values: ["msb-first", "lsb-first"] },
+      ],
+    },
+    {
+      id: "qspi_c",
+      name: "Smart QSPI(C)",
+      longname: "Quad Serial Peripheral Interface (C)",
+      desc: "Full-duplex, synchronous, serial bus compatible with Dual SPI and Quad SPI interfaces.",
+      license: "gplv2+",
+      kind: "c",
+      runner_status: "catalog_only",
+      inputs: ["logic"],
+      outputs: ["spi"],
+      tags: ["Embedded/industrial"],
+      channels: [
+        { id: "clk", name: "CLK", desc: "Clock", order: 0, type: 0, type_name: "clock" },
+        { id: "io0", name: "IO0", desc: "Data i/o 0", order: 1, type: 1, type_name: "serial_data" },
+      ],
+      optional_channels: [
+        { id: "io1", name: "IO1", desc: "Data i/o 1", order: 2, type: 1, type_name: "serial_data" },
+        { id: "io2", name: "IO2", desc: "Data i/o 2", order: 3, type: 1, type_name: "serial_data" },
+        { id: "io3", name: "IO3", desc: "Data i/o 3", order: 4, type: 1, type_name: "serial_data" },
+        { id: "cs", name: "CS#", desc: "Chip-select", order: 5, type: -1, type_name: "common" },
+      ],
+      options: [
+        { id: "cs_polarity", desc: "CS# polarity", value_type: "s", default: "active-low", values: ["active-low", "active-high"] },
+        { id: "bitorder", desc: "Bit order", value_type: "s", default: "msb-first", values: ["msb-first", "lsb-first"] },
+        { id: "twolinesmode", desc: "TwoLinesMode", value_type: "s", default: "spi", values: ["spi", "dspi", "qspi"] },
+      ],
+    },
+    {
+      id: "modbus_c",
+      name: "Modbus(C)",
+      longname: "Modbus RTU (C)",
+      desc: "Industrial Modbus RTU protocol decoder.",
+      license: "gplv2+",
+      kind: "c",
+      runner_status: "catalog_only",
+      inputs: ["uart"],
+      outputs: ["modbus"],
+      tags: ["Embedded/industrial"],
+      channels: [],
+      optional_channels: [],
+      options: [],
+    },
+    {
+      id: "jtag",
+      name: "JTAG",
+      longname: "Joint Test Action Group (IEEE 1149.1)",
+      desc: "Protocol for testing, debugging, and flashing ICs.",
+      license: "gplv2+",
+      kind: "python",
+      runner_status: "catalog_only",
+      inputs: ["logic"],
+      outputs: ["jtag"],
+      tags: ["Debug/trace"],
+      channels: [
+        { id: "tdi", name: "TDI", desc: "Test data input", order: 0, type: -1, type_name: "common" },
+        { id: "tdo", name: "TDO", desc: "Test data output", order: 1, type: -1, type_name: "common" },
+        { id: "tck", name: "TCK", desc: "Test clock", order: 2, type: -1, type_name: "common" },
+        { id: "tms", name: "TMS", desc: "Test mode select", order: 3, type: -1, type_name: "common" },
+      ],
+      optional_channels: [
+        { id: "trst", name: "TRST#", desc: "Test reset", order: 4, type: -1, type_name: "common" },
+      ],
+      options: [],
+    },
+    {
+      id: "usb_power_delivery",
+      name: "USB Power Delivery",
+      longname: "USB Power Delivery",
+      desc: "USB Type-C Power Delivery packet decoder.",
+      license: "gplv2+",
+      kind: "python",
+      runner_status: "catalog_only",
+      inputs: ["logic"],
+      outputs: ["usb_pd"],
+      tags: ["USB"],
+      channels: [{ id: "cc", name: "CC", desc: "Configuration channel", order: 0, type: -1, type_name: "common" }],
+      optional_channels: [],
+      options: [],
+    },
+  ],
+};
 
 function buildPreviewDemoSignals(
   channelCount: number,
@@ -598,6 +751,11 @@ export function deviceCapabilities(deviceId: string): Promise<HardwareCaptureCap
     return Promise.resolve(previewDeviceCapabilities(deviceId));
   }
   return callBackend("device_capabilities", { deviceId });
+}
+
+export function sigrokDecoderCatalog(): Promise<SigrokDecoderCatalog> {
+  if (!isTauriRuntime()) return Promise.resolve(PREVIEW_SIGROK_DECODER_CATALOG);
+  return callBackend("sigrok_decoder_catalog");
 }
 
 function previewDeviceCapabilities(deviceId: string): HardwareCaptureCapabilities {
@@ -783,6 +941,14 @@ export function exportCapture(
 ): Promise<void> {
   if (!isTauriRuntime()) return Promise.resolve();
   return callBackend("export_capture", { sessionId, path, format, saleaeSession });
+}
+
+export function writeTextFile(path: string, contents: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    console.info(`writeTextFile preview: ${path}`, contents);
+    return Promise.resolve();
+  }
+  return callBackend("write_text_file", { path, contents });
 }
 
 export function trimCapture(sessionId: string, request: TrimCaptureRequest): Promise<CaptureSummary> {

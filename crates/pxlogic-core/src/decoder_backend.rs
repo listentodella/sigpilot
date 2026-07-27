@@ -125,6 +125,12 @@ pub struct DecoderOutput {
     pub diagnostics: Vec<DecoderDiagnostic>,
 }
 
+const SALEAE_NATIVE_PROTOCOLS: &[&str] = &["UART", "I2C", "SPI", "I2S", "CAN", "LIN", "Parallel"];
+const SIGROK_NATIVE_PROTOCOLS: &[&str] = &[
+    "UART", "I2C", "SPI", "I2S", "CAN", "CAN-FD", "LIN", "Parallel",
+];
+const LEGACY_RUST_PROTOCOLS: &[&str] = &["UART", "I2C", "SPI"];
+
 /// Stable host-side contract. External implementations may live in a native
 /// sidecar; the input remains the same packed capture representation used by
 /// PXLogic and the `.sr` exporter.
@@ -346,15 +352,7 @@ impl DecoderBackend for SaleaeNativeDecoder {
                 kind: DecoderBackendKind::SaleaeNative,
                 display_name: "Saleae Native analyzer sidecar".to_string(),
                 available: false,
-                protocols: vec![
-                    "UART".to_string(),
-                    "I2C".to_string(),
-                    "SPI".to_string(),
-                    "I2S".to_string(),
-                    "CAN".to_string(),
-                    "LIN".to_string(),
-                    "Parallel".to_string(),
-                ],
+                protocols: protocol_names(SALEAE_NATIVE_PROTOCOLS),
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
                 detail: error.to_string(),
@@ -399,9 +397,72 @@ impl DecoderBackend for SaleaeNativeDecoder {
 pub struct SigrokNativeDecoder {
     sidecar_path: PathBuf,
     decoder_root: PathBuf,
+    python_decoder_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SigrokDecoderCatalog {
+    pub decoders: Vec<SigrokDecoderCatalogItem>,
+    pub c_decoder_count: usize,
+    pub python_decoder_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SigrokDecoderCatalogItem {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub longname: Option<String>,
+    pub desc: Option<String>,
+    pub license: Option<String>,
+    pub kind: Option<String>,
+    pub runner_status: Option<String>,
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub channels: Vec<SigrokDecoderChannel>,
+    #[serde(default)]
+    pub optional_channels: Vec<SigrokDecoderChannel>,
+    #[serde(default)]
+    pub options: Vec<SigrokDecoderOption>,
+    #[serde(default)]
+    pub annotations: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub annotation_rows: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub binary: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SigrokDecoderChannel {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub desc: Option<String>,
+    #[serde(default)]
+    pub order: i32,
+    #[serde(default)]
+    pub r#type: i32,
+    pub type_name: Option<String>,
+    pub idn: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SigrokDecoderOption {
+    pub id: Option<String>,
+    pub idn: Option<String>,
+    pub desc: Option<String>,
+    pub value_type: Option<String>,
+    #[serde(default)]
+    pub default: serde_json::Value,
+    #[serde(default)]
+    pub values: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct SigrokSidecarProbe {
     available: bool,
     protocols: Vec<String>,
@@ -409,13 +470,30 @@ struct SigrokSidecarProbe {
     decoder_name: String,
     decoder_id: String,
     api_version: u32,
+    #[serde(default)]
+    catalog_included: bool,
+    #[serde(default)]
+    decoder_catalog: Vec<SigrokDecoderCatalogItem>,
+    #[serde(default)]
+    c_decoder_count: usize,
+    #[serde(default)]
+    python_decoder_count: usize,
 }
 
 impl SigrokNativeDecoder {
     pub fn new(sidecar_path: impl Into<PathBuf>, decoder_root: impl Into<PathBuf>) -> Self {
+        Self::new_with_python_decoder_root(sidecar_path, decoder_root, None::<PathBuf>)
+    }
+
+    pub fn new_with_python_decoder_root(
+        sidecar_path: impl Into<PathBuf>,
+        decoder_root: impl Into<PathBuf>,
+        python_decoder_root: Option<impl Into<PathBuf>>,
+    ) -> Self {
         Self {
             sidecar_path: sidecar_path.into(),
             decoder_root: decoder_root.into(),
+            python_decoder_root: python_decoder_root.map(Into::into),
         }
     }
 
@@ -438,15 +516,40 @@ impl SigrokNativeDecoder {
                         .to_string(),
                 )
             })?;
-        Ok(Self::new(sidecar_path, decoder_root))
+        let python_decoder_root = std::env::var_os("PXLOGIC_SIGROK_PYTHON_DECODER_ROOT")
+            .map(PathBuf::from)
+            .or_else(discover_workspace_sigrok_python_decoder_root);
+        Ok(Self::new_with_python_decoder_root(
+            sidecar_path,
+            decoder_root,
+            python_decoder_root,
+        ))
     }
 
     fn probe(&self) -> Result<SigrokSidecarProbe> {
-        let output = Command::new(&self.sidecar_path)
-            .arg("--decoder-root")
-            .arg(&self.decoder_root)
-            .arg("--probe")
-            .output()?;
+        self.probe_with_catalog(false)
+    }
+
+    pub fn decoder_catalog(&self) -> Result<SigrokDecoderCatalog> {
+        let probe = self.probe_with_catalog(true)?;
+        Ok(SigrokDecoderCatalog {
+            decoders: probe.decoder_catalog,
+            c_decoder_count: probe.c_decoder_count,
+            python_decoder_count: probe.python_decoder_count,
+        })
+    }
+
+    fn probe_with_catalog(&self, include_catalog: bool) -> Result<SigrokSidecarProbe> {
+        let mut command = Command::new(&self.sidecar_path);
+        command.arg("--decoder-root").arg(&self.decoder_root);
+        if let Some(root) = &self.python_decoder_root {
+            command.arg("--python-decoder-root").arg(root);
+        }
+        command.arg("--probe");
+        if include_catalog {
+            command.arg("--catalog");
+        }
+        let output = command.output()?;
         if !output.status.success() {
             return Err(sidecar_error("Sigrok", "probe", &output.stderr));
         }
@@ -456,9 +559,12 @@ impl SigrokNativeDecoder {
     }
 
     fn decode_request<T: Serialize>(&self, request: &T) -> Result<DecoderOutput> {
-        let mut child = Command::new(&self.sidecar_path)
-            .arg("--decoder-root")
-            .arg(&self.decoder_root)
+        let mut command = Command::new(&self.sidecar_path);
+        command.arg("--decoder-root").arg(&self.decoder_root);
+        if let Some(root) = &self.python_decoder_root {
+            command.arg("--python-decoder-root").arg(root);
+        }
+        let mut child = command
             .arg("--decode")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -497,6 +603,16 @@ fn discover_workspace_sigrok_path(relative: &str) -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|path| path.exists())
+}
+
+fn discover_workspace_sigrok_python_decoder_root() -> Option<PathBuf> {
+    let current = std::env::current_dir().ok()?;
+    [
+        current.join("pxview-fork/libsigrokdecode/decoders"),
+        current.join("../pxview-fork/libsigrokdecode/decoders"),
+    ]
+    .into_iter()
+    .find(|path| path.is_dir())
 }
 
 fn discover_workspace_saleae_sidecar() -> Option<PathBuf> {
@@ -552,25 +668,26 @@ impl DecoderBackend for SigrokNativeDecoder {
                 protocols: probe.protocols,
                 supports_streaming: probe.supports_streaming,
                 isolation: DecoderBackendIsolation::Sidecar,
-                detail: format!(
-                    "PXView {} C decoder, API v{}",
-                    probe.decoder_id, probe.api_version
-                ),
+                detail: if probe.catalog_included {
+                    format!(
+                        "PXView verified sparse C runner {}, API v{}; catalog contains {} C and {} Python decoders",
+                        probe.decoder_id,
+                        probe.api_version,
+                        probe.c_decoder_count,
+                        probe.python_decoder_count
+                    )
+                } else {
+                    format!(
+                        "PXView verified sparse C runner {}, API v{}; full libsigrokdecode catalog is available through --catalog",
+                        probe.decoder_id, probe.api_version
+                    )
+                },
             },
             Err(error) => DecoderBackendInfo {
                 kind: DecoderBackendKind::SigrokNative,
                 display_name: "Sigrok Native analyzer sidecar".to_string(),
                 available: false,
-                protocols: vec![
-                    "UART".to_string(),
-                    "I2C".to_string(),
-                    "SPI".to_string(),
-                    "I2S".to_string(),
-                    "CAN".to_string(),
-                    "CAN-FD".to_string(),
-                    "LIN".to_string(),
-                    "Parallel".to_string(),
-                ],
+                protocols: protocol_names(SIGROK_NATIVE_PROTOCOLS),
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
                 detail: error.to_string(),
@@ -618,6 +735,10 @@ fn native_protocol_name(settings: &AnalyzerDecodeSettings) -> &str {
         AnalyzerDecodeSettings::Spi(_) => "SPI",
         AnalyzerDecodeSettings::Native(settings) => &settings.protocol_name,
     }
+}
+
+fn protocol_names(protocols: &[&str]) -> Vec<String> {
+    protocols.iter().map(|protocol| (*protocol).to_string()).collect()
 }
 
 fn ensure_sigrok_protocol_available(
@@ -974,7 +1095,7 @@ impl DecoderBackend for LegacyRustDecoder {
             kind: DecoderBackendKind::LegacyRust,
             display_name: "Legacy Rust decoder".to_string(),
             available: true,
-            protocols: vec!["UART".to_string(), "I2C".to_string(), "SPI".to_string()],
+            protocols: protocol_names(LEGACY_RUST_PROTOCOLS),
             supports_streaming: true,
             isolation: DecoderBackendIsolation::InProcess,
             detail: "Compatibility fallback only; prefer Saleae Native or Sigrok Native."
@@ -1390,6 +1511,7 @@ mod tests {
         assert!(!saleae.available);
         assert!(saleae.protocols.contains(&"LIN".to_string()));
         assert!(saleae.protocols.contains(&"Parallel".to_string()));
+        assert!(!saleae.protocols.contains(&"CAN-FD".to_string()));
 
         let sigrok = SigrokNativeDecoder::new(
             "/definitely/missing/pxlogic-sigrok-sidecar",
@@ -1398,6 +1520,7 @@ mod tests {
         .info();
         assert_eq!(sigrok.kind, DecoderBackendKind::SigrokNative);
         assert!(!sigrok.available);
+        assert!(sigrok.protocols.contains(&"CAN-FD".to_string()));
         assert!(sigrok.protocols.contains(&"LIN".to_string()));
         assert!(sigrok.protocols.contains(&"Parallel".to_string()));
     }
@@ -1847,6 +1970,34 @@ mod tests {
             .unwrap();
         assert_eq!(output.backend, DecoderBackendKind::SigrokNative);
         assert_mode_zero_output(&output);
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR, PXLOGIC_SIGROK_DECODER_ROOT, and PXLOGIC_SIGROK_PYTHON_DECODER_ROOT"]
+    fn sigrok_native_sidecar_catalog_enumerates_pxview_c_and_python_decoders() {
+        let probe = SigrokNativeDecoder::from_env()
+            .unwrap()
+            .probe_with_catalog(true)
+            .unwrap();
+
+        assert!(probe.available);
+        assert!(probe.catalog_included);
+        assert!(probe.c_decoder_count >= 200);
+        assert!(probe.python_decoder_count >= 200);
+
+        let has = |id: &str, kind: &str| {
+            probe.decoder_catalog.iter().any(|item| {
+                item.id.as_deref() == Some(id) && item.kind.as_deref() == Some(kind)
+            })
+        };
+        assert!(has("qspi_c", "c"));
+        assert!(has("modbus_c", "c"));
+        assert!(has("usb_power_delivery", "python"));
+        assert!(has("jtag", "python"));
+        assert!(probe.decoder_catalog.iter().any(|item| {
+            item.id.as_deref() == Some("spi_c")
+                && item.runner_status.as_deref() == Some("verified_sparse_c")
+        }));
     }
 
     #[test]

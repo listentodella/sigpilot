@@ -3,7 +3,25 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUNTIME_ROOT="${PXLOGIC_SALEAE_RUNTIME_ROOT:-/Volumes/tp7100s/Downloads/Saleae Logic.app/Contents/Resources/macos-arm64}"
+RUNTIME_ROOT="${PXLOGIC_SALEAE_RUNTIME_ROOT:-}"
+if [[ -z "$RUNTIME_ROOT" ]]; then
+  for candidate in \
+    "/Applications/Saleae Logic.app/Contents/Resources/macos-arm64" \
+    "/Applications/Logic 2.app/Contents/Resources/macos-arm64" \
+    "${HOME:-}/Applications/Saleae Logic.app/Contents/Resources/macos-arm64" \
+    "${HOME:-}/Applications/Logic 2.app/Contents/Resources/macos-arm64" \
+    "${HOME:-}/Downloads/Saleae Logic.app/Contents/Resources/macos-arm64" \
+    "${HOME:-}/Downloads/Logic 2.app/Contents/Resources/macos-arm64"; do
+    if [[ -f "$candidate/libgraph_server_shared.dylib" ]]; then
+      RUNTIME_ROOT="$candidate"
+      break
+    fi
+  done
+fi
+if [[ -z "$RUNTIME_ROOT" ]]; then
+  printf 'Saleae runtime not found; set PXLOGIC_SALEAE_RUNTIME_ROOT.\n' >&2
+  exit 1
+fi
 SIDECAR="$($ROOT_DIR/native/saleae-graph-sidecar/build.sh)"
 
 "$SIDECAR" --runtime-root "$RUNTIME_ROOT" --probe

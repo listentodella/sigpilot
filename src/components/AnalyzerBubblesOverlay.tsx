@@ -7,6 +7,7 @@ import {
   UiAnalyzerInstance,
   analyzerBubbleRoles,
   analyzerMarkerRoles,
+  formatAnalyzerText,
 } from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
@@ -278,10 +279,13 @@ export function AnalyzerBubblesOverlay({
                 const arrowWidth =
                   (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
                   (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
+                const formattedDisplayText = bubble.display_text.map((label) =>
+                  formatAnalyzerText(label, analyzer.displayRadix),
+                );
                 const text = multi
-                  ? multiBubbleText(bubble, bubbleWidth - 28)
-                  : bestFrameText(bubble.display_text, bubbleWidth - arrowWidth - 6);
-                const tooltip = multi ? bubbleTooltipText(bubble, text) : bubble.display_text[0] ?? "";
+                  ? multiBubbleText({ ...bubble, display_text: formattedDisplayText }, bubbleWidth - 28)
+                  : bestFrameText(formattedDisplayText, bubbleWidth - arrowWidth - 6);
+                const tooltip = multi ? bubbleTooltipText({ ...bubble, display_text: formattedDisplayText }, text) : formattedDisplayText[0] ?? "";
 
                 function handleClick(event: MouseEvent<HTMLButtonElement>) {
                   event.stopPropagation();

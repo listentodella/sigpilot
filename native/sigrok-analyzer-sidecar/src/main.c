@@ -184,6 +184,249 @@ static cJSON *add_array(cJSON *object, const char *key)
     return array;
 }
 
+static void add_optional_string(cJSON *object, const char *key, const char *value)
+{
+    if (value)
+        cJSON_AddStringToObject(object, key, value);
+    else
+        cJSON_AddNullToObject(object, key);
+}
+
+static void add_gslist_strings(cJSON *object, const char *key, const GSList *list)
+{
+    cJSON *array = add_array(object, key);
+    for (const GSList *item = list; item; item = item->next)
+        cJSON_AddItemToArray(array, cJSON_CreateString(item->data ? (const char *)item->data : ""));
+}
+
+static int strv_length(char **values)
+{
+    int length = 0;
+    while (values && values[length])
+        length++;
+    return length;
+}
+
+static cJSON *variant_to_json(GVariant *variant)
+{
+    if (!variant)
+        return cJSON_CreateNull();
+    if (g_variant_is_of_type(variant, G_VARIANT_TYPE_STRING))
+        return cJSON_CreateString(g_variant_get_string(variant, NULL));
+    if (g_variant_is_of_type(variant, G_VARIANT_TYPE_BOOLEAN))
+        return cJSON_CreateBool(g_variant_get_boolean(variant));
+    if (g_variant_is_of_type(variant, G_VARIANT_TYPE_INT64))
+        return cJSON_CreateNumber((double)g_variant_get_int64(variant));
+    if (g_variant_is_of_type(variant, G_VARIANT_TYPE_UINT64))
+        return cJSON_CreateNumber((double)g_variant_get_uint64(variant));
+    if (g_variant_is_of_type(variant, G_VARIANT_TYPE_INT32))
+        return cJSON_CreateNumber(g_variant_get_int32(variant));
+    if (g_variant_is_of_type(variant, G_VARIANT_TYPE_UINT32))
+        return cJSON_CreateNumber(g_variant_get_uint32(variant));
+    if (g_variant_is_of_type(variant, G_VARIANT_TYPE_DOUBLE))
+        return cJSON_CreateNumber(g_variant_get_double(variant));
+
+    gchar *printed = g_variant_print(variant, TRUE);
+    cJSON *json = cJSON_CreateString(printed ? printed : "");
+    g_free(printed);
+    return json;
+}
+
+static const char *channel_type_name(int type)
+{
+    switch (type) {
+    case SRD_CHANNEL_SCLK:
+        return "clock";
+    case SRD_CHANNEL_SDATA:
+        return "serial_data";
+    case SRD_CHANNEL_ADATA:
+        return "analog_data";
+    case SRD_CHANNEL_COMMON:
+    default:
+        return "common";
+    }
+}
+
+static int is_verified_sparse_c_decoder(const char *decoder_id)
+{
+    static const char *ids[] = {
+        "uart_c", "i2c_c", "spi_c", "i2s_c",
+        "can_c", "can_fd_c", "lin_c", "parallel_c",
+    };
+    for (size_t index = 0; index < sizeof(ids) / sizeof(ids[0]); index++) {
+        if (strcmp(decoder_id, ids[index]) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int load_c_decoder_module(const char *decoder_root, const char *decoder_id)
+{
+    if (!decoder_root || !*decoder_root || !decoder_id || !*decoder_id)
+        return SRD_ERR_ARG;
+
+    char *filenames[2];
+#ifdef _WIN32
+    filenames[0] = g_strdup_printf("%s.dll", decoder_id);
+    filenames[1] = g_strdup_printf("lib%s.dll", decoder_id);
+#else
+    filenames[0] = g_strdup_printf("lib%s.so", decoder_id);
+    filenames[1] = g_strdup_printf("%s.so", decoder_id);
+#endif
+    int result = SRD_ERR;
+    for (size_t index = 0; index < sizeof(filenames) / sizeof(filenames[0]); index++) {
+        char *path = g_build_filename(decoder_root, filenames[index], NULL);
+        char *absolute = g_canonicalize_filename(path, NULL);
+        if (g_file_test(absolute, G_FILE_TEST_IS_REGULAR) &&
+            srd_c_decoder_load(absolute) == SRD_OK) {
+            result = SRD_OK;
+            g_free(absolute);
+            g_free(path);
+            break;
+        }
+        g_free(absolute);
+        g_free(path);
+    }
+    for (size_t index = 0; index < sizeof(filenames) / sizeof(filenames[0]); index++)
+        g_free(filenames[index]);
+    return result;
+}
+
+static void load_verified_c_decoders(const char *decoder_root)
+{
+    static const char *ids[] = {
+        "uart_c", "i2c_c", "spi_c", "i2s_c",
+        "can_c", "can_fd_c", "lin_c", "parallel_c",
+    };
+    for (size_t index = 0; index < sizeof(ids) / sizeof(ids[0]); index++)
+        load_c_decoder_module(decoder_root, ids[index]);
+}
+
+static void add_channel_catalog(cJSON *array, const GSList *channels)
+{
+    for (const GSList *item = channels; item; item = item->next) {
+        const struct srd_channel *channel = item->data;
+        if (!channel)
+            continue;
+        cJSON *entry = cJSON_CreateObject();
+        add_optional_string(entry, "id", channel->id);
+        add_optional_string(entry, "name", channel->name);
+        add_optional_string(entry, "desc", channel->desc);
+        cJSON_AddNumberToObject(entry, "order", channel->order);
+        cJSON_AddNumberToObject(entry, "type", channel->type);
+        cJSON_AddStringToObject(entry, "type_name", channel_type_name(channel->type));
+        add_optional_string(entry, "idn", channel->idn);
+        cJSON_AddItemToArray(array, entry);
+    }
+}
+
+static void add_option_catalog(cJSON *array, const GSList *options)
+{
+    for (const GSList *item = options; item; item = item->next) {
+        const struct srd_decoder_option *option = item->data;
+        if (!option)
+            continue;
+        cJSON *entry = cJSON_CreateObject();
+        add_optional_string(entry, "id", option->id);
+        add_optional_string(entry, "idn", option->idn);
+        add_optional_string(entry, "desc", option->desc);
+        cJSON_AddStringToObject(entry, "value_type",
+                                option->def ? g_variant_get_type_string(option->def) : "unknown");
+        cJSON_AddItemToObject(entry, "default", variant_to_json(option->def));
+        cJSON *values = add_array(entry, "values");
+        for (const GSList *value = option->values; value; value = value->next)
+            cJSON_AddItemToArray(values, variant_to_json(value->data));
+        cJSON_AddItemToArray(array, entry);
+    }
+}
+
+static void add_annotation_catalog(cJSON *array, const GSList *annotations, const GSList *ann_types)
+{
+    int ann_class = 0;
+    const GSList *type_item = ann_types;
+    for (const GSList *item = annotations; item; item = item->next, ann_class++) {
+        char **parts = item->data;
+        int part_count = strv_length(parts);
+        int ann_type = type_item ? GPOINTER_TO_INT(type_item->data) : ann_class;
+        cJSON *entry = cJSON_CreateObject();
+        cJSON_AddNumberToObject(entry, "class", ann_class);
+        cJSON_AddNumberToObject(entry, "type", ann_type);
+        if (part_count >= 3) {
+            add_optional_string(entry, "id", parts[1]);
+            add_optional_string(entry, "desc", parts[2]);
+        } else {
+            add_optional_string(entry, "id", part_count > 0 ? parts[0] : NULL);
+            add_optional_string(entry, "desc", part_count > 1 ? parts[1] : NULL);
+        }
+        cJSON *labels = add_array(entry, "labels");
+        for (int index = 0; index < part_count; index++)
+            cJSON_AddItemToArray(labels, cJSON_CreateString(parts[index] ? parts[index] : ""));
+        cJSON_AddItemToArray(array, entry);
+        if (type_item)
+            type_item = type_item->next;
+    }
+}
+
+static void add_annotation_row_catalog(cJSON *array, const GSList *rows)
+{
+    for (const GSList *item = rows; item; item = item->next) {
+        const struct srd_decoder_annotation_row *row = item->data;
+        if (!row)
+            continue;
+        cJSON *entry = cJSON_CreateObject();
+        add_optional_string(entry, "id", row->id);
+        add_optional_string(entry, "desc", row->desc);
+        cJSON *classes = add_array(entry, "ann_classes");
+        for (const GSList *ann_class = row->ann_classes; ann_class; ann_class = ann_class->next)
+            cJSON_AddItemToArray(classes, cJSON_CreateNumber(GPOINTER_TO_SIZE(ann_class->data)));
+        cJSON_AddItemToArray(array, entry);
+    }
+}
+
+static void add_pair_catalog(cJSON *array, const GSList *pairs)
+{
+    int pair_class = 0;
+    for (const GSList *item = pairs; item; item = item->next, pair_class++) {
+        char **parts = item->data;
+        cJSON *entry = cJSON_CreateObject();
+        cJSON_AddNumberToObject(entry, "class", pair_class);
+        add_optional_string(entry, "id", parts && parts[0] ? parts[0] : NULL);
+        add_optional_string(entry, "desc", parts && parts[1] ? parts[1] : NULL);
+        cJSON_AddItemToArray(array, entry);
+    }
+}
+
+static void add_decoder_catalog_item(cJSON *array, const struct srd_decoder *decoder)
+{
+    cJSON *entry = cJSON_CreateObject();
+    add_optional_string(entry, "id", decoder->id);
+    add_optional_string(entry, "name", decoder->name);
+    add_optional_string(entry, "longname", decoder->longname);
+    add_optional_string(entry, "desc", decoder->desc);
+    add_optional_string(entry, "license", decoder->license);
+    cJSON_AddStringToObject(entry, "kind", decoder->is_c_decoder ? "c" : "python");
+    cJSON_AddStringToObject(entry, "runner_status",
+                            decoder->is_c_decoder && is_verified_sparse_c_decoder(decoder->id)
+                                ? "verified_sparse_c"
+                                : "catalog_only");
+    add_gslist_strings(entry, "inputs", decoder->inputs);
+    add_gslist_strings(entry, "outputs", decoder->outputs);
+    add_gslist_strings(entry, "tags", decoder->tags);
+    cJSON *channels = add_array(entry, "channels");
+    add_channel_catalog(channels, decoder->channels);
+    cJSON *optional_channels = add_array(entry, "optional_channels");
+    add_channel_catalog(optional_channels, decoder->opt_channels);
+    cJSON *options = add_array(entry, "options");
+    add_option_catalog(options, decoder->options);
+    cJSON *annotations = add_array(entry, "annotations");
+    add_annotation_catalog(annotations, decoder->annotations, decoder->ann_types);
+    cJSON *annotation_rows = add_array(entry, "annotation_rows");
+    add_annotation_row_catalog(annotation_rows, decoder->annotation_rows);
+    cJSON *binary = add_array(entry, "binary");
+    add_pair_catalog(binary, decoder->binary);
+    cJSON_AddItemToArray(array, entry);
+}
+
 static void ensure_annotations(annotation_list *list)
 {
     if (list->count < list->capacity)
@@ -1483,18 +1726,32 @@ static cJSON *render_lin_output(const decode_collector *collector, const lin_set
     return root;
 }
 
-static struct srd_decoder *initialize_decoder(const char *decoder_root, const char *decoder_id)
+static int initialize_sigrok(const char *decoder_root, const char *python_decoder_root,
+                             int load_full_catalog)
 {
-    if (srd_init(NULL) != SRD_OK)
-        return NULL;
+    if (srd_init(python_decoder_root && *python_decoder_root ? python_decoder_root : NULL) != SRD_OK)
+        return SRD_ERR;
     srd_c_decoder_paths_clear();
     if (decoder_root && *decoder_root)
         srd_c_decoder_path_add(decoder_root);
-    srd_c_decoder_load_all();
+    if (load_full_catalog)
+        return srd_decoder_load_all();
+    load_verified_c_decoders(decoder_root);
+    return SRD_OK;
+}
+
+static struct srd_decoder *initialize_decoder(const char *decoder_root,
+                                              const char *python_decoder_root,
+                                              const char *decoder_id)
+{
+    if (initialize_sigrok(decoder_root, python_decoder_root, 0) != SRD_OK)
+        return NULL;
+    load_c_decoder_module(decoder_root, decoder_id);
     return srd_decoder_get_by_id(decoder_id);
 }
 
-static cJSON *decode_request(cJSON *request, const char *decoder_root)
+static cJSON *decode_request(cJSON *request, const char *decoder_root,
+                             const char *python_decoder_root)
 {
     int channel_count = json_int(request, "channel_count", 0);
     cJSON *sample_count_json = cJSON_GetObjectItem(request, "sample_count");
@@ -1549,7 +1806,7 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     if ((protocol == DECODER_CAN || protocol == DECODER_CAN_FD) && can.inverted)
         input.channels[can.can_rx].initial_level ^= 1u;
 
-    struct srd_decoder *decoder = initialize_decoder(decoder_root, decoder_id);
+    struct srd_decoder *decoder = initialize_decoder(decoder_root, python_decoder_root, decoder_id);
     if (!decoder)
         fatal("requested PXView C decoder is not available");
 
@@ -1703,9 +1960,11 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     return output;
 }
 
-static cJSON *probe(const char *decoder_root)
+static cJSON *probe(const char *decoder_root, const char *python_decoder_root, int include_catalog)
 {
-    struct srd_decoder *uart = initialize_decoder(decoder_root, "uart_c");
+    if (initialize_sigrok(decoder_root, python_decoder_root, include_catalog) != SRD_OK)
+        fatal("failed to initialize libsigrokdecode decoder catalog");
+    struct srd_decoder *uart = srd_decoder_get_by_id("uart_c");
     struct srd_decoder *i2c = srd_decoder_get_by_id("i2c_c");
     struct srd_decoder *spi = srd_decoder_get_by_id("spi_c");
     struct srd_decoder *i2s = srd_decoder_get_by_id("i2s_c");
@@ -1738,6 +1997,27 @@ static cJSON *probe(const char *decoder_root)
     cJSON_AddStringToObject(root, "decoder_name", "PXView native C decoder pack");
     cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c,can_c,can_fd_c,lin_c,parallel_c");
     cJSON_AddNumberToObject(root, "api_version", SRD_C_DECODER_API_VERSION);
+    add_optional_string(root, "decoder_root", decoder_root);
+    add_optional_string(root, "python_decoder_root", python_decoder_root);
+    cJSON_AddBoolToObject(root, "catalog_included", include_catalog);
+    int c_decoder_count = 0;
+    int python_decoder_count = 0;
+    cJSON *catalog = include_catalog ? add_array(root, "decoder_catalog") : NULL;
+    for (const GSList *item = srd_decoder_list(); item; item = item->next) {
+        const struct srd_decoder *decoder = item->data;
+        if (!decoder)
+            continue;
+        if (decoder->is_c_decoder)
+            c_decoder_count++;
+        else
+            python_decoder_count++;
+        if (catalog)
+            add_decoder_catalog_item(catalog, decoder);
+    }
+    if (!catalog)
+        add_array(root, "decoder_catalog");
+    cJSON_AddNumberToObject(root, "c_decoder_count", c_decoder_count);
+    cJSON_AddNumberToObject(root, "python_decoder_count", python_decoder_count);
     srd_exit();
     return root;
 }
@@ -1745,11 +2025,17 @@ static cJSON *probe(const char *decoder_root)
 int main(int argc, char **argv)
 {
     const char *decoder_root = NULL;
+    const char *python_decoder_root = NULL;
     int should_probe = 0;
     int should_decode = 0;
+    int include_catalog = 0;
     for (int index = 1; index < argc; index++) {
         if (strcmp(argv[index], "--decoder-root") == 0 && index + 1 < argc)
             decoder_root = argv[++index];
+        else if (strcmp(argv[index], "--python-decoder-root") == 0 && index + 1 < argc)
+            python_decoder_root = argv[++index];
+        else if (strcmp(argv[index], "--catalog") == 0)
+            include_catalog = 1;
         else if (strcmp(argv[index], "--probe") == 0)
             should_probe = 1;
         else if (strcmp(argv[index], "--decode") == 0)
@@ -1757,20 +2043,20 @@ int main(int argc, char **argv)
     }
 
     if (should_probe) {
-        cJSON *response = probe(decoder_root);
+        cJSON *response = probe(decoder_root, python_decoder_root, include_catalog);
         print_json(response);
         cJSON_Delete(response);
         return 0;
     }
     if (!should_decode)
-        fatal("usage: pxlogic-sigrok-sidecar --decoder-root PATH (--probe|--decode)");
+        fatal("usage: pxlogic-sigrok-sidecar --decoder-root PATH [--python-decoder-root PATH] (--probe|--decode)");
 
     char *input = read_stdin();
     cJSON *request = cJSON_Parse(input);
     free(input);
     if (!request)
         fatal("invalid JSON request");
-    cJSON *response = decode_request(request, decoder_root);
+    cJSON *response = decode_request(request, decoder_root, python_decoder_root);
     print_json(response);
     cJSON_Delete(response);
     cJSON_Delete(request);

@@ -1,16 +1,17 @@
 import { X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { UiAnalyzerInstance } from "../lib/analyzers";
+import type { NativeCatalogOptionMetadata, UiAnalyzerInstance } from "../lib/analyzers";
 import {
+  PARALLEL_DATA_KEYS,
   analyzerBackendOptions,
+  analyzerCanRunDecoder,
   analyzerSupportsDecoding,
   createAnalyzerInstance,
   decoderBackendLabel,
+  sigrokCatalogRunnerLabel,
 } from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SaleaeIcon } from "./SaleaeIcon";
-
-const PARALLEL_DATA_KEYS = Array.from({ length: 16 }, (_, index) => `d${index}`);
 
 interface AnalyzerSettingsDialogProps {
   analyzer: UiAnalyzerInstance;
@@ -31,6 +32,9 @@ export function AnalyzerSettingsDialog({
 }: AnalyzerSettingsDialogProps) {
   const [draft, setDraft] = useState(analyzer);
   const supported = analyzerSupportsDecoding(draft);
+  const runnable = analyzerCanRunDecoder(draft);
+  const isSigrokCatalogAnalyzer = Boolean(draft.nativeRunnerStatus || draft.nativeCatalogKind || draft.nativeCatalogChannels);
+  const usesGenericNativeForm = isSigrokCatalogAnalyzer && !hasSpecializedSettingsForm(draft.type);
   const channelCount = Math.max(1, channelLabels.length, channelEnabled.length);
   const validationError = validateAnalyzer(draft);
 
@@ -47,6 +51,18 @@ export function AnalyzerSettingsDialog({
   function reset() {
     setDraft((current) => {
       const defaults = createAnalyzerInstance(current.type, [], 0, current.decoderBackend);
+      const nativeChannels =
+        current.nativeCatalogChannels?.reduce<Record<string, number | null>>((channels, catalogChannel, index) => {
+          channels[catalogChannel.id] = catalogChannel.required ? index % 32 : null;
+          return channels;
+        }, {}) ?? defaults.nativeChannels;
+      const nativeOptions =
+        current.nativeCatalogOptions?.reduce<Record<string, boolean | number | string>>((options, option) => {
+          if (option.defaultValue !== undefined) {
+            options[option.id] = option.defaultValue;
+          }
+          return options;
+        }, {}) ?? defaults.nativeOptions;
       return {
         ...current,
         channel: 0,
@@ -67,11 +83,11 @@ export function AnalyzerSettingsDialog({
         spiClockPhase: false,
         spiBitsPerTransfer: 8,
         spiMsbFirst: true,
-        nativeDecoderId: defaults.nativeDecoderId,
-        nativeProtocolName: defaults.nativeProtocolName,
+        nativeDecoderId: isSigrokCatalogAnalyzer ? current.nativeDecoderId : defaults.nativeDecoderId,
+        nativeProtocolName: isSigrokCatalogAnalyzer ? current.nativeProtocolName : defaults.nativeProtocolName,
         nativePrimaryChannel: defaults.nativePrimaryChannel,
-        nativeChannels: defaults.nativeChannels,
-        nativeOptions: defaults.nativeOptions,
+        nativeChannels,
+        nativeOptions,
         showInDataTable: true,
         streamToTerminal: false,
       };
@@ -96,7 +112,9 @@ export function AnalyzerSettingsDialog({
                   ? draft.nativeChannels.can_rx ?? draft.nativePrimaryChannel
                   : draft.type === "Simple Parallel"
                     ? draft.nativePrimaryChannel
-                    : draft.channel,
+                    : isSigrokCatalogAnalyzer
+                      ? draft.nativePrimaryChannel
+                      : draft.channel,
     });
   }
 
@@ -669,6 +687,53 @@ export function AnalyzerSettingsDialog({
             </>
           )}
 
+          {usesGenericNativeForm && (
+            <>
+              {draft.nativeCatalogDescription && (
+                <div className="analyzerDialogNote">{draft.nativeCatalogDescription}</div>
+              )}
+              {draft.nativeCatalogChannels?.map((catalogChannel, index) => (
+                <AnalyzerSettingRow
+                  key={catalogChannel.id}
+                  label={catalogChannel.name}
+                  required={catalogChannel.required}
+                >
+                  <ChannelSelect
+                    {...channelSelectProps}
+                    autoFocus={index === 0}
+                    optional={!catalogChannel.required}
+                    onChange={(channel) =>
+                      setDraft((current) => {
+                        const nativeChannels = { ...current.nativeChannels, [catalogChannel.id]: channel };
+                        const primary =
+                          current.nativeCatalogChannels
+                            ?.map((item) => nativeChannels[item.id])
+                            .find((candidate): candidate is number => typeof candidate === "number") ??
+                          current.nativePrimaryChannel;
+                        return { ...current, nativeChannels, nativePrimaryChannel: primary };
+                      })
+                    }
+                    value={draft.nativeChannels[catalogChannel.id] ?? null}
+                  />
+                </AnalyzerSettingRow>
+              ))}
+              {draft.nativeCatalogOptions?.map((option) => (
+                <AnalyzerSettingRow key={option.id} label={option.desc || option.id}>
+                  <GenericNativeOptionControl
+                    option={option}
+                    value={draft.nativeOptions[option.id]}
+                    onChange={(value) =>
+                      setDraft((current) => ({
+                        ...current,
+                        nativeOptions: { ...current.nativeOptions, [option.id]: value },
+                      }))
+                    }
+                  />
+                </AnalyzerSettingRow>
+              ))}
+            </>
+          )}
+
           <AnalyzerSettingRow label="Decoder Library">
             <select
               value={draft.decoderBackend}
@@ -684,7 +749,10 @@ export function AnalyzerSettingsDialog({
                   {decoderBackendLabel("legacy_rust")}
                 </option>
               )}
-              {analyzerBackendOptions(draft.type).map((backend) => (
+              {draft.decoderBackend === "sigrok_native" && isSigrokCatalogAnalyzer && (
+                <option value="sigrok_native">{decoderBackendLabel("sigrok_native")}</option>
+              )}
+              {!isSigrokCatalogAnalyzer && analyzerBackendOptions(draft.type).map((backend) => (
                 <option key={backend} value={backend}>
                   {decoderBackendLabel(backend)}
                 </option>
@@ -693,6 +761,11 @@ export function AnalyzerSettingsDialog({
           </AnalyzerSettingRow>
 
           {!supported && <div className="analyzerDialogWarning">Decoder backend unavailable</div>}
+          {supported && !runnable && (
+            <div className="analyzerDialogWarning">
+              {sigrokCatalogRunnerLabel(draft.nativeRunnerStatus)} decoder: settings can be saved, but execution is not wired to a sparse runner yet.
+            </div>
+          )}
           {validationError && <div className="analyzerDialogWarning">{validationError}</div>}
 
           <AnalyzerSettingRow>
@@ -733,6 +806,67 @@ export function AnalyzerSettingsDialog({
         </footer>
       </section>
     </div>
+  );
+}
+
+function GenericNativeOptionControl({
+  onChange,
+  option,
+  value,
+}: {
+  onChange: (value: boolean | number | string) => void;
+  option: NativeCatalogOptionMetadata;
+  value: boolean | number | string | undefined;
+}) {
+  const current = value ?? option.defaultValue ?? option.values[0] ?? "";
+  if (option.values.length > 0) {
+    return (
+      <select
+        value={String(current)}
+        onChange={(event) => {
+          const selected = option.values.find((candidate) => String(candidate) === event.target.value);
+          onChange(selected ?? event.target.value);
+        }}
+      >
+        {option.values.map((candidate) => (
+          <option key={String(candidate)} value={String(candidate)}>
+            {String(candidate)}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  if (typeof current === "boolean" || option.valueType === "b") {
+    return (
+      <label className="analyzerDialogCheckbox compact">
+        <input
+          checked={current === true}
+          onChange={(event) => onChange(event.target.checked)}
+          type="checkbox"
+        />
+        <span>{current === true ? "Enabled" : "Disabled"}</span>
+      </label>
+    );
+  }
+
+  if (typeof current === "number" || option.valueType === "x" || option.valueType === "t" || option.valueType === "u") {
+    return (
+      <input
+        step={1}
+        type="number"
+        value={Number(current)}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+    );
+  }
+
+  return (
+    <input
+      type="text"
+      value={String(current)}
+      onChange={(event) => onChange(event.target.value)}
+    />
   );
 }
 
@@ -933,6 +1067,21 @@ function ChannelOptionContent({
 }
 
 function validateAnalyzer(analyzer: UiAnalyzerInstance) {
+  if (analyzer.nativeCatalogChannels?.length && !hasSpecializedSettingsForm(analyzer.type)) {
+    const missing = analyzer.nativeCatalogChannels.find(
+      (channel) => channel.required && typeof analyzer.nativeChannels[channel.id] !== "number",
+    );
+    if (missing) return `Select ${missing.name}.`;
+    const assigned = analyzer.nativeCatalogChannels
+      .map((channel) => analyzer.nativeChannels[channel.id])
+      .filter((channel): channel is number => typeof channel === "number");
+    if (new Set(assigned).size !== assigned.length) return "Decoder inputs must use different channels.";
+    const invalidNumber = analyzer.nativeCatalogOptions?.find((option) => {
+      const value = analyzer.nativeOptions[option.id];
+      return typeof value === "number" && !Number.isFinite(value);
+    });
+    if (invalidNumber) return `${invalidNumber.desc || invalidNumber.id} must be a number.`;
+  }
   if (analyzer.type === "Async Serial") {
     if (analyzer.baudRate <= 0) return "Bit rate must be greater than zero.";
     if (analyzer.uartDataBits < 5 || analyzer.uartDataBits > 9) {
@@ -1022,6 +1171,10 @@ function validateAnalyzer(analyzer: UiAnalyzerInstance) {
     }
   }
   return "";
+}
+
+function hasSpecializedSettingsForm(type: string) {
+  return ["Async Serial", "I2C", "SPI", "I2S", "Simple Parallel", "LIN", "CAN", "CAN-FD"].includes(type);
 }
 
 function AnalyzerSettingRow({
