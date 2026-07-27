@@ -121,8 +121,6 @@ jobs:
           name: pxlogic-macos-${{ matrix.arch }}
           path: |
             target/${{ matrix.target }}/release/pxlogic-desktop
-            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            target/${{ matrix.target }}/release/bundle/macos/*.app
           if-no-files-found: error
           retention-days: 30
 
@@ -132,7 +130,6 @@ jobs:
         with:
           files: |
             target/${{ matrix.target }}/release/pxlogic-desktop
-            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           draft: false
           prerelease: false
         env:
