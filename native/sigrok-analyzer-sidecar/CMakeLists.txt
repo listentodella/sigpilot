@@ -63,6 +63,7 @@ add_pxview_c_decoder(i2s)
 add_pxview_c_decoder(lin)
 add_pxview_c_decoder(can)
 add_pxview_c_decoder(can_fd)
+add_pxview_c_decoder(parallel)
 
 add_executable(pxlogic-sigrok-sidecar src/main.c)
 target_compile_definitions(pxlogic-sigrok-sidecar PRIVATE CJSON_IMPLEMENTATION)
@@ -85,4 +86,5 @@ add_dependencies(pxlogic-sigrok-sidecar
     pxview_lin_c
     pxview_can_c
     pxview_can_fd_c
+    pxview_parallel_c
 )

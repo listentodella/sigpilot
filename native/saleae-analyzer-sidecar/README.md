@@ -1,6 +1,6 @@
 # Saleae Native analyzer sidecar
 
-This macOS arm64 sidecar hosts Saleae's original Logic 2.4.43 Async Serial, I2C, SPI, I2S / PCM, CAN, and LIN analyzers in an isolated process.
+This macOS arm64 sidecar hosts Saleae's original Logic 2.4.43 Async Serial, I2C, SPI, I2S / PCM, CAN, LIN, and Simple Parallel analyzers in an isolated process.
 
 It does not copy Saleae binaries into the repository. `verify.sh` extracts the required files from a local Logic installer into ignored `target/` storage, verifies their SHA-256 hashes, and runs packed/sparse native decoder fixtures.
 
@@ -20,4 +20,4 @@ export PXLOGIC_SALEAE_SIDECAR="$PWD/target/native/saleae-analyzer-sidecar/pxlogi
 export PXLOGIC_SALEAE_RUNTIME_ROOT="$PWD/target/native/saleae-runtime-2.4.43"
 ```
 
-Async Serial, I2C, SPI, I2S / PCM, CAN, and LIN use the same transition-indexed request for packed PXLogic captures and sparse `.sal` captures. Rust only transports captures and normalizes sidecar output; protocol state machines remain in the original Saleae plugins. `Auto` remains on the compatibility backend until native backends cover the remaining protocol set and streaming contract.
+Async Serial, I2C, SPI, I2S / PCM, CAN, LIN, and Simple Parallel use the same transition-indexed request for packed PXLogic captures and sparse `.sal` captures. Rust only transports captures and normalizes sidecar output; protocol state machines remain in the original Saleae plugins. `Auto` remains on the compatibility backend until native backends cover the remaining protocol set and streaming contract.

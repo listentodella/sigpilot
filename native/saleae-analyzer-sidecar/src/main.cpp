@@ -41,6 +41,7 @@ constexpr const char* kSpiPluginSha256 = "366dfc0b312385f5e608245a9493c33194ed81
 constexpr const char* kI2sPluginSha256 = "28c6864400d3f6f6baa3f71a4598f8cff8a00fa7b634148015d1707d9b443974";
 constexpr const char* kCanPluginSha256 = "ec1fcaa48d25930c43fe315e1c30917a475d01e7b85ad81d71e674ad81d1e251";
 constexpr const char* kLinPluginSha256 = "ce565e316ba9bdfc3d2d15bff609deedef6ef276e3b187a0ed150c4389e1bccc";
+constexpr const char* kParallelPluginSha256 = "8ece40a89c12ccae04b8155d76466f7b9055b45678590f4238a96f83226925df";
 
 enum class DecoderProtocol
 {
@@ -50,6 +51,7 @@ enum class DecoderProtocol
     I2s,
     Can,
     Lin,
+    Parallel,
 };
 
 struct RuntimePaths
@@ -62,6 +64,7 @@ struct RuntimePaths
     fs::path i2s_plugin;
     fs::path can_plugin;
     fs::path lin_plugin;
+    fs::path parallel_plugin;
 
     const fs::path& PluginPath(DecoderProtocol protocol) const
     {
@@ -78,6 +81,8 @@ struct RuntimePaths
             return can_plugin;
         case DecoderProtocol::Lin:
             return lin_plugin;
+        case DecoderProtocol::Parallel:
+            return parallel_plugin;
         }
         throw std::runtime_error("unknown Saleae decoder protocol");
     }
@@ -142,7 +147,15 @@ struct LinSettings
     U32 version = 2;
 };
 
-using DecoderSettings = std::variant<UartSettings, I2cSettings, SpiSettings, I2sSettings, CanSettings, LinSettings>;
+struct ParallelSettings
+{
+    std::array<std::optional<U32>, 16> data{};
+    std::optional<U32> clock;
+    U32 clock_state = 0;
+};
+
+using DecoderSettings =
+    std::variant<UartSettings, I2cSettings, SpiSettings, I2sSettings, CanSettings, LinSettings, ParallelSettings>;
 
 std::string Sha256(const fs::path& path)
 {
@@ -181,13 +194,14 @@ RuntimePaths ValidateRuntimeRoot(const fs::path& root)
                        root / "Analyzers" / "libspi_analyzer.so",
                        root / "Analyzers" / "libi2s_analyzer.so",
                        root / "Analyzers" / "libcan_analyzer.so",
-                       root / "Analyzers" / "liblin_analyzer.so"};
+                       root / "Analyzers" / "liblin_analyzer.so",
+                       root / "Analyzers" / "libsimple_parallel_analyzer.so"};
     if (!fs::is_regular_file(paths.runtime_library) || !fs::is_regular_file(paths.serial_plugin) ||
         !fs::is_regular_file(paths.i2c_plugin) || !fs::is_regular_file(paths.spi_plugin) ||
         !fs::is_regular_file(paths.i2s_plugin) || !fs::is_regular_file(paths.can_plugin) ||
-        !fs::is_regular_file(paths.lin_plugin)) {
+        !fs::is_regular_file(paths.lin_plugin) || !fs::is_regular_file(paths.parallel_plugin)) {
         throw std::runtime_error(
-            "Saleae runtime root must contain libAnalyzer.dylib plus Serial, I2C, SPI, I2S, CAN, and LIN analyzer plugins: " +
+            "Saleae runtime root must contain libAnalyzer.dylib plus Serial, I2C, SPI, I2S, CAN, LIN, and Simple Parallel analyzer plugins: " +
             root.string());
     }
     return paths;
@@ -217,7 +231,8 @@ RuntimePaths LocateRuntime(const std::optional<fs::path>& explicit_root)
             fs::is_regular_file(candidate / "Analyzers" / "libspi_analyzer.so") &&
             fs::is_regular_file(candidate / "Analyzers" / "libi2s_analyzer.so") &&
             fs::is_regular_file(candidate / "Analyzers" / "libcan_analyzer.so") &&
-            fs::is_regular_file(candidate / "Analyzers" / "liblin_analyzer.so")) {
+            fs::is_regular_file(candidate / "Analyzers" / "liblin_analyzer.so") &&
+            fs::is_regular_file(candidate / "Analyzers" / "libsimple_parallel_analyzer.so")) {
             return ValidateRuntimeRoot(candidate);
         }
     }
@@ -464,6 +479,17 @@ void ConfigureAnalyzer(Analyzer* analyzer, const LinSettings& settings)
     CommitSettings(analyzer_settings, "LIN");
 }
 
+void ConfigureAnalyzer(Analyzer* analyzer, const ParallelSettings& settings)
+{
+    auto* analyzer_settings = AnalyzerSettingsFor(analyzer);
+    for (std::size_t index = 0; index < settings.data.size(); ++index) {
+        SetChannelSetting(analyzer_settings, "D" + std::to_string(index), settings.data.at(index));
+    }
+    SetChannelSetting(analyzer_settings, "Clock", settings.clock);
+    SetNumberSetting(analyzer_settings, "Clock State", settings.clock_state);
+    CommitSettings(analyzer_settings, "Simple Parallel");
+}
+
 std::optional<U32> OptionalChannel(const json& channels, const char* key)
 {
     if (!channels.contains(key) || channels.at(key).is_null()) {
@@ -494,7 +520,10 @@ DecoderProtocol ParseProtocol(const json& input)
     if (protocol == "lin") {
         return DecoderProtocol::Lin;
     }
-    throw std::runtime_error("decoder.protocol must be uart, i2c, spi, i2s, can, or lin");
+    if (protocol == "parallel" || protocol == "simple_parallel") {
+        return DecoderProtocol::Parallel;
+    }
+    throw std::runtime_error("decoder.protocol must be uart, i2c, spi, i2s, can, lin, or parallel");
 }
 
 UartSettings ParseUartSettings(const json& input)
@@ -625,6 +654,41 @@ LinSettings ParseLinSettings(const json& input)
     return settings;
 }
 
+ParallelSettings ParseParallelSettings(const json& input)
+{
+    const auto& decoder = input.contains("decoder") ? input.at("decoder") : input;
+    const auto& channels = decoder.contains("channels") ? decoder.at("channels") : decoder.at("settings");
+    const auto& options = decoder.contains("options") ? decoder.at("options") : decoder.at("settings");
+    ParallelSettings settings;
+    std::vector<U32> configured_channels;
+    for (std::size_t index = 0; index < settings.data.size(); ++index) {
+        const auto key = "d" + std::to_string(index);
+        settings.data.at(index) = OptionalChannel(channels, key.c_str());
+        if (settings.data.at(index).has_value()) {
+            configured_channels.push_back(*settings.data.at(index));
+        }
+    }
+    settings.clock = channels.contains("clk") ? OptionalChannel(channels, "clk") : OptionalChannel(channels, "clock");
+    if (settings.clock.has_value()) {
+        configured_channels.push_back(*settings.clock);
+    }
+    const auto explicit_state = options.value("clock_state", -1);
+    if (explicit_state >= 0) {
+        settings.clock_state = static_cast<U32>(explicit_state);
+    } else {
+        const auto edge = Lower(options.value("clock_edge", std::string("rising")));
+        settings.clock_state = edge == "falling" || edge == "falling-edge" ? 1u : edge == "dual" ? 2u : 0u;
+    }
+    if (configured_channels.size() < 2 || !settings.clock.has_value() || settings.clock_state > 2) {
+        throw std::runtime_error("Simple Parallel requires Clock, at least one data channel, and a valid clock edge");
+    }
+    std::sort(configured_channels.begin(), configured_channels.end());
+    if (std::adjacent_find(configured_channels.begin(), configured_channels.end()) != configured_channels.end()) {
+        throw std::runtime_error("Simple Parallel channels must be distinct");
+    }
+    return settings;
+}
+
 DecoderSettings ParseSettings(const json& input, DecoderProtocol protocol)
 {
     switch (protocol) {
@@ -640,6 +704,8 @@ DecoderSettings ParseSettings(const json& input, DecoderProtocol protocol)
         return ParseCanSettings(input);
     case DecoderProtocol::Lin:
         return ParseLinSettings(input);
+    case DecoderProtocol::Parallel:
+        return ParseParallelSettings(input);
     }
     throw std::runtime_error("unknown Saleae decoder protocol");
 }
@@ -752,6 +818,8 @@ const char* ProtocolName(DecoderProtocol protocol)
         return "CAN";
     case DecoderProtocol::Lin:
         return "LIN";
+    case DecoderProtocol::Parallel:
+        return "Simple Parallel";
     }
     return "Unknown";
 }
@@ -778,6 +846,14 @@ std::vector<U32> BubbleChannels(const DecoderSettings& settings)
                 return std::vector<U32>{value.channel};
             } else if constexpr (std::is_same_v<Type, LinSettings>) {
                 return std::vector<U32>{value.channel};
+            } else if constexpr (std::is_same_v<Type, ParallelSettings>) {
+                std::vector<U32> channels;
+                for (const auto channel : value.data) {
+                    if (channel.has_value()) {
+                        channels.push_back(*channel);
+                    }
+                }
+                return channels;
             } else {
                 return std::vector<U32>{value.data};
             }
@@ -812,6 +888,26 @@ void AddChannelValue(json& values, U32 channel, const char* role, U64 value, U32
                       {"role", role},
                       {"label", HexLabel(value, bits)},
                       {"value", value}});
+}
+
+U32 ParallelBitWidth(const ParallelSettings& settings)
+{
+    for (std::size_t index = settings.data.size(); index > 0; --index) {
+        if (settings.data.at(index - 1).has_value()) {
+            return static_cast<U32>(index);
+        }
+    }
+    return 1;
+}
+
+std::optional<U32> ParallelPrimaryChannel(const ParallelSettings& settings)
+{
+    for (const auto channel : settings.data) {
+        if (channel.has_value()) {
+            return channel;
+        }
+    }
+    return std::nullopt;
 }
 
 void AddFieldChannelValue(json& values, const DecoderSettings& settings, const std::string& name, U64 value)
@@ -854,6 +950,11 @@ void AddFieldChannelValue(json& values, const DecoderSettings& settings, const s
                 (void)decoder;
                 (void)lower_name;
                 (void)value;
+            } else if constexpr (std::is_same_v<Type, ParallelSettings>) {
+                if ((lower_name == "data" || lower_name == "value" || lower_name == "parallel") &&
+                    ParallelPrimaryChannel(decoder).has_value()) {
+                    AddChannelValue(values, *ParallelPrimaryChannel(decoder), "Data", value, ParallelBitWidth(decoder));
+                }
             }
         },
         settings);
@@ -929,6 +1030,13 @@ void AddLegacyFields(const PxlogicSaleae::CapturedFrame& captured, const std::ve
                     AddChannelValue(channel_values, *decoder.miso, "MISO", captured.data2,
                                     decoder.bits_per_transfer);
                 }
+            } else if constexpr (std::is_same_v<Type, ParallelSettings>) {
+                const auto primary = ParallelPrimaryChannel(decoder);
+                if (!primary.has_value()) {
+                    return;
+                }
+                fields.push_back({{"name", "data"}, {"value", json{{"Unsigned", captured.data1}}}});
+                AddChannelValue(channel_values, *primary, "Data", captured.data1, ParallelBitWidth(decoder));
             }
         },
         settings);
@@ -1073,6 +1181,7 @@ json Probe(const RuntimePaths& runtime)
     Plugin i2s(runtime.i2s_plugin);
     Plugin can(runtime.can_plugin);
     Plugin lin(runtime.lin_plugin);
+    Plugin parallel(runtime.parallel_plugin);
     const auto runtime_hash = Sha256(runtime.runtime_library);
     const auto serial_hash = Sha256(runtime.serial_plugin);
     const auto i2c_hash = Sha256(runtime.i2c_plugin);
@@ -1080,19 +1189,20 @@ json Probe(const RuntimePaths& runtime)
     const auto i2s_hash = Sha256(runtime.i2s_plugin);
     const auto can_hash = Sha256(runtime.can_plugin);
     const auto lin_hash = Sha256(runtime.lin_plugin);
+    const auto parallel_hash = Sha256(runtime.parallel_plugin);
     const bool abi_match = runtime_hash == kRuntimeSha256 && serial_hash == kSerialPluginSha256 &&
                            i2c_hash == kI2cPluginSha256 && spi_hash == kSpiPluginSha256 &&
                            i2s_hash == kI2sPluginSha256 && can_hash == kCanPluginSha256 &&
-                           lin_hash == kLinPluginSha256;
+                           lin_hash == kLinPluginSha256 && parallel_hash == kParallelPluginSha256;
     return {{"kind", "saleae_native"},
             {"display_name", "Saleae Native analyzer sidecar"},
             {"available", abi_match},
-            {"protocols", json::array({"UART", "I2C", "SPI", "I2S", "CAN", "LIN"})},
+            {"protocols", json::array({"UART", "I2C", "SPI", "I2S", "CAN", "LIN", "Parallel"})},
             {"supports_streaming", false},
             {"isolation", "sidecar"},
             {"analyzer_name",
              std::string(serial.Name()) + ", " + i2c.Name() + ", " + spi.Name() + ", " + i2s.Name() + ", " +
-                 can.Name() + ", " + lin.Name()},
+                 can.Name() + ", " + lin.Name() + ", " + parallel.Name()},
             {"runtime_root", runtime.root.string()},
             {"runtime_sha256", runtime_hash},
             {"runtime_sha256_expected", kRuntimeSha256},
@@ -1125,7 +1235,12 @@ json Probe(const RuntimePaths& runtime)
                            {"name", lin.Name()},
                            {"sha256", lin_hash},
                            {"sha256_expected", kLinPluginSha256},
-                           {"settings_schema", SettingsSchema(lin)}}})},
+                           {"settings_schema", SettingsSchema(lin)}},
+                          {{"protocol", "Parallel"},
+                           {"name", parallel.Name()},
+                           {"sha256", parallel_hash},
+                           {"sha256_expected", kParallelPluginSha256},
+                           {"settings_schema", SettingsSchema(parallel)}}})},
             {"abi_match", abi_match}};
 }
 

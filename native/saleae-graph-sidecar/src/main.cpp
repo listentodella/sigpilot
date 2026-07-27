@@ -1040,6 +1040,27 @@ Json BuildSaleaeLinSettings(const Json& settings)
                                     {"value", options.value("baudrate", 20000)}})});
 }
 
+Json BuildSaleaeParallelSettings(const Json& settings)
+{
+    const Json channels = settings.value("channels", Json::object());
+    const Json options = settings.value("options", Json::object());
+    Json result = Json::array();
+    for (int bit = 0; bit < 16; ++bit) {
+        const std::string name = "D" + std::to_string(bit);
+        result.push_back(SaleaeChannelSetting(name, name, false,
+                                              channels.value("d" + std::to_string(bit), Json(nullptr))));
+    }
+    Json clock_state_options = Json::array(
+        {SaleaeNumberOption("Rising edge", 0), SaleaeNumberOption("Falling edge", 1),
+         SaleaeNumberOption("Dual edge", 2)});
+    const std::string edge = options.value("clock_edge", "rising");
+    const int clock_state = options.value("clock_state", edge == "falling" ? 1 : edge == "dual" ? 2 : 0);
+    result.push_back(SaleaeChannelSetting("Clock", "Clock", true, channels.value("clk", Json(nullptr))));
+    result.push_back(SaleaeNumberListSetting("Clock State", "Define whether the data is valid on Clock rising or falling edge",
+                                              std::move(clock_state_options), clock_state));
+    return result;
+}
+
 Json BuildSaleaeAnalyzerSettings(const Json& decode_settings)
 {
     if (!decode_settings.is_object() || !decode_settings.contains("settings") ||
@@ -1059,6 +1080,9 @@ Json BuildSaleaeAnalyzerSettings(const Json& decode_settings)
     }
     if (protocol == "Native" && settings.value("decoder_id", "") == "lin") {
         return BuildSaleaeLinSettings(settings);
+    }
+    if (protocol == "Native" && settings.value("decoder_id", "") == "parallel") {
+        return BuildSaleaeParallelSettings(settings);
     }
     return Json();
 }

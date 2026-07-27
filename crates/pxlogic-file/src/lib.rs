@@ -671,6 +671,50 @@ fn normalize_saleae_decode_settings(
                 primary_channel: rx,
             }))
         }
+        "Simple Parallel" | "Parallel" => {
+            let mut channels = BTreeMap::new();
+            let mut primary_channel = None;
+            for bit in 0..16 {
+                let title = format!("D{bit}");
+                let channel = saleae_setting_u8(analyzer, &[title.as_str()]);
+                if primary_channel.is_none() {
+                    primary_channel = channel;
+                }
+                channels.insert(format!("d{bit}"), channel);
+            }
+            let clock = saleae_setting_u8(analyzer, &["Clock"])?;
+            let primary_channel = primary_channel?;
+            channels.insert("clk".to_string(), Some(clock));
+            let clock_state = saleae_setting_u64(analyzer, &["Clock State"]).unwrap_or(0);
+            Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "parallel".to_string(),
+                protocol_name: "Parallel".to_string(),
+                channels,
+                options: BTreeMap::from([
+                    (
+                        "clock_edge".to_string(),
+                        NativeOptionValue::Text(
+                            match clock_state {
+                                1 => "falling",
+                                2 => "dual",
+                                _ => "rising",
+                            }
+                            .to_string(),
+                        ),
+                    ),
+                    (
+                        "clock_state".to_string(),
+                        NativeOptionValue::Integer(clock_state as i64),
+                    ),
+                    ("word_size".to_string(), NativeOptionValue::Integer(0)),
+                    (
+                        "endianness".to_string(),
+                        NativeOptionValue::Text("little".to_string()),
+                    ),
+                ]),
+                primary_channel,
+            }))
+        }
         _ => None,
     }
 }

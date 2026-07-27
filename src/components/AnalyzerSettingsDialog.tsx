@@ -10,6 +10,8 @@ import {
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SaleaeIcon } from "./SaleaeIcon";
 
+const PARALLEL_DATA_KEYS = Array.from({ length: 16 }, (_, index) => `d${index}`);
+
 interface AnalyzerSettingsDialogProps {
   analyzer: UiAnalyzerInstance;
   capturedChannelCount: number;
@@ -91,8 +93,25 @@ export function AnalyzerSettingsDialog({
               : draft.type === "LIN"
                 ? draft.nativeChannels.rx ?? draft.nativePrimaryChannel
                 : draft.type === "CAN" || draft.type === "CAN-FD"
-                ? draft.nativeChannels.can_rx ?? draft.nativePrimaryChannel
-                : draft.channel,
+                  ? draft.nativeChannels.can_rx ?? draft.nativePrimaryChannel
+                  : draft.type === "Simple Parallel"
+                    ? draft.nativePrimaryChannel
+                    : draft.channel,
+    });
+  }
+
+  function updateParallelDataChannel(index: number, channel: number | null) {
+    setDraft((current) => {
+      const key = PARALLEL_DATA_KEYS[index];
+      const nativeChannels = { ...current.nativeChannels, [key]: channel };
+      const primary = PARALLEL_DATA_KEYS.map((dataKey) => nativeChannels[dataKey]).find(
+        (candidate): candidate is number => typeof candidate === "number",
+      );
+      return {
+        ...current,
+        nativePrimaryChannel: primary ?? current.nativePrimaryChannel,
+        nativeChannels,
+      };
     });
   }
 
@@ -451,6 +470,61 @@ export function AnalyzerSettingsDialog({
                 >
                   <option value="right-high">Channel 2 (right - I2S typical)</option>
                   <option value="left-high">Channel 1 (left - inverted)</option>
+                </select>
+              </AnalyzerSettingRow>
+            </>
+          )}
+
+          {draft.type === "Simple Parallel" && (
+            <>
+              {PARALLEL_DATA_KEYS.map((key, index) => (
+                <AnalyzerSettingRow key={key} label={`D${index}`}>
+                  <ChannelSelect
+                    {...channelSelectProps}
+                    autoFocus={index === 0}
+                    optional
+                    onChange={(channel) => updateParallelDataChannel(index, channel)}
+                    value={draft.nativeChannels[key] ?? null}
+                  />
+                </AnalyzerSettingRow>
+              ))}
+              <AnalyzerSettingRow label="Clock" required>
+                <ChannelSelect
+                  {...channelSelectProps}
+                  onChange={(channel) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeChannels: { ...current.nativeChannels, clk: channel ?? 0 },
+                    }))
+                  }
+                  value={draft.nativeChannels.clk ?? 0}
+                />
+              </AnalyzerSettingRow>
+              <AnalyzerSettingRow label="Clock State">
+                <select
+                  value={String(
+                    draft.nativeOptions.clock_edge === "dual" || draft.nativeOptions.clock_state === 2
+                      ? "dual"
+                      : draft.nativeOptions.clock_edge === "falling" || draft.nativeOptions.clock_edge === "falling-edge"
+                        ? "falling"
+                        : "rising",
+                  )}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      nativeOptions: {
+                        ...current.nativeOptions,
+                        clock_edge: event.target.value,
+                        clock_state: event.target.value === "dual" ? 2 : event.target.value === "falling" ? 1 : 0,
+                      },
+                    }))
+                  }
+                >
+                  <option value="rising">Rising edge</option>
+                  <option value="falling">Falling edge</option>
+                  <option disabled={draft.decoderBackend === "sigrok_native"} value="dual">
+                    Dual edge (Saleae Native)
+                  </option>
                 </select>
               </AnalyzerSettingRow>
             </>
@@ -897,6 +971,27 @@ function validateAnalyzer(analyzer: UiAnalyzerInstance) {
     const maximumWordSize = analyzer.decoderBackend === "saleae_native" ? 64 : 32;
     if (!Number.isInteger(wordSize) || wordSize < 2 || wordSize > maximumWordSize) {
       return `Audio bit depth must be between 2 and ${maximumWordSize} bits.`;
+    }
+  }
+  if (analyzer.type === "Simple Parallel") {
+    const dataChannels = PARALLEL_DATA_KEYS.map((key) => analyzer.nativeChannels[key]).filter(
+      (channel): channel is number => typeof channel === "number",
+    );
+    const clock = analyzer.nativeChannels.clk;
+    if (dataChannels.length === 0 || typeof clock !== "number") {
+      return "Select Clock and at least one parallel data channel.";
+    }
+    if (new Set([...dataChannels, clock]).size !== dataChannels.length + 1) {
+      return "Simple Parallel inputs must use different channels.";
+    }
+    const clockEdge =
+      analyzer.nativeOptions.clock_edge === "dual" || analyzer.nativeOptions.clock_state === 2
+        ? "dual"
+        : analyzer.nativeOptions.clock_edge === "falling" || analyzer.nativeOptions.clock_edge === "falling-edge"
+          ? "falling"
+          : "rising";
+    if (analyzer.decoderBackend === "sigrok_native" && clockEdge === "dual") {
+      return "Sigrok Native supports rising or falling Clock State; Dual edge requires Saleae Native.";
     }
   }
   if (analyzer.type === "LIN") {

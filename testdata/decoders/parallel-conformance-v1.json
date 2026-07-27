@@ -1,0 +1,31 @@
+{
+  "format": "pxlogic.parallel-conformance.v1",
+  "cases": [
+    {
+      "id": "parallel-2bit-rising-00-03",
+      "sample_rate_hz": 1000000,
+      "sample_count": 200,
+      "channel_count": 3,
+      "initial_levels": [0, 0, 0],
+      "edges": [
+        { "channel": 0, "samples": [30, 70, 110, 150] },
+        { "channel": 1, "samples": [50, 90, 130, 170] },
+        { "channel": 2, "samples": [20, 25, 60, 65, 100, 105, 140, 145] }
+      ],
+      "decoder": {
+        "protocol": "parallel",
+        "channels": { "d0": 0, "d1": 1, "clk": 2 },
+        "options": {
+          "clock_edge": "rising",
+          "clock_state": 0,
+          "wordsize": 0,
+          "word_size": 0,
+          "endianness": "little"
+        }
+      },
+      "expected_role": "Data",
+      "expected_rows": ["Items", "Items", "Items", "Items"],
+      "expected_values": [0, 3, 0, 3]
+    }
+  ]
+}

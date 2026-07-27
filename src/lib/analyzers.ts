@@ -92,6 +92,10 @@ export function createAnalyzerInstance(
 ): UiAnalyzerInstance {
   const index = analyzers.length;
   const nextChannel = (offset: number) => (channel + offset) % 32;
+  const parallelChannels: Record<string, number | null> = { clk: nextChannel(1) };
+  for (let bit = 0; bit < 16; bit += 1) {
+    parallelChannels[`d${bit}`] = bit === 0 ? channel : null;
+  }
   const nativeDefaults: {
     decoderId: string;
     protocolName: string;
@@ -123,6 +127,14 @@ export function createAnalyzerInstance(
             channels: { can_rx: channel },
             options: { nominal_bitrate: 1_000_000, fast_bitrate: 2_000_000, sample_point: 70 },
           }
+        : type === "Simple Parallel"
+          ? {
+              decoderId: "parallel",
+              protocolName: "Parallel",
+              primaryChannel: channel,
+              channels: parallelChannels,
+              options: { clock_edge: "rising", clock_state: 0, word_size: 0, endianness: "little" },
+            }
         : {
             decoderId: "i2s",
             protocolName: "I2S",
@@ -268,6 +280,15 @@ export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChan
       : [];
   }
 
+  if (analyzer.type === "Simple Parallel") {
+    const data = Array.from({ length: 16 }, (_, index) => analyzer.nativeChannels[`d${index}`]).find(
+      (channel): channel is number => typeof channel === "number",
+    );
+    return typeof data === "number"
+      ? [{ channel: data, hasBubbles: true, hasMarkers: true, title: "Data" }]
+      : [];
+  }
+
   return [
     {
       channel: analyzer.channel,
@@ -306,7 +327,8 @@ export function analyzerSupportsDecoding(analyzer: Pick<UiAnalyzerInstance, "typ
     analyzer.type === "I2S" ||
     analyzer.type === "LIN" ||
     analyzer.type === "CAN" ||
-    analyzer.type === "CAN-FD"
+    analyzer.type === "CAN-FD" ||
+    analyzer.type === "Simple Parallel"
   );
 }
 
@@ -355,7 +377,8 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
     analyzer.type === "I2S" ||
     analyzer.type === "LIN" ||
     analyzer.type === "CAN" ||
-    analyzer.type === "CAN-FD"
+    analyzer.type === "CAN-FD" ||
+    analyzer.type === "Simple Parallel"
   ) {
     return {
       protocol: "Native",
@@ -534,6 +557,7 @@ export function analyzerBackendOptions(type: string): DecoderBackendKind[] {
   if (type === "I2S" || type === "LIN" || type === "CAN") {
     return ["saleae_native", "sigrok_native"];
   }
+  if (type === "Simple Parallel") return ["saleae_native", "sigrok_native"];
   if (type === "CAN-FD") return ["sigrok_native"];
   return [];
 }
@@ -548,11 +572,11 @@ export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
   {
     backend: "saleae_native",
     label: "Saleae Native",
-    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "LIN", "CAN"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "LIN", "CAN", "Simple Parallel"],
   },
   {
     backend: "sigrok_native",
     label: "Sigrok Native (PXView)",
-    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "LIN", "CAN", "CAN-FD"],
+    analyzers: ["Async Serial", "I2C", "SPI", "I2S", "LIN", "CAN", "CAN-FD", "Simple Parallel"],
   },
 ];

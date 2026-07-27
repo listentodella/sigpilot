@@ -15,6 +15,11 @@ test("new analyzers are offered only through external decoder ecosystems", () =>
   assert.deepEqual(analyzerBackendOptions("Async Serial"), ["saleae_native", "sigrok_native"]);
   assert.deepEqual(analyzerBackendOptions("I2C"), ["saleae_native", "sigrok_native"]);
   assert.deepEqual(analyzerBackendOptions("SPI"), ["saleae_native", "sigrok_native"]);
+  assert.deepEqual(analyzerBackendOptions("Simple Parallel"), ["saleae_native", "sigrok_native"]);
+  assert.equal(
+    ANALYZER_CATALOG_GROUPS.every((group) => group.analyzers.includes("Simple Parallel")),
+    true,
+  );
   assert.equal(
     ANALYZER_CATALOG_GROUPS.some((group) => group.analyzers.includes("Manchester")),
     false,

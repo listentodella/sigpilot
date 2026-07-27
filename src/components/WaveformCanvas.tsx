@@ -33,6 +33,12 @@ interface WaveformCanvasProps {
   onViewportChange: (start: number, samples: number) => void;
 }
 
+interface RowHitTarget {
+  channelIndex: number;
+  height: number;
+  top: number;
+}
+
 const graphPaddingLeft = 0;
 const graphPaddingRight = 0;
 const digitalGraphGutterPx = 8;
@@ -476,6 +482,16 @@ export function WaveformCanvas({
       onPointerCancel={handlePointerUp}
       onPointerLeave={handlePointerLeave}
     >
+      <div className="waveformRowHitTargets" aria-hidden="true">
+        {getWaveformRowHitTargets(tile, rowHeights, rowTopInsets).map((row) => (
+          <div
+            className="waveformRowHitTarget"
+            data-channel-index={row.channelIndex}
+            key={row.channelIndex}
+            style={{ height: row.height, top: row.top }}
+          />
+        ))}
+      </div>
       <canvas ref={canvasRef} className="waveform-canvas" />
       {hoverNavigation?.previousEdge != null && (
         <DigitalNavigationButton
@@ -493,6 +509,20 @@ export function WaveformCanvas({
       )}
     </div>
   );
+}
+
+function getWaveformRowHitTargets(
+  tile: WaveformTile | null,
+  rowHeights: number[],
+  rowTopInsets: number[],
+): RowHitTarget[] {
+  if (!tile || tile.channels.length === 0) return [];
+  const layouts = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets);
+  return layouts.map((layout, index) => ({
+    channelIndex: tile.channels[index]?.channel ?? index,
+    height: Math.max(1, layout.height),
+    top: layout.top,
+  }));
 }
 
 function normalizeWheelDelta(delta: number, deltaMode: number) {

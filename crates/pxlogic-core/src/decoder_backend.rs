@@ -352,6 +352,8 @@ impl DecoderBackend for SaleaeNativeDecoder {
                     "SPI".to_string(),
                     "I2S".to_string(),
                     "CAN".to_string(),
+                    "LIN".to_string(),
+                    "Parallel".to_string(),
                 ],
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
@@ -533,6 +535,10 @@ fn discover_saleae_runtime_root() -> Option<PathBuf> {
             && path.join("Analyzers/libspi_analyzer.so").is_file()
             && path.join("Analyzers/libi2s_analyzer.so").is_file()
             && path.join("Analyzers/libcan_analyzer.so").is_file()
+            && path.join("Analyzers/liblin_analyzer.so").is_file()
+            && path
+                .join("Analyzers/libsimple_parallel_analyzer.so")
+                .is_file()
     })
 }
 
@@ -562,6 +568,8 @@ impl DecoderBackend for SigrokNativeDecoder {
                     "I2S".to_string(),
                     "CAN".to_string(),
                     "CAN-FD".to_string(),
+                    "LIN".to_string(),
+                    "Parallel".to_string(),
                 ],
                 supports_streaming: false,
                 isolation: DecoderBackendIsolation::Sidecar,
@@ -1339,11 +1347,59 @@ mod tests {
         );
     }
 
+    fn parallel_settings() -> AnalyzerDecodeSettings {
+        AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+            decoder_id: "parallel".to_string(),
+            protocol_name: "Parallel".to_string(),
+            channels: BTreeMap::from([
+                ("d0".to_string(), Some(0)),
+                ("d1".to_string(), Some(1)),
+                ("clk".to_string(), Some(2)),
+            ]),
+            options: BTreeMap::from([
+                (
+                    "clock_edge".to_string(),
+                    NativeOptionValue::Text("rising".to_string()),
+                ),
+                ("clock_state".to_string(), NativeOptionValue::Integer(0)),
+                ("word_size".to_string(), NativeOptionValue::Integer(0)),
+                (
+                    "endianness".to_string(),
+                    NativeOptionValue::Text("little".to_string()),
+                ),
+            ]),
+            primary_channel: 0,
+        })
+    }
+
     #[test]
     fn legacy_backend_is_explicitly_discoverable() {
         let info = LegacyRustDecoder.info();
         assert_eq!(info.kind, DecoderBackendKind::LegacyRust);
         assert!(info.detail.contains("prefer"));
+    }
+
+    #[test]
+    fn native_backend_fallback_info_keeps_external_protocol_catalog_visible() {
+        let saleae = SaleaeNativeDecoder::new(
+            "/definitely/missing/pxlogic-saleae-analyzer-sidecar",
+            "/definitely/missing/saleae-runtime",
+        )
+        .info();
+        assert_eq!(saleae.kind, DecoderBackendKind::SaleaeNative);
+        assert!(!saleae.available);
+        assert!(saleae.protocols.contains(&"LIN".to_string()));
+        assert!(saleae.protocols.contains(&"Parallel".to_string()));
+
+        let sigrok = SigrokNativeDecoder::new(
+            "/definitely/missing/pxlogic-sigrok-sidecar",
+            "/definitely/missing/sigrok-decoders",
+        )
+        .info();
+        assert_eq!(sigrok.kind, DecoderBackendKind::SigrokNative);
+        assert!(!sigrok.available);
+        assert!(sigrok.protocols.contains(&"LIN".to_string()));
+        assert!(sigrok.protocols.contains(&"Parallel".to_string()));
     }
 
     #[test]
@@ -1413,6 +1469,29 @@ mod tests {
         assert_eq!(decoder["channels"]["rx"], 0);
         assert_eq!(decoder["options"]["baudrate"], 100_000);
         assert_eq!(decoder["options"]["version"], 2);
+    }
+
+    #[test]
+    fn generic_native_request_preserves_parallel_contract_without_rust_protocol_logic() {
+        let capture = transition_capture(
+            "native-parallel-test",
+            1_000_000,
+            200,
+            &[0, 0, 0],
+            &[
+                (0, vec![30, 70, 110, 150]),
+                (1, vec![50, 90, 130, 170]),
+                (2, vec![20, 25, 60, 65, 100, 105, 140, 145]),
+            ],
+        );
+        let request = build_native_sidecar_request(&capture, &parallel_settings()).unwrap();
+        let decoder = serde_json::to_value(request.decoder).unwrap();
+        assert_eq!(decoder["protocol"], "parallel");
+        assert_eq!(decoder["channels"]["d0"], 0);
+        assert_eq!(decoder["channels"]["d1"], 1);
+        assert_eq!(decoder["channels"]["clk"], 2);
+        assert_eq!(decoder["options"]["clock_edge"], "rising");
+        assert_eq!(decoder["options"]["clock_state"], 0);
     }
 
     #[test]

@@ -110,8 +110,10 @@ import {
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
 import {
+  ChannelDeleteDataMode,
+  ChannelTrimPreview,
   isChannelDeleteDataVisible,
-  resolveChannelTrimAnchorSample,
+  resolveChannelTrimRange,
 } from "./lib/channelContextMenu";
 import {
   ANALYZER_CATALOG_GROUPS,
@@ -165,7 +167,6 @@ import {
 import {
   loadScreenshotSettings,
   persistScreenshotSettings,
-  SCREENSHOT_DELAY_MS,
   ScreenshotCaptureRect,
   ScreenshotDestination,
   takeScreenshot,
@@ -341,9 +342,26 @@ interface ChannelContextMenuState {
   y: number;
 }
 
+interface PendingChannelTrim {
+  mode: ChannelDeleteDataMode;
+  range: ChannelTrimPreview;
+  sessionId: string;
+}
+
+interface ScreenshotNotification {
+  body: string;
+  heading: string;
+  id: number;
+  type: "error" | "success";
+}
+
 const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
 const DEFAULT_BUFFER_SIZE_MB = 1024;
 const DEFAULT_DEMO_BUFFER_SIZE_MB = 4096;
+const SCREENSHOT_CONTEXT_MENU_CLOSE_DELAY_MS = 300;
+const SCREENSHOT_WINDOW_CONTEXT_MENU_CLOSE_DELAY_MS = 100;
+const SCREENSHOT_FEEDBACK_VISIBLE_MS = 520;
+const SCREENSHOT_NOTIFICATION_VISIBLE_MS = 4_000;
 const FALLBACK_SAMPLE_RATES = [
   2_000,
   5_000,
@@ -1138,6 +1156,8 @@ export default function App() {
   const [editingChannel, setEditingChannel] = useState<number | null>(null);
   const [channelReorderActive, setChannelReorderActive] = useState(false);
   const [channelContextMenu, setChannelContextMenu] = useState<ChannelContextMenuState | null>(null);
+  const [pendingChannelTrim, setPendingChannelTrim] = useState<PendingChannelTrim | null>(null);
+  const [screenshotNotification, setScreenshotNotification] = useState<ScreenshotNotification | null>(null);
   const [screenshotSettings, setScreenshotSettings] = useState(loadScreenshotSettings);
   const [preferences, setPreferences] = useState(loadUiPreferences);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
@@ -1150,6 +1170,7 @@ export default function App() {
   const footerRef = useRef<HTMLElement>(null);
   const graphScrollerRef = useRef<HTMLDivElement>(null);
   const channelContextMenuRef = useRef<HTMLDivElement>(null);
+  const channelContextMenuSnapshotRef = useRef<ChannelContextMenuState | null>(null);
   const graphScrollFrameRef = useRef<number | null>(null);
   const pendingGraphScrollRef = useRef<{ sessionId: string; scrollTop: number } | null>(null);
   const sessionsRef = useRef<UiSession[]>([]);
@@ -1188,6 +1209,16 @@ export default function App() {
   useEffect(() => {
     persistScreenshotSettings(screenshotSettings);
   }, [screenshotSettings]);
+
+  useEffect(() => {
+    if (!screenshotNotification) return;
+    const timeout = window.setTimeout(() => {
+      setScreenshotNotification((current) =>
+        current?.id === screenshotNotification.id ? null : current,
+      );
+    }, SCREENSHOT_NOTIFICATION_VISIBLE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [screenshotNotification]);
 
   useEffect(() => {
     persistUiPreferences(preferences);
@@ -1486,6 +1517,8 @@ export default function App() {
     () => visibleChannelIndexes.map((channelIndex) => channelLabels[channelIndex] ?? `D${channelIndex}`),
     [channelLabels, visibleChannelIndexes],
   );
+  const activePendingChannelTrim =
+    pendingChannelTrim?.sessionId === activeSession?.id ? pendingChannelTrim : null;
   const contextMenuChannelRows = useMemo(
     () => {
       if (!activeSession) return [];
@@ -1549,6 +1582,12 @@ export default function App() {
       : 0;
   const activeSettings = activeSession?.settings ?? defaultSettings(selectedDevice);
   const activeMessage = activeSession?.message ?? startupMessage;
+
+  useEffect(() => {
+    if (channelContextMenu) {
+      channelContextMenuSnapshotRef.current = channelContextMenu;
+    }
+  }, [channelContextMenu]);
 
   const updateViewport = useCallback(
     (sessionId: string, start: number, samples: number) => {
@@ -2550,39 +2589,76 @@ export default function App() {
     }));
   }
 
-  async function deleteDataFromContext(mode: "before" | "after" | "offscreen") {
+  function previewChannelTrim(mode: ChannelDeleteDataMode) {
     const menu = channelContextMenu;
     if (!activeSession?.summary || !menu) return;
 
     const total = activeSession.summary.metadata.sample_count;
-    if (total <= 1) return;
+    const range = resolveChannelTrimRange({
+      clickedSample: menu.sample,
+      mode,
+      totalSamples: total,
+      viewportSamples: activeSession.viewportSamples,
+      viewportStart: activeSession.viewportStart,
+    });
+    if (!range) return;
 
-    const clickedSample = resolveChannelTrimAnchorSample(
-      menu.sample,
-      activeSession.viewportStart,
-      total,
-    );
-    const trimStart =
-      mode === "before"
-        ? Math.min(total - 1, clickedSample)
-        : mode === "offscreen"
-          ? Math.max(0, Math.min(total - 1, activeSession.viewportStart))
-          : 0;
-    const trimEnd =
-      mode === "after"
-        ? Math.max(1, Math.min(total, clickedSample))
-        : mode === "offscreen"
-          ? Math.max(trimStart + 1, Math.min(total, activeSession.viewportStart + activeSession.viewportSamples))
-          : total;
+    setChannelContextMenu(null);
+    setPendingChannelTrim({
+      mode,
+      range,
+      sessionId: activeSession.id,
+    });
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      message: "Review highlighted data before deleting",
+    }));
 
+    if (mode === "offscreen") {
+      const preservedSamples = Math.max(1, range.trimEnd - range.trimStart);
+      const padding = preservedSamples * 0.2;
+      const targetStart = Math.max(0, range.trimStart - padding);
+      const targetEnd = Math.min(total, range.trimEnd + padding);
+      animateViewport(activeSession.id, targetStart, targetEnd - targetStart);
+      return;
+    }
+
+    const anchor = mode === "before" ? range.trimStart : range.trimEnd;
+    if (
+      anchor < activeSession.viewportStart ||
+      anchor > activeSession.viewportStart + activeSession.viewportSamples
+    ) {
+      animateViewport(activeSession.id, anchor - activeSession.viewportSamples / 2, activeSession.viewportSamples);
+    }
+  }
+
+  async function confirmPendingChannelTrim() {
+    const pending = pendingChannelTrim;
+    if (!pending) return;
+    const session = sessionsRef.current.find((item) => item.id === pending.sessionId);
+    if (!session?.summary) {
+      setPendingChannelTrim(null);
+      return;
+    }
+
+    setPendingChannelTrim(null);
     try {
-      const nextSummary = await trimCapture(activeSession.id, {
-        trim_before_sample: trimStart,
-        trim_after_sample: trimEnd,
+      const nextSummary = await trimCapture(pending.sessionId, {
+        trim_before_sample: pending.range.trimStart,
+        trim_after_sample: pending.range.trimEnd,
       });
-      updateSession(activeSession.id, (session) => applyTrimmedCapture(session, nextSummary, trimStart, mode));
+      updateSession(pending.sessionId, (current) =>
+        applyTrimmedCapture(current, nextSummary, pending.range.trimStart, pending.mode),
+      );
     } catch (error) {
-      updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
+      updateSession(pending.sessionId, (current) => ({ ...current, message: String(error) }));
+    }
+  }
+
+  function cancelPendingChannelTrim() {
+    setPendingChannelTrim(null);
+    if (activeSession) {
+      updateSession(activeSession.id, (session) => ({ ...session, message: "Delete Data canceled" }));
     }
   }
 
@@ -2591,19 +2667,27 @@ export default function App() {
 
     let rect: ScreenshotCaptureRect | undefined;
     if (target === "channel") {
-      const menu = channelContextMenu;
-      const graphViewport = document.querySelector<HTMLElement>(".graphViewport");
-      if (!menu || !graphViewport) return;
+      const menu = channelContextMenu ?? channelContextMenuSnapshotRef.current;
+      if (!menu) return;
       const rowIndex = visibleChannelIndexes.indexOf(menu.channelIndex);
-      const layout = visibleChannelLayouts[rowIndex];
-      if (rowIndex < 0 || !layout) return;
-      const viewportRect = graphViewport.getBoundingClientRect();
-      rect = {
-        x: viewportRect.left,
-        y: viewportRect.top + layout.outerTop + (visibleAnalyzerInsets[rowIndex] ?? 0),
-        width: viewportRect.width,
-        height: visibleChannelHeights[rowIndex] ?? SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
-      };
+      if (rowIndex < 0) return;
+      rect = resolveChannelScreenshotRect(menu.channelIndex, rowIndex, {
+        analyzerInset: visibleAnalyzerInsets[rowIndex] ?? 0,
+        fallbackHeight: visibleChannelHeights[rowIndex] ?? SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
+        fallbackTop: visibleChannelLayouts[rowIndex]?.outerTop,
+      }) ?? undefined;
+      if (!rect) return;
+    } else {
+      const root = document.querySelector<HTMLElement>(".logic-root");
+      const rootRect = root?.getBoundingClientRect();
+      if (rootRect) {
+        rect = {
+          x: rootRect.left,
+          y: rootRect.top,
+          width: rootRect.width,
+          height: rootRect.height,
+        };
+      }
     }
 
     const sessionId = activeSession.id;
@@ -2611,24 +2695,51 @@ export default function App() {
     const device = devices.find((item) => item.id === activeSession.selectedDevice);
     const connectedDeviceName = device?.profile_model || device?.product || device?.label;
     const settings = { ...screenshotSettings };
+    const captureRect = rect;
+    setChannelContextMenu(null);
+    channelContextMenuSnapshotRef.current = null;
+    if (captureRect) showScreenshotCaptureFeedback(captureRect, target, SCREENSHOT_FEEDBACK_VISIBLE_MS);
     screenshotInProgressRef.current = true;
     window.setTimeout(() => {
-      void takeScreenshot({ connectedDeviceName, rect, sessionName, settings })
+      void takeScreenshot({
+        connectedDeviceName,
+        rect: target === "channel" ? captureRect : undefined,
+        sessionName,
+        settings,
+      })
         .then((result) => {
           if (result.filePath) {
             setScreenshotSettings((current) => ({ ...current, filePath: result.filePath }));
           }
           if (result.message) {
             updateSession(sessionId, (session) => ({ ...session, message: result.message ?? session.message }));
+            showScreenshotNotification({
+              body: screenshotNotificationBody(result.message),
+              heading: "Screenshot Taken",
+              type: "success",
+            });
           }
         })
         .catch((error) => {
-          updateSession(sessionId, (session) => ({ ...session, message: `Screenshot failed: ${String(error)}` }));
+          const errorMessage = `Screenshot failed: ${String(error)}`;
+          updateSession(sessionId, (session) => ({ ...session, message: errorMessage }));
+          showScreenshotNotification({
+            body: "An error occurred while taking a screenshot. Please try again.",
+            heading: "Screenshot Error",
+            type: "error",
+          });
         })
         .finally(() => {
           screenshotInProgressRef.current = false;
         });
-    }, SCREENSHOT_DELAY_MS);
+    }, target === "window" ? SCREENSHOT_WINDOW_CONTEXT_MENU_CLOSE_DELAY_MS : SCREENSHOT_CONTEXT_MENU_CLOSE_DELAY_MS);
+  }
+
+  function showScreenshotNotification(notification: Omit<ScreenshotNotification, "id">) {
+    setScreenshotNotification({
+      ...notification,
+      id: Date.now(),
+    });
   }
 
   function setScreenshotDestination(destination: ScreenshotDestination) {
@@ -3404,9 +3515,9 @@ export default function App() {
                         hasHiddenChannels={contextMenuChannelRows.some((row) => row.isSelectable && row.isHidden)}
                         interactiveMeasurementVisible={activeSession.showInteractiveMeasurement}
                         onClose={() => setChannelContextMenu(null)}
-                        onDeleteDataAfter={() => void deleteDataFromContext("after")}
-                        onDeleteDataBefore={() => void deleteDataFromContext("before")}
-                        onDeleteDataOffscreen={() => void deleteDataFromContext("offscreen")}
+                        onDeleteDataAfter={() => previewChannelTrim("after")}
+                        onDeleteDataBefore={() => previewChannelTrim("before")}
+                        onDeleteDataOffscreen={() => previewChannelTrim("offscreen")}
                         onFitAllRows={fitAllRowsToWindowHeight}
                         onHideChannel={() => hideChannelRow(channelContextMenu.channelIndex)}
                         onMatchAllHeights={() => matchAllDigitalChannelHeights(channelContextMenu.channelIndex)}
@@ -3484,6 +3595,13 @@ export default function App() {
                         session={activeSession}
                         visibleChannelIndexes={visibleChannelIndexes}
                       />
+                      {activePendingChannelTrim && (
+                        <ChannelTrimOverlay
+                          range={activePendingChannelTrim.range}
+                          viewportSamples={activeSession.viewportSamples}
+                          viewportStart={activeSession.viewportStart}
+                        />
+                      )}
                     </div>
                     {visibleChannelIndexes.map((channelIndex, rowIndex) => (
                       <ChannelResizeHandle
@@ -3594,6 +3712,23 @@ export default function App() {
           />
         </section>
 
+        {activePendingChannelTrim && activeSession && (
+          <ChannelTrimDialog
+            mode={activePendingChannelTrim.mode}
+            onCancel={cancelPendingChannelTrim}
+            onConfirm={() => void confirmPendingChannelTrim()}
+            range={activePendingChannelTrim.range}
+            sampleRateHz={activeSession.summary?.metadata.sample_rate_hz}
+          />
+        )}
+        {screenshotNotification && (
+          <ScreenshotToast
+            body={screenshotNotification.body}
+            heading={screenshotNotification.heading}
+            onClose={() => setScreenshotNotification(null)}
+            type={screenshotNotification.type}
+          />
+        )}
         {analyzerInEdit && analyzerEditSession && (
           <AnalyzerSettingsDialog
             analyzer={analyzerInEdit.analyzer}
@@ -3884,6 +4019,215 @@ function ChannelResizeHandle({
       title={`Drag to resize D${channelIndex}`}
     />
   );
+}
+
+function ChannelTrimOverlay({
+  range,
+  viewportSamples,
+  viewportStart,
+}: {
+  range: ChannelTrimPreview;
+  viewportSamples: number;
+  viewportStart: number;
+}) {
+  const scale = 100 / Math.max(1, viewportSamples);
+  const leftWidth =
+    range.trimBefore === undefined
+      ? 0
+      : Math.max(0, Math.min(100, (range.trimBefore - viewportStart) * scale));
+  const rightWidth =
+    range.trimAfter === undefined
+      ? 0
+      : Math.max(0, Math.min(100, (viewportStart + viewportSamples - range.trimAfter) * scale));
+
+  return (
+    <div className="channelTrimOverlay" aria-hidden="true">
+      {leftWidth > 0 && <div className="channelTrimStripe left" style={{ width: `${leftWidth}%` }} />}
+      {rightWidth > 0 && <div className="channelTrimStripe right" style={{ width: `${rightWidth}%` }} />}
+    </div>
+  );
+}
+
+function ScreenshotToast({
+  body,
+  heading,
+  onClose,
+  type,
+}: {
+  body: string;
+  heading: string;
+  onClose: () => void;
+  type: "error" | "success";
+}) {
+  return createPortal(
+    <section className={`screenshotToast ${type}`} role="status" aria-live="polite">
+      <div className="screenshotToastIcon" aria-hidden="true">
+        {type === "success" ? <Check size={14} /> : <X size={14} />}
+      </div>
+      <div className="screenshotToastCopy">
+        <h2>{heading}</h2>
+        <p>{body}</p>
+      </div>
+      <button aria-label="Dismiss screenshot notification" onClick={onClose} type="button">
+        <X size={14} />
+      </button>
+    </section>,
+    document.body,
+  );
+}
+
+function ChannelTrimDialog({
+  mode,
+  onCancel,
+  onConfirm,
+  range,
+  sampleRateHz,
+}: {
+  mode: ChannelDeleteDataMode;
+  onCancel: () => void;
+  onConfirm: () => void;
+  range: ChannelTrimPreview;
+  sampleRateHz?: number;
+}) {
+  const keptSamples = Math.max(0, range.trimEnd - range.trimStart);
+  const modeLabel =
+    mode === "before"
+      ? "before this point"
+      : mode === "after"
+        ? "after this point"
+        : "outside the current view";
+  const duration = sampleRateHz && sampleRateHz > 0
+    ? formatTrimDuration(keptSamples / sampleRateHz)
+    : null;
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  return createPortal(
+    <div
+      className="trimDialogLayer"
+      onMouseDown={(event) => event.target === event.currentTarget && onCancel()}
+      role="presentation"
+    >
+      <section
+        className="trimDialog"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="trim-dialog-title"
+      >
+        <header className="trimDialogHeader">
+          <h2 id="trim-dialog-title">Delete Data</h2>
+          <button aria-label="Cancel Delete Data" onClick={onCancel} type="button">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="trimDialogContent">
+          <h3>Are you sure?</h3>
+          <p>This operation is irreversible. Analyzers will be restarted.</p>
+          <p className="trimDialogDetail">
+            The highlighted data {modeLabel} will be removed. {duration ? `${duration} remains selected.` : `${formatSamples(keptSamples)} remain selected.`}
+          </p>
+        </div>
+        <footer className="trimDialogActions">
+          <button className="trimDialogButton transparent" onClick={onCancel} type="button">
+            Cancel
+          </button>
+          <button className="trimDialogButton primary" onClick={onConfirm} type="button">
+            Yes, Delete
+          </button>
+        </footer>
+      </section>
+    </div>,
+    document.body,
+  );
+}
+
+function formatTrimDuration(seconds: number) {
+  const absolute = Math.abs(seconds);
+  if (absolute >= 1) return `${trimCompactNumber(seconds)} s`;
+  if (absolute >= 1e-3) return `${trimCompactNumber(seconds * 1e3)} ms`;
+  if (absolute >= 1e-6) return `${trimCompactNumber(seconds * 1e6)} us`;
+  return `${trimCompactNumber(seconds * 1e9)} ns`;
+}
+
+function trimCompactNumber(value: number) {
+  return Number(value.toFixed(3)).toString();
+}
+
+function screenshotNotificationBody(message: string) {
+  if (message === "Screenshot copied to clipboard") return "Screenshot copied to clipboard.";
+  const saved = message.match(/^Screenshot saved as (.+)$/);
+  if (saved) return `"${saved[1]}" saved to disk.`;
+  return message;
+}
+
+function resolveChannelScreenshotRect(
+  channelIndex: number,
+  rowIndex: number,
+  fallback: {
+    analyzerInset: number;
+    fallbackHeight: number;
+    fallbackTop?: number;
+  },
+): ScreenshotCaptureRect | null {
+  const graphViewport = document.querySelector<HTMLElement>(".graphViewport");
+  const viewportRect = graphViewport?.getBoundingClientRect();
+  if (!graphViewport || !viewportRect) return null;
+
+  const selector = `.waveformRowHitTarget[data-channel-index="${channelIndex}"]`;
+  const hitTarget = graphViewport.querySelector<HTMLElement>(selector);
+  const hitTargetRect = hitTarget?.getBoundingClientRect();
+  if (hitTargetRect && hitTargetRect.width > 0 && hitTargetRect.height > 0) {
+    return {
+      x: viewportRect.left,
+      y: hitTargetRect.top,
+      width: viewportRect.width,
+      height: hitTargetRect.height,
+    };
+  }
+
+  const labelRow = document.querySelector<HTMLElement>(
+    `.channelDragItem[data-channel-index="${channelIndex}"]`,
+  );
+  const labelRect = labelRow?.getBoundingClientRect();
+  if (labelRect && labelRect.height > 0) {
+    return {
+      x: viewportRect.left,
+      y: labelRect.top + fallback.analyzerInset,
+      width: viewportRect.width,
+      height: Math.max(1, Math.min(fallback.fallbackHeight, labelRect.height - fallback.analyzerInset)),
+    };
+  }
+
+  const top = fallback.fallbackTop ?? rowIndex * fallback.fallbackHeight;
+  return {
+    x: viewportRect.left,
+    y: viewportRect.top + top + fallback.analyzerInset,
+    width: viewportRect.width,
+    height: fallback.fallbackHeight,
+  };
+}
+
+function showScreenshotCaptureFeedback(
+  rect: ScreenshotCaptureRect,
+  target: "channel" | "window",
+  visibleMs: number,
+) {
+  document.querySelectorAll(".screenshotCaptureFeedback").forEach((element) => element.remove());
+  const element = document.createElement("div");
+  element.className = `screenshotCaptureFeedback ${target}`;
+  element.style.height = `${rect.height}px`;
+  element.style.left = `${rect.x}px`;
+  element.style.top = `${rect.y}px`;
+  element.style.width = `${rect.width}px`;
+  document.body.appendChild(element);
+  window.setTimeout(() => element.remove(), visibleMs);
 }
 
 function ChannelContextMenu({

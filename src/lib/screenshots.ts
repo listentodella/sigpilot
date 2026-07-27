@@ -115,7 +115,13 @@ async function captureNativeAppCanvas(rect?: ScreenshotCaptureRect) {
   if (!root) throw new Error("screenshot root is not available");
   const rootRect = root.getBoundingClientRect();
   const requested = clampScreenshotRect(rootRect, rect);
-  const encoded = await invoke<string>("capture_screenshot_png");
+  const restoreHidden = hideScreenshotChrome();
+  let encoded: string;
+  try {
+    encoded = await invoke<string>("capture_screenshot_png");
+  } finally {
+    restoreHidden();
+  }
   const image = await loadScreenshotImage(`data:image/png;base64,${encoded}`);
   const scaleX = image.naturalWidth / Math.max(1, window.innerWidth);
   const scaleY = image.naturalHeight / Math.max(1, window.innerHeight);
@@ -138,36 +144,131 @@ async function captureNativeAppCanvas(rect?: ScreenshotCaptureRect) {
   return canvas;
 }
 
+function hideScreenshotChrome() {
+  const elements = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      ".channelContextMenu, .screenshotCaptureFeedback, .screenshotToast, .trimDialogLayer, .channelTrimOverlay, .waveformRowHitTargets",
+    ),
+  );
+  const previous = elements.map((element) => element.style.display);
+  elements.forEach((element) => {
+    element.style.display = "none";
+  });
+  return () => {
+    elements.forEach((element, index) => {
+      element.style.display = previous[index] ?? "";
+    });
+  };
+}
+
 async function captureBrowserAppCanvas(rect?: ScreenshotCaptureRect) {
-  const { default: html2canvas } = await import("html2canvas");
   const root = document.querySelector<HTMLElement>(".logic-root");
   if (!root) throw new Error("screenshot root is not available");
   await document.fonts?.ready;
 
   const rootRect = root.getBoundingClientRect();
   const requested = clampScreenshotRect(rootRect, rect);
+  const graphCanvas = rect ? captureBrowserGraphCanvasRect(requested) : null;
+  if (graphCanvas) return graphCanvas;
+
   const width = Math.max(1, Math.round(requested.width));
   const height = Math.max(1, Math.round(requested.height));
+  const scale = rect ? window.devicePixelRatio || 1 : 1;
+  const { default: html2canvas } = await import("html2canvas");
 
-  return html2canvas(root, {
-    backgroundColor: SCREENSHOT_BACKGROUND,
-    height,
-    logging: false,
-    onclone: (clonedDocument) => {
-      clonedDocument.querySelectorAll<HTMLElement>(".channelContextMenu").forEach((menu) => {
-        menu.style.display = "none";
-      });
-    },
-    scale: window.devicePixelRatio || 1,
-    scrollX: 0,
-    scrollY: 0,
-    useCORS: true,
-    width,
-    windowHeight: Math.round(rootRect.height),
-    windowWidth: Math.round(rootRect.width),
-    x: Math.round(requested.x - rootRect.left),
-    y: Math.round(requested.y - rootRect.top),
-  });
+  try {
+    return await html2canvas(root, {
+      backgroundColor: SCREENSHOT_BACKGROUND,
+      height,
+      ignoreElements: (element) =>
+        element instanceof HTMLCanvasElement && (element.width <= 0 || element.height <= 0),
+      logging: false,
+      onclone: (clonedDocument) => {
+        clonedDocument
+          .querySelectorAll<HTMLElement>(
+            ".channelContextMenu, .screenshotCaptureFeedback, .screenshotToast, .trimDialogLayer, .channelTrimOverlay, .waveformRowHitTargets",
+          )
+          .forEach((element) => {
+            element.style.display = "none";
+          });
+      },
+      scale,
+      scrollX: 0,
+      scrollY: 0,
+      useCORS: true,
+      width,
+      windowHeight: Math.round(rootRect.height),
+      windowWidth: Math.round(rootRect.width),
+      x: Math.round(requested.x - rootRect.left),
+      y: Math.round(requested.y - rootRect.top),
+    });
+  } catch (error) {
+    const fallbackCanvas = rect ? captureBrowserGraphCanvasRect(requested) : null;
+    if (fallbackCanvas) return fallbackCanvas;
+    throw error;
+  }
+}
+
+function captureBrowserGraphCanvasRect(requested: ScreenshotCaptureRect) {
+  const graphViewport = document.querySelector<HTMLElement>(".graphViewport");
+  const viewportRect = graphViewport?.getBoundingClientRect();
+  if (!graphViewport || !viewportRect || !rectsOverlap(requested, viewportRect)) return null;
+
+  const sourceCanvases = Array.from(graphViewport.querySelectorAll<HTMLCanvasElement>("canvas")).filter(
+    (canvas) => canvas.width > 0 && canvas.height > 0,
+  );
+  if (sourceCanvases.length === 0) return null;
+
+  const outputScale = window.devicePixelRatio || 1;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(requested.width * outputScale));
+  canvas.height = Math.max(1, Math.round(requested.height * outputScale));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("screenshot canvas is unavailable");
+  context.fillStyle = SCREENSHOT_BACKGROUND;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  let drewSource = false;
+  for (const source of sourceCanvases) {
+    const sourceRect = source.getBoundingClientRect();
+    const overlap = intersectScreenshotRects(requested, sourceRect);
+    if (!overlap) continue;
+
+    const sourceScaleX = source.width / Math.max(1, sourceRect.width);
+    const sourceScaleY = source.height / Math.max(1, sourceRect.height);
+    context.drawImage(
+      source,
+      Math.round((overlap.x - sourceRect.left) * sourceScaleX),
+      Math.round((overlap.y - sourceRect.top) * sourceScaleY),
+      Math.round(overlap.width * sourceScaleX),
+      Math.round(overlap.height * sourceScaleY),
+      Math.round((overlap.x - requested.x) * outputScale),
+      Math.round((overlap.y - requested.y) * outputScale),
+      Math.round(overlap.width * outputScale),
+      Math.round(overlap.height * outputScale),
+    );
+    drewSource = true;
+  }
+
+  return drewSource ? canvas : null;
+}
+
+function rectsOverlap(a: ScreenshotCaptureRect, b: DOMRect) {
+  return a.x < b.right && a.x + a.width > b.left && a.y < b.bottom && a.y + a.height > b.top;
+}
+
+function intersectScreenshotRects(a: ScreenshotCaptureRect, b: DOMRect): ScreenshotCaptureRect | null {
+  const left = Math.max(a.x, b.left);
+  const top = Math.max(a.y, b.top);
+  const right = Math.min(a.x + a.width, b.right);
+  const bottom = Math.min(a.y + a.height, b.bottom);
+  if (right <= left || bottom <= top) return null;
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  };
 }
 
 async function writeCanvasToClipboard(canvas: HTMLCanvasElement) {

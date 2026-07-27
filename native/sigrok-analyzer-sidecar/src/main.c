@@ -108,6 +108,17 @@ typedef struct {
     int version;
 } lin_settings;
 
+#define PARALLEL_DATA_CHANNELS 32
+
+typedef struct {
+    int clk;
+    int data[PARALLEL_DATA_CHANNELS];
+    int max_data_index;
+    const char *clock_edge;
+    int wordsize;
+    const char *endianness;
+} parallel_settings;
+
 typedef enum {
     DECODER_SPI,
     DECODER_UART,
@@ -116,6 +127,7 @@ typedef enum {
     DECODER_CAN,
     DECODER_CAN_FD,
     DECODER_LIN,
+    DECODER_PARALLEL,
 } decoder_protocol;
 
 static void fatal(const char *message)
@@ -298,7 +310,9 @@ static decoder_protocol parse_protocol(cJSON *request)
         return DECODER_CAN_FD;
     if (strcmp(protocol, "lin") == 0)
         return DECODER_LIN;
-    fatal("decoder.protocol must be one of uart, i2c, spi, i2s, can, can_fd, or lin");
+    if (strcmp(protocol, "parallel") == 0 || strcmp(protocol, "simple_parallel") == 0)
+        return DECODER_PARALLEL;
+    fatal("decoder.protocol must be one of uart, i2c, spi, i2s, can, can_fd, lin, or parallel");
     return DECODER_SPI;
 }
 
@@ -425,6 +439,46 @@ static void parse_lin_settings(cJSON *request, lin_settings *settings)
     if (settings->rx < 0 || settings->baudrate == 0 ||
         (settings->version != 1 && settings->version != 2))
         fatal("LIN requires an input channel, a positive bit rate, and version 1 or 2");
+}
+
+static void parse_parallel_settings(cJSON *request, parallel_settings *settings)
+{
+    cJSON *decoder = cJSON_GetObjectItem(request, "decoder");
+    cJSON *channels = decoder ? cJSON_GetObjectItem(decoder, "channels") : NULL;
+    cJSON *options = decoder ? cJSON_GetObjectItem(decoder, "options") : NULL;
+    if (!decoder || !channels || !options)
+        fatal("decoder channels/options are required");
+
+    settings->clk = optional_channel(channels, "clk");
+    if (settings->clk < 0)
+        settings->clk = optional_channel(channels, "clock");
+    settings->max_data_index = -1;
+    for (int index = 0; index < PARALLEL_DATA_CHANNELS; index++) {
+        char key[8];
+        snprintf(key, sizeof(key), "d%d", index);
+        settings->data[index] = optional_channel(channels, key);
+        if (settings->data[index] >= 0)
+            settings->max_data_index = index;
+    }
+    const char *edge = json_string(options, "clock_edge", "rising");
+    settings->clock_edge = (strcmp(edge, "falling") == 0 || strcmp(edge, "falling-edge") == 0)
+                               ? "falling"
+                               : "rising";
+    settings->wordsize = 0;
+    settings->endianness = "little";
+
+    if (settings->clk < 0 || settings->max_data_index < 0)
+        fatal("Simple Parallel requires Clock and at least one data channel");
+    for (int index = 0; index <= settings->max_data_index; index++) {
+        if (settings->data[index] < 0)
+            continue;
+        if (settings->data[index] == settings->clk)
+            fatal("Simple Parallel Clock and data channels must be distinct");
+        for (int previous = 0; previous < index; previous++) {
+            if (settings->data[previous] == settings->data[index])
+                fatal("Simple Parallel data channels must be distinct");
+        }
+    }
 }
 
 typedef struct {
@@ -915,6 +969,93 @@ static cJSON *new_frame(uint64_t frame_id, uint64_t start_sample, uint64_t end_s
     return frame;
 }
 
+static int parse_parallel_annotation_value(const char *text, uint64_t *value)
+{
+    if (!text || !*text)
+        return 0;
+    if (text[0] == '@') {
+        char *end = NULL;
+        unsigned long long parsed = strtoull(text + 1, &end, 16);
+        if (end && *end == '\0') {
+            *value = (uint64_t)parsed;
+            return 1;
+        }
+        return 0;
+    }
+    if (strlen(text) == 4 && text[0] == '\\' && text[1] == 'x') {
+        char *end = NULL;
+        unsigned long long parsed = strtoull(text + 2, &end, 16);
+        if (end && *end == '\0') {
+            *value = (uint64_t)parsed;
+            return 1;
+        }
+    }
+    if (strlen(text) == 2 && text[0] == '\\') {
+        switch (text[1]) {
+        case '0': *value = 0; return 1;
+        case 'a': *value = '\a'; return 1;
+        case 'b': *value = '\b'; return 1;
+        case 't': *value = '\t'; return 1;
+        case 'n': *value = '\n'; return 1;
+        case 'v': *value = '\v'; return 1;
+        case 'f': *value = '\f'; return 1;
+        case 'r': *value = '\r'; return 1;
+        default: break;
+        }
+    }
+    if (strlen(text) == 1) {
+        *value = (unsigned char)text[0];
+        return 1;
+    }
+    return 0;
+}
+
+static int parallel_primary_channel(const parallel_settings *settings)
+{
+    for (int index = 0; index <= settings->max_data_index; index++) {
+        if (settings->data[index] >= 0)
+            return settings->data[index];
+    }
+    return -1;
+}
+
+static cJSON *render_parallel_output(const decode_collector *collector,
+                                     const parallel_settings *settings)
+{
+    enum { PARALLEL_ANN_ITEMS = 0, PARALLEL_ANN_WORDS = 1 };
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "backend", "sigrok_native");
+    cJSON_AddStringToObject(root, "protocol", "Simple Parallel");
+    cJSON *frames = add_array(root, "frames");
+    uint64_t frame_id = 0;
+    const int primary_channel = parallel_primary_channel(settings);
+    const int data_bits = settings->max_data_index + 1;
+
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if ((item->ann_class != PARALLEL_ANN_ITEMS && item->ann_class != PARALLEL_ANN_WORDS) ||
+            item->text_count == 0) {
+            continue;
+        }
+        uint64_t value = 0;
+        const char *text = item->texts[0];
+        if (!parse_parallel_annotation_value(text, &value))
+            continue;
+        const int width_bits = item->ann_class == PARALLEL_ANN_WORDS && settings->wordsize > 0
+                                   ? data_bits * settings->wordsize
+                                   : data_bits;
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample,
+                                 item->ann_class == PARALLEL_ANN_WORDS ? "Words" : "Items");
+        add_protocol_value(frame,
+                           item->ann_class == PARALLEL_ANN_WORDS ? "word" : "data",
+                           "Data", primary_channel, value, text, (width_bits + 3) / 4);
+        cJSON_AddItemToArray(frames, frame);
+    }
+
+    add_array(root, "diagnostics");
+    return root;
+}
+
 static cJSON *render_uart_output(const decode_collector *collector, const uart_settings *settings)
 {
     enum { UART_RX_DATA = 2, UART_TX_DATA = 3, UART_RX_WARN = 0, UART_TX_WARN = 1 };
@@ -1370,12 +1511,14 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     i2s_settings i2s;
     can_settings can;
     lin_settings lin;
+    parallel_settings parallel;
     memset(&spi, 0, sizeof(spi));
     memset(&uart, 0, sizeof(uart));
     memset(&i2c, 0, sizeof(i2c));
     memset(&i2s, 0, sizeof(i2s));
     memset(&can, 0, sizeof(can));
     memset(&lin, 0, sizeof(lin));
+    memset(&parallel, 0, sizeof(parallel));
     const char *decoder_id;
     if (protocol == DECODER_UART) {
         parse_uart_settings(request, &uart);
@@ -1395,6 +1538,9 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
     } else if (protocol == DECODER_LIN) {
         parse_lin_settings(request, &lin);
         decoder_id = "lin_c";
+    } else if (protocol == DECODER_PARALLEL) {
+        parse_parallel_settings(request, &parallel);
+        decoder_id = "parallel_c";
     } else {
         parse_spi_settings(request, &spi);
         decoder_id = "spi_c";
@@ -1444,6 +1590,10 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
         add_option_double(options, "sample_point", can.sample_point);
     } else if (protocol == DECODER_LIN) {
         add_option_i64(options, "version", lin.version);
+    } else if (protocol == DECODER_PARALLEL) {
+        add_option_string(options, "clock_edge", parallel.clock_edge);
+        add_option_i64(options, "wordsize", parallel.wordsize);
+        add_option_string(options, "endianness", parallel.endianness);
     } else {
         add_option_string(options, "cs_polarity", spi.cs_active_low ? "active-low" : "active-high");
         add_option_u64(options, "cpol", (uint64_t)spi.cpol);
@@ -1474,6 +1624,13 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
         add_channel(channels, "can_rx", can.can_rx);
     } else if (protocol == DECODER_LIN) {
         /* LIN consumes UART protocol output, so its source instance gets the physical RX map below. */
+    } else if (protocol == DECODER_PARALLEL) {
+        add_channel(channels, "clk", parallel.clk);
+        for (int index = 0; index <= parallel.max_data_index; index++) {
+            char role[8];
+            snprintf(role, sizeof(role), "d%d", index);
+            add_channel(channels, role, parallel.data[index]);
+        }
     } else {
         add_channel(channels, "clk", spi.clk);
         add_channel(channels, "miso", spi.miso);
@@ -1536,7 +1693,9 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root)
                                                 ? render_can_output(&collector, &can, 1)
                                                 : protocol == DECODER_LIN
                                                       ? render_lin_output(&collector, &lin)
-                                                : render_output(&collector, &spi);
+                                                : protocol == DECODER_PARALLEL
+                                                      ? render_parallel_output(&collector, &parallel)
+                                                      : render_output(&collector, &spi);
     srd_session_destroy(session);
     srd_exit();
     free_sparse_input(&input);
@@ -1553,10 +1712,11 @@ static cJSON *probe(const char *decoder_root)
     struct srd_decoder *can = srd_decoder_get_by_id("can_c");
     struct srd_decoder *can_fd = srd_decoder_get_by_id("can_fd_c");
     struct srd_decoder *lin = srd_decoder_get_by_id("lin_c");
+    struct srd_decoder *parallel = srd_decoder_get_by_id("parallel_c");
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "available",
                           uart != NULL || i2c != NULL || spi != NULL || i2s != NULL ||
-                              can != NULL || can_fd != NULL || lin != NULL);
+                              can != NULL || can_fd != NULL || lin != NULL || parallel != NULL);
     cJSON *protocols = add_array(root, "protocols");
     if (uart)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("UART"));
@@ -1572,9 +1732,11 @@ static cJSON *probe(const char *decoder_root)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("CAN-FD"));
     if (lin)
         cJSON_AddItemToArray(protocols, cJSON_CreateString("LIN"));
+    if (parallel)
+        cJSON_AddItemToArray(protocols, cJSON_CreateString("Parallel"));
     cJSON_AddBoolToObject(root, "supports_streaming", 0);
     cJSON_AddStringToObject(root, "decoder_name", "PXView native C decoder pack");
-    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c,can_c,can_fd_c,lin_c");
+    cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c,can_c,can_fd_c,lin_c,parallel_c");
     cJSON_AddNumberToObject(root, "api_version", SRD_C_DECODER_API_VERSION);
     srd_exit();
     return root;
