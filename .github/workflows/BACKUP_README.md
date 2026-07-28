@@ -88,4 +88,4 @@ rm *.backup*
 
 ## 当前激活的 Workflows
 
-- **build-cross-platform.yml**: GitHub 托管 runner 上的 macOS、Windows 和 Linux 构建
+- **build-cross-platform.yml**: self-hosted Windows/Linux 与 GitHub 托管 macOS 构建

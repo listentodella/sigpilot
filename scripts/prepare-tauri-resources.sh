@@ -18,6 +18,9 @@ copy_file() {
   local source="$1"
   local target="$2"
   mkdir -p "$(dirname "$target")"
+  if [[ -e "$target" && "$source" -ef "$target" ]]; then
+    return 0
+  fi
   cp "$source" "$target"
   chmod u+rw "$target"
 }

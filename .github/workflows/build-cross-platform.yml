@@ -18,10 +18,10 @@ permissions:
 jobs:
   checks:
     name: Tests and frontend
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux build dependencies
         run: |
@@ -37,12 +37,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: pnpm
@@ -70,12 +70,13 @@ jobs:
   build-windows:
     name: Windows x64
     needs: checks
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Sigrok build environment
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -93,8 +94,9 @@ jobs:
       - name: Export MSYS2 paths for resource preparation
         shell: pwsh
         run: |
-          "C:\msys64\ucrt64\bin" | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
-          "BASH=C:\msys64\usr\bin\bash.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $msysRoot = "${{ steps.msys2.outputs.msys2-location }}"
+          "$msysRoot\ucrt64\bin" | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+          "BASH=$msysRoot\usr\bin\bash.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "MSYSTEM=UCRT64" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
           "CHERE_INVOKING=1" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -104,12 +106,12 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: pnpm
@@ -166,7 +168,7 @@ jobs:
           Copy-Item $msi.FullName "$bundleRoot/pxlogic-studio-windows-x64.msi"
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pxlogic-windows-x64
           path: |
@@ -178,12 +180,12 @@ jobs:
   build-linux:
     name: Linux x64
     needs: checks
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, Linux, X64]
     env:
       PXLOGIC_COPY_NATIVE_DEPS: "1"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux build dependencies
         run: |
@@ -210,12 +212,12 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: pnpm
@@ -282,7 +284,7 @@ jobs:
               '.available and .c_decoder_count >= 200 and .python_decoder_count >= 200'
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pxlogic-linux-x64
           path: |
@@ -307,10 +309,10 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Sigrok build dependencies
-        run: brew install cmake glib jq pkg-config python@3.13
+        run: brew install cmake glib jq pkg-config
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -318,12 +320,12 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: pnpm
@@ -352,7 +354,7 @@ jobs:
             "$app" "$bundle_root/pxlogic-studio-macos-${{ matrix.arch }}.app.zip"
 
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pxlogic-macos-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/bundle/pxlogic-studio-macos-${{ matrix.arch }}.app.zip
@@ -368,12 +370,12 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-artifacts
           merge-multiple: true
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release-artifacts/*

@@ -7,6 +7,9 @@ UI tests, then produces these artifacts:
 - Windows x64: NSIS `.exe` and WiX `.msi`
 - Linux x64: `.AppImage` and `.deb`
 
+Checks, Windows and Linux run on the repository's `self-hosted` `X64` runners.
+macOS continues to use GitHub-hosted Apple Silicon and Intel runners.
+
 Windows and Linux build the vendored PXView sigrok sidecar and its C decoder
 modules on the target runner. The workflow bundles the required shared
 libraries, Python standard library, Python decoder catalog, FPGA bitstreams and

@@ -90,8 +90,9 @@ When adding new features, ensure they work on all platforms:
 ## CI/CD Integration
 
 The `build-cross-platform.yml` workflow builds all supported desktop targets.
-Windows uses an MSYS2 UCRT64 toolchain for the native sigrok sidecar while the
-Tauri application itself uses the Rust MSVC target. Linux bundles the sidecar's
-non-system shared libraries. Both packages include the Python standard library,
-decoder catalog, native C decoder modules and FPGA bitstreams, so target
-machines do not need a separate sigrok or Python installation.
+Windows and Linux use the repository's self-hosted x64 runners. Windows uses an
+MSYS2 UCRT64 toolchain for the native sigrok sidecar while the Tauri application
+itself uses the Rust MSVC target. Linux bundles the sidecar's non-system shared
+libraries. Both packages include the Python standard library, decoder catalog,
+native C decoder modules and FPGA bitstreams, so target machines do not need a
+separate sigrok or Python installation.
