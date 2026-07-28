@@ -52,6 +52,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
+          cache-targets: false
+          shared-key: source-only
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -117,6 +119,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
+          cache-targets: false
+          shared-key: source-only
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -221,6 +225,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
+          cache-targets: false
+          shared-key: source-only
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -327,6 +333,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
+          cache-targets: false
+          shared-key: source-only
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
