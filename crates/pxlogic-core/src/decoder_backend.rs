@@ -545,11 +545,7 @@ impl SigrokNativeDecoder {
     }
 
     fn probe_with_catalog(&self, include_catalog: bool) -> Result<SigrokSidecarProbe> {
-        let mut command = Command::new(&self.sidecar_path);
-        command.arg("--decoder-root").arg(&self.decoder_root);
-        if let Some(root) = &self.python_decoder_root {
-            command.arg("--python-decoder-root").arg(root);
-        }
+        let mut command = self.command();
         command.arg("--probe");
         if include_catalog {
             command.arg("--catalog");
@@ -564,11 +560,7 @@ impl SigrokNativeDecoder {
     }
 
     fn decode_request<T: Serialize>(&self, request: &T) -> Result<DecoderOutput> {
-        let mut command = Command::new(&self.sidecar_path);
-        command.arg("--decoder-root").arg(&self.decoder_root);
-        if let Some(root) = &self.python_decoder_root {
-            command.arg("--python-decoder-root").arg(root);
-        }
+        let mut command = self.command();
         let mut child = command
             .arg("--decode")
             .stdin(Stdio::piped())
@@ -594,6 +586,21 @@ impl SigrokNativeDecoder {
             CoreError::Decode(format!("invalid Sigrok sidecar decode response: {error}"))
         })
     }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.sidecar_path);
+        command.arg("--decoder-root").arg(&self.decoder_root);
+        if let Some(root) = &self.python_decoder_root {
+            command.arg("--python-decoder-root").arg(root);
+        }
+        if let Some(sidecar_dir) = self.sidecar_path.parent() {
+            let python_home = sidecar_dir.join("python-runtime");
+            if python_home.is_dir() {
+                command.env("PYTHONHOME", python_home);
+            }
+        }
+        command
+    }
 }
 
 fn discover_workspace_sigrok_path(relative: &str) -> Option<PathBuf> {
@@ -615,12 +622,9 @@ fn discover_workspace_sigrok_python_decoder_root() -> Option<PathBuf> {
 }
 
 fn discover_workspace_saleae_sidecar() -> Option<PathBuf> {
-    native_sidecar_search_paths(
-        "saleae-analyzer-sidecar",
-        "pxlogic-saleae-analyzer-sidecar",
-    )
-    .into_iter()
-    .find(|path| path.is_file())
+    native_sidecar_search_paths("saleae-analyzer-sidecar", "pxlogic-saleae-analyzer-sidecar")
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 fn native_sidecar_search_paths(subdir: &str, relative: &str) -> Vec<PathBuf> {
@@ -712,7 +716,12 @@ fn push_workspace_native_candidate(
     subdir: &str,
     relative: &str,
 ) {
-    paths.push(base.join("target").join("native").join(subdir).join(relative));
+    paths.push(
+        base.join("target")
+            .join("native")
+            .join(subdir)
+            .join(relative),
+    );
     paths.push(
         base.join("native")
             .join(subdir)
@@ -771,7 +780,11 @@ fn saleae_runtime_search_dirs() -> Vec<PathBuf> {
 
 fn push_saleae_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
     candidates.push(base.join("vendor").join("saleae-runtime-2.4.43"));
-    candidates.push(base.join("target").join("native").join("saleae-runtime-2.4.43"));
+    candidates.push(
+        base.join("target")
+            .join("native")
+            .join("saleae-runtime-2.4.43"),
+    );
     candidates.push(
         base.join("resources")
             .join("native")
@@ -878,7 +891,10 @@ fn native_protocol_name(settings: &AnalyzerDecodeSettings) -> &str {
 }
 
 fn protocol_names(protocols: &[&str]) -> Vec<String> {
-    protocols.iter().map(|protocol| (*protocol).to_string()).collect()
+    protocols
+        .iter()
+        .map(|protocol| (*protocol).to_string())
+        .collect()
 }
 
 fn ensure_sigrok_protocol_available(
@@ -2157,9 +2173,10 @@ mod tests {
         assert!(probe.python_decoder_count >= 200);
 
         let has = |id: &str, kind: &str| {
-            probe.decoder_catalog.iter().any(|item| {
-                item.id.as_deref() == Some(id) && item.kind.as_deref() == Some(kind)
-            })
+            probe
+                .decoder_catalog
+                .iter()
+                .any(|item| item.id.as_deref() == Some(id) && item.kind.as_deref() == Some(kind))
         };
         assert!(has("qspi_c", "c"));
         assert!(has("modbus_c", "c"));

@@ -12,9 +12,17 @@ PARALLEL_FIXTURES="${5:-$ROOT_DIR/testdata/decoders/parallel-conformance-v1.json
 
 "$SIDECAR_DIR/build.sh" >/dev/null
 
-SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar"
+if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
+  SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar.exe"
+else
+  SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar"
+fi
 DECODER_ROOT="$BUILD_DIR/decoders/c_decoders"
-PYTHON_DECODER_ROOT="$ROOT_DIR/pxview-fork/libsigrokdecode/decoders"
+if [[ -d "$ROOT_DIR/vendor/pxview-sigrokdecode/libsigrokdecode/decoders" ]]; then
+  PYTHON_DECODER_ROOT="$ROOT_DIR/vendor/pxview-sigrokdecode/libsigrokdecode/decoders"
+else
+  PYTHON_DECODER_ROOT="$ROOT_DIR/pxview-fork/libsigrokdecode/decoders"
+fi
 
 "$SIDECAR" --decoder-root "$DECODER_ROOT" --probe | jq -e '
   .available == true

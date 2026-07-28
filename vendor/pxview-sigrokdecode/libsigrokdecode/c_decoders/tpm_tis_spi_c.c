@@ -138,7 +138,7 @@ static void tpm_tis_finish_annotations(struct srd_decoder_inst *di, tpm_tis_stat
     /* Output python protocol data */
     if (s->out_python >= 0) {
         
-        uint8_t py_data[1];
+        uint8_t py_data[5];
         py_data[0] = (unsigned char)s->reading;
         py_data[1] = (unsigned char)(s->addr >> 16);
         py_data[2] = (unsigned char)(s->addr >> 8);

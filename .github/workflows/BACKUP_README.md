@@ -88,4 +88,4 @@ rm *.backup*
 
 ## 当前激活的 Workflows
 
-- **test-windows-selfhosted.yml**: Windows 11 self-hosted runner 测试
+- **build-cross-platform.yml**: GitHub 托管 runner 上的 macOS、Windows 和 Linux 构建

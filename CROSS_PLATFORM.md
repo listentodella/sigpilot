@@ -53,7 +53,7 @@ Core dependencies available on all platforms:
 | USB Device Detection | `rusb` | All |
 | Capture | `pxlogic-core` | All |
 | Sigrok Decoders | Native sidecar | All |
-| Saleae Legacy Runtime | macOS dylib | macOS only |
+| Saleae native runtime | macOS dylib | macOS only |
 | Native Screenshot | WKWebView API | macOS only |
 | File I/O | Standard Rust | All |
 
@@ -89,4 +89,9 @@ When adding new features, ensure they work on all platforms:
 
 ## CI/CD Integration
 
-The GitHub Actions workflow automatically builds for all platforms on every push. Check the workflow runs to ensure your changes compile on all targets.
+The `build-cross-platform.yml` workflow builds all supported desktop targets.
+Windows uses an MSYS2 UCRT64 toolchain for the native sigrok sidecar while the
+Tauri application itself uses the Rust MSVC target. Linux bundles the sidecar's
+non-system shared libraries. Both packages include the Python standard library,
+decoder catalog, native C decoder modules and FPGA bitstreams, so target
+machines do not need a separate sigrok or Python installation.

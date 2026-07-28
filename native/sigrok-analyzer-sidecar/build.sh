@@ -5,6 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SIDECAR_DIR="$ROOT_DIR/native/sigrok-analyzer-sidecar"
 BUILD_DIR="${PXLOGIC_SIGROK_BUILD_DIR:-$SIDECAR_DIR/target}"
 
+if [[ -n "${PXLOGIC_SIGROK_SOURCE_ROOT:-}" ]]; then
+  PXVIEW_ROOT="$PXLOGIC_SIGROK_SOURCE_ROOT"
+elif [[ -d "$ROOT_DIR/vendor/pxview-sigrokdecode/libsigrokdecode" ]]; then
+  PXVIEW_ROOT="$ROOT_DIR/vendor/pxview-sigrokdecode"
+else
+  PXVIEW_ROOT="$ROOT_DIR/pxview-fork"
+fi
+
 if command -v cmake >/dev/null 2>&1; then
   CMAKE_BIN="$(command -v cmake)"
 elif [[ -x /opt/homebrew/bin/cmake ]]; then
@@ -17,7 +25,13 @@ fi
 if [[ "$(uname -s)" == "Darwin" ]]; then
   export PATH="/opt/homebrew/bin:$PATH"
 fi
-"$CMAKE_BIN" -S "$SIDECAR_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+if [[ -d "$BUILD_DIR/decoders/c_decoders" ]]; then
+  find "$BUILD_DIR/decoders/c_decoders" -maxdepth 1 -type f \
+    -name 'lib*_c.*' -delete
+fi
+"$CMAKE_BIN" -S "$SIDECAR_DIR" -B "$BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPXVIEW_ROOT="$PXVIEW_ROOT"
 "$CMAKE_BIN" --build "$BUILD_DIR" --config Release --parallel
 
 if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then

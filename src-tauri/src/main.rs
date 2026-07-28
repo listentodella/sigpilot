@@ -1557,10 +1557,80 @@ fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn set_bundled_path(name: &str, path: PathBuf, directory: bool) {
+    let exists = if directory {
+        path.is_dir()
+    } else {
+        path.is_file()
+    };
+    if exists && std::env::var_os(name).is_none() {
+        std::env::set_var(name, path);
+    }
+}
+
+fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
+    let resource_dir = app.path().resource_dir()?.join("resources");
+    let native_dir = resource_dir.join("native");
+    let sigrok_dir = native_dir.join("sigrok-analyzer-sidecar");
+    #[cfg(target_os = "windows")]
+    let sigrok_executable = "pxlogic-sigrok-sidecar.exe";
+    #[cfg(not(target_os = "windows"))]
+    let sigrok_executable = "pxlogic-sigrok-sidecar";
+
+    set_bundled_path(
+        "PXLOGIC_BITSTREAM_DIR",
+        resource_dir.join("bitstreams"),
+        true,
+    );
+    set_bundled_path(
+        "PXLOGIC_SIGROK_SIDECAR",
+        sigrok_dir.join(sigrok_executable),
+        false,
+    );
+    set_bundled_path(
+        "PXLOGIC_SIGROK_DECODER_ROOT",
+        sigrok_dir.join("decoders/c_decoders"),
+        true,
+    );
+    set_bundled_path(
+        "PXLOGIC_SIGROK_PYTHON_DECODER_ROOT",
+        sigrok_dir.join("decoders/python_decoders"),
+        true,
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        set_bundled_path(
+            "PXLOGIC_SALEAE_SIDECAR",
+            native_dir
+                .join("saleae-analyzer-sidecar")
+                .join("pxlogic-saleae-analyzer-sidecar"),
+            false,
+        );
+        set_bundled_path(
+            "PXLOGIC_SALEAE_GRAPH_SIDECAR",
+            native_dir
+                .join("saleae-graph-sidecar")
+                .join("pxlogic-saleae-graph-sidecar"),
+            false,
+        );
+        set_bundled_path(
+            "PXLOGIC_SALEAE_RUNTIME_ROOT",
+            native_dir.join("saleae-runtime-2.4.43"),
+            true,
+        );
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            configure_bundled_resources(app)?;
+            Ok(())
+        })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_devices,

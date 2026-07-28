@@ -1,0 +1,371 @@
+name: Build Cross-Platform
+
+on:
+  push:
+    branches: [codex/graph-server-32ch, main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [codex/graph-server-32ch, main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Tests and frontend
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libusb-1.0-0-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+      - name: Test UI logic
+        run: node --test tests/*.test.ts
+
+      - name: Build frontend
+        run: pnpm build
+
+  build-windows:
+    name: Windows x64
+    needs: checks
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Sigrok build environment
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-jq
+
+      - name: Export MSYS2 paths for resource preparation
+        shell: pwsh
+        run: |
+          "C:\msys64\ucrt64\bin" | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+          "BASH=C:\msys64\usr\bin\bash.exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "MSYSTEM=UCRT64" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "CHERE_INVOKING=1" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify native Sigrok decoder
+        shell: msys2 {0}
+        run: native/sigrok-analyzer-sidecar/verify.sh
+
+      - name: Prepare and probe bundled resources
+        shell: msys2 {0}
+        run: |
+          scripts/prepare-tauri-resources.sh
+          sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar.exe"
+          decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
+          python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
+          python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
+          test -f resources/bitstreams/hspi_ddr.bin
+          test -f resources/bitstreams/hspi_ddr_RST.bin
+          test -x "$sidecar"
+          test -d "$decoder_root"
+          test -d "$python_root"
+          test -d "$python_home"
+          PYTHONHOME="$python_home" "$sidecar" \
+            --decoder-root "$decoder_root" \
+            --python-decoder-root "$python_root" \
+            --probe --catalog | jq -e \
+              '.available and .c_decoder_count >= 200 and .python_decoder_count >= 200'
+
+      - name: Build Tauri installers
+        shell: pwsh
+        env:
+          TAURI_SKIP_DEVTOOLS_CHECK: true
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi --ci
+
+      - name: Name Windows artifacts
+        shell: pwsh
+        run: |
+          $bundleRoot = "target/x86_64-pc-windows-msvc/release/bundle"
+          $exe = Get-ChildItem "$bundleRoot/nsis" -Filter *.exe | Select-Object -First 1
+          $msi = Get-ChildItem "$bundleRoot/msi" -Filter *.msi | Select-Object -First 1
+          if (-not $exe -or -not $msi) { throw "Tauri did not produce both Windows installers" }
+          Copy-Item $exe.FullName "$bundleRoot/pxlogic-studio-windows-x64.exe"
+          Copy-Item $msi.FullName "$bundleRoot/pxlogic-studio-windows-x64.msi"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pxlogic-windows-x64
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64.exe
+            target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64.msi
+          if-no-files-found: error
+          retention-days: 30
+
+  build-linux:
+    name: Linux x64
+    needs: checks
+    runs-on: ubuntu-22.04
+    env:
+      PXLOGIC_COPY_NATIVE_DEPS: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            jq \
+            ninja-build \
+            pkg-config \
+            python3-dev \
+            libglib2.0-dev \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libusb-1.0-0-dev \
+            patchelf \
+            libfuse2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify native Sigrok decoder
+        run: native/sigrok-analyzer-sidecar/verify.sh
+
+      - name: Prepare and probe bundled resources
+        run: |
+          scripts/prepare-tauri-resources.sh
+          sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar"
+          decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
+          python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
+          python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
+          test -f resources/bitstreams/hspi_ddr.bin
+          test -f resources/bitstreams/hspi_ddr_RST.bin
+          test -x "$sidecar"
+          test -d "$decoder_root"
+          test -d "$python_root"
+          test -d "$python_home"
+          PYTHONHOME="$python_home" "$sidecar" \
+            --decoder-root "$decoder_root" \
+            --python-decoder-root "$python_root" \
+            --probe --catalog | jq -e \
+              '.available and .c_decoder_count >= 200 and .python_decoder_count >= 200'
+
+      - name: Build Tauri packages
+        run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --ci
+
+      - name: Verify AppImage payload and name artifacts
+        run: |
+          set -euo pipefail
+          bundle_root="target/x86_64-unknown-linux-gnu/release/bundle"
+          appimage="$(find "$bundle_root/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)"
+          deb="$(find "$bundle_root/deb" -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$appimage"
+          test -n "$deb"
+          cp "$appimage" "$bundle_root/pxlogic-studio-linux-x64.AppImage"
+          cp "$deb" "$bundle_root/pxlogic-studio-linux-x64.deb"
+          chmod 755 "$bundle_root/pxlogic-studio-linux-x64.AppImage"
+
+          extract_dir="$(mktemp -d)"
+          cd "$extract_dir"
+          "$GITHUB_WORKSPACE/$bundle_root/pxlogic-studio-linux-x64.AppImage" --appimage-extract >/dev/null
+          packaged_sidecar="$(find squashfs-root -type f -name pxlogic-sigrok-sidecar -print -quit)"
+          test -n "$packaged_sidecar"
+          packaged_root="$(dirname "$packaged_sidecar")"
+          test -f "$(find squashfs-root -type f -name hspi_ddr.bin -print -quit)"
+          PYTHONHOME="$packaged_root/python-runtime" "$packaged_sidecar" \
+            --decoder-root "$packaged_root/decoders/c_decoders" \
+            --python-decoder-root "$packaged_root/decoders/python_decoders" \
+            --probe --catalog | jq -e \
+              '.available and .c_decoder_count >= 200 and .python_decoder_count >= 200'
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pxlogic-linux-x64
+          path: |
+            target/x86_64-unknown-linux-gnu/release/bundle/pxlogic-studio-linux-x64.AppImage
+            target/x86_64-unknown-linux-gnu/release/bundle/pxlogic-studio-linux-x64.deb
+          if-no-files-found: error
+          retention-days: 30
+
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+          - arch: x64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Sigrok build dependencies
+        run: brew install cmake glib jq pkg-config python@3.13
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri app bundle
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles app --ci --no-sign
+
+      - name: Name macOS artifact
+        run: |
+          set -euo pipefail
+          bundle_root="target/${{ matrix.target }}/release/bundle"
+          app="$(find "$bundle_root/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$app" "$bundle_root/pxlogic-studio-macos-${{ matrix.arch }}.app.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pxlogic-macos-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/bundle/pxlogic-studio-macos-${{ matrix.arch }}.app.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*

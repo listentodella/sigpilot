@@ -93,6 +93,32 @@ copy_shared_dependencies() {
   esac
 }
 
+copy_python_runtime() {
+  local target_dir="$1"
+  local python_prefix python_version python_source python_target
+
+  case "$HOST_OS" in
+    Darwin) return 0 ;;
+  esac
+  command -v python3 >/dev/null 2>&1 || {
+    printf 'python3 is required to bundle the Sigrok runtime.\n' >&2
+    return 1
+  }
+
+  python_prefix="$(python3 -c 'import sys; print(sys.base_prefix)')"
+  python_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  python_source="$python_prefix/lib/python$python_version"
+  python_target="$target_dir/python-runtime/lib/python$python_version"
+  if [[ ! -d "$python_source" ]]; then
+    printf 'Python standard library was not found at %s.\n' "$python_source" >&2
+    return 1
+  fi
+
+  copy_directory "$python_source" "$python_target"
+  rm -rf "$python_target/site-packages"
+  find "$python_target" -type d -name __pycache__ -prune -exec rm -rf {} +
+}
+
 is_saleae_analyzer_runtime() {
   local source="$1"
   [[ -f "$source/libAnalyzer.dylib" \
@@ -196,6 +222,7 @@ if sigrok_root="$(sigrok_source_root)"; then
   copy_executable "$sigrok_sidecar" \
     "$RESOURCE_DIR/sigrok-analyzer-sidecar/$sigrok_target_name"
   copy_shared_dependencies "$sigrok_sidecar" "$RESOURCE_DIR/sigrok-analyzer-sidecar"
+  copy_python_runtime "$RESOURCE_DIR/sigrok-analyzer-sidecar"
   if [[ -d "$sigrok_build_dir/decoders/c_decoders" ]]; then
     mkdir -p "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders"
     cp -R "$sigrok_build_dir/decoders/c_decoders" \
