@@ -516,10 +516,30 @@ fn locate_saleae_runtime_root() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_RUNTIME_ROOT") {
         return Some(PathBuf::from(path));
     }
-    let mut candidates = vec![
+    saleae_runtime_root_candidates()
+        .into_iter()
+        .find(|path| path.join("libgraph_server_shared.dylib").is_file())
+}
+
+fn saleae_runtime_root_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(current) = std::env::current_dir() {
+        push_saleae_runtime_root_candidates(&mut candidates, &current);
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_saleae_runtime_root_candidates(&mut candidates, &manifest_dir);
+    if let Some(workspace_root) = manifest_dir.parent() {
+        push_saleae_runtime_root_candidates(&mut candidates, workspace_root);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().take(8) {
+            push_saleae_runtime_root_candidates(&mut candidates, ancestor);
+        }
+    }
+    candidates.extend([
         PathBuf::from("/Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
         PathBuf::from("/Applications/Logic 2.app/Contents/Resources/macos-arm64"),
-    ];
+    ]);
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         candidates.push(home.join("Applications/Saleae Logic.app/Contents/Resources/macos-arm64"));
@@ -527,9 +547,23 @@ fn locate_saleae_runtime_root() -> Option<PathBuf> {
         candidates.push(home.join("Downloads/Saleae Logic.app/Contents/Resources/macos-arm64"));
         candidates.push(home.join("Downloads/Logic 2.app/Contents/Resources/macos-arm64"));
     }
-    candidates
-        .into_iter()
-        .find(|path| path.join("libgraph_server_shared.dylib").is_file())
+    dedup_pathbufs(candidates)
+}
+
+fn push_saleae_runtime_root_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
+    candidates.push(base.join("vendor").join("saleae-runtime-2.4.43"));
+    candidates.push(base.join("target").join("native").join("saleae-runtime-2.4.43"));
+    candidates.push(
+        base.join("resources")
+            .join("native")
+            .join("saleae-runtime-2.4.43"),
+    );
+    candidates.push(
+        base.join("Resources")
+            .join("resources")
+            .join("native")
+            .join("saleae-runtime-2.4.43"),
+    );
 }
 
 fn locate_saleae_graph_sidecar() -> Option<PathBuf> {

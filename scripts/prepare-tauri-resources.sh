@@ -8,6 +8,7 @@ mkdir -p "$RESOURCE_DIR"
 rm -rf \
   "$RESOURCE_DIR/saleae-analyzer-sidecar" \
   "$RESOURCE_DIR/saleae-graph-sidecar" \
+  "$RESOURCE_DIR/saleae-runtime-2.4.43" \
   "$RESOURCE_DIR/sigrok-analyzer-sidecar"
 
 copy_file() {
@@ -21,6 +22,44 @@ copy_file() {
 copy_executable() {
   copy_file "$1" "$2"
   chmod 755 "$2"
+}
+
+copy_directory() {
+  local source="$1"
+  local target="$2"
+  mkdir -p "$target"
+  if command -v ditto >/dev/null 2>&1; then
+    ditto --norsrc "$source" "$target"
+  else
+    cp -R "$source/." "$target/"
+  fi
+}
+
+is_saleae_analyzer_runtime() {
+  local source="$1"
+  [[ -f "$source/libAnalyzer.dylib" \
+    && -f "$source/Analyzers/libserial_analyzer.so" \
+    && -f "$source/Analyzers/libi2c_analyzer.so" \
+    && -f "$source/Analyzers/libspi_analyzer.so" \
+    && -f "$source/Analyzers/libi2s_analyzer.so" \
+    && -f "$source/Analyzers/libcan_analyzer.so" \
+    && -f "$source/Analyzers/liblin_analyzer.so" \
+    && -f "$source/Analyzers/libsimple_parallel_analyzer.so" ]]
+}
+
+saleae_runtime_source() {
+  local candidate
+  for candidate in \
+    "${PXLOGIC_SALEAE_RUNTIME_ROOT:-}" \
+    "$ROOT_DIR/vendor/saleae-runtime-2.4.43" \
+    "$ROOT_DIR/target/native/saleae-runtime-2.4.43"
+  do
+    if [[ -n "$candidate" ]] && is_saleae_analyzer_runtime "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
 run_build_script() {
@@ -44,6 +83,14 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   saleae_graph="$(run_build_script "$ROOT_DIR/native/saleae-graph-sidecar/build.sh")"
   copy_executable "$saleae_graph" \
     "$RESOURCE_DIR/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar"
+
+  if saleae_runtime="$(saleae_runtime_source)"; then
+    copy_directory "$saleae_runtime" "$RESOURCE_DIR/saleae-runtime-2.4.43"
+    find "$RESOURCE_DIR/saleae-runtime-2.4.43" \
+      -type f \( -name '*.dylib' -o -name '*.so' \) -exec chmod 755 {} +
+  else
+    printf 'Skipping Saleae analyzer runtime: no Logic 2.4.43 runtime source was found.\n' >&2
+  fi
 else
   printf 'Skipping Saleae native sidecars: macOS arm64 is required.\n' >&2
 fi

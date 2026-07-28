@@ -724,36 +724,70 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 fn discover_saleae_runtime_root() -> Option<PathBuf> {
-    let current = std::env::current_dir().ok();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    saleae_runtime_search_dirs()
+        .into_iter()
+        .find(|path| is_saleae_analyzer_runtime(path))
+}
+
+fn saleae_runtime_search_dirs() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(current) = current {
-        candidates.push(current.join("target/native/saleae-runtime-2.4.43"));
-        candidates.push(current.join("../target/native/saleae-runtime-2.4.43"));
+    if let Ok(current) = std::env::current_dir() {
+        push_saleae_runtime_candidates(&mut candidates, &current);
     }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_saleae_runtime_candidates(&mut candidates, &manifest_dir);
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        push_saleae_runtime_candidates(&mut candidates, workspace_root);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().take(8) {
+            push_saleae_runtime_candidates(&mut candidates, ancestor);
+        }
+    }
+
     candidates.extend([
         PathBuf::from("/Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
         PathBuf::from("/Applications/Logic 2.app/Contents/Resources/macos-arm64"),
     ]);
-    if let Some(home) = home {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         candidates.extend([
             home.join("Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
             home.join("Applications/Logic 2.app/Contents/Resources/macos-arm64"),
             home.join("Downloads/Saleae Logic.app/Contents/Resources/macos-arm64"),
         ]);
     }
-    candidates.into_iter().find(|path| {
-        path.join("libAnalyzer.dylib").is_file()
-            && path.join("Analyzers/libserial_analyzer.so").is_file()
-            && path.join("Analyzers/libi2c_analyzer.so").is_file()
-            && path.join("Analyzers/libspi_analyzer.so").is_file()
-            && path.join("Analyzers/libi2s_analyzer.so").is_file()
-            && path.join("Analyzers/libcan_analyzer.so").is_file()
-            && path.join("Analyzers/liblin_analyzer.so").is_file()
-            && path
-                .join("Analyzers/libsimple_parallel_analyzer.so")
-                .is_file()
-    })
+    dedup_paths(candidates)
+}
+
+fn push_saleae_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
+    candidates.push(base.join("vendor").join("saleae-runtime-2.4.43"));
+    candidates.push(base.join("target").join("native").join("saleae-runtime-2.4.43"));
+    candidates.push(
+        base.join("resources")
+            .join("native")
+            .join("saleae-runtime-2.4.43"),
+    );
+    candidates.push(
+        base.join("Resources")
+            .join("resources")
+            .join("native")
+            .join("saleae-runtime-2.4.43"),
+    );
+}
+
+fn is_saleae_analyzer_runtime(path: &Path) -> bool {
+    path.join("libAnalyzer.dylib").is_file()
+        && path.join("Analyzers/libserial_analyzer.so").is_file()
+        && path.join("Analyzers/libi2c_analyzer.so").is_file()
+        && path.join("Analyzers/libspi_analyzer.so").is_file()
+        && path.join("Analyzers/libi2s_analyzer.so").is_file()
+        && path.join("Analyzers/libcan_analyzer.so").is_file()
+        && path.join("Analyzers/liblin_analyzer.so").is_file()
+        && path
+            .join("Analyzers/libsimple_parallel_analyzer.so")
+            .is_file()
 }
 
 impl DecoderBackend for SigrokNativeDecoder {
@@ -1272,6 +1306,16 @@ mod tests {
                 .join("native")
                 .join("saleae-analyzer-sidecar")
                 .join("pxlogic-saleae-analyzer-sidecar")
+        ));
+
+        let mut runtime_paths = Vec::new();
+        push_saleae_runtime_candidates(&mut runtime_paths, &contents_dir);
+        assert!(runtime_paths.contains(
+            &contents_dir
+                .join("Resources")
+                .join("resources")
+                .join("native")
+                .join("saleae-runtime-2.4.43")
         ));
     }
 
