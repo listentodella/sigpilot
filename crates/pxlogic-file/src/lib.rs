@@ -103,6 +103,45 @@ pub struct SaleaeImportedCapture {
     pub session: SaleaeSessionMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum PxlogicProjectCapture {
+    Packed(CaptureData),
+    Sparse(SparseCaptureData),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PxlogicProject {
+    pub capture: PxlogicProjectCapture,
+    pub session: SaleaeSessionMetadata,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PxlogicProjectManifest {
+    format: String,
+    session: SaleaeSessionMetadata,
+    capture: PxlogicProjectCaptureManifest,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PxlogicProjectCaptureManifest {
+    Packed {
+        metadata: CaptureMetadata,
+        samples_file: String,
+    },
+    Sparse {
+        metadata: CaptureMetadata,
+        channels: Vec<PxlogicProjectSparseChannel>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PxlogicProjectSparseChannel {
+    channel: u8,
+    initial_high: bool,
+    transitions_file: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SaleaeExportManifest {
     format: &'static str,
@@ -862,6 +901,192 @@ pub fn open_pxcap(path: impl AsRef<Path>) -> Result<CaptureData> {
     Ok(CaptureData { metadata, samples })
 }
 
+pub fn save_pxl_packed(
+    path: impl AsRef<Path>,
+    capture: &CaptureData,
+    session: &SaleaeSessionMetadata,
+) -> Result<()> {
+    let file = File::create(path)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let manifest = PxlogicProjectManifest {
+        format: "pxlogic.project.v1".to_string(),
+        session: session.clone(),
+        capture: PxlogicProjectCaptureManifest::Packed {
+            metadata: capture.metadata.clone(),
+            samples_file: "capture/samples.bin".to_string(),
+        },
+    };
+
+    zip.start_file("project.json", options)?;
+    zip.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
+    zip.start_file("capture/samples.bin", options)?;
+    zip.write_all(&capture.samples)?;
+    zip.finish()?;
+    Ok(())
+}
+
+pub fn save_pxl_sparse(
+    path: impl AsRef<Path>,
+    capture: &SparseCaptureData,
+    session: &SaleaeSessionMetadata,
+) -> Result<()> {
+    validate_sparse_project_capture(capture)?;
+    let file = File::create(path)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let mut channels = capture.channels.iter().collect::<Vec<_>>();
+    channels.sort_by_key(|channel| channel.channel);
+    let manifest_channels = channels
+        .iter()
+        .map(|channel| PxlogicProjectSparseChannel {
+            channel: channel.channel,
+            initial_high: channel.initial_high,
+            transitions_file: format!("capture/transitions-{}.u64", channel.channel),
+        })
+        .collect::<Vec<_>>();
+    let manifest = PxlogicProjectManifest {
+        format: "pxlogic.project.v1".to_string(),
+        session: session.clone(),
+        capture: PxlogicProjectCaptureManifest::Sparse {
+            metadata: capture.metadata.clone(),
+            channels: manifest_channels,
+        },
+    };
+
+    zip.start_file("project.json", options)?;
+    zip.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
+    for channel in channels {
+        zip.start_file(
+            format!("capture/transitions-{}.u64", channel.channel),
+            options,
+        )?;
+        for &sample in &channel.transitions {
+            zip.write_all(&sample.to_le_bytes())?;
+        }
+    }
+    zip.finish()?;
+    Ok(())
+}
+
+pub fn open_pxl(path: impl AsRef<Path>) -> Result<PxlogicProject> {
+    let file = File::open(path)?;
+    let mut zip = ZipArchive::new(file)?;
+    let mut manifest_json = String::new();
+    zip.by_name("project.json")?
+        .read_to_string(&mut manifest_json)?;
+    let manifest: PxlogicProjectManifest = serde_json::from_str(&manifest_json)?;
+    if manifest.format != "pxlogic.project.v1" {
+        return Err(FileError::InvalidCapture);
+    }
+
+    let capture = match manifest.capture {
+        PxlogicProjectCaptureManifest::Packed {
+            mut metadata,
+            samples_file,
+        } => {
+            validate_project_file_name(&samples_file)?;
+            metadata.enabled_channels =
+                resolve_enabled_channels(metadata.channel_count, &metadata.enabled_channels)
+                    .map_err(|_| FileError::InvalidCapture)?;
+            let mut samples = Vec::new();
+            zip.by_name(&samples_file)?.read_to_end(&mut samples)?;
+            PxlogicProjectCapture::Packed(CaptureData { metadata, samples })
+        }
+        PxlogicProjectCaptureManifest::Sparse {
+            mut metadata,
+            channels,
+        } => {
+            metadata.enabled_channels =
+                resolve_enabled_channels(metadata.channel_count, &metadata.enabled_channels)
+                    .map_err(|_| FileError::InvalidCapture)?;
+            let mut restored_channels = channels
+                .into_iter()
+                .map(|channel| {
+                    validate_project_file_name(&channel.transitions_file)?;
+                    let transitions =
+                        read_project_transition_file(&mut zip, &channel.transitions_file)?;
+                    Ok(SparseDigitalChannel {
+                        channel: channel.channel,
+                        initial_high: channel.initial_high,
+                        transitions,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            restored_channels.sort_by_key(|channel| channel.channel);
+            let capture = SparseCaptureData {
+                metadata,
+                channels: restored_channels,
+            };
+            validate_sparse_project_capture(&capture)?;
+            PxlogicProjectCapture::Sparse(capture)
+        }
+    };
+
+    Ok(PxlogicProject {
+        capture,
+        session: manifest.session,
+    })
+}
+
+fn validate_project_file_name(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(FileError::InvalidCapture);
+    }
+    Ok(())
+}
+
+fn read_project_transition_file(zip: &mut ZipArchive<File>, path: &str) -> Result<Vec<u64>> {
+    let mut bytes = Vec::new();
+    zip.by_name(path)?.read_to_end(&mut bytes)?;
+    if bytes.len() % 8 != 0 {
+        return Err(FileError::InvalidCapture);
+    }
+    Ok(bytes
+        .chunks_exact(8)
+        .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("transition width")))
+        .collect())
+}
+
+fn validate_sparse_project_capture(capture: &SparseCaptureData) -> Result<()> {
+    validate_saleae_export_metadata(&capture.metadata)?;
+    let enabled_channels = export_channels(&capture.metadata)?;
+    let mut channels = capture.channels.iter().collect::<Vec<_>>();
+    channels.sort_by_key(|channel| channel.channel);
+    if channels.is_empty()
+        || channels.len() != enabled_channels.len()
+        || channels
+            .iter()
+            .map(|channel| channel.channel)
+            .ne(enabled_channels.iter().copied())
+        || channels
+            .windows(2)
+            .any(|pair| pair[0].channel == pair[1].channel)
+    {
+        return Err(FileError::InvalidCapture);
+    }
+    for channel in channels {
+        if channel.channel >= capture.metadata.channel_count
+            || channel
+                .transitions
+                .iter()
+                .any(|sample| *sample >= capture.metadata.sample_count)
+            || channel
+                .transitions
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(FileError::InvalidCapture);
+        }
+    }
+    Ok(())
+}
+
 pub fn export_sr(path: impl AsRef<Path>, capture: &CaptureData) -> Result<()> {
     let enabled_channels = export_channels(&capture.metadata)?;
     let file = File::create(path)?;
@@ -993,7 +1218,7 @@ fn vcd_identifier(channel: u8) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{collections::BTreeMap, fs, path::PathBuf};
 
     use pxlogic_core::{
         capture::generate_sample_words, CaptureSettings, CaptureTriggerKind, CaptureTriggerMetadata,
@@ -1025,6 +1250,77 @@ mod tests {
         );
         assert_eq!(opened.metadata.trigger, capture.metadata.trigger);
         assert_eq!(opened.samples, capture.samples);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pxl_round_trips_packed_capture_and_analyzers() {
+        let mut capture = generate_sample_words(&CaptureSettings {
+            sample_rate_hz: 10_000,
+            duration_ms: 10,
+            channel_count: 16,
+            ..CaptureSettings::default()
+        })
+        .unwrap();
+        capture.metadata.trigger = Some(CaptureTriggerMetadata {
+            sample_index: 50,
+            channel: 0,
+            kind: CaptureTriggerKind::Rising,
+        });
+        let session = project_session();
+        let path = temp_file("roundtrip.pxl");
+
+        save_pxl_packed(&path, &capture, &session).unwrap();
+        let opened = open_pxl(&path).unwrap();
+
+        assert_eq!(opened.session, session);
+        match opened.capture {
+            PxlogicProjectCapture::Packed(opened_capture) => {
+                assert_eq!(opened_capture.metadata, capture.metadata);
+                assert_eq!(opened_capture.samples, capture.samples);
+            }
+            PxlogicProjectCapture::Sparse(_) => panic!("packed project opened as sparse"),
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pxl_round_trips_sparse_capture_and_sigrok_metadata() {
+        let mut metadata = sparse_capture().metadata;
+        metadata.sample_count = 4;
+        let capture = SparseCaptureData {
+            metadata,
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 4,
+                    initial_high: true,
+                    transitions: vec![2],
+                },
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: vec![1, 3],
+                },
+            ],
+        };
+        let session = project_session();
+        let path = temp_file("sparse-roundtrip.pxl");
+
+        save_pxl_sparse(&path, &capture, &session).unwrap();
+        let opened = open_pxl(&path).unwrap();
+
+        assert_eq!(opened.session, session);
+        match opened.capture {
+            PxlogicProjectCapture::Sparse(opened_capture) => {
+                assert_eq!(opened_capture.metadata, capture.metadata);
+                assert_eq!(opened_capture.channels.len(), 2);
+                assert_eq!(opened_capture.channels[0].channel, 0);
+                assert_eq!(opened_capture.channels[0].transitions, vec![1, 3]);
+                assert_eq!(opened_capture.channels[1].channel, 4);
+                assert_eq!(opened_capture.channels[1].initial_high, true);
+            }
+            PxlogicProjectCapture::Packed(_) => panic!("sparse project opened as packed"),
+        }
         let _ = fs::remove_file(path);
     }
 
@@ -1608,6 +1904,52 @@ mod tests {
                 msb_first: true,
             }))
         );
+    }
+
+    fn project_session() -> SaleaeSessionMetadata {
+        SaleaeSessionMetadata {
+            name: "PXLogic Bench".to_string(),
+            notes: "round-trip notes".to_string(),
+            analyzers: vec![
+                SaleaeAnalyzerMetadata {
+                    analyzer_type: "I2C".to_string(),
+                    name: "I2C bus".to_string(),
+                    color: "#75CACA".to_string(),
+                    display_radix: "Hexadecimal".to_string(),
+                    show_in_data_table: true,
+                    stream_to_terminal: false,
+                    decoder_backend: DecoderBackendKind::SaleaeNative,
+                    decode_settings: Some(AnalyzerDecodeSettings::I2c(I2cDecodeSettings {
+                        sda_channel: 0,
+                        scl_channel: 4,
+                    })),
+                    saleae_metadata: serde_json::json!({"type": "I2C", "nodeId": 20000}),
+                },
+                SaleaeAnalyzerMetadata {
+                    analyzer_type: "LIN".to_string(),
+                    name: "LIN via sigrok".to_string(),
+                    color: "#D881F7".to_string(),
+                    display_radix: "Binary".to_string(),
+                    show_in_data_table: false,
+                    stream_to_terminal: true,
+                    decoder_backend: DecoderBackendKind::SigrokNative,
+                    decode_settings: Some(AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                        decoder_id: "lin".to_string(),
+                        protocol_name: "LIN".to_string(),
+                        channels: BTreeMap::from([("rx".to_string(), Some(0))]),
+                        options: BTreeMap::from([(
+                            "baudrate".to_string(),
+                            NativeOptionValue::Integer(19_200),
+                        )]),
+                        primary_channel: 0,
+                    })),
+                    saleae_metadata: serde_json::json!({
+                        "nativeCatalogKind": "python",
+                        "nativeRunnerStatus": "wired"
+                    }),
+                },
+            ],
+        }
     }
 
     fn temp_file(name: &str) -> PathBuf {

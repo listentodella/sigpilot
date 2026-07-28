@@ -20,7 +20,7 @@ use pxlogic_core::{
     CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DeviceInfo,
     DeviceKind, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
     HardwareCaptureCapabilities, PwmConfiguration, PwmSettings, PxUsbSpeed, SigrokDecoderCatalog,
-    SigrokNativeDecoder,
+    SigrokNativeDecoder, SparseCaptureData,
 };
 use pxlogic_graph::{GraphFrameRequest, GraphFrameResponse, GraphSession};
 use pxlogic_waveform::{
@@ -84,6 +84,18 @@ struct CaptureSummary {
 struct OpenCaptureResult {
     summary: CaptureSummary,
     saleae_session: Option<pxlogic_file::SaleaeSessionMetadata>,
+}
+
+fn sparse_capture_summary(capture: &SparseCaptureData) -> CaptureSummary {
+    let bytes = capture
+        .channels
+        .iter()
+        .map(|channel| channel.transitions.len().saturating_mul(8))
+        .sum();
+    CaptureSummary {
+        metadata: capture.metadata.clone(),
+        bytes,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -552,7 +564,11 @@ fn saleae_runtime_root_candidates() -> Vec<PathBuf> {
 
 fn push_saleae_runtime_root_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
     candidates.push(base.join("vendor").join("saleae-runtime-2.4.43"));
-    candidates.push(base.join("target").join("native").join("saleae-runtime-2.4.43"));
+    candidates.push(
+        base.join("target")
+            .join("native")
+            .join("saleae-runtime-2.4.43"),
+    );
     candidates.push(
         base.join("resources")
             .join("native")
@@ -714,6 +730,39 @@ fn open_capture(
         });
     }
 
+    if source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pxl"))
+    {
+        let project = pxlogic_file::open_pxl(source_path).map_err(to_string)?;
+        let summary = match project.capture {
+            pxlogic_file::PxlogicProjectCapture::Packed(capture) => {
+                let summary = CaptureSummary {
+                    metadata: capture.metadata.clone(),
+                    bytes: capture.samples.len(),
+                };
+                state
+                    .session(&session_id)
+                    .replace_capture(capture)
+                    .map_err(to_string)?;
+                summary
+            }
+            pxlogic_file::PxlogicProjectCapture::Sparse(capture) => {
+                let summary = sparse_capture_summary(&capture);
+                state
+                    .session(&session_id)
+                    .replace_sparse_capture(capture)
+                    .map_err(to_string)?;
+                summary
+            }
+        };
+        return Ok(OpenCaptureResult {
+            summary,
+            saleae_session: Some(project.session),
+        });
+    }
+
     let capture = pxlogic_file::open_pxcap(source_path).map_err(to_string)?;
     let summary = CaptureSummary {
         metadata: capture.metadata.clone(),
@@ -730,12 +779,33 @@ fn open_capture(
 }
 
 #[tauri::command]
-fn save_capture(session_id: String, path: String, state: State<'_, AppState>) -> CommandResult<()> {
-    let capture = state
-        .existing_session(&session_id)?
+fn save_capture(
+    session_id: String,
+    path: String,
+    saleae_session: Option<pxlogic_file::SaleaeSessionMetadata>,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    let session = state.existing_session(&session_id)?;
+    let path = PathBuf::from(path);
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pxl"))
+    {
+        let metadata = saleae_session.unwrap_or_default();
+        if let Some(capture) = session.capture() {
+            return pxlogic_file::save_pxl_packed(path, &capture, &metadata).map_err(to_string);
+        }
+        if let Some(capture) = session.sparse_capture() {
+            return pxlogic_file::save_pxl_sparse(path, &capture, &metadata).map_err(to_string);
+        }
+        return Err("no capture is loaded".to_string());
+    }
+
+    let capture = session
         .capture()
-        .ok_or_else(|| "no capture is loaded".to_string())?;
-    pxlogic_file::save_pxcap(PathBuf::from(path), &capture).map_err(to_string)
+        .ok_or_else(|| "this save format requires a packed capture".to_string())?;
+    pxlogic_file::save_pxcap(path, &capture).map_err(to_string)
 }
 
 fn export_saleae_capture(

@@ -928,9 +928,13 @@ export function openCapture(sessionId: string, path: string): Promise<OpenCaptur
   return callBackend("open_capture", { sessionId, path });
 }
 
-export function saveCapture(sessionId: string, path: string): Promise<void> {
+export function saveCapture(
+  sessionId: string,
+  path: string,
+  saleaeSession?: SaleaeSessionMetadata,
+): Promise<void> {
   if (!isTauriRuntime()) return Promise.resolve();
-  return callBackend("save_capture", { sessionId, path });
+  return callBackend("save_capture", { sessionId, path, saleaeSession });
 }
 
 export function exportCapture(

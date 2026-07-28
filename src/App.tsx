@@ -2312,7 +2312,7 @@ export default function App() {
     try {
       const path = await openDialog({
         multiple: false,
-        filters: [{ name: "Logic Capture", extensions: ["pxcap", "sal"] }],
+        filters: [{ name: "Logic Capture", extensions: ["pxl", "pxcap", "sal"] }],
       });
       if (typeof path !== "string") return;
       target =
@@ -2344,11 +2344,18 @@ export default function App() {
     if (!activeSession?.summary || activeSession.busy) return;
     try {
       const path = await saveDialog({
-        defaultPath: `${activeSession.name || "capture"}.pxcap`,
-        filters: [{ name: "PXLogic Capture", extensions: ["pxcap"] }],
+        defaultPath: `${activeSession.name || "capture"}.pxl`,
+        filters: [
+          { name: "PXLogic Project", extensions: ["pxl"] },
+          { name: "Legacy Raw Capture", extensions: ["pxcap"] },
+        ],
       });
       if (!path) return;
-      await saveCapture(activeSession.id, path);
+      await saveCapture(activeSession.id, path, {
+        name: activeSession.name,
+        notes: activeSession.notes,
+        analyzers: activeSession.analyzers.map(saleaeAnalyzerMetadata),
+      });
       const savedName = preferences.renameTabToSavedCapture ? captureNameFromSavedPath(path) : null;
       updateSession(activeSession.id, (session) => ({
         ...session,
