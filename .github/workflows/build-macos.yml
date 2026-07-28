@@ -133,8 +133,6 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             "$app_path" \
             "$bundle_root/pxlogic-studio-macos-${{ matrix.arch }}.app.zip"
-          cp "target/${{ matrix.target }}/release/pxlogic-desktop" \
-            "$bundle_root/pxlogic-desktop-macos-${{ matrix.arch }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -142,7 +140,6 @@ jobs:
           name: pxlogic-macos-${{ matrix.arch }}
           path: |
             target/${{ matrix.target }}/release/bundle/pxlogic-studio-macos-${{ matrix.arch }}.app.zip
-            target/${{ matrix.target }}/release/bundle/pxlogic-desktop-macos-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 30
 
