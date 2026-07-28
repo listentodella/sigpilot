@@ -10,7 +10,7 @@ CAN_FIXTURES="${3:-$ROOT_DIR/testdata/decoders/can-conformance-v1.json}"
 LIN_FIXTURES="${4:-$ROOT_DIR/testdata/decoders/lin-conformance-v1.json}"
 PARALLEL_FIXTURES="${5:-$ROOT_DIR/testdata/decoders/parallel-conformance-v1.json}"
 
-"$SIDECAR_DIR/build.sh" >/dev/null
+"$SIDECAR_DIR/build.sh"
 
 if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
   SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar.exe"
@@ -24,7 +24,24 @@ else
   PYTHON_DECODER_ROOT="$ROOT_DIR/pxview-fork/libsigrokdecode/decoders"
 fi
 
-"$SIDECAR" --decoder-root "$DECODER_ROOT" --probe | jq -e '
+run_probe() {
+  local output status
+  set +e
+  output="$("$SIDECAR" "$@")"
+  status=$?
+  set -e
+  if (( status != 0 )) || [[ -z "$output" ]]; then
+    printf 'Sigrok sidecar probe failed with status %d and %d output bytes.\n' \
+      "$status" "${#output}" >&2
+    if command -v ldd >/dev/null 2>&1; then
+      ldd "$SIDECAR" >&2 || true
+    fi
+    return 1
+  fi
+  printf '%s\n' "$output"
+}
+
+run_probe --decoder-root "$DECODER_ROOT" --probe | jq -e '
   .available == true
   and (.protocols | index("UART") != null)
   and (.protocols | index("I2C") != null)
@@ -36,7 +53,7 @@ fi
   and (.protocols | index("Parallel") != null)
 ' >/dev/null
 
-"$SIDECAR" \
+run_probe \
   --decoder-root "$DECODER_ROOT" \
   --python-decoder-root "$PYTHON_DECODER_ROOT" \
   --probe \
