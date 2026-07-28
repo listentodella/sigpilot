@@ -1450,6 +1450,7 @@ fn bitstream_search_dirs() -> Vec<PathBuf> {
 fn push_relative_resource_dirs(dirs: &mut Vec<PathBuf>, base: &Path) {
     dirs.push(base.join("resources").join("bitstreams"));
     dirs.push(base.join("src-tauri").join("resources").join("bitstreams"));
+    dirs.push(base.join("Resources").join("resources").join("bitstreams"));
 }
 
 fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -1539,6 +1540,20 @@ mod tests {
         assert_eq!(bitstreams.main, vec![4, 5, 6]);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bitstream_search_dirs_include_macos_app_resource_layout() {
+        let contents_dir = PathBuf::from("/Applications/PXLogic Studio.app/Contents");
+        let mut dirs = Vec::new();
+        push_relative_resource_dirs(&mut dirs, &contents_dir);
+
+        assert!(dirs.contains(
+            &contents_dir
+                .join("Resources")
+                .join("resources")
+                .join("bitstreams")
+        ));
     }
 
     #[test]
