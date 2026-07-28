@@ -131,6 +131,11 @@ const SIGROK_NATIVE_PROTOCOLS: &[&str] = &[
 ];
 const LEGACY_RUST_PROTOCOLS: &[&str] = &["UART", "I2C", "SPI"];
 
+#[cfg(windows)]
+const SIGROK_SIDECAR_EXECUTABLE: &str = "pxlogic-sigrok-sidecar.exe";
+#[cfg(not(windows))]
+const SIGROK_SIDECAR_EXECUTABLE: &str = "pxlogic-sigrok-sidecar";
+
 /// Stable host-side contract. External implementations may live in a native
 /// sidecar; the input remains the same packed capture representation used by
 /// PXLogic and the `.sr` exporter.
@@ -500,7 +505,7 @@ impl SigrokNativeDecoder {
     pub fn from_env() -> Result<Self> {
         let sidecar_path = std::env::var_os("PXLOGIC_SIGROK_SIDECAR")
             .map(PathBuf::from)
-            .or_else(|| discover_workspace_sigrok_path("pxlogic-sigrok-sidecar"))
+            .or_else(|| discover_workspace_sigrok_path(SIGROK_SIDECAR_EXECUTABLE))
             .ok_or_else(|| {
                 CoreError::Decode(
                     "PXLOGIC_SIGROK_SIDECAR is not configured and no bundled or workspace sidecar was found"
@@ -600,6 +605,9 @@ fn discover_workspace_sigrok_path(relative: &str) -> Option<PathBuf> {
 fn discover_workspace_sigrok_python_decoder_root() -> Option<PathBuf> {
     decoder_resource_search_paths("sigrok-analyzer-sidecar", "decoders/python_decoders")
         .into_iter()
+        .chain(workspace_decoder_search_paths(
+            "vendor/pxview-sigrokdecode/libsigrokdecode/decoders",
+        ))
         .chain(workspace_decoder_search_paths(
             "pxview-fork/libsigrokdecode/decoders",
         ))

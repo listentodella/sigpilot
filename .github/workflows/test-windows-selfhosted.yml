@@ -1,0 +1,100 @@
+name: Test Build Windows (Self-Hosted)
+
+on:
+  push:
+    branches:
+      - codex/graph-server-32ch
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-self-hosted:
+    runs-on: [self-hosted, windows]
+
+    name: Build Windows x64 (Self-Hosted)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri app
+        env:
+          TAURI_SKIP_DEVTOOLS_CHECK: true
+        run: |
+          # Skip native resource preparation on Windows
+          node -e "const fs=require('fs');const conf=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8'));conf.build.beforeBuildCommand='pnpm build';fs.writeFileSync('src-tauri/tauri.conf.json',JSON.stringify(conf,null,2));"
+          pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi
+
+      - name: Prepare Windows artifacts
+        shell: pwsh
+        run: |
+          $bundleRoot = "target/x86_64-pc-windows-msvc/release/bundle"
+          $nsisDir = "$bundleRoot/nsis"
+          $msiDir = "$bundleRoot/msi"
+
+          # Find and rename NSIS installer
+          if (Test-Path $nsisDir) {
+            $nsisInstaller = Get-ChildItem -Path $nsisDir -Filter "*.exe" | Select-Object -First 1
+            if ($nsisInstaller) {
+              Copy-Item $nsisInstaller.FullName "$bundleRoot/pxlogic-studio-windows-x64.exe"
+              Write-Host "NSIS installer: $bundleRoot/pxlogic-studio-windows-x64.exe"
+            }
+          }
+
+          # Find and rename MSI installer
+          if (Test-Path $msiDir) {
+            $msiInstaller = Get-ChildItem -Path $msiDir -Filter "*.msi" | Select-Object -First 1
+            if ($msiInstaller) {
+              Copy-Item $msiInstaller.FullName "$bundleRoot/pxlogic-studio-windows-x64.msi"
+              Write-Host "MSI installer: $bundleRoot/pxlogic-studio-windows-x64.msi"
+            }
+          }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pxlogic-windows-x64-selfhosted
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64.exe
+            target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64.msi
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build summary
+        run: |
+          echo "### Build completed successfully! :rocket:" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "**Platform**: Windows x64 (Self-Hosted)" >> $env:GITHUB_STEP_SUMMARY
+          echo "**Runner**: ${{ runner.name }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "**OS**: ${{ runner.os }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "**Artifacts**:" >> $env:GITHUB_STEP_SUMMARY
+          echo "- NSIS installer (.exe)" >> $env:GITHUB_STEP_SUMMARY
+          echo "- MSI installer (.msi)" >> $env:GITHUB_STEP_SUMMARY

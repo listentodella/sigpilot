@@ -7,7 +7,13 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 get_filename_component(PXLOGIC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-set(PXVIEW_ROOT "${PXLOGIC_ROOT}/pxview-fork" CACHE PATH "PXView source tree")
+set(PXVIEW_VENDOR_ROOT "${PXLOGIC_ROOT}/vendor/pxview-sigrokdecode")
+if(EXISTS "${PXVIEW_VENDOR_ROOT}/libsigrokdecode")
+    set(PXVIEW_DEFAULT_ROOT "${PXVIEW_VENDOR_ROOT}")
+else()
+    set(PXVIEW_DEFAULT_ROOT "${PXLOGIC_ROOT}/pxview-fork")
+endif()
+set(PXVIEW_ROOT "${PXVIEW_DEFAULT_ROOT}" CACHE PATH "PXView source tree")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
@@ -53,7 +59,9 @@ function(add_pxview_c_decoder protocol)
     target_link_libraries(${target} PRIVATE PkgConfig::GLIB)
     set_target_properties(${target} PROPERTIES
         OUTPUT_NAME ${protocol}_c
+        PREFIX ""
         LIBRARY_OUTPUT_DIRECTORY "${DECODER_OUTPUT_DIR}"
+        BUILD_RPATH "$ORIGIN;$ORIGIN/../.."
     )
     list(APPEND PXVIEW_C_DECODER_TARGETS ${target})
     set(PXVIEW_C_DECODER_TARGETS "${PXVIEW_C_DECODER_TARGETS}" PARENT_SCOPE)
@@ -69,6 +77,9 @@ foreach(decoder_source IN LISTS PXVIEW_C_DECODER_SOURCES)
 endforeach()
 
 add_executable(pxlogic-sigrok-sidecar src/main.c)
+set_target_properties(pxlogic-sigrok-sidecar PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+)
 target_compile_definitions(pxlogic-sigrok-sidecar PRIVATE CJSON_IMPLEMENTATION)
 target_include_directories(pxlogic-sigrok-sidecar PRIVATE
     ${PXVIEW_ROOT}

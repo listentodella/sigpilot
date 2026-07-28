@@ -14,9 +14,14 @@ else
   exit 1
 fi
 
-export PATH="/opt/homebrew/bin:$PATH"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  export PATH="/opt/homebrew/bin:$PATH"
+fi
 "$CMAKE_BIN" -S "$SIDECAR_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
 "$CMAKE_BIN" --build "$BUILD_DIR" --config Release --parallel
 
-echo "$BUILD_DIR/pxlogic-sigrok-sidecar"
-
+if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
+  echo "$BUILD_DIR/pxlogic-sigrok-sidecar.exe"
+else
+  echo "$BUILD_DIR/pxlogic-sigrok-sidecar"
+fi

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESOURCE_DIR="$ROOT_DIR/resources/native"
 SALEAE_GRAPH_RUNTIME_ARCHIVE="$ROOT_DIR/vendor/saleae-runtime-graph-2.4.43-macos-arm64.tar.gz"
+HOST_OS="$(uname -s)"
+HOST_ARCH="$(uname -m)"
 
 mkdir -p "$RESOURCE_DIR"
 rm -rf \
@@ -34,6 +36,61 @@ copy_directory() {
   else
     cp -R "$source/." "$target/"
   fi
+}
+
+sigrok_source_root() {
+  local candidate
+  for candidate in \
+    "$ROOT_DIR/vendor/pxview-sigrokdecode" \
+    "$ROOT_DIR/pxview-fork"
+  do
+    if [[ -d "$candidate/libsigrokdecode" && -d "$candidate/common" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+sigrok_executable_name() {
+  case "$HOST_OS" in
+    MINGW*|MSYS*|CYGWIN*) printf 'pxlogic-sigrok-sidecar.exe\n' ;;
+    *) printf 'pxlogic-sigrok-sidecar\n' ;;
+  esac
+}
+
+copy_shared_dependencies() {
+  local binary="$1"
+  local target_dir="$2"
+  local line dep
+
+  case "$HOST_OS" in
+    MINGW*|MSYS*|CYGWIN*)
+      command -v ldd >/dev/null 2>&1 || return 0
+      while IFS= read -r line; do
+        dep="$(printf '%s\n' "$line" | awk '{print $3}')"
+        if [[ -f "$dep" && "$dep" == /*/bin/*.dll ]]; then
+          copy_file "$dep" "$target_dir/$(basename "$dep")"
+        fi
+      done < <(ldd "$binary" 2>/dev/null || true)
+      ;;
+    Linux)
+      [[ "${PXLOGIC_COPY_NATIVE_DEPS:-0}" == "1" ]] || return 0
+      command -v ldd >/dev/null 2>&1 || return 0
+      while IFS= read -r line; do
+        dep="$(printf '%s\n' "$line" | awk '{print $3}')"
+        if [[ ! -f "$dep" ]]; then
+          continue
+        fi
+        case "$(basename "$dep")" in
+          ld-linux*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libgcc_s.so.*)
+            continue
+            ;;
+        esac
+        copy_file "$dep" "$target_dir/$(basename "$dep")"
+      done < <(ldd "$binary" 2>/dev/null || true)
+      ;;
+  esac
 }
 
 is_saleae_analyzer_runtime() {
@@ -106,7 +163,7 @@ run_build_script() {
   printf '%s\n' "$output" | tail -n 1
 }
 
-if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+if [[ "$HOST_OS" == "Darwin" && "$HOST_ARCH" == "arm64" ]]; then
   saleae_analyzer="$(run_build_script "$ROOT_DIR/native/saleae-analyzer-sidecar/build.sh")"
   saleae_analyzer_dir="$(dirname "$saleae_analyzer")"
   copy_executable "$saleae_analyzer" \
@@ -132,22 +189,28 @@ else
   printf 'Skipping Saleae native sidecars: macOS arm64 is required.\n' >&2
 fi
 
-if [[ -d "$ROOT_DIR/pxview-fork/libsigrokdecode" ]]; then
+if sigrok_root="$(sigrok_source_root)"; then
   sigrok_sidecar="$(run_build_script "$ROOT_DIR/native/sigrok-analyzer-sidecar/build.sh")"
   sigrok_build_dir="$(dirname "$sigrok_sidecar")"
+  sigrok_target_name="$(sigrok_executable_name)"
   copy_executable "$sigrok_sidecar" \
-    "$RESOURCE_DIR/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar"
+    "$RESOURCE_DIR/sigrok-analyzer-sidecar/$sigrok_target_name"
+  copy_shared_dependencies "$sigrok_sidecar" "$RESOURCE_DIR/sigrok-analyzer-sidecar"
   if [[ -d "$sigrok_build_dir/decoders/c_decoders" ]]; then
     mkdir -p "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders"
     cp -R "$sigrok_build_dir/decoders/c_decoders" \
       "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders/c_decoders"
-    find "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders/c_decoders" -type f -name '*.so' -exec chmod 755 {} +
+    while IFS= read -r -d '' decoder_binary; do
+      chmod 755 "$decoder_binary" || true
+      copy_shared_dependencies "$decoder_binary" "$RESOURCE_DIR/sigrok-analyzer-sidecar"
+    done < <(find "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders/c_decoders" \
+      -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) -print0)
   fi
-  if [[ -d "$ROOT_DIR/pxview-fork/libsigrokdecode/decoders" ]]; then
+  if [[ -d "$sigrok_root/libsigrokdecode/decoders" ]]; then
     mkdir -p "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders"
-    cp -R "$ROOT_DIR/pxview-fork/libsigrokdecode/decoders" \
+    cp -R "$sigrok_root/libsigrokdecode/decoders" \
       "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders/python_decoders"
   fi
 else
-  printf 'Skipping Sigrok sidecar: pxview-fork is not available in this checkout.\n' >&2
+  printf 'Skipping Sigrok sidecar: vendor/pxview-sigrokdecode or pxview-fork is not available in this checkout.\n' >&2
 fi

@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.pxlogic.studio",
   "build": {
-    "beforeDevCommand": "./scripts/prepare-tauri-resources.sh && pnpm dev",
-    "beforeBuildCommand": "pnpm build && ./scripts/prepare-tauri-resources.sh",
+    "beforeDevCommand": "node scripts/prepare-tauri-resources.mjs && pnpm dev",
+    "beforeBuildCommand": "pnpm build && node scripts/prepare-tauri-resources.mjs",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
@@ -25,11 +25,21 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
-    "icon": ["icons/icon.icns"],
+    "targets": "all",
+    "icon": ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"],
     "resources": {
       "../resources/bitstreams": "resources/bitstreams",
       "../resources/native": "resources/native"
+    },
+    "windows": {
+      "wix": {
+        "language": "en-US"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libusb-1.0-0"]
+      }
     }
   }
 }
