@@ -225,6 +225,15 @@ if sigrok_root="$(sigrok_source_root)"; then
   copy_executable "$sigrok_sidecar" \
     "$RESOURCE_DIR/sigrok-analyzer-sidecar/$sigrok_target_name"
   copy_shared_dependencies "$sigrok_sidecar" "$RESOURCE_DIR/sigrok-analyzer-sidecar"
+  case "$HOST_OS" in
+    MINGW*|MSYS*|CYGWIN*)
+      for runtime_dll in "$sigrok_build_dir"/*.dll; do
+        [[ -f "$runtime_dll" ]] || continue
+        copy_file "$runtime_dll" \
+          "$RESOURCE_DIR/sigrok-analyzer-sidecar/$(basename "$runtime_dll")"
+      done
+      ;;
+  esac
   copy_python_runtime "$RESOURCE_DIR/sigrok-analyzer-sidecar"
   if [[ -d "$sigrok_build_dir/decoders/c_decoders" ]]; then
     mkdir -p "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders"

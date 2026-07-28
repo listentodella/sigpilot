@@ -47,6 +47,25 @@ fi
   "${cmake_platform_args[@]}"
 "$CMAKE_BIN" --build "$BUILD_DIR" --config Release --parallel
 
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    python_dynload="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
+    while IFS= read -r dependency; do
+      [[ -f "$dependency" && "$dependency" == /*/bin/*.dll ]] || continue
+      cp -f "$dependency" "$BUILD_DIR/$(basename "$dependency")"
+    done < <(
+      {
+        ldd "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" 2>/dev/null || true
+        if [[ -d "$python_dynload" ]]; then
+          while IFS= read -r -d '' extension; do
+            ldd "$extension" 2>/dev/null || true
+          done < <(find "$python_dynload" -type f \( -name '*.pyd' -o -name '*.dll' \) -print0)
+        fi
+      } | awk '$2 == "=>" { print $3 }' | sort -u
+    )
+    ;;
+esac
+
 if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
   echo "$BUILD_DIR/pxlogic-sigrok-sidecar.exe"
 else
