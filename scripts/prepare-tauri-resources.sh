@@ -118,7 +118,7 @@ copy_python_runtime() {
   fi
 
   copy_directory "$python_source" "$python_target"
-  rm -rf "$python_target/site-packages"
+  rm -rf "$python_target/site-packages" "$python_target"/config-*
   find "$python_target" -type d -name __pycache__ -prune -exec rm -rf {} +
 }
 
