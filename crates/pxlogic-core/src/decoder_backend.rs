@@ -8,7 +8,7 @@
 use std::{
     collections::BTreeSet,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -267,7 +267,7 @@ impl SaleaeNativeDecoder {
             .or_else(discover_workspace_saleae_sidecar)
             .ok_or_else(|| {
                 CoreError::Decode(
-                    "PXLOGIC_SALEAE_SIDECAR is not configured and no workspace build was found"
+                    "PXLOGIC_SALEAE_SIDECAR is not configured and no bundled or workspace sidecar was found"
                         .to_string(),
                 )
             })?;
@@ -503,7 +503,7 @@ impl SigrokNativeDecoder {
             .or_else(|| discover_workspace_sigrok_path("pxlogic-sigrok-sidecar"))
             .ok_or_else(|| {
                 CoreError::Decode(
-                    "PXLOGIC_SIGROK_SIDECAR is not configured and no workspace build was found"
+                    "PXLOGIC_SIGROK_SIDECAR is not configured and no bundled or workspace sidecar was found"
                         .to_string(),
                 )
             })?;
@@ -512,7 +512,7 @@ impl SigrokNativeDecoder {
             .or_else(|| discover_workspace_sigrok_path("decoders/c_decoders"))
             .ok_or_else(|| {
                 CoreError::Decode(
-                    "PXLOGIC_SIGROK_DECODER_ROOT is not configured and no workspace build was found"
+                    "PXLOGIC_SIGROK_DECODER_ROOT is not configured and no bundled or workspace decoder root was found"
                         .to_string(),
                 )
             })?;
@@ -592,37 +592,135 @@ impl SigrokNativeDecoder {
 }
 
 fn discover_workspace_sigrok_path(relative: &str) -> Option<PathBuf> {
-    let current = std::env::current_dir().ok()?;
-    [
-        current
-            .join("native/sigrok-analyzer-sidecar/target")
-            .join(relative),
-        current
-            .join("../native/sigrok-analyzer-sidecar/target")
-            .join(relative),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
+    native_sidecar_search_paths("sigrok-analyzer-sidecar", relative)
+        .into_iter()
+        .find(|path| path.exists())
 }
 
 fn discover_workspace_sigrok_python_decoder_root() -> Option<PathBuf> {
-    let current = std::env::current_dir().ok()?;
-    [
-        current.join("pxview-fork/libsigrokdecode/decoders"),
-        current.join("../pxview-fork/libsigrokdecode/decoders"),
-    ]
-    .into_iter()
-    .find(|path| path.is_dir())
+    decoder_resource_search_paths("sigrok-analyzer-sidecar", "decoders/python_decoders")
+        .into_iter()
+        .chain(workspace_decoder_search_paths(
+            "pxview-fork/libsigrokdecode/decoders",
+        ))
+        .find(|path| path.is_dir())
 }
 
 fn discover_workspace_saleae_sidecar() -> Option<PathBuf> {
-    let current = std::env::current_dir().ok()?;
-    [
-        current.join("target/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"),
-        current.join("../target/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"),
-    ]
+    native_sidecar_search_paths(
+        "saleae-analyzer-sidecar",
+        "pxlogic-saleae-analyzer-sidecar",
+    )
     .into_iter()
     .find(|path| path.is_file())
+}
+
+fn native_sidecar_search_paths(subdir: &str, relative: &str) -> Vec<PathBuf> {
+    let mut paths = decoder_resource_search_paths(subdir, relative);
+    paths.extend(workspace_native_search_paths(subdir, relative));
+    dedup_paths(paths)
+}
+
+fn decoder_resource_search_paths(subdir: &str, relative: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(current) = std::env::current_dir() {
+        push_bundled_native_candidate(&mut paths, &current, subdir, relative);
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_bundled_native_candidate(&mut paths, &manifest_dir, subdir, relative);
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        push_bundled_native_candidate(&mut paths, workspace_root, subdir, relative);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().take(8) {
+            push_bundled_native_candidate(&mut paths, ancestor, subdir, relative);
+        }
+    }
+    dedup_paths(paths)
+}
+
+fn workspace_native_search_paths(subdir: &str, relative: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(current) = std::env::current_dir() {
+        push_workspace_native_candidate(&mut paths, &current, subdir, relative);
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_workspace_native_candidate(&mut paths, &manifest_dir, subdir, relative);
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        push_workspace_native_candidate(&mut paths, workspace_root, subdir, relative);
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().take(8) {
+            push_workspace_native_candidate(&mut paths, ancestor, subdir, relative);
+        }
+    }
+    dedup_paths(paths)
+}
+
+fn workspace_decoder_search_paths(relative: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(current) = std::env::current_dir() {
+        paths.push(current.join(relative));
+        paths.push(current.join("..").join(relative));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    paths.push(manifest_dir.join(relative));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        paths.push(workspace_root.join(relative));
+    }
+
+    dedup_paths(paths)
+}
+
+fn push_bundled_native_candidate(
+    paths: &mut Vec<PathBuf>,
+    base: &Path,
+    subdir: &str,
+    relative: &str,
+) {
+    paths.push(
+        base.join("resources")
+            .join("native")
+            .join(subdir)
+            .join(relative),
+    );
+    paths.push(
+        base.join("Resources")
+            .join("resources")
+            .join("native")
+            .join(subdir)
+            .join(relative),
+    );
+}
+
+fn push_workspace_native_candidate(
+    paths: &mut Vec<PathBuf>,
+    base: &Path,
+    subdir: &str,
+    relative: &str,
+) {
+    paths.push(base.join("target").join("native").join(subdir).join(relative));
+    paths.push(
+        base.join("native")
+            .join(subdir)
+            .join("target")
+            .join(relative),
+    );
+}
+
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
+        }
+    }
+    deduped
 }
 
 fn discover_saleae_runtime_root() -> Option<PathBuf> {
@@ -1155,6 +1253,27 @@ mod tests {
         },
         models::{CaptureMetadata, SparseDigitalChannel},
     };
+
+    #[test]
+    fn native_sidecar_candidates_include_macos_app_resource_layout() {
+        let contents_dir = PathBuf::from("/Applications/PXLogic Studio.app/Contents");
+        let mut paths = Vec::new();
+        push_bundled_native_candidate(
+            &mut paths,
+            &contents_dir,
+            "saleae-analyzer-sidecar",
+            "pxlogic-saleae-analyzer-sidecar",
+        );
+
+        assert!(paths.contains(
+            &contents_dir
+                .join("Resources")
+                .join("resources")
+                .join("native")
+                .join("saleae-analyzer-sidecar")
+                .join("pxlogic-saleae-analyzer-sidecar")
+        ));
+    }
 
     fn transition_capture(
         source: &str,

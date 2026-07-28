@@ -536,13 +536,59 @@ fn locate_saleae_graph_sidecar() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_GRAPH_SIDECAR") {
         return Some(PathBuf::from(path));
     }
-    let current = std::env::current_dir().ok()?;
-    [
-        current.join("target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar"),
-        current.join("../target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
+    saleae_graph_sidecar_candidates()
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn saleae_graph_sidecar_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(current) = std::env::current_dir() {
+        push_saleae_graph_sidecar_candidates(&mut candidates, &current);
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_saleae_graph_sidecar_candidates(&mut candidates, &manifest_dir);
+    if let Some(workspace_root) = manifest_dir.parent() {
+        push_saleae_graph_sidecar_candidates(&mut candidates, workspace_root);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().take(8) {
+            push_saleae_graph_sidecar_candidates(&mut candidates, ancestor);
+        }
+    }
+    dedup_pathbufs(candidates)
+}
+
+fn push_saleae_graph_sidecar_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
+    candidates.push(
+        base.join("resources")
+            .join("native")
+            .join("saleae-graph-sidecar")
+            .join("pxlogic-saleae-graph-sidecar"),
+    );
+    candidates.push(
+        base.join("Resources")
+            .join("resources")
+            .join("native")
+            .join("saleae-graph-sidecar")
+            .join("pxlogic-saleae-graph-sidecar"),
+    );
+    candidates.push(
+        base.join("target")
+            .join("native")
+            .join("saleae-graph-sidecar")
+            .join("pxlogic-saleae-graph-sidecar"),
+    );
+}
+
+fn dedup_pathbufs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.iter().any(|existing| existing == &path) {
+            deduped.push(path);
+        }
+    }
+    deduped
 }
 
 fn convert_saleae_capture(path: &Path) -> CommandResult<PathBuf> {

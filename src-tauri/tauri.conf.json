@@ -5,7 +5,7 @@
   "identifier": "dev.pxlogic.studio",
   "build": {
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && ./scripts/prepare-tauri-resources.sh",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
@@ -28,7 +28,8 @@
     "targets": ["app"],
     "icon": ["icons/icon.icns"],
     "resources": {
-      "../resources/bitstreams": "resources/bitstreams"
+      "../resources/bitstreams": "resources/bitstreams",
+      "../resources/native": "resources/native"
     }
   }
 }
