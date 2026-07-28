@@ -1,2 +1,3 @@
 vendor/saleae-runtime-2.4.43/**/*.dylib binary
 vendor/saleae-runtime-2.4.43/**/*.so binary
+vendor/saleae-runtime-graph-2.4.43-macos-arm64.tar.gz binary

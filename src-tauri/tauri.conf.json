@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "dev.pxlogic.studio",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "./scripts/prepare-tauri-resources.sh && pnpm dev",
     "beforeBuildCommand": "pnpm build && ./scripts/prepare-tauri-resources.sh",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"

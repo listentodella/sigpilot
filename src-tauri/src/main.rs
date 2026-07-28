@@ -518,7 +518,7 @@ fn locate_saleae_runtime_root() -> Option<PathBuf> {
     }
     saleae_runtime_root_candidates()
         .into_iter()
-        .find(|path| path.join("libgraph_server_shared.dylib").is_file())
+        .find(|path| is_saleae_graph_runtime_root(path))
 }
 
 fn saleae_runtime_root_candidates() -> Vec<PathBuf> {
@@ -564,6 +564,18 @@ fn push_saleae_runtime_root_candidates(candidates: &mut Vec<PathBuf>, base: &Pat
             .join("native")
             .join("saleae-runtime-2.4.43"),
     );
+}
+
+fn is_saleae_graph_runtime_root(path: &Path) -> bool {
+    path.join("libAnalyzer.dylib").is_file()
+        && path.join("libgraph_server_shared.dylib").is_file()
+        && path.join("pythonlibs/lib/python314.zip").is_file()
+        && path
+            .join("pythonlibs/lib/python3.14/site-packages/saleae")
+            .is_dir()
+        && path
+            .join("pythonlibs/lib/python3.14/site-packages/numpy")
+            .is_dir()
 }
 
 fn locate_saleae_graph_sidecar() -> Option<PathBuf> {
@@ -631,7 +643,7 @@ fn convert_saleae_capture(path: &Path) -> CommandResult<PathBuf> {
             .to_string()
     })?;
     let runtime_root = locate_saleae_runtime_root().ok_or_else(|| {
-        "Saleae .sal support requires Logic 2.4.43 runtime; set PXLOGIC_SALEAE_RUNTIME_ROOT"
+        "Saleae .sal support requires the bundled GraphServer runtime; rebuild the app resources"
             .to_string()
     })?;
     let suffix = std::time::SystemTime::now()
@@ -736,7 +748,7 @@ fn export_saleae_capture(
             .to_string()
     })?;
     let runtime_root = locate_saleae_runtime_root().ok_or_else(|| {
-        "Saleae .sal export requires Logic 2.4.43 runtime; set PXLOGIC_SALEAE_RUNTIME_ROOT"
+        "Saleae .sal export requires the bundled GraphServer runtime; rebuild the app resources"
             .to_string()
     })?;
     let suffix = std::time::SystemTime::now()

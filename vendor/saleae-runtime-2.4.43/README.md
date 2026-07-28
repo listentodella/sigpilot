@@ -15,4 +15,6 @@ Included files:
 - `Analyzers/liblin_analyzer.so`
 - `Analyzers/libsimple_parallel_analyzer.so`
 
-This is the minimal runtime needed for protocol decode. Saleae `.sal` graph import/export needs the larger GraphServer runtime (`libgraph_server_shared.dylib` plus `pythonlibs`) and is not covered by this subset.
+This is the minimal runtime needed for protocol decode.
+
+Saleae `.sal` graph import/export also needs `libgraph_server_shared.dylib` plus a Python runtime subset. PXLogic vendors that part as `../saleae-runtime-graph-2.4.43-macos-arm64.tar.gz`; `scripts/prepare-tauri-resources.sh` extracts it into the same runtime directory during dev and packaging.

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESOURCE_DIR="$ROOT_DIR/resources/native"
+SALEAE_GRAPH_RUNTIME_ARCHIVE="$ROOT_DIR/vendor/saleae-runtime-graph-2.4.43-macos-arm64.tar.gz"
 
 mkdir -p "$RESOURCE_DIR"
 rm -rf \
@@ -47,6 +48,14 @@ is_saleae_analyzer_runtime() {
     && -f "$source/Analyzers/libsimple_parallel_analyzer.so" ]]
 }
 
+is_saleae_graph_runtime() {
+  local source="$1"
+  [[ -f "$source/libgraph_server_shared.dylib" \
+    && -f "$source/pythonlibs/lib/python314.zip" \
+    && -d "$source/pythonlibs/lib/python3.14/site-packages/saleae" \
+    && -d "$source/pythonlibs/lib/python3.14/site-packages/numpy" ]]
+}
+
 saleae_runtime_source() {
   local candidate
   for candidate in \
@@ -59,6 +68,31 @@ saleae_runtime_source() {
       return 0
     fi
   done
+  return 1
+}
+
+copy_saleae_graph_runtime() {
+  local target="$1"
+  local source
+
+  for source in \
+    "${PXLOGIC_SALEAE_RUNTIME_ROOT:-}" \
+    "$ROOT_DIR/target/native/saleae-runtime-full-2.4.43" \
+    "$ROOT_DIR/target/native/saleae-runtime-graph-2.4.43"
+  do
+    if [[ -n "$source" ]] && is_saleae_graph_runtime "$source"; then
+      copy_file "$source/libgraph_server_shared.dylib" \
+        "$target/libgraph_server_shared.dylib"
+      copy_directory "$source/pythonlibs" "$target/pythonlibs"
+      return 0
+    fi
+  done
+
+  if [[ -f "$SALEAE_GRAPH_RUNTIME_ARCHIVE" ]]; then
+    tar -xzf "$SALEAE_GRAPH_RUNTIME_ARCHIVE" -C "$target"
+    return 0
+  fi
+
   return 1
 }
 
@@ -86,6 +120,9 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
 
   if saleae_runtime="$(saleae_runtime_source)"; then
     copy_directory "$saleae_runtime" "$RESOURCE_DIR/saleae-runtime-2.4.43"
+    if ! copy_saleae_graph_runtime "$RESOURCE_DIR/saleae-runtime-2.4.43"; then
+      printf 'Skipping Saleae graph runtime: no GraphServer runtime source was found.\n' >&2
+    fi
     find "$RESOURCE_DIR/saleae-runtime-2.4.43" \
       -type f \( -name '*.dylib' -o -name '*.so' \) -exec chmod 755 {} +
   else
