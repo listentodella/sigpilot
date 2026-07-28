@@ -10,7 +10,7 @@ CAN_FIXTURES="${3:-$ROOT_DIR/testdata/decoders/can-conformance-v1.json}"
 LIN_FIXTURES="${4:-$ROOT_DIR/testdata/decoders/lin-conformance-v1.json}"
 PARALLEL_FIXTURES="${5:-$ROOT_DIR/testdata/decoders/parallel-conformance-v1.json}"
 
-"$SIDECAR_DIR/build.sh"
+"$SIDECAR_DIR/build.sh" >/dev/null
 
 if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
   SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar.exe"

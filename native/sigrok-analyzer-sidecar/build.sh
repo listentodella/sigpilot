@@ -25,13 +25,26 @@ fi
 if [[ "$(uname -s)" == "Darwin" ]]; then
   export PATH="/opt/homebrew/bin:$PATH"
 fi
+cmake_platform_args=()
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    python_executable="$(command -v python3)"
+    python_root="$(cd "$(dirname "$python_executable")/.." && pwd)"
+    cmake_platform_args+=(
+      "-DPython3_ROOT_DIR=$(cygpath -m "$python_root")"
+      "-DPython3_EXECUTABLE=$(cygpath -m "$python_executable")"
+      "-DPython3_FIND_REGISTRY=NEVER"
+    )
+    ;;
+esac
 if [[ -d "$BUILD_DIR/decoders/c_decoders" ]]; then
   find "$BUILD_DIR/decoders/c_decoders" -maxdepth 1 -type f \
     -name 'lib*_c.*' -delete
 fi
 "$CMAKE_BIN" -S "$SIDECAR_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DPXVIEW_ROOT="$PXVIEW_ROOT"
+  -DPXVIEW_ROOT="$PXVIEW_ROOT" \
+  "${cmake_platform_args[@]}"
 "$CMAKE_BIN" --build "$BUILD_DIR" --config Release --parallel
 
 if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
