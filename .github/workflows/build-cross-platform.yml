@@ -25,8 +25,10 @@ jobs:
 
       - name: Install Linux build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          host_arch="$(dpkg --print-architecture)"
+          apt_arch_args=(-o "APT::Architecture=${host_arch}" -o "APT::Architectures=${host_arch}")
+          sudo apt-get "${apt_arch_args[@]}" update
+          sudo apt-get "${apt_arch_args[@]}" install -y \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
@@ -189,8 +191,10 @@ jobs:
 
       - name: Install Linux build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          host_arch="$(dpkg --print-architecture)"
+          apt_arch_args=(-o "APT::Architecture=${host_arch}" -o "APT::Architectures=${host_arch}")
+          sudo apt-get "${apt_arch_args[@]}" update
+          sudo apt-get "${apt_arch_args[@]}" install -y \
             build-essential \
             cmake \
             jq \
