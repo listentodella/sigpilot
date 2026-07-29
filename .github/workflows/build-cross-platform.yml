@@ -2,11 +2,7 @@ name: Build Cross-Platform
 
 on:
   push:
-    branches: [codex/graph-server-32ch, main, master]
     tags: ["v*"]
-  pull_request:
-    branches: [codex/graph-server-32ch, main, master]
-  workflow_dispatch:
 
 concurrency:
   group: desktop-${{ github.workflow }}-${{ github.ref }}

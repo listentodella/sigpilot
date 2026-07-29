@@ -79,6 +79,7 @@ import {
   TimingMarkersPanel,
 } from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
+import { defaultCaptureViewportSamples } from "./lib/liveViewport";
 import {
   cancelCapture,
   CaptureProgress,
@@ -239,6 +240,7 @@ interface UiSession {
   canvasWidth: number;
   viewportStart: number;
   viewportSamples: number;
+  liveViewportMode: "auto" | "manual";
   diagnostics: DiagnosticEvent[];
   busy: boolean;
   message: string;
@@ -817,15 +819,15 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     previousSamples === 0 ||
     session.viewportStart + session.viewportSamples >=
       previousSamples - Math.max(1, Math.round(session.viewportSamples * 0.05));
-  const viewportSamples = Math.max(
-    1,
-    Math.min(
-      summary.metadata.sample_count,
-      previousSamples > 0 ? session.viewportSamples : Math.min(summary.metadata.sample_count, 100_000),
-    ),
-  );
+  const viewportSamples =
+    session.liveViewportMode === "auto"
+      ? defaultCaptureViewportSamples(
+          summary.metadata.sample_count,
+          summary.metadata.sample_rate_hz,
+        )
+      : Math.max(1, Math.min(summary.metadata.sample_count, session.viewportSamples));
   const maxViewportStart = Math.max(0, summary.metadata.sample_count - viewportSamples);
-  const viewportStart = wasFollowingLiveEdge
+  const viewportStart = session.liveViewportMode === "auto" || wasFollowingLiveEdge
     ? maxViewportStart
     : Math.max(0, Math.min(maxViewportStart, session.viewportStart));
 
@@ -840,7 +842,10 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
 
 function initialCaptureViewport(summary: CaptureSummary) {
   const totalSamples = Math.max(1, summary.metadata.sample_count);
-  const viewportSamples = Math.max(1, Math.min(totalSamples, 100_000));
+  const viewportSamples = defaultCaptureViewportSamples(
+    summary.metadata.sample_count,
+    summary.metadata.sample_rate_hz,
+  );
   const triggerSample = summary.metadata.trigger?.sample_index;
   const viewportStart =
     triggerSample == null
@@ -1099,6 +1104,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     canvasWidth: 1000,
     viewportStart: 0,
     viewportSamples: 50_000,
+    liveViewportMode: "auto",
     diagnostics: [],
     busy: false,
     message: "Ready",
@@ -1692,6 +1698,7 @@ export default function App() {
           ...session,
           viewportStart: Math.max(0, Math.min(maxStart, Math.round(start))),
           viewportSamples: nextSamples,
+          liveViewportMode: session.busy ? "manual" : session.liveViewportMode,
         };
       });
     },
@@ -2077,6 +2084,9 @@ export default function App() {
       selectedDevice: deviceId,
       settings: nextSettings,
       busy: true,
+      liveViewportMode: "auto",
+      viewportStart: 0,
+      viewportSamples: 1,
       progress: null,
       rangePlacement: null,
       timingMarkerPlacement: null,
@@ -3662,6 +3672,7 @@ export default function App() {
                     )}
                     <div className="graphViewport">
                       <WaveformCanvas
+                        isLive={activeSession.busy}
                         rowHeights={visibleOuterRowHeights}
                         rowTopInsets={visibleAnalyzerInsets}
                         tile={visibleTile}

@@ -13,6 +13,7 @@ import {
 } from "../lib/saleaeTimingDisplay";
 
 interface WaveformCanvasProps {
+  isLive?: boolean;
   rowHeights: number[];
   rowTopInsets?: number[];
   tile: WaveformTile | null;
@@ -45,6 +46,7 @@ const digitalGraphGutterPx = 8;
 const digitalGraphLabelHeightPx = 16;
 const digitalMeasurementBoxMinWidthPx = 110;
 const panningAnimationDurationMs = 300;
+const liveViewportInterpolationMs = 55;
 const packedDigitalBinBytes = 16;
 const packedDigitalBinCache = new WeakMap<object, DataView>();
 const digitalEdgeCache = new WeakMap<object, DigitalEdge[]>();
@@ -76,6 +78,7 @@ interface HoverNavigation {
 }
 
 export function WaveformCanvas({
+  isLive = false,
   rowHeights,
   rowTopInsets = [],
   tile,
@@ -111,6 +114,7 @@ export function WaveformCanvas({
   const viewportFrameRef = useRef<number | null>(null);
   const drawFrameRef = useRef<number | null>(null);
   const animatedViewportFrameRef = useRef<number | null>(null);
+  const liveViewportFrameRef = useRef<number | null>(null);
   const [hoverNavigation, setHoverNavigation] = useState<HoverNavigation | null>(null);
   onViewportChangeRef.current = onViewportChange;
   onWidthChangeRef.current = onWidthChange;
@@ -136,6 +140,8 @@ export function WaveformCanvas({
     const viewportChanged =
       viewportPropsRef.current.start !== viewportStart ||
       viewportPropsRef.current.samples !== viewportSamples;
+    const visualViewportChanged =
+      viewportRef.current.start !== viewportStart || viewportRef.current.samples !== viewportSamples;
     const graphLayoutChanged =
       sampleRateRef.current !== sampleRateHz ||
       timeOriginSampleRef.current !== timeOriginSample ||
@@ -146,8 +152,18 @@ export function WaveformCanvas({
 
     tileRef.current = tile;
     viewportPropsRef.current = { start: viewportStart, samples: viewportSamples };
-    if (viewportChanged) {
-      viewportRef.current = { start: viewportStart, samples: viewportSamples };
+    if (!isLive) {
+      cancelLiveViewportAnimation();
+      if (visualViewportChanged) {
+        viewportRef.current = { start: viewportStart, samples: viewportSamples };
+      }
+    } else if (viewportChanged && visualViewportChanged) {
+      if (!dragRef.current) {
+        animateLiveViewportTo(viewportStart, viewportSamples);
+      } else {
+        cancelLiveViewportAnimation();
+        viewportRef.current = { start: viewportStart, samples: viewportSamples };
+      }
     }
     sampleRateRef.current = sampleRateHz;
     timeOriginSampleRef.current = timeOriginSample;
@@ -157,10 +173,16 @@ export function WaveformCanvas({
     rowHeightsRef.current = rowHeights;
     rowTopInsetsRef.current = rowTopInsets;
     if (!showInteractiveMeasurement) hoverRef.current = null;
-    if (tileChanged || viewportChanged || graphLayoutChanged || interactionChanged || colorsChanged) {
+    if (
+      tileChanged ||
+      (!isLive && visualViewportChanged) ||
+      graphLayoutChanged ||
+      interactionChanged ||
+      colorsChanged
+    ) {
       scheduleDraw();
     }
-  }, [matchChannelColors, rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
+  }, [isLive, matchChannelColors, rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
@@ -171,6 +193,7 @@ export function WaveformCanvas({
         cancelAnimationFrame(drawFrameRef.current);
       }
       cancelViewportAnimation();
+      cancelLiveViewportAnimation();
     };
   }, []);
 
@@ -210,6 +233,7 @@ export function WaveformCanvas({
   }
 
   function scheduleViewportChange(start: number, samples: number) {
+    cancelLiveViewportAnimation();
     viewportRef.current = { start, samples };
     scheduleDraw();
     syncNavigationToViewport(start, samples);
@@ -222,6 +246,37 @@ export function WaveformCanvas({
       pendingViewportRef.current = null;
       if (next) onViewportChangeRef.current(next.start, next.samples);
     });
+  }
+
+  function animateLiveViewportTo(start: number, samples: number) {
+    cancelLiveViewportAnimation();
+    const initial = viewportRef.current;
+    const startDelta = start - initial.start;
+    const samplesDelta = samples - initial.samples;
+    const startedAt = performance.now();
+
+    const step = (now: number) => {
+      const progress = clamp((now - startedAt) / liveViewportInterpolationMs, 0, 1);
+      viewportRef.current = {
+        start: initial.start + startDelta * progress,
+        samples: initial.samples + samplesDelta * progress,
+      };
+      scheduleDraw();
+      if (progress < 1) {
+        liveViewportFrameRef.current = requestAnimationFrame(step);
+      } else {
+        liveViewportFrameRef.current = null;
+      }
+    };
+
+    liveViewportFrameRef.current = requestAnimationFrame(step);
+  }
+
+  function cancelLiveViewportAnimation() {
+    if (liveViewportFrameRef.current !== null) {
+      cancelAnimationFrame(liveViewportFrameRef.current);
+      liveViewportFrameRef.current = null;
+    }
   }
 
   function animateViewportTo(start: number, samples: number) {
@@ -300,6 +355,7 @@ export function WaveformCanvas({
     if (!totalSamplesRef.current) return;
     event.preventDefault();
     cancelViewportAnimation();
+    cancelLiveViewportAnimation();
     hoverRef.current = null;
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -326,6 +382,7 @@ export function WaveformCanvas({
     if (!totalSamplesRef.current) return;
     if (event.button !== 0) return;
     cancelViewportAnimation();
+    cancelLiveViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
     hoverRef.current = null;
     dragRef.current = {
