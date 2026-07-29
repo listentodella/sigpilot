@@ -11,6 +11,7 @@ import {
 } from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
+import { analyzerViewportTransform } from "../lib/analyzerViewportTransform";
 
 const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
@@ -34,6 +35,7 @@ interface AnalyzerMarkerTrack {
 
 interface AnalyzerBubblesOverlayProps {
   analyzers: UiAnalyzerInstance[];
+  isViewportInteracting?: boolean;
   rowHeights: number[];
   rowTopInsets: number[];
   tile: WaveformTile | null;
@@ -48,6 +50,7 @@ interface AnalyzerBubblesOverlayProps {
 
 export function AnalyzerBubblesOverlay({
   analyzers,
+  isViewportInteracting = false,
   rowHeights,
   rowTopInsets,
   tile,
@@ -60,6 +63,7 @@ export function AnalyzerBubblesOverlay({
   onZoomBubble,
 }: AnalyzerBubblesOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const laidOutViewportRef = useRef({ start: viewportStart, samples: viewportSamples });
   const callbacksRef = useRef({ onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble });
   callbacksRef.current = { onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble };
   const [overlayWidth, setOverlayWidth] = useState(1);
@@ -135,6 +139,7 @@ export function AnalyzerBubblesOverlay({
   }, [bubbleTracks, hoveredTrackKey]);
 
   useLayoutEffect(() => {
+    if (isViewportInteracting) return;
     const overlay = overlayRef.current;
     if (!overlay) return;
     const width = Math.max(1, overlay.clientWidth);
@@ -155,9 +160,10 @@ export function AnalyzerBubblesOverlay({
       element.classList.toggle("overflowRight", right > width);
     });
 
-  }, [overlayWidth, viewportSamples, viewportStart, bubbleTracks, markerTracks, tileChannels]);
+  }, [isViewportInteracting, overlayWidth, viewportSamples, viewportStart, bubbleTracks, markerTracks, tileChannels]);
 
   useLayoutEffect(() => {
+    if (isViewportInteracting) return;
     const overlay = overlayRef.current;
     const canvas = overlay?.querySelector<HTMLCanvasElement>(".analyzerMarkersCanvas");
     if (!overlay || !canvas) return;
@@ -223,7 +229,20 @@ export function AnalyzerBubblesOverlay({
     viewportSamples,
     viewportStart,
     visibleChannelIndexes,
+    isViewportInteracting,
   ]);
+
+  useLayoutEffect(() => {
+    if (!isViewportInteracting) {
+      laidOutViewportRef.current = { start: viewportStart, samples: viewportSamples };
+    }
+  }, [isViewportInteracting, viewportSamples, viewportStart]);
+
+  const interactionTransform = analyzerViewportTransform(
+    laidOutViewportRef.current,
+    { start: viewportStart, samples: viewportSamples },
+    overlayWidth,
+  );
 
   const renderedContent = useMemo(
     () => (
@@ -364,7 +383,18 @@ export function AnalyzerBubblesOverlay({
 
   return (
     <div className="analyzerBubblesOverlay" ref={overlayRef}>
-      {renderedContent}
+      <div
+        className="analyzerOverlayTransformLayer"
+        style={
+          isViewportInteracting
+            ? {
+                transform: `translate3d(${interactionTransform.translateX}px, 0, 0) scaleX(${interactionTransform.scaleX})`,
+              }
+            : undefined
+        }
+      >
+        {renderedContent}
+      </div>
     </div>
   );
 }

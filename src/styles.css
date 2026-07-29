@@ -1893,6 +1893,15 @@ button:disabled {
   pointer-events: none;
 }
 
+.analyzerOverlayTransformLayer {
+  contain: layout paint;
+  height: 100%;
+  position: relative;
+  transform-origin: 0 0;
+  width: 100%;
+  will-change: transform;
+}
+
 .analyzerBubbleStrip {
   height: 16px;
   position: absolute;

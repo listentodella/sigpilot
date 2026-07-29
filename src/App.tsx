@@ -1204,6 +1204,7 @@ export default function App() {
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [graphRequestEpoch, setGraphRequestEpoch] = useState(0);
   const [analyzerRenderRequestEpoch, setAnalyzerRenderRequestEpoch] = useState(0);
+  const [graphViewportInteracting, setGraphViewportInteracting] = useState(false);
   const [startupMessage, setStartupMessage] = useState("Ready");
 
   const footerRef = useRef<HTMLElement>(null);
@@ -1230,6 +1231,7 @@ export default function App() {
   const analyzerRequestSeq = useRef<Record<string, number>>({});
   const rangeMeasurementRequestSeq = useRef<Record<string, number>>({});
   const viewportAnimationRef = useRef<number | null>(null);
+  const graphViewportInteractionSourcesRef = useRef(new Set<"animation" | "waveform">());
   const lastPointerXRef = useRef<number | null>(null);
   const sessionCounter = useRef(1);
   const preparingDeviceIdsRef = useRef(new Set<string>());
@@ -1705,6 +1707,23 @@ export default function App() {
     [updateSession],
   );
 
+  const setGraphViewportInteraction = useCallback(
+    (source: "animation" | "waveform", active: boolean) => {
+      const sources = graphViewportInteractionSourcesRef.current;
+      const wasActive = sources.size > 0;
+      if (source === "waveform" && active && viewportAnimationRef.current !== null) {
+        window.cancelAnimationFrame(viewportAnimationRef.current);
+        viewportAnimationRef.current = null;
+        sources.delete("animation");
+      }
+      if (active) sources.add(source);
+      else sources.delete(source);
+      const isActive = sources.size > 0;
+      if (wasActive !== isActive) setGraphViewportInteracting(isActive);
+    },
+    [],
+  );
+
   const animateViewport = useCallback(
     (sessionId: string, start: number, samples: number, durationMs = 300) => {
       if (viewportAnimationRef.current !== null) {
@@ -1719,6 +1738,7 @@ export default function App() {
       const initialStart = session.viewportStart;
       const initialSamples = session.viewportSamples;
       const startedAt = performance.now();
+      setGraphViewportInteraction("animation", true);
 
       const step = (now: number) => {
         const progress = Math.max(0, Math.min(1, (now - startedAt) / durationMs));
@@ -1732,12 +1752,13 @@ export default function App() {
           viewportAnimationRef.current = window.requestAnimationFrame(step);
         } else {
           viewportAnimationRef.current = null;
+          setGraphViewportInteraction("animation", false);
         }
       };
 
       viewportAnimationRef.current = window.requestAnimationFrame(step);
     },
-    [updateViewport],
+    [setGraphViewportInteraction, updateViewport],
   );
 
   const zoomViewport = useCallback(
@@ -1875,6 +1896,10 @@ export default function App() {
       analyzerRenderRequestSeq.current += 1;
       return;
     }
+    if (graphViewportInteracting) {
+      analyzerRenderRequestSeq.current += 1;
+      return;
+    }
 
     const sessionSnapshot = activeSession;
     const analyzerRequests = sessionSnapshot.analyzers.flatMap((analyzer) => {
@@ -1989,6 +2014,7 @@ export default function App() {
     activeSession?.viewportStart,
     analyzerRenderRequestEpoch,
     graphAnalyzerDecodeSignature,
+    graphViewportInteracting,
     updateSession,
   ]);
 
@@ -3719,6 +3745,9 @@ export default function App() {
                           });
                         }}
                         onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
+                        onViewportInteractionChange={(active) =>
+                          setGraphViewportInteraction("waveform", active)
+                        }
                       />
                       <CaptureTriggerMarker
                         triggerSample={activeSession.summary?.metadata.trigger?.sample_index}
@@ -3727,6 +3756,7 @@ export default function App() {
                       />
                       <AnalyzerBubblesOverlay
                         analyzers={activeSession.analyzers}
+                        isViewportInteracting={graphViewportInteracting}
                         onGoToFrame={(analyzerId, frameIndex) => goToAnalyzerFrame(analyzerId, frameIndex, false)}
                         onOpenTableFrame={openAnalyzerTableFrame}
                         onSelectFrame={(analyzerId, frameIndex) =>

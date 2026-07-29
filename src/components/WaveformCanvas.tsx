@@ -32,6 +32,7 @@ interface WaveformCanvasProps {
     sample: number;
   }) => void;
   onViewportChange: (start: number, samples: number) => void;
+  onViewportInteractionChange?: (active: boolean) => void;
 }
 
 interface RowHitTarget {
@@ -92,6 +93,7 @@ export function WaveformCanvas({
   viewportSamples,
   onOpenContextMenu,
   onViewportChange,
+  onViewportInteractionChange,
 }: WaveformCanvasProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -105,6 +107,7 @@ export function WaveformCanvas({
   const rowHeightsRef = useRef(rowHeights);
   const rowTopInsetsRef = useRef(rowTopInsets);
   const onViewportChangeRef = useRef(onViewportChange);
+  const onViewportInteractionChangeRef = useRef(onViewportInteractionChange);
   const onWidthChangeRef = useRef(onWidthChange);
   const hoverRef = useRef<HoverMeasurement | null>(null);
   const showInteractiveMeasurementRef = useRef(showInteractiveMeasurement);
@@ -115,8 +118,11 @@ export function WaveformCanvas({
   const drawFrameRef = useRef<number | null>(null);
   const animatedViewportFrameRef = useRef<number | null>(null);
   const liveViewportFrameRef = useRef<number | null>(null);
+  const wheelInteractionTimerRef = useRef<number | null>(null);
+  const viewportInteractionActiveRef = useRef(false);
   const [hoverNavigation, setHoverNavigation] = useState<HoverNavigation | null>(null);
   onViewportChangeRef.current = onViewportChange;
+  onViewportInteractionChangeRef.current = onViewportInteractionChange;
   onWidthChangeRef.current = onWidthChange;
 
   useEffect(() => {
@@ -194,6 +200,10 @@ export function WaveformCanvas({
       }
       cancelViewportAnimation();
       cancelLiveViewportAnimation();
+      if (wheelInteractionTimerRef.current !== null) {
+        window.clearTimeout(wheelInteractionTimerRef.current);
+      }
+      setViewportInteractionActive(false);
     };
   }, []);
 
@@ -354,6 +364,14 @@ export function WaveformCanvas({
   function handleWheel(event: WheelEvent) {
     if (!totalSamplesRef.current) return;
     event.preventDefault();
+    setViewportInteractionActive(true);
+    if (wheelInteractionTimerRef.current !== null) {
+      window.clearTimeout(wheelInteractionTimerRef.current);
+    }
+    wheelInteractionTimerRef.current = window.setTimeout(() => {
+      wheelInteractionTimerRef.current = null;
+      if (!dragRef.current) setViewportInteractionActive(false);
+    }, 90);
     cancelViewportAnimation();
     cancelLiveViewportAnimation();
     hoverRef.current = null;
@@ -381,6 +399,11 @@ export function WaveformCanvas({
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (!totalSamplesRef.current) return;
     if (event.button !== 0) return;
+    if (wheelInteractionTimerRef.current !== null) {
+      window.clearTimeout(wheelInteractionTimerRef.current);
+      wheelInteractionTimerRef.current = null;
+    }
+    setViewportInteractionActive(true);
     cancelViewportAnimation();
     cancelLiveViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -406,10 +429,17 @@ export function WaveformCanvas({
 
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
     dragRef.current = null;
+    setViewportInteractionActive(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     updateHoverAt(event.clientX, event.clientY);
+  }
+
+  function setViewportInteractionActive(active: boolean) {
+    if (viewportInteractionActiveRef.current === active) return;
+    viewportInteractionActiveRef.current = active;
+    onViewportInteractionChangeRef.current?.(active);
   }
 
   function clearHover() {
