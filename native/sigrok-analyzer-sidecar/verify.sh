@@ -27,7 +27,9 @@ fi
 run_sidecar() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-      PYTHONHOME="$(python3 -c 'import sys; print(sys.base_prefix)')" "$SIDECAR" "$@"
+      python_home="$(python3 -c 'import sys; print(sys.base_prefix)')"
+      python_home="$(cygpath -w "$python_home")"
+      PYTHONHOME="$python_home" "$SIDECAR" "$@"
       ;;
     *)
       "$SIDECAR" "$@"

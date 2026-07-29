@@ -30,6 +30,10 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     python_executable="$(command -v python3)"
     python_root="$(cd "$(dirname "$python_executable")/.." && pwd)"
+    # CMake caches Python discovery aggressively; the self-hosted runner can
+    # retain a cache from a different Python installation between jobs.
+    rm -f "$BUILD_DIR/CMakeCache.txt"
+    rm -rf "$BUILD_DIR/CMakeFiles"
     cmake_platform_args+=(
       "-DPython3_ROOT_DIR=$(cygpath -m "$python_root")"
       "-DPython3_EXECUTABLE=$(cygpath -m "$python_executable")"
