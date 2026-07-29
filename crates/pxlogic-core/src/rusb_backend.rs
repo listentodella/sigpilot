@@ -1,7 +1,10 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -31,6 +34,14 @@ use crate::{
 };
 
 const TRIGGER_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const USB_ACCESS_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(50),
+    Duration::from_millis(150),
+    Duration::from_millis(300),
+    Duration::from_millis(500),
+];
+
+static USB_CONTEXT: OnceLock<std::result::Result<Context, String>> = OnceLock::new();
 
 #[derive(Debug, Default, Clone)]
 pub struct RusbBackend;
@@ -743,7 +754,34 @@ impl RusbBackend {
     }
 
     fn context() -> Result<Context> {
-        Context::new().map_err(CoreError::from)
+        match USB_CONTEXT.get_or_init(|| Context::new().map_err(|error| error.to_string())) {
+            Ok(context) => Ok(context.clone()),
+            Err(error) => Err(CoreError::Usb(format!(
+                "failed to initialize the shared libusb context: {error}"
+            ))),
+        }
+    }
+
+    fn open_with_retry(device: &rusb::Device<Context>) -> Result<DeviceHandle<Context>> {
+        for delay in USB_ACCESS_RETRY_DELAYS {
+            match device.open() {
+                Ok(handle) => return Ok(handle),
+                Err(error) if is_transient_usb_access_error(error) => {
+                    std::thread::sleep(delay);
+                }
+                Err(error) => {
+                    return Err(CoreError::Usb(format!(
+                        "failed to open the PXLogic WinUSB device: {error}"
+                    )));
+                }
+            }
+        }
+
+        device.open().map_err(|error| {
+            CoreError::Usb(format!(
+                "failed to open the PXLogic WinUSB device after retrying: {error}"
+            ))
+        })
     }
 
     fn open_device(&self, device_id: &str) -> Result<DeviceHandle<Context>> {
@@ -762,7 +800,7 @@ impl RusbBackend {
                 device.address(),
             );
             if candidate_id == device_id {
-                return device.open().map_err(CoreError::from);
+                return Self::open_with_retry(&device);
             }
         }
 
@@ -770,7 +808,7 @@ impl RusbBackend {
             for device in context.devices()?.iter() {
                 let desc = device.device_descriptor()?;
                 if protocol::is_supported_pxlogic_id(desc.vendor_id(), desc.product_id()) {
-                    return device.open().map_err(CoreError::from);
+                    return Self::open_with_retry(&device);
                 }
             }
         }
@@ -779,9 +817,25 @@ impl RusbBackend {
     }
 
     fn claim_pxlogic_interfaces(handle: &mut DeviceHandle<Context>) -> Result<()> {
-        handle.claim_interface(0)?;
-        handle.claim_interface(1)?;
-        Ok(())
+        for delay in USB_ACCESS_RETRY_DELAYS {
+            match claim_pxlogic_interfaces_once(handle) {
+                Ok(()) => return Ok(()),
+                Err((_, error)) if is_transient_usb_access_error(error) => {
+                    std::thread::sleep(delay);
+                }
+                Err((interface, error)) => {
+                    return Err(CoreError::Usb(format!(
+                        "failed to claim PXLogic USB interface {interface}: {error}"
+                    )));
+                }
+            }
+        }
+
+        claim_pxlogic_interfaces_once(handle).map_err(|(interface, error)| {
+            CoreError::Usb(format!(
+                "failed to claim PXLogic USB interface {interface} after retrying: {error}"
+            ))
+        })
     }
 
     fn write_register(handle: &mut DeviceHandle<Context>, addr: u32, value: u32) -> Result<()> {
@@ -1029,7 +1083,7 @@ impl RusbBackend {
             ..UsbIdentityProbe::default()
         };
 
-        let mut handle = match device.open() {
+        let mut handle = match Self::open_with_retry(device) {
             Ok(handle) => handle,
             Err(error) => {
                 probe.ready = false;
@@ -1323,6 +1377,21 @@ fn usb_speed_label(speed: rusb::Speed) -> &'static str {
     }
 }
 
+fn is_transient_usb_access_error(error: rusb::Error) -> bool {
+    matches!(error, rusb::Error::Access | rusb::Error::Busy)
+}
+
+fn claim_pxlogic_interfaces_once(
+    handle: &mut DeviceHandle<Context>,
+) -> std::result::Result<(), (u8, rusb::Error)> {
+    handle.claim_interface(0).map_err(|error| (0, error))?;
+    if let Err(error) = handle.claim_interface(1) {
+        let _ = handle.release_interface(0);
+        return Err((1, error));
+    }
+    Ok(())
+}
+
 impl CaptureBackend for RusbBackend {
     fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
         let context = Self::context()?;
@@ -1499,6 +1568,14 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn retries_only_transient_windows_usb_access_errors() {
+        assert!(is_transient_usb_access_error(rusb::Error::Access));
+        assert!(is_transient_usb_access_error(rusb::Error::Busy));
+        assert!(!is_transient_usb_access_error(rusb::Error::NoDevice));
+        assert!(!is_transient_usb_access_error(rusb::Error::Timeout));
+    }
 
     #[test]
     fn maps_pxview_control_status_to_trigger_metadata() {
