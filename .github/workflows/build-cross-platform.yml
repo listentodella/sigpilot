@@ -207,29 +207,68 @@ jobs:
           PYTHONHOME="$python_home" native/sigrok-analyzer-sidecar/smoke-packaged.sh \
             "$sidecar" "$decoder_root" "$python_root"
 
-      - name: Build Tauri installers
+      - name: Build portable Tauri executable
         shell: pwsh
         env:
           TAURI_SKIP_DEVTOOLS_CHECK: true
-        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi --ci
+          PXLOGIC_REUSE_SIGROK_BUILD: "1"
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --no-bundle --ci
 
-      - name: Name Windows artifacts
+      - name: Stage Windows portable bundle
         shell: pwsh
         run: |
-          $bundleRoot = "target/x86_64-pc-windows-msvc/release/bundle"
-          $exe = Get-ChildItem "$bundleRoot/nsis" -Filter *.exe | Select-Object -First 1
-          $msi = Get-ChildItem "$bundleRoot/msi" -Filter *.msi | Select-Object -First 1
-          if (-not $exe -or -not $msi) { throw "Tauri did not produce both Windows installers" }
-          Copy-Item $exe.FullName "$bundleRoot/pxlogic-studio-windows-x64.exe"
-          Copy-Item $msi.FullName "$bundleRoot/pxlogic-studio-windows-x64.msi"
+          $releaseRoot = "target/x86_64-pc-windows-msvc/release"
+          $executable = Join-Path $releaseRoot "pxlogic-desktop.exe"
+          $portableRoot = Join-Path $releaseRoot "portable"
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+            throw "Tauri did not produce $executable"
+          }
+          Remove-Item -LiteralPath $portableRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $portableRoot | Out-Null
+          Copy-Item -LiteralPath $executable -Destination (Join-Path $portableRoot "PXLogic Studio.exe")
+          Copy-Item -LiteralPath "resources" -Destination $portableRoot -Recurse
+
+          $requiredPaths = @(
+            "resources/bitstreams/hspi_ddr.bin",
+            "resources/bitstreams/hspi_ddr_RST.bin",
+            "resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar.exe",
+            "resources/native/sigrok-analyzer-sidecar/decoders/c_decoders",
+            "resources/native/sigrok-analyzer-sidecar/decoders/python_decoders",
+            "resources/native/sigrok-analyzer-sidecar/python-runtime"
+          )
+          foreach ($relativePath in $requiredPaths) {
+            if (-not (Test-Path -LiteralPath (Join-Path $portableRoot $relativePath))) {
+              throw "Portable bundle is missing $relativePath"
+            }
+          }
+
+      - name: Smoke test Windows portable bundle
+        shell: msys2 {0}
+        run: |
+          portable_root="target/x86_64-pc-windows-msvc/release/portable"
+          sigrok_root="$portable_root/resources/native/sigrok-analyzer-sidecar"
+          PYTHONHOME="$sigrok_root/python-runtime" \
+            native/sigrok-analyzer-sidecar/smoke-packaged.sh \
+              "$sigrok_root/pxlogic-sigrok-sidecar.exe" \
+              "$sigrok_root/decoders/c_decoders" \
+              "$sigrok_root/decoders/python_decoders"
+
+      - name: Archive Windows portable bundle
+        shell: pwsh
+        run: |
+          $releaseRoot = "target/x86_64-pc-windows-msvc/release"
+          $portableRoot = Join-Path $releaseRoot "portable"
+          $bundleRoot = Join-Path $releaseRoot "bundle"
+          $archive = Join-Path $bundleRoot "pxlogic-studio-windows-x64-portable.zip"
+          New-Item -ItemType Directory -Path $bundleRoot -Force | Out-Null
+          Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$portableRoot/*" -DestinationPath $archive -CompressionLevel Optimal
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: pxlogic-windows-x64
-          path: |
-            target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64.exe
-            target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64.msi
+          name: pxlogic-windows-x64-portable
+          path: target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64-portable.zip
           if-no-files-found: error
           retention-days: 30
 

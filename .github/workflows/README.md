@@ -4,7 +4,7 @@
 UI tests, then produces these artifacts:
 
 - macOS arm64/x64: `.app.zip`
-- Windows x64: NSIS `.exe` and WiX `.msi`
+- Windows x64: portable `.zip` containing the application `.exe` and resources
 - Linux x64: `.AppImage` and `.deb`
 
 Checks, Windows and Linux run on the repository's `self-hosted` `X64` runners.
@@ -16,7 +16,9 @@ libraries, Python standard library, Python decoder catalog, FPGA bitstreams and
 native C decoder modules. It probes the prepared resources before packaging;
 the prepared Windows/Linux resources execute a real generic C decode, and
 Linux additionally extracts the finished AppImage and repeats that decode from
-inside its payload.
+inside its payload. Windows repeats the decode from the staged portable bundle
+before creating the ZIP; MSI and NSIS installers are not required by Tauri and
+are intentionally not generated.
 
 The cross-platform acceptance scope is USB discovery/capture, `.pxl` and
 `.pxcap` open/save, supported base imports, and the native sigrok runners. The
