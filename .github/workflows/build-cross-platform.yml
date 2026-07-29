@@ -95,13 +95,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install Sigrok build environment
+      - name: Detect persistent MSYS2 installation
+        id: detect-msys2
+        shell: pwsh
+        run: |
+          $installed = Test-Path "C:\msys64\usr\bin\pacman.exe"
+          "installed=$($installed.ToString().ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Setup persistent MSYS2 environment
         id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
-          install: >-
+          location: C:\
+          release: ${{ steps.detect-msys2.outputs.installed != 'true' }}
+          update: false
+          cache: false
+
+      - name: Install missing MSYS2 build dependencies
+        shell: msys2 {0}
+        run: |
+          packages=(
             base-devel
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-cmake
@@ -110,6 +124,27 @@ jobs:
             mingw-w64-ucrt-x86_64-glib2
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-jq
+          )
+          missing_packages=()
+          package_or_group_installed() {
+            if pacman -Q "$1" >/dev/null 2>&1; then
+              return 0
+            fi
+            local members member
+            members="$(pacman -Sgq "$1" 2>/dev/null)" || return 1
+            [[ -n "$members" ]] || return 1
+            while IFS= read -r member; do
+              pacman -Q "$member" >/dev/null 2>&1 || return 1
+            done <<<"$members"
+          }
+          for package in "${packages[@]}"; do
+            package_or_group_installed "$package" || missing_packages+=("$package")
+          done
+          if (( ${#missing_packages[@]} == 0 )); then
+            echo "MSYS2 build dependencies are already installed."
+            exit 0
+          fi
+          pacman --noconfirm -S --needed "${missing_packages[@]}"
 
       - name: Export MSYS2 paths for resource preparation
         shell: pwsh
