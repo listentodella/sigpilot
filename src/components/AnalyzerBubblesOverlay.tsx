@@ -1,5 +1,6 @@
 import { CSSProperties, MouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnalyzerBubble, AnalyzerTrackWindow, WaveformTile } from "../lib/api";
+import { analyzerBubbleLayout } from "../lib/analyzerBubbleLayout";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
   ANALYZER_STRIP_HEIGHT_PX,
@@ -11,15 +12,12 @@ import {
 } from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
-import { analyzerViewportTransform } from "../lib/analyzerViewportTransform";
 import { visibleAnalyzerMarkerSamples } from "../lib/analyzerMarkers";
 
 const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
 const MAX_MULTI_BUBBLE_COUNT = 99;
 const MAX_MULTI_BUBBLE_TEXT_LENGTH = 200;
-const BUBBLE_REBASE_MIN_SCALE = 0.67;
-const BUBBLE_REBASE_MAX_SCALE = 1.5;
 
 interface AnalyzerBubbleTrack {
   analyzer: UiAnalyzerInstance;
@@ -35,9 +33,18 @@ interface AnalyzerMarkerTrack {
   role: AnalyzerChannelRole;
 }
 
+interface AnalyzerBubbleElementBinding {
+  endSample: number;
+  element: HTMLButtonElement;
+  labels: string[];
+  multi: boolean;
+  resultCount: number;
+  startSample: number;
+  textElement: HTMLElement | null;
+}
+
 interface AnalyzerBubblesOverlayProps {
   analyzers: UiAnalyzerInstance[];
-  isViewportInteracting?: boolean;
   rowHeights: number[];
   rowTopInsets: number[];
   tile: WaveformTile | null;
@@ -52,7 +59,6 @@ interface AnalyzerBubblesOverlayProps {
 
 export function AnalyzerBubblesOverlay({
   analyzers,
-  isViewportInteracting = false,
   rowHeights,
   rowTopInsets,
   tile,
@@ -65,8 +71,7 @@ export function AnalyzerBubblesOverlay({
   onZoomBubble,
 }: AnalyzerBubblesOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
-  const transformLayerRef = useRef<HTMLDivElement>(null);
-  const laidOutViewportRef = useRef({ start: viewportStart, samples: viewportSamples });
+  const bubbleElementsRef = useRef(new Map<string, AnalyzerBubbleElementBinding>());
   const callbacksRef = useRef({ onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble });
   callbacksRef.current = { onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble };
   const [overlayWidth, setOverlayWidth] = useState(1);
@@ -144,38 +149,32 @@ export function AnalyzerBubblesOverlay({
   useLayoutEffect(() => {
     const overlay = overlayRef.current;
     if (!overlay) return;
-    const transform = analyzerViewportTransform(
-      laidOutViewportRef.current,
-      { start: viewportStart, samples: viewportSamples },
-      Math.max(1, overlay.clientWidth),
-    );
-    if (
-      isViewportInteracting &&
-      transform.scaleX >= BUBBLE_REBASE_MIN_SCALE &&
-      transform.scaleX <= BUBBLE_REBASE_MAX_SCALE
-    ) return;
     const width = Math.max(1, overlay.clientWidth);
     const samples = Math.max(1, viewportSamples);
 
-    overlay.querySelectorAll<HTMLElement>(".analyzerBubble").forEach((element) => {
-      const start = Number(element.dataset.bubbleStart);
-      const end = Number(element.dataset.bubbleEnd);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-      const left = ((start - viewportStart) / samples) * width;
-      const right = ((end - viewportStart) / samples) * width;
-      const visible = right >= 0 && left <= width;
-      element.style.display = visible ? "flex" : "none";
+    bubbleElementsRef.current.forEach(({ endSample, element, labels, multi, resultCount, startSample, textElement }) => {
+      const layout = analyzerBubbleLayout(startSample, endSample, viewportStart, samples, width);
+      const { overflowLeft, overflowRight, visible } = layout;
+      const display = visible ? "flex" : "none";
+      if (element.style.display !== display) element.style.display = display;
       if (!visible) return;
-      element.style.left = `${Math.max(0, left)}px`;
-      element.style.width = `${Math.max(1, Math.min(right, width) - Math.max(left, 0))}px`;
-      element.classList.toggle("overflowLeft", left < 0);
-      element.classList.toggle("overflowRight", right > width);
+      const bubbleWidth = layout.widthPx;
+      const transform = `translate3d(${layout.leftPx}px, 0, 0)`;
+      const widthStyle = `${bubbleWidth}px`;
+      if (element.style.transform !== transform) element.style.transform = transform;
+      if (element.style.width !== widthStyle) element.style.width = widthStyle;
+      element.classList.toggle("overflowLeft", overflowLeft);
+      element.classList.toggle("overflowRight", overflowRight);
+
+      const arrowWidth =
+        (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
+        (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
+      const nextText = multi
+        ? multiBubbleTextFromValues(labels, resultCount, bubbleWidth - 28)
+        : bestFrameText(labels, bubbleWidth - arrowWidth - 6);
+      if (textElement && textElement.textContent !== nextText) textElement.textContent = nextText;
     });
-    laidOutViewportRef.current = { start: viewportStart, samples: viewportSamples };
-    if (isViewportInteracting && transformLayerRef.current) {
-      transformLayerRef.current.style.transform = "none";
-    }
-  }, [isViewportInteracting, overlayWidth, viewportSamples, viewportStart, bubbleTracks, markerTracks, tileChannels]);
+  }, [overlayWidth, viewportSamples, viewportStart, bubbleTracks]);
 
   useLayoutEffect(() => {
     const overlay = overlayRef.current;
@@ -240,20 +239,7 @@ export function AnalyzerBubblesOverlay({
     viewportSamples,
     viewportStart,
     visibleChannelIndexes,
-    isViewportInteracting,
   ]);
-
-  useLayoutEffect(() => {
-    if (!isViewportInteracting) {
-      laidOutViewportRef.current = { start: viewportStart, samples: viewportSamples };
-    }
-  }, [isViewportInteracting, viewportSamples, viewportStart]);
-
-  const interactionTransform = analyzerViewportTransform(
-    laidOutViewportRef.current,
-    { start: viewportStart, samples: viewportSamples },
-    overlayWidth,
-  );
 
   const renderedContent = useMemo(
     () => (
@@ -315,6 +301,7 @@ export function AnalyzerBubblesOverlay({
                   ? multiBubbleText({ ...bubble, display_text: formattedDisplayText }, bubbleWidth - 28)
                   : bestFrameText(formattedDisplayText, bubbleWidth - arrowWidth - 6);
                 const tooltip = multi ? bubbleTooltipText({ ...bubble, display_text: formattedDisplayText }, text) : formattedDisplayText[0] ?? "";
+                const bubbleKey = `${track.key}:${bubble.start_sample}:${bubble.frame_id_interval.begin}:${bubble.frame_id_interval.end}`;
 
                 function handleClick(event: MouseEvent<HTMLButtonElement>) {
                   event.stopPropagation();
@@ -330,7 +317,7 @@ export function AnalyzerBubblesOverlay({
                     className={`analyzerBubble ${multi ? "multi" : ""} ${highlighted ? "highlighted" : ""} ${overflowLeft ? "overflowLeft" : ""} ${overflowRight ? "overflowRight" : ""}`}
                     data-bubble-end={bubble.end_sample}
                     data-bubble-start={bubble.start_sample}
-                    key={`${bubble.start_sample}-${bubble.frame_id_interval.begin}-${bubble.frame_id_interval.end}`}
+                    key={bubbleKey}
                     onClick={handleClick}
                     onDoubleClick={(event) => {
                       event.stopPropagation();
@@ -343,10 +330,26 @@ export function AnalyzerBubblesOverlay({
                     }}
                     style={{
                       display: right >= 0 && left <= overlayWidth ? "flex" : "none",
-                      left: Math.max(left, 0),
+                      left: 0,
+                      transform: `translate3d(${Math.max(left, 0)}px, 0, 0)`,
                       width: bubbleWidth,
                       "--analyzer-color": analyzer.color,
                     } as CSSProperties}
+                    ref={(element) => {
+                      if (element) {
+                        bubbleElementsRef.current.set(bubbleKey, {
+                          endSample: bubble.end_sample,
+                          element,
+                          labels: formattedDisplayText,
+                          multi,
+                          resultCount: bubble.result_count,
+                          startSample: bubble.start_sample,
+                          textElement: element.querySelector<HTMLElement>(".analyzerBubbleText"),
+                        });
+                      } else {
+                        bubbleElementsRef.current.delete(bubbleKey);
+                      }
+                    }}
                     title={`${tooltip}\n${navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+click to scroll to table row`}
                     type="button"
                   >
@@ -394,20 +397,24 @@ export function AnalyzerBubblesOverlay({
   return (
     <div className="analyzerBubblesOverlay" ref={overlayRef}>
       <canvas className="analyzerMarkersCanvas" aria-hidden="true" />
-      <div
-        className="analyzerOverlayTransformLayer"
-        ref={transformLayerRef}
-        style={
-          isViewportInteracting
-            ? {
-                transform: `translate3d(${interactionTransform.translateX}px, 0, 0) scaleX(${interactionTransform.scaleX})`,
-              }
-            : undefined
-        }
-      >
+      <div className="analyzerOverlayTransformLayer">
         {renderedContent}
       </div>
     </div>
+  );
+}
+
+function multiBubbleTextFromValues(
+  displayText: string[],
+  resultCount: number,
+  availableWidth: number,
+) {
+  return multiBubbleText(
+    {
+      display_text: displayText,
+      result_count: resultCount,
+    },
+    availableWidth,
   );
 }
 
@@ -487,7 +494,10 @@ function bestFrameText(displayText: string[], widthPx: number) {
   );
 }
 
-function multiBubbleText(bubble: AnalyzerBubble, widthPx: number) {
+function multiBubbleText(
+  bubble: Pick<AnalyzerBubble, "display_text" | "result_count">,
+  widthPx: number,
+) {
   const text = bubble.display_text.map((label) => bestFrameText([label], widthPx)).join("·");
   const suffix = bubble.display_text.length < bubble.result_count ? "..." : "";
   const output = `${text}${suffix}`;

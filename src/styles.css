@@ -1906,9 +1906,7 @@ button:disabled {
   contain: layout paint;
   height: 100%;
   position: relative;
-  transform-origin: 0 0;
   width: 100%;
-  will-change: transform;
 }
 
 .analyzerBubbleStrip {
@@ -1939,6 +1937,7 @@ button:disabled {
   line-height: 16px;
   cursor: default;
   pointer-events: auto;
+  transform-origin: 0 0;
 }
 
 .analyzerBubble.highlighted {

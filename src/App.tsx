@@ -3756,7 +3756,6 @@ export default function App() {
                       />
                       <AnalyzerBubblesOverlay
                         analyzers={activeSession.analyzers}
-                        isViewportInteracting={graphViewportInteracting}
                         onGoToFrame={(analyzerId, frameIndex) => goToAnalyzerFrame(analyzerId, frameIndex, false)}
                         onOpenTableFrame={openAnalyzerTableFrame}
                         onSelectFrame={(analyzerId, frameIndex) =>
