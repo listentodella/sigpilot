@@ -219,8 +219,17 @@ else
 fi
 
 if sigrok_root="$(sigrok_source_root)"; then
-  sigrok_sidecar="$(run_build_script "$ROOT_DIR/native/sigrok-analyzer-sidecar/build.sh")"
-  sigrok_build_dir="$(dirname "$sigrok_sidecar")"
+  if [[ "${PXLOGIC_REUSE_SIGROK_BUILD:-0}" == "1" ]]; then
+    sigrok_build_dir="${PXLOGIC_SIGROK_BUILD_DIR:-$ROOT_DIR/native/sigrok-analyzer-sidecar/target}"
+    sigrok_sidecar="$sigrok_build_dir/$(sigrok_executable_name)"
+    if [[ ! -f "$sigrok_sidecar" ]]; then
+      printf 'Reusable Sigrok sidecar was not found at %s.\n' "$sigrok_sidecar" >&2
+      exit 1
+    fi
+  else
+    sigrok_sidecar="$(run_build_script "$ROOT_DIR/native/sigrok-analyzer-sidecar/build.sh")"
+    sigrok_build_dir="$(dirname "$sigrok_sidecar")"
+  fi
   sigrok_target_name="$(sigrok_executable_name)"
   copy_executable "$sigrok_sidecar" \
     "$RESOURCE_DIR/sigrok-analyzer-sidecar/$sigrok_target_name"

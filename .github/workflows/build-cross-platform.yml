@@ -188,6 +188,8 @@ jobs:
 
       - name: Prepare and probe bundled resources
         shell: msys2 {0}
+        env:
+          PXLOGIC_REUSE_SIGROK_BUILD: "1"
         run: |
           scripts/prepare-tauri-resources.sh
           sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar.exe"
@@ -309,6 +311,8 @@ jobs:
         run: native/sigrok-analyzer-sidecar/verify.sh
 
       - name: Prepare and probe bundled resources
+        env:
+          PXLOGIC_REUSE_SIGROK_BUILD: "1"
         run: |
           scripts/prepare-tauri-resources.sh
           sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar"

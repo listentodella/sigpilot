@@ -26,14 +26,26 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   export PATH="/opt/homebrew/bin:$PATH"
 fi
 cmake_platform_args=()
+python_fingerprint=""
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     python_executable="$(command -v python3)"
     python_root="$(cd "$(dirname "$python_executable")/.." && pwd)"
-    # CMake caches Python discovery aggressively; the self-hosted runner can
-    # retain a cache from a different Python installation between jobs.
-    rm -f "$BUILD_DIR/CMakeCache.txt"
-    rm -rf "$BUILD_DIR/CMakeFiles"
+    python_fingerprint="$(cygpath -am "$python_executable")|$(cygpath -am "$python_root")"
+    fingerprint_file="$BUILD_DIR/.pxlogic-python-toolchain"
+    cached_fingerprint="$(cat "$fingerprint_file" 2>/dev/null || true)"
+    if [[ -z "$cached_fingerprint" && -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+      cached_python="$(sed -n 's/^Python3_EXECUTABLE:[^=]*=//p' "$BUILD_DIR/CMakeCache.txt" | head -n 1)"
+      cached_root="$(sed -n 's/^Python3_ROOT_DIR:[^=]*=//p' "$BUILD_DIR/CMakeCache.txt" | head -n 1)"
+      if [[ -n "$cached_python" && -n "$cached_root" ]]; then
+        cached_fingerprint="$cached_python|$cached_root"
+      fi
+    fi
+    # Invalidate only when the persistent runner changed Python installations.
+    if [[ -f "$BUILD_DIR/CMakeCache.txt" && "$cached_fingerprint" != "$python_fingerprint" ]]; then
+      rm -f "$BUILD_DIR/CMakeCache.txt"
+      rm -rf "$BUILD_DIR/CMakeFiles"
+    fi
     cmake_platform_args+=(
       "-DPython3_ROOT_DIR=$(cygpath -m "$python_root")"
       "-DPython3_EXECUTABLE=$(cygpath -m "$python_executable")"
@@ -49,6 +61,9 @@ fi
   -DCMAKE_BUILD_TYPE=Release \
   -DPXVIEW_ROOT="$PXVIEW_ROOT" \
   "${cmake_platform_args[@]}"
+if [[ -n "$python_fingerprint" ]]; then
+  printf '%s\n' "$python_fingerprint" > "$BUILD_DIR/.pxlogic-python-toolchain"
+fi
 "$CMAKE_BIN" --build "$BUILD_DIR" --config Release --parallel
 
 case "$(uname -s)" in
