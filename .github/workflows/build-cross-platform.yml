@@ -91,6 +91,8 @@ jobs:
     name: Windows x64
     needs: checks
     runs-on: [self-hosted, Windows, X64]
+    env:
+      PXLOGIC_SIGROK_BUILD_DIR: C:/pxlogic-native-cache/sigrok-ucrt64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -237,6 +239,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     env:
       PXLOGIC_COPY_NATIVE_DEPS: "1"
+      PXLOGIC_SIGROK_BUILD_DIR: /tmp/pxlogic-native-cache/sigrok-linux-x64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
