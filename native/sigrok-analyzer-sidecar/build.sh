@@ -54,6 +54,7 @@ fi
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     python_dynload="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
+    python_dynload="$(cygpath -u "$python_dynload")"
     while IFS= read -r dependency; do
       [[ -f "$dependency" && "$dependency" == /*/bin/*.dll ]] || continue
       cp -f "$dependency" "$BUILD_DIR/$(basename "$dependency")"
