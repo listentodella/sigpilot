@@ -24,10 +24,21 @@ else
   PYTHON_DECODER_ROOT="$ROOT_DIR/pxview-fork/libsigrokdecode/decoders"
 fi
 
+run_sidecar() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      PYTHONHOME="$(python3 -c 'import sys; print(sys.base_prefix)')" "$SIDECAR" "$@"
+      ;;
+    *)
+      "$SIDECAR" "$@"
+      ;;
+  esac
+}
+
 run_probe() {
   local output status
   set +e
-  output="$("$SIDECAR" "$@")"
+  output="$(run_sidecar "$@")"
   status=$?
   set -e
   if (( status != 0 )) || [[ -z "$output" ]]; then
@@ -82,7 +93,7 @@ while IFS= read -r fixture; do
     edges,
     decoder
   }' <<<"$fixture")"
-  output="$(printf '%s' "$request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  output="$(printf '%s' "$request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
 
   expected_mosi="$(jq -c '[.expected_words[].mosi]' <<<"$fixture")"
   expected_miso="$(jq -c '[.expected_words[].miso]' <<<"$fixture")"
@@ -109,7 +120,7 @@ while IFS= read -r fixture; do
     edges,
     decoder
   }' <<<"$fixture")"
-  output="$(printf '%s' "$request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  output="$(printf '%s' "$request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
   expected_rows="$(jq -c '.expected_rows' <<<"$fixture")"
   expected_values="$(jq -c '.expected_values' <<<"$fixture")"
   actual_rows="$(jq -c '[.frames[].row]' <<<"$output")"
@@ -135,7 +146,7 @@ while IFS= read -r fixture; do
         decoder
       }
   ' <<<"$fixture")"
-  large_output="$(printf '%s' "$large_request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  large_output="$(printf '%s' "$large_request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
   large_start="$(jq -r '[.frames[].start_sample] | min' <<<"$large_output")"
   if (( large_start <= 4294967295 )); then
     printf 'FAIL %s-large-index expected a sample beyond uint32, got %s\n' "$fixture_id" "$large_start" >&2
@@ -158,7 +169,7 @@ while IFS= read -r fixture; do
           }
         else . end
     ' <<<"$fixture")"
-    output="$(printf '%s' "$request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+    output="$(printf '%s' "$request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
     if jq -e --argjson expected "$(jq -c '.expected_roles' <<<"$fixture")" '
       ([.frames[].channel_values[] | select(.role == "Identifier") | .value] == $expected.Identifier)
       and ([.frames[].channel_values[] | select(.role == "DLC") | .value] == $expected.DLC)
@@ -176,7 +187,7 @@ while IFS= read -r fixture; do
       .sample_count = 50000000000
       | .edges |= map(.samples |= map(. + 49000000000))
     ' <<<"$request")"
-    large_output="$(printf '%s' "$large_request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+    large_output="$(printf '%s' "$large_request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
     large_start="$(jq -r '[.frames[].start_sample] | min' <<<"$large_output")"
     if (( large_start <= 4294967295 )); then
       printf 'FAIL %s-%s-large-index expected a sample beyond uint32, got %s\n' \
@@ -199,7 +210,7 @@ while IFS= read -r fixture; do
     edges,
     decoder
   }' <<<"$fixture")"
-  output="$(printf '%s' "$request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  output="$(printf '%s' "$request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
   if jq -e --argjson expected "$(jq -c '.expected_roles' <<<"$fixture")" '
     .protocol == "LIN"
     and ([.frames[].channel_values[] | select(.role == "LIN") | .value] == $expected.LIN)
@@ -214,7 +225,7 @@ while IFS= read -r fixture; do
     .sample_count = 50000000000
     | .edges |= map(.samples |= map(. + 49000000000))
   ' <<<"$request")"
-  large_output="$(printf '%s' "$large_request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  large_output="$(printf '%s' "$large_request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
   large_start="$(jq -r '[.frames[].start_sample] | min' <<<"$large_output")"
   if (( large_start <= 4294967295 )); then
     printf 'FAIL %s-lin-large-index expected a sample beyond uint32, got %s\n' \
@@ -236,7 +247,7 @@ while IFS= read -r fixture; do
     edges,
     decoder
   }' <<<"$fixture")"
-  output="$(printf '%s' "$request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  output="$(printf '%s' "$request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
   expected_rows="$(jq -c '.expected_rows' <<<"$fixture")"
   expected_values="$(jq -c '.expected_values' <<<"$fixture")"
   expected_role="$(jq -r '.expected_role' <<<"$fixture")"
@@ -254,7 +265,7 @@ while IFS= read -r fixture; do
     .sample_count = 50000000000
     | .edges |= map(.samples |= map(. + 49000000000))
   ' <<<"$request")"
-  large_output="$(printf '%s' "$large_request" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+  large_output="$(printf '%s' "$large_request" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
   large_start="$(jq -r '[.frames[].start_sample] | min' <<<"$large_output")"
   if (( large_start <= 4294967295 )); then
     printf 'FAIL %s-parallel-large-index expected a sample beyond uint32, got %s\n' \
@@ -282,7 +293,7 @@ large_fixture="$(jq -c '
       decoder
     }
 ' "$FIXTURES")"
-large_output="$(printf '%s' "$large_fixture" | "$SIDECAR" --decoder-root "$DECODER_ROOT" --decode)"
+large_output="$(printf '%s' "$large_fixture" | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
 large_start="$(jq -r '[.frames[].start_sample] | min' <<<"$large_output")"
 if (( large_start <= 4294967295 )); then
   printf 'FAIL sparse-large-index expected a sample beyond uint32, got %s\n' "$large_start" >&2
