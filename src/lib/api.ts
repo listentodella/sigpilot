@@ -436,7 +436,12 @@ let previewCapture: CaptureSummary = {
   },
   bytes: 250_000,
 };
-let previewCaptureRun: { cancelled: boolean } | null = null;
+interface PreviewCaptureRun {
+  cancelled: boolean;
+  cancel: () => void;
+}
+
+let previewCaptureRun: PreviewCaptureRun | null = null;
 const previewCaptures = new Map<string, CaptureSummary>();
 const previewCaptureRevisions = new Map<string, number>();
 const previewAnalyzerFrameCache = new Map<string, DecodedFrame[]>();
@@ -832,8 +837,16 @@ export function startCapture(
   demoAnalyzers: AnalyzerDecodeSettings[] = [],
 ): Promise<CaptureSummary> {
   if (!isTauriRuntime()) {
-    if (previewCaptureRun) previewCaptureRun.cancelled = true;
-    const run = { cancelled: false };
+    previewCaptureRun?.cancel();
+    let finishRun = () => {};
+    const run: PreviewCaptureRun = {
+      cancelled: false,
+      cancel: () => {
+        if (run.cancelled) return;
+        run.cancelled = true;
+        finishRun();
+      },
+    };
     previewCaptureRun = run;
     const unitsize = settings.channel_count > 16 ? 4 : settings.channel_count > 8 ? 2 : 1;
     const timedSamples = Math.max(1, Math.round((settings.sample_rate_hz * settings.duration_ms) / 1000));
@@ -865,7 +878,18 @@ export function startCapture(
     );
 
     return new Promise((resolve) => {
+      let updateTimer: number | null = null;
+      let finished = false;
+      finishRun = () => {
+        if (finished) return;
+        finished = true;
+        if (updateTimer !== null) window.clearTimeout(updateTimer);
+        if (previewCaptureRun === run) previewCaptureRun = null;
+        resolve(previewCapture);
+      };
+
       function update() {
+        if (finished) return;
         const elapsedSeconds = Math.max(0, (performance.now() - startedAt) / 1000);
         const sampleCount = Math.max(
           1,
@@ -899,13 +923,12 @@ export function startCapture(
         callbacks.onSummary?.(previewCapture);
 
         if (run.cancelled || sampleCount >= targetSamples) {
-          if (previewCaptureRun === run) previewCaptureRun = null;
-          resolve(previewCapture);
+          finishRun();
           return;
         }
-        window.setTimeout(update, PREVIEW_CAPTURE_UPDATE_MS);
+        updateTimer = window.setTimeout(update, PREVIEW_CAPTURE_UPDATE_MS);
       }
-      window.setTimeout(update, PREVIEW_CAPTURE_UPDATE_MS);
+      update();
     });
   }
   return callBackend("start_capture", { sessionId, settings, demoAnalyzers });
@@ -913,7 +936,7 @@ export function startCapture(
 
 export function cancelCapture(): Promise<void> {
   if (!isTauriRuntime()) {
-    if (previewCaptureRun) previewCaptureRun.cancelled = true;
+    previewCaptureRun?.cancel();
     return Promise.resolve();
   }
   return callBackend("cancel_capture");

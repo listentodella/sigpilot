@@ -1815,7 +1815,23 @@ export default function App() {
           analyzer_view: null,
           analyzers: [],
         });
-        if (requestSeq === tileRequestSeq.current && next.frame_id === requestSeq) {
+        const latestSession = sessionsRef.current.find((session) => session.id === sessionSnapshot.id);
+        const latestVisibleChannels = latestSession
+          ? visibleDigitalChannelIndexes(latestSession)
+          : [];
+        const canServeLatestViewport =
+          latestSession != null &&
+          activeSessionIdRef.current === sessionSnapshot.id &&
+          next.frame_id === requestSeq &&
+          latestVisibleChannels.length > 0 &&
+          graphTileCanServeViewport(
+            next.tile,
+            latestSession.viewportStart,
+            latestSession.viewportSamples,
+            latestSession.canvasWidth,
+            latestVisibleChannels,
+          );
+        if (canServeLatestViewport) {
           updateSession(sessionSnapshot.id, (session) => ({
             ...session,
             tile: {
@@ -2249,10 +2265,16 @@ export default function App() {
   ]);
 
   async function handleCancel() {
-    await cancelCapture();
     const targetId = captureSessionRef.current ?? activeSession?.id;
     if (targetId) {
       updateSession(targetId, (session) => ({ ...session, message: "Stopping capture" }));
+    }
+    try {
+      await cancelCapture();
+    } catch (error) {
+      if (targetId) {
+        updateSession(targetId, (session) => ({ ...session, message: String(error) }));
+      }
     }
   }
 

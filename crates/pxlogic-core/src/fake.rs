@@ -129,8 +129,13 @@ impl FakeBackend {
                     .min(sample_count)
             };
             let mut remaining = next_samples.saturating_sub(samples_read);
+            let mut cancellation_observed = false;
             while remaining > 0 {
-                let chunk_samples = remaining.min(1_048_576);
+                if cancel.load(Ordering::Acquire) {
+                    cancellation_observed = true;
+                    break;
+                }
+                let chunk_samples = remaining.min(DEMO_GENERATION_CHUNK_SAMPLES);
                 let chunk = generator.generate(chunk_samples);
                 on_samples(&chunk);
                 samples.extend_from_slice(&chunk);
@@ -142,6 +147,9 @@ impl FakeBackend {
                 bytes_expected,
                 samples_read,
             });
+            if cancellation_observed {
+                continue;
+            }
             if samples_read >= sample_count {
                 break;
             }
@@ -159,6 +167,7 @@ impl FakeBackend {
 }
 
 const INITIAL_CAPTURE_RESERVE_BYTES: usize = 8 * 1024 * 1024;
+const DEMO_GENERATION_CHUNK_SAMPLES: u64 = 262_144;
 
 impl CaptureBackend for FakeBackend {
     fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
@@ -211,5 +220,41 @@ impl CaptureBackend for FakeBackend {
         on_samples: &mut dyn FnMut(&[u8]),
     ) -> Result<CaptureData> {
         self.capture_streaming_generated(settings, &[], cancel, progress, started, on_samples)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_capture_checks_cancellation_between_small_generation_chunks() {
+        let backend = FakeBackend;
+        let settings = CaptureSettings {
+            sample_rate_hz: 100_000_000,
+            buffer_size_mb: 16,
+            ..CaptureSettings::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let mut chunk_sizes = Vec::new();
+
+        let capture = backend
+            .capture_streaming_with_analyzers(
+                &settings,
+                &[],
+                &cancel,
+                &mut |_| {},
+                &mut |_| thread::sleep(Duration::from_millis(40)),
+                &mut |chunk| {
+                    chunk_sizes.push(chunk.len());
+                    cancel.store(true, Ordering::Release);
+                },
+            )
+            .expect("demo capture should return the partial capture after cancellation");
+
+        assert_eq!(chunk_sizes.len(), 1);
+        assert!(chunk_sizes[0] <= DEMO_GENERATION_CHUNK_SAMPLES as usize);
+        assert_eq!(capture.samples.len(), chunk_sizes[0]);
+        assert_eq!(capture.metadata.sample_count as usize, chunk_sizes[0]);
     }
 }
