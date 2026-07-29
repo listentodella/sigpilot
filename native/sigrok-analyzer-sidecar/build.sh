@@ -55,6 +55,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     python_dynload="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
     python_dynload="$(cygpath -u "$python_dynload")"
+    python_bin="$(dirname "$(command -v python3)")"
     while IFS= read -r dependency; do
       [[ -f "$dependency" && "$dependency" == /*/bin/*.dll ]] || continue
       cp -f "$dependency" "$BUILD_DIR/$(basename "$dependency")"
@@ -68,6 +69,32 @@ case "$(uname -s)" in
         fi
       } | awk '$2 == "=>" { print $3 }' | sort -u
     )
+
+    # MSYS2 ldd does not reliably report dependencies for Python .pyd files.
+    # Walk their PE import tables and recursively collect matching UCRT DLLs.
+    declare -a pe_queue=("$BUILD_DIR/pxlogic-sigrok-sidecar.exe")
+    if [[ -d "$python_dynload" ]]; then
+      while IFS= read -r -d '' extension; do
+        pe_queue+=("$extension")
+      done < <(find "$python_dynload" -type f \( -name '*.pyd' -o -name '*.dll' \) -print0)
+    fi
+    declare -A seen_pe_files=()
+    queue_index=0
+    while (( queue_index < ${#pe_queue[@]} )); do
+      pe_file="${pe_queue[$queue_index]}"
+      queue_index=$((queue_index + 1))
+      pe_key="$(cygpath -aw "$pe_file" | tr '[:upper:]' '[:lower:]')"
+      [[ -z "${seen_pe_files[$pe_key]:-}" ]] || continue
+      seen_pe_files[$pe_key]=1
+      while IFS= read -r dll_name; do
+        [[ -n "$dll_name" ]] || continue
+        dll_source="$(find "$python_bin" -maxdepth 1 -type f -iname "$dll_name" -print -quit)"
+        [[ -n "$dll_source" ]] || continue
+        dll_target="$BUILD_DIR/$(basename "$dll_source")"
+        cp -f "$dll_source" "$dll_target"
+        pe_queue+=("$dll_target")
+      done < <(objdump -p "$pe_file" 2>/dev/null | awk '/DLL Name:/ { print $3 }')
+    done
     ;;
 esac
 
