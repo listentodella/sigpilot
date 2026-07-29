@@ -200,11 +200,8 @@ jobs:
           test -d "$decoder_root"
           test -d "$python_root"
           test -d "$python_home"
-          PYTHONHOME="$python_home" "$sidecar" \
-            --decoder-root "$decoder_root" \
-            --python-decoder-root "$python_root" \
-            --probe --catalog | jq -e \
-              '.available and .c_decoder_count >= 200 and .python_decoder_count >= 200'
+          PYTHONHOME="$python_home" native/sigrok-analyzer-sidecar/smoke-packaged.sh \
+            "$sidecar" "$decoder_root" "$python_root"
 
       - name: Build Tauri installers
         shell: pwsh
@@ -324,11 +321,8 @@ jobs:
           test -d "$decoder_root"
           test -d "$python_root"
           test -d "$python_home"
-          PYTHONHOME="$python_home" "$sidecar" \
-            --decoder-root "$decoder_root" \
-            --python-decoder-root "$python_root" \
-            --probe --catalog | jq -e \
-              '.available and .c_decoder_count >= 200 and .python_decoder_count >= 200'
+          PYTHONHOME="$python_home" native/sigrok-analyzer-sidecar/smoke-packaged.sh \
+            "$sidecar" "$decoder_root" "$python_root"
 
       - name: Build Tauri packages
         run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --ci
@@ -352,11 +346,11 @@ jobs:
           test -n "$packaged_sidecar"
           packaged_root="$(dirname "$packaged_sidecar")"
           test -f "$(find squashfs-root -type f -name hspi_ddr.bin -print -quit)"
-          PYTHONHOME="$packaged_root/python-runtime" "$packaged_sidecar" \
-            --decoder-root "$packaged_root/decoders/c_decoders" \
-            --python-decoder-root "$packaged_root/decoders/python_decoders" \
-            --probe --catalog | jq -e \
-              '.available and .c_decoder_count >= 200 and .python_decoder_count >= 200'
+          PYTHONHOME="$packaged_root/python-runtime" \
+            "$GITHUB_WORKSPACE/native/sigrok-analyzer-sidecar/smoke-packaged.sh" \
+            "$packaged_sidecar" \
+            "$packaged_root/decoders/c_decoders" \
+            "$packaged_root/decoders/python_decoders"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7

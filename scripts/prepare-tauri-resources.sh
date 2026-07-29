@@ -239,11 +239,9 @@ if sigrok_root="$(sigrok_source_root)"; then
     mkdir -p "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders"
     cp -R "$sigrok_build_dir/decoders/c_decoders" \
       "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders/c_decoders"
-    while IFS= read -r -d '' decoder_binary; do
-      chmod 755 "$decoder_binary" || true
-      copy_shared_dependencies "$decoder_binary" "$RESOURCE_DIR/sigrok-analyzer-sidecar"
-    done < <(find "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders/c_decoders" \
-      -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) -print0)
+    find "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders/c_decoders" \
+      -type f \( -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) \
+      -exec chmod 755 {} +
   fi
   if [[ -d "$sigrok_root/libsigrokdecode/decoders" ]]; then
     mkdir -p "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders"
