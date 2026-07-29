@@ -2194,9 +2194,51 @@ mod tests {
                 && item.runner_status.as_deref() == Some("generic_sparse_c")
         }));
         assert!(probe.decoder_catalog.iter().any(|item| {
+            item.id.as_deref() == Some("pwm")
+                && item.runner_status.as_deref() == Some("generic_sparse_python")
+        }));
+        assert!(probe.decoder_catalog.iter().any(|item| {
             item.id.as_deref() == Some("modbus_c")
                 && item.runner_status.as_deref() == Some("catalog_only")
         }));
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR, PXLOGIC_SIGROK_DECODER_ROOT, and PXLOGIC_SIGROK_PYTHON_DECODER_ROOT"]
+    fn sigrok_native_sidecar_decodes_generic_sparse_python_pwm() {
+        let capture = sparse_transition_capture(
+            "sigrok-python-pwm-test",
+            1_000_000,
+            100,
+            0,
+            &[0],
+            &[(0, vec![10, 20, 30, 40, 50, 60])],
+        );
+        let settings = AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+            decoder_id: "python:pwm".to_string(),
+            protocol_name: "PWM".to_string(),
+            channels: BTreeMap::from([("data".to_string(), Some(0))]),
+            options: BTreeMap::from([(
+                "polarity".to_string(),
+                NativeOptionValue::Text("active-high".to_string()),
+            )]),
+            primary_channel: 0,
+        });
+
+        let output = SigrokNativeDecoder::from_env()
+            .unwrap()
+            .decode_sparse(&capture, &settings)
+            .unwrap();
+        assert_eq!(output.protocol, "Pulse-width modulation");
+        assert_eq!(
+            output
+                .frames
+                .iter()
+                .filter(|frame| frame.row == "Duty cycle")
+                .map(|frame| frame.texts[0].as_str())
+                .collect::<Vec<_>>(),
+            vec!["50.000000%", "50.000000%"]
+        );
     }
 
     #[test]

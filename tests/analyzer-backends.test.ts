@@ -90,6 +90,53 @@ test("generic sigrok C catalog analyzers keep schema and run through the sparse 
   });
 });
 
+test("direct-input sigrok Python analyzers use the sparse Python runner", () => {
+  const pwm = createAnalyzerInstanceFromSigrokCatalog(
+    {
+      id: "pwm",
+      name: "PWM",
+      longname: "Pulse-width modulation",
+      desc: "Analog level encoded in duty cycle percentage.",
+      license: "gplv2+",
+      kind: "python",
+      runner_status: "generic_sparse_python",
+      inputs: ["logic"],
+      outputs: [],
+      tags: ["Encoding"],
+      channels: [
+        { id: "data", name: "Data", desc: "Data line", order: 0, type: -1, type_name: "common" },
+      ],
+      optional_channels: [],
+      options: [
+        {
+          id: "polarity",
+          desc: "Polarity",
+          value_type: "s",
+          default: "active-high",
+          values: ["active-low", "active-high"],
+        },
+      ],
+    },
+    [],
+    3,
+  );
+
+  assert.equal(pwm.type, "PWM");
+  assert.equal(pwm.nativeDecoderId, "python:pwm");
+  assert.equal(pwm.nativeProtocolName, "PWM");
+  assert.equal(analyzerCanRunDecoder(pwm), true);
+  assert.deepEqual(analyzerDecodeSettings(pwm), {
+    protocol: "Native",
+    settings: {
+      decoder_id: "python:pwm",
+      protocol_name: "PWM",
+      channels: { data: 3 },
+      options: { polarity: "active-high" },
+      primary_channel: 3,
+    },
+  });
+});
+
 test("sigrok catalog display names prefer readable short protocol labels", () => {
   const qspiCatalog = {
     id: "qspi_c",

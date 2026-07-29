@@ -27,9 +27,9 @@ The executable accepts `--probe` and `--decode`. `--probe` is fast and reports
 only the verified sparse C runner protocols. `--probe --catalog` additionally
 loads PXView's Python decoder directory and emits a `decoder_catalog` with
 decoder ids, C/Python kind, required/optional channels, options, annotations,
-annotation rows, and binary outputs. Catalog entries outside the verified sparse
-C runner are marked `catalog_only` until the generic packed/Python execution
-path is wired and tested.
+annotation rows, and binary outputs. Direct digital-input C and Python decoders
+use the generic sparse runner. Decoders that require protocol-stack input or
+analog samples remain `catalog_only` until their upstream stack is configured.
 
 Tauri packaging copies the Python standard library beside the sidecar on
 Windows and Linux. The Rust adapter sets `PYTHONHOME` for the child process, so
@@ -40,7 +40,8 @@ Decode requests use the `pxlogic.decoder.v1` transition-stream contract
 (`pxlogic.decoder.spi.v1` remains accepted for Saleae/SPI fixture compatibility),
 and responses use the backend-neutral Rust `DecoderOutput` JSON shape.
 
-All eight C decoders run against a transition-indexed `srd_decoder_runtime`.
+All eight verified C decoders and the generic direct-input C/Python decoders run
+against a transition-indexed `srd_decoder_runtime`.
 Decode cost and memory therefore scale with relevant edges rather than total
 capture duration; `verify.sh` covers UART, I2C, SPI, I2S, CAN, CAN-FD, LIN,
 Simple Parallel, transactions near sample 49 billion, and catalog enumeration

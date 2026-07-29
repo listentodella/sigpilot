@@ -129,6 +129,7 @@ typedef enum {
     DECODER_LIN,
     DECODER_PARALLEL,
     DECODER_GENERIC_C,
+    DECODER_GENERIC_PYTHON,
 } decoder_protocol;
 
 static void fatal(const char *message)
@@ -286,7 +287,15 @@ static int decoder_has_analog_channels(const struct srd_decoder *decoder)
 
 static int is_generic_sparse_c_decoder(const struct srd_decoder *decoder)
 {
-    return decoder && decoder->is_c_decoder && decoder->channels &&
+    return decoder && decoder->is_c_decoder &&
+           (decoder->channels || decoder->opt_channels) &&
+           decoder_has_input(decoder, "logic") && !decoder_has_analog_channels(decoder);
+}
+
+static int is_generic_sparse_python_decoder(const struct srd_decoder *decoder)
+{
+    return decoder && !decoder->is_c_decoder &&
+           (decoder->channels || decoder->opt_channels) &&
            decoder_has_input(decoder, "logic") && !decoder_has_analog_channels(decoder);
 }
 
@@ -440,6 +449,8 @@ static void add_decoder_catalog_item(cJSON *array, const struct srd_decoder *dec
         runner_status = "verified_sparse_c";
     else if (is_generic_sparse_c_decoder(decoder))
         runner_status = "generic_sparse_c";
+    else if (is_generic_sparse_python_decoder(decoder))
+        runner_status = "generic_sparse_python";
     cJSON_AddStringToObject(entry, "runner_status", runner_status);
     add_gslist_strings(entry, "inputs", decoder->inputs);
     add_gslist_strings(entry, "outputs", decoder->outputs);
@@ -587,6 +598,8 @@ static decoder_protocol parse_protocol(cJSON *request)
         return DECODER_LIN;
     if (strcmp(protocol, "parallel") == 0 || strcmp(protocol, "simple_parallel") == 0)
         return DECODER_PARALLEL;
+    if (g_str_has_prefix(protocol, "python:"))
+        return DECODER_GENERIC_PYTHON;
     return DECODER_GENERIC_C;
 }
 
@@ -964,8 +977,10 @@ static int sparse_wait(struct srd_decoder_inst *di, GSList *condition_list,
     const sparse_input *input = (const sparse_input *)di->inbuf_const;
     if (!input)
         return SRD_ERR_ARG;
-    free_condition_list(di->condition_list);
-    di->condition_list = condition_list;
+    if (condition_list != di->condition_list) {
+        free_condition_list(di->condition_list);
+        di->condition_list = condition_list;
+    }
 
     if (!condition_list) {
         di->abs_cur_samplenum = 0;
@@ -1827,11 +1842,27 @@ static int initialize_sigrok(const char *decoder_root, const char *python_decode
 
 static struct srd_decoder *initialize_decoder(const char *decoder_root,
                                               const char *python_decoder_root,
-                                              const char *decoder_id)
+                                              const char *decoder_id,
+                                              int force_python)
 {
     if (initialize_sigrok(decoder_root, python_decoder_root, 0) != SRD_OK)
         return NULL;
-    load_c_decoder_module(decoder_root, decoder_id);
+    if (!force_python) {
+        load_c_decoder_module(decoder_root, decoder_id);
+    } else {
+        srd_decoder_load(decoder_id);
+        if (!srd_decoder_get_by_id(decoder_id) && strchr(decoder_id, ':')) {
+            char *module_name = g_strdup(decoder_id);
+            for (char *cursor = module_name; *cursor; cursor++) {
+                if (*cursor == ':')
+                    *cursor = '-';
+            }
+            srd_decoder_load(module_name);
+            g_free(module_name);
+        }
+        if (!srd_decoder_get_by_id(decoder_id))
+            srd_decoder_load_all();
+    }
     return srd_decoder_get_by_id(decoder_id);
 }
 
@@ -1960,6 +1991,8 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
         decoder_id = "spi_c";
     } else {
         decoder_id = request_decoder ? json_string(request_decoder, "protocol", "") : "";
+        if (protocol == DECODER_GENERIC_PYTHON && g_str_has_prefix(decoder_id, "python:"))
+            decoder_id += strlen("python:");
         if (!*decoder_id)
             fatal("generic decoder protocol ID is required");
     }
@@ -1967,17 +2000,22 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     if ((protocol == DECODER_CAN || protocol == DECODER_CAN_FD) && can.inverted)
         input.channels[can.can_rx].initial_level ^= 1u;
 
-    struct srd_decoder *decoder = initialize_decoder(decoder_root, python_decoder_root, decoder_id);
+    struct srd_decoder *decoder = initialize_decoder(
+        decoder_root, python_decoder_root, decoder_id,
+        protocol == DECODER_GENERIC_PYTHON);
     if (!decoder)
-        fatal("requested PXView C decoder is not available");
+        fatal("requested PXView decoder is not available");
     if (protocol == DECODER_GENERIC_C && !is_generic_sparse_c_decoder(decoder))
         fatal("requested decoder does not support direct sparse digital input");
+    if (protocol == DECODER_GENERIC_PYTHON && !is_generic_sparse_python_decoder(decoder))
+        fatal("requested Python decoder does not support direct sparse digital input");
 
     struct srd_session *session = NULL;
     if (srd_session_new(&session) != SRD_OK || !session)
         fatal("failed to create libsigrokdecode session");
 
-    GHashTable *options = protocol == DECODER_GENERIC_C
+    GHashTable *options = (protocol == DECODER_GENERIC_C ||
+                           protocol == DECODER_GENERIC_PYTHON)
                               ? generic_options(decoder, request_decoder)
                               : g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                       (GDestroyNotify)g_variant_unref);
@@ -2030,7 +2068,8 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     if (!instance)
         fatal("failed to create PXView C decoder instance");
 
-    GHashTable *channels = protocol == DECODER_GENERIC_C
+    GHashTable *channels = (protocol == DECODER_GENERIC_C ||
+                            protocol == DECODER_GENERIC_PYTHON)
                                ? generic_channels(request_decoder, channel_count)
                                : g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                        (GDestroyNotify)g_variant_unref);
@@ -2103,10 +2142,24 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     char *error = NULL;
     if (srd_session_start(session, &error) != SRD_OK)
         fatal(error ? error : "failed to start libsigrokdecode session");
-    source_instance->c_dec_inst->decode(source_instance);
+    if (protocol == DECODER_GENERIC_PYTHON) {
+        const uint8_t **empty_channels = calloc(
+            (size_t)source_instance->dec_num_channels, sizeof(*empty_channels));
+        if (!empty_channels)
+            fatal("out of memory while starting Python decoder");
+        if (srd_session_send(session, 0, sample_count - 1, empty_channels,
+                             (const uint8_t *)&input, sample_count, &error) != SRD_OK) {
+            free(empty_channels);
+            fatal(error ? error : "Python decoder failed");
+        }
+        free(empty_channels);
+    } else {
+        source_instance->c_dec_inst->decode(source_instance);
+    }
     srd_session_end(session, &error);
 
-    cJSON *output = protocol == DECODER_GENERIC_C
+    cJSON *output = (protocol == DECODER_GENERIC_C ||
+                     protocol == DECODER_GENERIC_PYTHON)
                         ? render_generic_output(&collector, decoder)
                         : protocol == DECODER_UART
                         ? render_uart_output(&collector, &uart)

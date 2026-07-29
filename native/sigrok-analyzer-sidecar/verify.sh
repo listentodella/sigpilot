@@ -81,12 +81,35 @@ run_probe \
     and (.decoder_catalog | map(select(.id == "jtag" and .kind == "python")) | length == 1)
     and (.decoder_catalog | map(select(.id == "spi_c" and .runner_status == "verified_sparse_c")) | length == 1)
     and (.decoder_catalog | map(select(.runner_status == "generic_sparse_c")) | length >= 90)
+    and (.decoder_catalog | map(select(.runner_status == "generic_sparse_python")) | length >= 110)
     and (.decoder_catalog | map(select(.id == "guess_bitrate_c" and .runner_status == "generic_sparse_c")) | length == 1)
+    and (.decoder_catalog | map(select(.id == "pwm" and .runner_status == "generic_sparse_python")) | length == 1)
     and (.decoder_catalog | map(select(.id == "modbus_c" and .runner_status == "catalog_only")) | length == 1)
     and (.decoder_catalog | map(select(.id == "modbus" and .runner_status == "catalog_only")) | length == 1)
   ' >/dev/null
 
 failures=0
+python_output="$(printf '%s' '{
+  "format":"pxlogic.decoder.v1",
+  "sample_rate_hz":1000000,
+  "sample_count":100,
+  "channel_count":1,
+  "initial_levels":[0],
+  "edges":[{"channel":0,"samples":[10,20,30,40,50,60]}],
+  "decoder":{"protocol":"python:pwm","channels":{"data":0},"options":{"polarity":"active-high"}}
+}' | run_sidecar --decoder-root "$DECODER_ROOT" --python-decoder-root "$PYTHON_DECODER_ROOT" --decode)"
+if jq -e '
+  .backend == "sigrok_native"
+  and .protocol == "Pulse-width modulation"
+  and ([.frames[] | select(.row == "Duty cycle") | .texts[0]] == ["50.000000%", "50.000000%"])
+  and ([.frames[] | select(.row == "Period") | .texts[0]] == ["20.0 μs", "20.0 μs"])
+' >/dev/null <<<"$python_output"; then
+  printf 'PASS generic-sparse-python-pwm\n'
+else
+  printf 'FAIL generic sparse Python PWM decoder did not produce the expected annotations\n' >&2
+  failures=$((failures + 1))
+fi
+
 generic_output="$(printf '%s' '{
   "format":"pxlogic.decoder.v1",
   "sample_rate_hz":1000000,

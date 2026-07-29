@@ -34,6 +34,7 @@ const EXTERNAL_DECODER_BACKENDS: DecoderBackendKind[] = ["saleae_native", "sigro
 const CORE_ANALYZER_TYPES = ["Async Serial", "I2C", "SPI"] as const;
 const VERIFIED_SIGROK_C_RUNNER_STATUS = "verified_sparse_c";
 const GENERIC_SIGROK_C_RUNNER_STATUS = "generic_sparse_c";
+const GENERIC_SIGROK_PYTHON_RUNNER_STATUS = "generic_sparse_python";
 const CATALOG_ONLY_SIGROK_RUNNER_STATUS = "catalog_only";
 const SIGROK_VERIFIED_C_RUNNER_TYPES: Record<string, string> = {
   uart_c: "Async Serial",
@@ -379,9 +380,9 @@ function catalogOptionsForItem(item: SigrokDecoderCatalogItem) {
 
 function runnableSigrokDecoderId(item: SigrokDecoderCatalogItem) {
   const id = item.id ?? "";
-  return SIGROK_VERIFIED_C_RUNNER_TYPES[id]
-    ? id.replace(/_c$/, "").replace(/-/g, "_")
-    : null;
+  if (SIGROK_VERIFIED_C_RUNNER_TYPES[id]) return id.replace(/_c$/, "").replace(/-/g, "_");
+  if (item.runner_status === GENERIC_SIGROK_PYTHON_RUNNER_STATUS) return `python:${id}`;
+  return null;
 }
 
 export function sigrokCatalogDisplayName(item: SigrokDecoderCatalogItem) {
@@ -410,6 +411,7 @@ function compactSigrokCatalogName(value?: string | null) {
 
 function sigrokCatalogProtocolName(item: SigrokDecoderCatalogItem) {
   const runnableId = runnableSigrokDecoderId(item);
+  if (runnableId?.startsWith("python:")) return sigrokCatalogDisplayName(item);
   if (runnableId === "can_fd") return "CAN-FD";
   if (runnableId === "i2c") return "I2C";
   if (runnableId) return runnableId.toUpperCase();
@@ -419,6 +421,7 @@ function sigrokCatalogProtocolName(item: SigrokDecoderCatalogItem) {
 export function sigrokCatalogRunnerLabel(status?: string | null) {
   if (status === VERIFIED_SIGROK_C_RUNNER_STATUS) return "Runnable";
   if (status === GENERIC_SIGROK_C_RUNNER_STATUS) return "Generic C";
+  if (status === GENERIC_SIGROK_PYTHON_RUNNER_STATUS) return "Python";
   return "Catalog";
 }
 
@@ -633,7 +636,8 @@ export function analyzerCanRunDecoder(
   return (
     !analyzer.nativeRunnerStatus ||
     analyzer.nativeRunnerStatus === VERIFIED_SIGROK_C_RUNNER_STATUS ||
-    analyzer.nativeRunnerStatus === GENERIC_SIGROK_C_RUNNER_STATUS
+    analyzer.nativeRunnerStatus === GENERIC_SIGROK_C_RUNNER_STATUS ||
+    analyzer.nativeRunnerStatus === GENERIC_SIGROK_PYTHON_RUNNER_STATUS
   );
 }
 

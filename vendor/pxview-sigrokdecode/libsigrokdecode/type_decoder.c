@@ -1128,6 +1128,8 @@ static PyObject* Decoder_wait(PyObject* self, PyObject* args)
 {
     int ret;
     uint64_t skip_count;
+    uint64_t runtime_samplenum;
+    uint64_t runtime_matched;
     gboolean found_match;
     struct srd_decoder_inst* di;
     PyGILState_STATE gstate;
@@ -1162,6 +1164,48 @@ static PyObject* Decoder_wait(PyObject* self, PyObject* args)
                 di->inst_id, __func__);
             goto err;
         }
+    }
+
+    /* Native hosts may provide a transition-indexed runtime. Keep Python
+     * decoders on their original wait() API without expanding sparse data. */
+    if (di->runtime) {
+        runtime_samplenum = 0;
+        runtime_matched = 0;
+        Py_BEGIN_ALLOW_THREADS
+        ret = di->runtime->wait(di, di->condition_list,
+            &runtime_samplenum, &runtime_matched);
+        Py_END_ALLOW_THREADS
+
+        if (ret != SRD_OK) {
+            di->is_task_stop_signal = TRUE;
+            PyErr_SetNone(srd_ChunkDone_exc);
+            PyGILState_Release(gstate);
+            return NULL;
+        }
+
+        PyObject* py_cur_samplenum = PyLong_FromUnsignedLongLong(runtime_samplenum);
+        PyObject_SetAttrString(di->py_inst, "samplenum", py_cur_samplenum);
+        Py_DECREF(py_cur_samplenum);
+
+        PyObject* py_matched = PyLong_FromUnsignedLongLong(runtime_matched);
+        PyObject_SetAttrString(di->py_inst, "matched", py_matched);
+        Py_DECREF(py_matched);
+
+        PyObject* pins = PyTuple_New(di->dec_num_channels);
+        if (!pins) {
+            PyGILState_Release(gstate);
+            return NULL;
+        }
+        for (int channel = 0; channel < di->dec_num_channels; channel++) {
+            uint8_t pin = di->runtime->get_pin(di, channel, runtime_samplenum);
+            PyTuple_SetItem(pins, channel, PyLong_FromLong(pin));
+        }
+        Py_DECREF(di->py_pinvalues);
+        di->py_pinvalues = pins;
+
+        PyGILState_Release(gstate);
+        Py_INCREF(di->py_pinvalues);
+        return di->py_pinvalues;
     }
 
     while (1) {
