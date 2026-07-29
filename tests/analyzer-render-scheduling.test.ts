@@ -47,6 +47,18 @@ test("viewport whitespace does not invalidate an analyzer render", () => {
   );
 });
 
+test("subpixel live data does not cause endless analyzer LOD retries", () => {
+  assert.equal(
+    analyzerRenderViewportCanServe(
+      { startSample: 0, sampleCount: 1_000, pixels: 1 },
+      { startSample: 0, sampleCount: 500_000_000, pixels: 1_000 },
+      true,
+      { startSample: 0, sampleCount: 1_000 },
+    ),
+    true,
+  );
+});
+
 test("empty live updates preserve the previous analyzer snapshot", () => {
   const previous = [trackWindow([bubble(10, 20)])];
   const incoming = [trackWindow([])];

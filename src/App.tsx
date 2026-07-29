@@ -80,7 +80,11 @@ import {
 } from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
-import { captureDataWindow, normalizeCaptureViewport } from "./lib/captureViewport";
+import {
+  captureDataWindow,
+  normalizeCaptureViewport,
+  normalizeLiveCaptureViewport,
+} from "./lib/captureViewport";
 import {
   analyzerRenderRequestIntervalMs,
   analyzerRenderViewportCanServe,
@@ -781,6 +785,8 @@ function graphTileCanServeViewport(
   if (desiredSamplesPerPixel <= 8 && tile.channels.some((channel) => channel.segments.length === 0)) {
     return false;
   }
+  const projectedDataPixels = dataWindow.samples / Math.max(Number.EPSILON, desiredSamplesPerPixel);
+  if (projectedDataPixels <= 1.5) return true;
   const resolutionRatio = tile.samples_per_pixel / Math.max(Number.EPSILON, desiredSamplesPerPixel);
   return resolutionRatio >= 0.5 && resolutionRatio <= 1.75;
 }
@@ -836,10 +842,11 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
   const requestedViewportStart = session.liveViewportMode === "auto" || wasFollowingLiveEdge
     ? summary.metadata.sample_count - requestedViewportSamples
     : session.viewportStart;
-  const viewport = normalizeCaptureViewport(
+  const viewport = normalizeLiveCaptureViewport(
     requestedViewportStart,
     requestedViewportSamples,
     summary.metadata.sample_count,
+    summary.metadata.sample_rate_hz,
   );
 
   return {
@@ -1708,7 +1715,14 @@ export default function App() {
         if (!sessionTotalSamples) {
           return { ...session, viewportStart: 0, viewportSamples: 0 };
         }
-        const viewport = normalizeCaptureViewport(start, samples, sessionTotalSamples);
+        const viewport = session.busy
+          ? normalizeLiveCaptureViewport(
+              start,
+              samples,
+              sessionTotalSamples,
+              session.summary!.metadata.sample_rate_hz,
+            )
+          : normalizeCaptureViewport(start, samples, sessionTotalSamples);
         return {
           ...session,
           viewportStart: viewport.start,
@@ -1746,7 +1760,14 @@ export default function App() {
       const total = session?.summary?.metadata.sample_count ?? 0;
       if (!session || total <= 0) return;
 
-      const target = normalizeCaptureViewport(start, samples, total);
+      const target = session.busy
+        ? normalizeLiveCaptureViewport(
+            start,
+            samples,
+            total,
+            session.summary!.metadata.sample_rate_hz,
+          )
+        : normalizeCaptureViewport(start, samples, total);
       const targetSamples = target.samples;
       const targetStart = target.start;
       const initialStart = session.viewportStart;
@@ -1837,7 +1858,7 @@ export default function App() {
         const pixelScale = requestSamples / Math.max(1, sessionSnapshot.viewportSamples);
         const maxPixels = visibleChannelIndexes.length > 16 ? 1800 : 2600;
         const renderPixels = Math.max(
-          480,
+          1,
           Math.min(maxPixels, Math.round(sessionSnapshot.canvasWidth * pixelScale)),
         );
         const next = await renderGraphFrame(sessionSnapshot.id, {
@@ -1982,7 +2003,7 @@ export default function App() {
           const requestSamples = Math.max(1, requestEnd - requestStart);
           const pixelScale = requestSamples / Math.max(1, sessionSnapshot.viewportSamples);
           const renderPixels = Math.max(
-            480,
+            1,
             Math.min(2_600, Math.round(sessionSnapshot.canvasWidth * pixelScale)),
           );
           const requestViewport = {
@@ -2875,6 +2896,10 @@ export default function App() {
     }
 
     setPendingChannelTrim(null);
+    updateSession(pending.sessionId, (current) => ({
+      ...current,
+      message: "Deleting data...",
+    }));
     try {
       const nextSummary = await trimCapture(pending.sessionId, {
         trim_before_sample: pending.range.trimStart,

@@ -48,6 +48,8 @@ pub enum GraphError {
     UnalignedSamples,
     #[error("waveform request is invalid")]
     InvalidWaveformRequest,
+    #[error("capture trim range is invalid")]
+    InvalidTrimRange,
     #[error("analyzer settings are invalid: {0}")]
     InvalidAnalyzer(String),
     #[error("failed to serialize analyzer settings: {0}")]
@@ -235,6 +237,40 @@ impl DigitalGraph {
             index.edges.clone_from(&sparse_channel.transitions);
         }
         Ok(graph)
+    }
+
+    fn trim(&mut self, start: u64, end: u64) -> Result<()> {
+        if start >= end || end > self.sample_count {
+            return Err(GraphError::InvalidTrimRange);
+        }
+
+        for channel in &mut self.channels {
+            const fn shifted_edge(edge: u64, start: u64) -> u64 {
+                edge - start
+            }
+
+            let initial_high = channel.level_at(start);
+            let first_edge = channel.edges.partition_point(|edge| *edge <= start);
+            let end_edge = channel.edges.partition_point(|edge| *edge < end);
+            let retained_edges = end_edge.saturating_sub(first_edge);
+            channel.edges.copy_within(first_edge..end_edge, 0);
+            channel.edges.truncate(retained_edges);
+            channel
+                .edges
+                .iter_mut()
+                .for_each(|edge| *edge = shifted_edge(*edge, start));
+            channel.initial_high = initial_high;
+        }
+
+        self.metadata = trimmed_metadata(&self.metadata, start, end)?;
+        self.sample_count = end - start;
+        self.last_word = Some(self.channels.iter().enumerate().fold(
+            0u32,
+            |word, (channel_index, channel)| {
+                word | (u32::from(channel.level_at(self.sample_count - 1)) << channel_index)
+            },
+        ));
+        Ok(())
     }
 
     pub fn append_interleaved(&mut self, samples: &[u8]) -> Result<u64> {
@@ -897,6 +933,30 @@ impl GraphSession {
         Ok(())
     }
 
+    pub fn trim_capture(&self, start: u64, end: u64) -> Result<(CaptureMetadata, usize)> {
+        let mut graph = self.graph.write();
+        let graph = graph.as_mut().ok_or(GraphError::EmptyGraph)?;
+        if start >= end || end > graph.sample_count() {
+            return Err(GraphError::InvalidTrimRange);
+        }
+        let metadata = trimmed_metadata(graph.metadata(), start, end)?;
+
+        let mut packed_capture = self.capture.write();
+        let mut sparse_capture = self.sparse_capture.write();
+        let bytes = if let Some(capture) = packed_capture.as_mut() {
+            trim_packed_capture(capture, metadata.clone(), start, end)?
+        } else if let Some(capture) = sparse_capture.as_mut() {
+            trim_sparse_capture(capture, metadata.clone(), start, end)?
+        } else {
+            return Err(GraphError::EmptyGraph);
+        };
+
+        graph.trim(start, end)?;
+        self.analyzer_cache.lock().clear();
+        self.bump_revision();
+        Ok((metadata, bytes))
+    }
+
     pub fn capture(&self) -> Option<Arc<CaptureData>> {
         self.capture.read().clone()
     }
@@ -1217,6 +1277,91 @@ impl GraphSession {
     fn bump_revision(&self) {
         self.revision.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn trimmed_metadata(metadata: &CaptureMetadata, start: u64, end: u64) -> Result<CaptureMetadata> {
+    if start >= end || end > metadata.sample_count {
+        return Err(GraphError::InvalidTrimRange);
+    }
+    let mut trimmed = metadata.clone();
+    trimmed.sample_count = end - start;
+    trimmed.trigger = trimmed.trigger.and_then(|mut trigger| {
+        if trigger.sample_index < start || trigger.sample_index >= end {
+            return None;
+        }
+        trigger.sample_index -= start;
+        Some(trigger)
+    });
+    Ok(trimmed)
+}
+
+fn trim_packed_capture(
+    capture: &mut Arc<CaptureData>,
+    metadata: CaptureMetadata,
+    start: u64,
+    end: u64,
+) -> Result<usize> {
+    let unit_size = usize::from(capture.metadata.unitsize);
+    let byte_start = usize::try_from(start)
+        .ok()
+        .and_then(|sample| sample.checked_mul(unit_size))
+        .ok_or(GraphError::InvalidMetadata)?;
+    let byte_end = usize::try_from(end)
+        .ok()
+        .and_then(|sample| sample.checked_mul(unit_size))
+        .ok_or(GraphError::InvalidMetadata)?;
+    if unit_size == 0 || byte_end > capture.samples.len() || byte_start > byte_end {
+        return Err(GraphError::InvalidMetadata);
+    }
+
+    if let Some(capture) = Arc::get_mut(capture) {
+        if byte_start > 0 {
+            capture.samples.copy_within(byte_start..byte_end, 0);
+        }
+        capture.samples.truncate(byte_end - byte_start);
+        capture.metadata = metadata;
+    } else {
+        *capture = Arc::new(CaptureData {
+            metadata,
+            samples: capture.samples[byte_start..byte_end].to_vec(),
+        });
+    }
+    Ok(byte_end - byte_start)
+}
+
+fn trim_sparse_capture(
+    capture: &mut Arc<SparseCaptureData>,
+    metadata: CaptureMetadata,
+    start: u64,
+    end: u64,
+) -> Result<usize> {
+    let trim_channel = |channel: &mut SparseDigitalChannel| {
+        let first_edge = channel.transitions.partition_point(|edge| *edge <= start);
+        let end_edge = channel.transitions.partition_point(|edge| *edge < end);
+        channel.initial_high ^= first_edge % 2 == 1;
+        let retained_edges = end_edge.saturating_sub(first_edge);
+        channel.transitions.copy_within(first_edge..end_edge, 0);
+        channel.transitions.truncate(retained_edges);
+        channel
+            .transitions
+            .iter_mut()
+            .for_each(|edge| *edge -= start);
+    };
+
+    if let Some(capture) = Arc::get_mut(capture) {
+        capture.channels.iter_mut().for_each(trim_channel);
+        capture.metadata = metadata;
+    } else {
+        let mut trimmed = capture.as_ref().clone();
+        trimmed.channels.iter_mut().for_each(trim_channel);
+        trimmed.metadata = metadata;
+        *capture = Arc::new(trimmed);
+    }
+    Ok(capture
+        .channels
+        .iter()
+        .map(|channel| channel.transitions.len().saturating_mul(8))
+        .sum())
 }
 
 fn sparse_native_analysis_windows(
@@ -2030,6 +2175,71 @@ mod tests {
                     assert_eq!(indexed_channel.falling_edges, scanned_channel.falling_edges);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn packed_trim_reuses_the_existing_edge_index() {
+        let original = demo_capture(8, 10_000);
+        let unit_size = usize::from(original.metadata.unitsize);
+        let expected_samples = original.samples[2_500 * unit_size..9_000 * unit_size].to_vec();
+        let session = GraphSession::default();
+        session.replace_capture(original).unwrap();
+
+        let (metadata, bytes) = session.trim_capture(2_500, 9_000).unwrap();
+        let capture = session.capture().unwrap();
+        assert_eq!(metadata.sample_count, 6_500);
+        assert_eq!(bytes, expected_samples.len());
+        assert_eq!(capture.samples, expected_samples);
+
+        let rebuilt = DigitalGraph::from_capture(&capture).unwrap();
+        let indexed = session.graph.read();
+        let indexed = indexed.as_ref().unwrap();
+        assert_eq!(indexed.metadata, rebuilt.metadata);
+        assert_eq!(indexed.sample_count, rebuilt.sample_count);
+        for (trimmed, expected) in indexed.channels.iter().zip(&rebuilt.channels) {
+            assert_eq!(trimmed.initial_high, expected.initial_high);
+            assert_eq!(trimmed.edges, expected.edges);
+        }
+    }
+
+    #[test]
+    fn sparse_trim_updates_initial_levels_and_transition_offsets() {
+        let mut metadata = demo_capture(2, 1_000).metadata;
+        metadata.sample_count = 1_000;
+        let sparse = SparseCaptureData {
+            metadata,
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: vec![100, 300, 700, 900],
+                },
+                SparseDigitalChannel {
+                    channel: 1,
+                    initial_high: true,
+                    transitions: vec![200, 400, 600, 800],
+                },
+            ],
+        };
+        let session = GraphSession::default();
+        session.replace_sparse_capture(sparse).unwrap();
+
+        let (metadata, bytes) = session.trim_capture(250, 800).unwrap();
+        let capture = session.sparse_capture().unwrap();
+        assert_eq!(metadata.sample_count, 550);
+        assert_eq!(bytes, 4 * 8);
+        assert!(capture.channels[0].initial_high);
+        assert_eq!(capture.channels[0].transitions, vec![50, 450]);
+        assert!(!capture.channels[1].initial_high);
+        assert_eq!(capture.channels[1].transitions, vec![150, 350]);
+
+        let rebuilt = DigitalGraph::from_sparse_capture(&capture).unwrap();
+        let indexed = session.graph.read();
+        let indexed = indexed.as_ref().unwrap();
+        for (trimmed, expected) in indexed.channels.iter().zip(&rebuilt.channels) {
+            assert_eq!(trimmed.initial_high, expected.initial_high);
+            assert_eq!(trimmed.edges, expected.edges);
         }
     }
 

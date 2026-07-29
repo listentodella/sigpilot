@@ -1,6 +1,9 @@
 import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useState } from "react";
 import type { WaveformTile } from "../lib/api";
-import { normalizeCaptureViewport } from "../lib/captureViewport";
+import {
+  normalizeCaptureViewport,
+  normalizeLiveCaptureViewport,
+} from "../lib/captureViewport";
 import {
   findSaleaeGraphChannelIndexAtY,
   getSaleaeGraphChannelLayout,
@@ -104,6 +107,7 @@ export function WaveformCanvas({
   const viewportRef = useRef({ start: viewportStart, samples: viewportSamples });
   const viewportPropsRef = useRef({ start: viewportStart, samples: viewportSamples });
   const sampleRateRef = useRef(sampleRateHz);
+  const isLiveRef = useRef(isLive);
   const timeOriginSampleRef = useRef(timeOriginSample);
   const totalSamplesRef = useRef(totalSamples);
   const rowHeightsRef = useRef(rowHeights);
@@ -177,6 +181,7 @@ export function WaveformCanvas({
       }
     }
     sampleRateRef.current = sampleRateHz;
+    isLiveRef.current = isLive;
     timeOriginSampleRef.current = timeOriginSample;
     showInteractiveMeasurementRef.current = showInteractiveMeasurement;
     matchChannelColorsRef.current = matchChannelColors;
@@ -254,7 +259,13 @@ export function WaveformCanvas({
   }
 
   function clampViewport(start: number, samples: number) {
-    const next = normalizeViewport(start, samples, totalSamplesRef.current);
+    const next = normalizeViewport(
+      start,
+      samples,
+      totalSamplesRef.current,
+      isLiveRef.current,
+      sampleRateRef.current,
+    );
     scheduleViewportChange(next.start, next.samples);
   }
 
@@ -307,7 +318,13 @@ export function WaveformCanvas({
 
   function animateViewportTo(start: number, samples: number) {
     cancelViewportAnimation();
-    const target = normalizeViewport(start, samples, totalSamplesRef.current);
+    const target = normalizeViewport(
+      start,
+      samples,
+      totalSamplesRef.current,
+      isLiveRef.current,
+      sampleRateRef.current,
+    );
     const initial = viewportRef.current;
     const startDelta = target.start - initial.start;
     const samplesDelta = target.samples - initial.samples;
@@ -1589,8 +1606,16 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function normalizeViewport(start: number, samples: number, totalSamples: number) {
-  return normalizeCaptureViewport(start, samples, totalSamples);
+function normalizeViewport(
+  start: number,
+  samples: number,
+  totalSamples: number,
+  isLive: boolean,
+  sampleRateHz: number,
+) {
+  return isLive
+    ? normalizeLiveCaptureViewport(start, samples, totalSamples, sampleRateHz)
+    : normalizeCaptureViewport(start, samples, totalSamples);
 }
 
 function easeOutCubic(progress: number) {

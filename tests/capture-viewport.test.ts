@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   captureDataWindow,
+  maximumLiveCaptureViewportSamples,
   maximumCaptureViewportSamples,
   normalizeCaptureViewport,
+  normalizeLiveCaptureViewport,
 } from "../src/lib/captureViewport.ts";
 
 test("DataLimited zoom permits a viewport 2.5 times wider than the capture", () => {
@@ -23,6 +25,26 @@ test("DataLimited pan keeps at least 40 percent captured data visible", () => {
     samples: 500,
     start: 800,
   });
+});
+
+test("live capture reserves a 500 second zoom-out range", () => {
+  assert.equal(maximumLiveCaptureViewportSamples(1_000_000, 1_000_000), 500_000_000);
+  assert.deepEqual(
+    normalizeLiveCaptureViewport(-200_000_000, 900_000_000, 1_000_000, 1_000_000),
+    { samples: 500_000_000, start: 0 },
+  );
+});
+
+test("live wide viewports stay left anchored as capture data grows", () => {
+  const initial = normalizeLiveCaptureViewport(0, 500_000_000, 2_000_000, 1_000_000);
+  const growing = normalizeLiveCaptureViewport(
+    initial.start,
+    initial.samples,
+    20_000_000,
+    1_000_000,
+  );
+  assert.deepEqual(initial, { samples: 500_000_000, start: 0 });
+  assert.deepEqual(growing, { samples: 500_000_000, start: 0 });
 });
 
 test("backend data windows exclude viewport whitespace", () => {

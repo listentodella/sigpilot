@@ -21,11 +21,7 @@ export function analyzerRenderViewportCanServe(
   isLive: boolean,
   availableData?: Pick<AnalyzerRenderViewport, "sampleCount" | "startSample">,
 ) {
-  const requestSamplesPerPixel = request.sampleCount / Math.max(1, request.pixels);
   const targetSamplesPerPixel = target.sampleCount / Math.max(1, target.pixels);
-  const lodRatio = requestSamplesPerPixel / Math.max(Number.EPSILON, targetSamplesPerPixel);
-  if (lodRatio < 0.75 || lodRatio > 1.35) return false;
-
   const requestEnd = request.startSample + request.sampleCount;
   const dataStart = availableData?.startSample ?? target.startSample;
   const dataEnd = availableData
@@ -33,6 +29,13 @@ export function analyzerRenderViewportCanServe(
     : target.startSample + target.sampleCount;
   const targetStart = Math.max(target.startSample, dataStart);
   const targetEnd = Math.min(target.startSample + target.sampleCount, dataEnd);
+  const projectedDataPixels = Math.max(0, targetEnd - targetStart) /
+    Math.max(Number.EPSILON, targetSamplesPerPixel);
+  if (projectedDataPixels > 1.5) {
+    const requestSamplesPerPixel = request.sampleCount / Math.max(1, request.pixels);
+    const lodRatio = requestSamplesPerPixel / Math.max(Number.EPSILON, targetSamplesPerPixel);
+    if (lodRatio < 0.75 || lodRatio > 1.35) return false;
+  }
   const requiredTargetEnd = targetStart + Math.max(0, targetEnd - targetStart) * (isLive ? 0.85 : 1);
   return request.startSample <= targetStart && requestEnd >= requiredTargetEnd;
 }

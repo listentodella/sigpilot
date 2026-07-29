@@ -16,11 +16,11 @@ use parking_lot::{Mutex, RwLock};
 use pxlogic_core::{
     build_pxview_pwm0_register_script, generic_logic_capture_capabilities,
     pxlogic_capture_capabilities_from_profile, resolve_pxlogic_device_profile,
-    AnalyzerDecodeSettings, CaptureBackend, CaptureData, CaptureMetadata, CaptureProgress,
-    CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DeviceInfo,
-    DeviceKind, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
-    HardwareCaptureCapabilities, PwmConfiguration, PwmSettings, PxUsbSpeed, SigrokDecoderCatalog,
-    SigrokNativeDecoder, SparseCaptureData,
+    AnalyzerDecodeSettings, CaptureBackend, CaptureMetadata, CaptureProgress, CaptureSettings,
+    CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DeviceInfo, DeviceKind,
+    DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend, HardwareCaptureCapabilities,
+    PwmConfiguration, PwmSettings, PxUsbSpeed, SigrokDecoderCatalog, SigrokNativeDecoder,
+    SparseCaptureData,
 };
 use pxlogic_graph::{GraphFrameRequest, GraphFrameResponse, GraphSession};
 use pxlogic_waveform::{
@@ -923,16 +923,13 @@ fn export_capture(
 }
 
 #[tauri::command]
-fn trim_capture(
+async fn trim_capture(
     session_id: String,
     request: TrimCaptureRequest,
     state: State<'_, AppState>,
 ) -> CommandResult<CaptureSummary> {
     let session = state.existing_session(&session_id)?;
-    let capture = session
-        .capture()
-        .ok_or_else(|| "no capture is loaded".to_string())?;
-    let total_samples = capture.metadata.sample_count;
+    let total_samples = session.sample_count();
     if total_samples == 0 {
         return Err("capture is empty".to_string());
     }
@@ -945,43 +942,12 @@ fn trim_capture(
     if end <= start {
         return Err("delete data interval would remove the entire capture".to_string());
     }
-
-    let unit_size = usize::from(capture.metadata.unitsize);
-    if unit_size == 0 {
-        return Err("capture has invalid unit size".to_string());
-    }
-    let byte_start = usize::try_from(start)
-        .map_err(|_| "trim start is too large".to_string())?
-        .checked_mul(unit_size)
-        .ok_or_else(|| "trim start byte offset overflowed".to_string())?;
-    let byte_end = usize::try_from(end)
-        .map_err(|_| "trim end is too large".to_string())?
-        .checked_mul(unit_size)
-        .ok_or_else(|| "trim end byte offset overflowed".to_string())?;
-    if byte_end > capture.samples.len() || byte_start > byte_end {
-        return Err("capture sample buffer is shorter than metadata".to_string());
-    }
-
-    let mut metadata = capture.metadata.clone();
-    metadata.sample_count = end - start;
-    metadata.trigger = metadata.trigger.and_then(|mut trigger| {
-        if trigger.sample_index < start || trigger.sample_index >= end {
-            return None;
-        }
-        trigger.sample_index -= start;
-        Some(trigger)
-    });
-    let capture = CaptureData {
-        metadata,
-        samples: capture.samples[byte_start..byte_end].to_vec(),
-    };
-    let summary = CaptureSummary {
-        metadata: capture.metadata.clone(),
-        bytes: capture.samples.len(),
-    };
-    session.replace_capture(capture).map_err(to_string)?;
-
-    Ok(summary)
+    tauri::async_runtime::spawn_blocking(move || {
+        let (metadata, bytes) = session.trim_capture(start, end).map_err(to_string)?;
+        Ok(CaptureSummary { metadata, bytes })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

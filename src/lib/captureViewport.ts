@@ -1,4 +1,5 @@
 export const MIN_CAPTURE_DATA_VISIBLE_RATIO = 0.4;
+export const LIVE_CAPTURE_RESERVED_VIEW_SECONDS = 500;
 
 export interface CaptureViewport {
   samples: number;
@@ -14,6 +15,16 @@ export interface CaptureDataWindow {
 export function maximumCaptureViewportSamples(totalSamples: number) {
   const total = Math.max(1, Math.round(totalSamples));
   return Math.ceil(total / MIN_CAPTURE_DATA_VISIBLE_RATIO);
+}
+
+export function maximumLiveCaptureViewportSamples(
+  totalSamples: number,
+  sampleRateHz: number,
+) {
+  const reservedSamples = Math.round(
+    Math.max(1, sampleRateHz) * LIVE_CAPTURE_RESERVED_VIEW_SECONDS,
+  );
+  return Math.max(maximumCaptureViewportSamples(totalSamples), reservedSamples);
 }
 
 // Logic 2's DataLimited mode permits zooming and panning while at least 40%
@@ -32,6 +43,27 @@ export function normalizeCaptureViewport(
   const maximumStart = Math.floor(total - MIN_CAPTURE_DATA_VISIBLE_RATIO * nextSamples);
   const nextStart = Math.max(minimumStart, Math.min(maximumStart, Math.round(start)));
   return { samples: nextSamples, start: nextStart };
+}
+
+export function normalizeLiveCaptureViewport(
+  start: number,
+  samples: number,
+  totalSamples: number,
+  sampleRateHz: number,
+): CaptureViewport {
+  const total = Math.max(1, Math.round(totalSamples));
+  const nextSamples = Math.max(
+    1,
+    Math.min(
+      maximumLiveCaptureViewportSamples(total, sampleRateHz),
+      Math.round(samples),
+    ),
+  );
+
+  if (nextSamples >= total) {
+    return { samples: nextSamples, start: 0 };
+  }
+  return normalizeCaptureViewport(start, nextSamples, total);
 }
 
 export function captureDataWindow(
