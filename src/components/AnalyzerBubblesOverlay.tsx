@@ -12,12 +12,14 @@ import {
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
 import { analyzerViewportTransform } from "../lib/analyzerViewportTransform";
+import { visibleAnalyzerMarkerSamples } from "../lib/analyzerMarkers";
 
 const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
 const MAX_MULTI_BUBBLE_COUNT = 99;
 const MAX_MULTI_BUBBLE_TEXT_LENGTH = 200;
-const MAX_MARKERS_PER_TRACK = 300;
+const BUBBLE_REBASE_MIN_SCALE = 0.67;
+const BUBBLE_REBASE_MAX_SCALE = 1.5;
 
 interface AnalyzerBubbleTrack {
   analyzer: UiAnalyzerInstance;
@@ -63,6 +65,7 @@ export function AnalyzerBubblesOverlay({
   onZoomBubble,
 }: AnalyzerBubblesOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
+  const transformLayerRef = useRef<HTMLDivElement>(null);
   const laidOutViewportRef = useRef({ start: viewportStart, samples: viewportSamples });
   const callbacksRef = useRef({ onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble });
   callbacksRef.current = { onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble };
@@ -139,9 +142,18 @@ export function AnalyzerBubblesOverlay({
   }, [bubbleTracks, hoveredTrackKey]);
 
   useLayoutEffect(() => {
-    if (isViewportInteracting) return;
     const overlay = overlayRef.current;
     if (!overlay) return;
+    const transform = analyzerViewportTransform(
+      laidOutViewportRef.current,
+      { start: viewportStart, samples: viewportSamples },
+      Math.max(1, overlay.clientWidth),
+    );
+    if (
+      isViewportInteracting &&
+      transform.scaleX >= BUBBLE_REBASE_MIN_SCALE &&
+      transform.scaleX <= BUBBLE_REBASE_MAX_SCALE
+    ) return;
     const width = Math.max(1, overlay.clientWidth);
     const samples = Math.max(1, viewportSamples);
 
@@ -159,11 +171,13 @@ export function AnalyzerBubblesOverlay({
       element.classList.toggle("overflowLeft", left < 0);
       element.classList.toggle("overflowRight", right > width);
     });
-
+    laidOutViewportRef.current = { start: viewportStart, samples: viewportSamples };
+    if (isViewportInteracting && transformLayerRef.current) {
+      transformLayerRef.current.style.transform = "none";
+    }
   }, [isViewportInteracting, overlayWidth, viewportSamples, viewportStart, bubbleTracks, markerTracks, tileChannels]);
 
   useLayoutEffect(() => {
-    if (isViewportInteracting) return;
     const overlay = overlayRef.current;
     const canvas = overlay?.querySelector<HTMLCanvasElement>(".analyzerMarkersCanvas");
     if (!overlay || !canvas) return;
@@ -199,23 +213,20 @@ export function AnalyzerBubblesOverlay({
       if (!channel) return;
       const edgeSamples = track.edgeType === "rising" ? channel.rising_edges : channel.falling_edges;
       if (edgeSamples.length === 0) return;
-      const firstIndex = Math.max(0, firstMarkerAtOrAfter(edgeSamples, viewStart - viewportSamples * 0.02));
       const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
       const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
       const centerY = rowTops[rowIndex] + inset + trackHeight / 2;
       context.fillStyle = saleaeLegacyChannelColor(track.role.channel);
       context.strokeStyle = context.fillStyle;
-      for (
-        let index = firstIndex, rendered = 0;
-        index < edgeSamples.length && rendered < MAX_MARKERS_PER_TRACK;
-        index += 1
-      ) {
-        const sample = edgeSamples[index];
-        if (sample > viewEnd + viewportSamples * 0.02) break;
+      const markerSamples = visibleAnalyzerMarkerSamples(
+        edgeSamples,
+        viewStart,
+        viewEnd - viewStart,
+        width,
+      );
+      for (const sample of markerSamples) {
         const left = ((sample - viewStart) / Math.max(1, viewportSamples)) * width;
-        if (left < -10 || left > width + 10) continue;
         drawAnalyzerMarker(context, left, centerY, track.edgeType);
-        rendered += 1;
       }
     });
     context.restore();
@@ -247,7 +258,6 @@ export function AnalyzerBubblesOverlay({
   const renderedContent = useMemo(
     () => (
       <>
-      <canvas className="analyzerMarkersCanvas" aria-hidden="true" />
       {visibleChannelIndexes.flatMap((channel, rowIndex) => {
         const channelTracks = bubbleTracks.filter((track) => track.role.channel === channel);
         return channelTracks.map((track, trackIndex) => {
@@ -383,8 +393,10 @@ export function AnalyzerBubblesOverlay({
 
   return (
     <div className="analyzerBubblesOverlay" ref={overlayRef}>
+      <canvas className="analyzerMarkersCanvas" aria-hidden="true" />
       <div
         className="analyzerOverlayTransformLayer"
+        ref={transformLayerRef}
         style={
           isViewportInteracting
             ? {
@@ -397,17 +409,6 @@ export function AnalyzerBubblesOverlay({
       </div>
     </div>
   );
-}
-
-function firstMarkerAtOrAfter(samples: number[], sample: number) {
-  let low = 0;
-  let high = samples.length;
-  while (low < high) {
-    const middle = (low + high) >>> 1;
-    if (samples[middle] < sample) low = middle + 1;
-    else high = middle;
-  }
-  return low;
 }
 
 function drawAnalyzerMarker(

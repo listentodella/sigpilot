@@ -1885,6 +1885,15 @@ button:disabled {
   z-index: 1;
 }
 
+.waveformMeasurementCanvas {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+  pointer-events: none;
+}
+
 .analyzerBubblesOverlay {
   position: absolute;
   inset: 0;
@@ -2071,6 +2080,7 @@ button:disabled {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  z-index: 0;
 }
 
 .cursorOverlay {

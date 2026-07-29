@@ -97,6 +97,7 @@ export function WaveformCanvas({
 }: WaveformCanvasProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragRef = useRef<{ x: number; start: number; samples: number } | null>(null);
   const tileRef = useRef<WaveformTile | null>(null);
   const viewportRef = useRef({ start: viewportStart, samples: viewportSamples });
@@ -128,12 +129,15 @@ export function WaveformCanvas({
   useEffect(() => {
     const host = hostRef.current;
     const canvas = canvasRef.current;
-    if (!host || !canvas) return;
+    const measurementCanvas = measurementCanvasRef.current;
+    if (!host || !canvas || !measurementCanvas) return;
     const observer = new ResizeObserver(([entry]) => {
       const rect = entry.contentRect;
       const dpr = window.devicePixelRatio || 1;
       canvas.width = Math.max(1, Math.floor(rect.width * dpr));
       canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+      measurementCanvas.width = canvas.width;
+      measurementCanvas.height = canvas.height;
       onWidthChangeRef.current(Math.max(1, Math.floor(rect.width)));
       scheduleDraw();
     });
@@ -214,18 +218,29 @@ export function WaveformCanvas({
 
   function drawCurrent() {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const measurementCanvas = measurementCanvasRef.current;
+    if (!canvas || !measurementCanvas) return;
     draw(
       canvas,
       tileRef.current,
       viewportRef.current.start,
       viewportRef.current.samples,
-      showInteractiveMeasurementRef.current ? hoverRef.current : null,
+      null,
       sampleRateRef.current,
       timeOriginSampleRef.current,
       rowHeightsRef.current,
       rowTopInsetsRef.current,
       matchChannelColorsRef.current,
+    );
+    drawMeasurementOverlay(
+      measurementCanvas,
+      tileRef.current,
+      showInteractiveMeasurementRef.current ? hoverRef.current : null,
+      viewportRef.current.start,
+      viewportRef.current.samples,
+      sampleRateRef.current,
+      rowHeightsRef.current,
+      rowTopInsetsRef.current,
     );
   }
 
@@ -580,6 +595,7 @@ export function WaveformCanvas({
         ))}
       </div>
       <canvas ref={canvasRef} className="waveform-canvas" />
+      <canvas ref={measurementCanvasRef} className="waveformMeasurementCanvas" aria-hidden="true" />
       {hoverNavigation?.previousEdge != null && (
         <DigitalNavigationButton
           direction="previous"
@@ -595,6 +611,33 @@ export function WaveformCanvas({
         />
       )}
     </div>
+  );
+}
+
+function drawMeasurementOverlay(
+  canvas: HTMLCanvasElement,
+  tile: WaveformTile | null,
+  hover: HoverMeasurement | null,
+  viewportStart: number,
+  viewportSamples: number,
+  sampleRateHz: number,
+  rowHeights: number[],
+  rowTopInsets: number[],
+) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (!tile || !hover) return;
+  drawHoverMeasurement(
+    context,
+    canvas,
+    tile,
+    hover,
+    viewportStart,
+    viewportSamples,
+    sampleRateHz,
+    rowHeights,
+    rowTopInsets,
   );
 }
 
