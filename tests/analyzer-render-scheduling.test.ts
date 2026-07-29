@@ -35,6 +35,18 @@ test("live analyzer renders tolerate a small amount of right-edge lag", () => {
   );
 });
 
+test("viewport whitespace does not invalidate an analyzer render", () => {
+  assert.equal(
+    analyzerRenderViewportCanServe(
+      { startSample: 0, sampleCount: 1_000, pixels: 400 },
+      { startSample: -750, sampleCount: 2_500, pixels: 1_000 },
+      false,
+      { startSample: 0, sampleCount: 1_000 },
+    ),
+    true,
+  );
+});
+
 test("empty live updates preserve the previous analyzer snapshot", () => {
   const previous = [trackWindow([bubble(10, 20)])];
   const incoming = [trackWindow([])];

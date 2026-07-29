@@ -80,6 +80,7 @@ import {
 } from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
+import { captureDataWindow, normalizeCaptureViewport } from "./lib/captureViewport";
 import {
   analyzerRenderRequestIntervalMs,
   analyzerRenderViewportCanServe,
@@ -767,14 +768,15 @@ function graphTileCanServeViewport(
   tile: WaveformTile | null,
   viewportStart: number,
   viewportSamples: number,
+  totalSamples: number,
   canvasWidth: number,
   channelIndexes: number[],
 ) {
   if (!tile || tile.channels.length !== channelIndexes.length || viewportSamples <= 0) return false;
   if (tile.channels.some((channel, index) => channel.channel !== channelIndexes[index])) return false;
-  const viewportEnd = viewportStart + viewportSamples;
+  const dataWindow = captureDataWindow(viewportStart, viewportSamples, totalSamples);
   const tileEnd = tile.start_sample + tile.sample_count;
-  if (viewportStart < tile.start_sample || viewportEnd > tileEnd) return false;
+  if (dataWindow.start < tile.start_sample || dataWindow.end > tileEnd) return false;
   const desiredSamplesPerPixel = viewportSamples / Math.max(1, canvasWidth);
   if (desiredSamplesPerPixel <= 8 && tile.channels.some((channel) => channel.segments.length === 0)) {
     return false;
@@ -824,23 +826,27 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     previousSamples === 0 ||
     session.viewportStart + session.viewportSamples >=
       previousSamples - Math.max(1, Math.round(session.viewportSamples * 0.05));
-  const viewportSamples =
+  const requestedViewportSamples =
     session.liveViewportMode === "auto"
       ? defaultCaptureViewportSamples(
           summary.metadata.sample_count,
           summary.metadata.sample_rate_hz,
         )
-      : Math.max(1, Math.min(summary.metadata.sample_count, session.viewportSamples));
-  const maxViewportStart = Math.max(0, summary.metadata.sample_count - viewportSamples);
-  const viewportStart = session.liveViewportMode === "auto" || wasFollowingLiveEdge
-    ? maxViewportStart
-    : Math.max(0, Math.min(maxViewportStart, session.viewportStart));
+      : session.viewportSamples;
+  const requestedViewportStart = session.liveViewportMode === "auto" || wasFollowingLiveEdge
+    ? summary.metadata.sample_count - requestedViewportSamples
+    : session.viewportStart;
+  const viewport = normalizeCaptureViewport(
+    requestedViewportStart,
+    requestedViewportSamples,
+    summary.metadata.sample_count,
+  );
 
   return {
     ...syncedSession,
     summary: summaryWithLabels(summary, syncedSession.channelLabels),
-    viewportStart,
-    viewportSamples,
+    viewportStart: viewport.start,
+    viewportSamples: viewport.samples,
     message: "Capturing",
   };
 }
@@ -861,13 +867,14 @@ function initialCaptureViewport(summary: CaptureSummary) {
 
 function preserveCaptureViewport(session: UiSession, summary: CaptureSummary) {
   const totalSamples = Math.max(1, summary.metadata.sample_count);
-  const viewportSamples = Math.max(
-    1,
-    Math.min(totalSamples, session.viewportSamples || Math.min(totalSamples, 100_000)),
+  const viewport = normalizeCaptureViewport(
+    session.viewportStart,
+    session.viewportSamples || Math.min(totalSamples, 100_000),
+    totalSamples,
   );
   return {
-    viewportSamples,
-    viewportStart: Math.max(0, Math.min(totalSamples - viewportSamples, session.viewportStart)),
+    viewportSamples: viewport.samples,
+    viewportStart: viewport.start,
   };
 }
 
@@ -1701,12 +1708,11 @@ export default function App() {
         if (!sessionTotalSamples) {
           return { ...session, viewportStart: 0, viewportSamples: 0 };
         }
-        const nextSamples = Math.max(1, Math.min(sessionTotalSamples, Math.round(samples)));
-        const maxStart = Math.max(0, sessionTotalSamples - nextSamples);
+        const viewport = normalizeCaptureViewport(start, samples, sessionTotalSamples);
         return {
           ...session,
-          viewportStart: Math.max(0, Math.min(maxStart, Math.round(start))),
-          viewportSamples: nextSamples,
+          viewportStart: viewport.start,
+          viewportSamples: viewport.samples,
           liveViewportMode: session.busy ? "manual" : session.liveViewportMode,
         };
       });
@@ -1740,8 +1746,9 @@ export default function App() {
       const total = session?.summary?.metadata.sample_count ?? 0;
       if (!session || total <= 0) return;
 
-      const targetSamples = Math.max(1, Math.min(total, samples));
-      const targetStart = Math.max(0, Math.min(total - targetSamples, start));
+      const target = normalizeCaptureViewport(start, samples, total);
+      const targetSamples = target.samples;
+      const targetStart = target.start;
       const initialStart = session.viewportStart;
       const initialSamples = session.viewportSamples;
       const startedAt = performance.now();
@@ -1796,6 +1803,7 @@ export default function App() {
         sessionSnapshot.tile,
         sessionSnapshot.viewportStart,
         sessionSnapshot.viewportSamples,
+        sessionSnapshot.summary!.metadata.sample_count,
         sessionSnapshot.canvasWidth,
         visibleChannelIndexes,
       )
@@ -1856,6 +1864,7 @@ export default function App() {
             next.tile,
             latestSession.viewportStart,
             latestSession.viewportSamples,
+            latestSession.summary!.metadata.sample_count,
             latestSession.canvasWidth,
             latestVisibleChannels,
           );
@@ -2015,6 +2024,10 @@ export default function App() {
                 startSample: latestSession.viewportStart,
               },
               latestSession.busy,
+              {
+                startSample: 0,
+                sampleCount: latestSession.summary.metadata.sample_count,
+              },
             );
           if (
             requestSeq === analyzerRenderRequestSeq.current &&

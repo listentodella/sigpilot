@@ -1,5 +1,6 @@
 import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useState } from "react";
 import type { WaveformTile } from "../lib/api";
+import { normalizeCaptureViewport } from "../lib/captureViewport";
 import {
   findSaleaeGraphChannelIndexAtY,
   getSaleaeGraphChannelLayout,
@@ -1589,11 +1590,7 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function normalizeViewport(start: number, samples: number, totalSamples: number) {
-  const minSamples = totalSamples ? 1 : 1;
-  const nextSamples = Math.max(minSamples, Math.min(totalSamples || samples, Math.round(samples)));
-  const maxStart = Math.max(0, (totalSamples || 0) - nextSamples);
-  const nextStart = Math.max(0, Math.min(maxStart, Math.round(start)));
-  return { start: nextStart, samples: nextSamples };
+  return normalizeCaptureViewport(start, samples, totalSamples);
 }
 
 function easeOutCubic(progress: number) {
