@@ -33,6 +33,7 @@ export type AnalyzerDisplayRadix = (typeof DISPLAY_RADIX_OPTIONS)[number];
 const EXTERNAL_DECODER_BACKENDS: DecoderBackendKind[] = ["saleae_native", "sigrok_native"];
 const CORE_ANALYZER_TYPES = ["Async Serial", "I2C", "SPI"] as const;
 const VERIFIED_SIGROK_C_RUNNER_STATUS = "verified_sparse_c";
+const GENERIC_SIGROK_C_RUNNER_STATUS = "generic_sparse_c";
 const CATALOG_ONLY_SIGROK_RUNNER_STATUS = "catalog_only";
 const SIGROK_VERIFIED_C_RUNNER_TYPES: Record<string, string> = {
   uart_c: "Async Serial",
@@ -417,6 +418,7 @@ function sigrokCatalogProtocolName(item: SigrokDecoderCatalogItem) {
 
 export function sigrokCatalogRunnerLabel(status?: string | null) {
   if (status === VERIFIED_SIGROK_C_RUNNER_STATUS) return "Runnable";
+  if (status === GENERIC_SIGROK_C_RUNNER_STATUS) return "Generic C";
   return "Catalog";
 }
 
@@ -628,7 +630,11 @@ export function analyzerCanRunDecoder(
 ) {
   if (!analyzerSupportsDecoding(analyzer)) return false;
   if (analyzer.nativeRunnerStatus === CATALOG_ONLY_SIGROK_RUNNER_STATUS) return false;
-  return !analyzer.nativeRunnerStatus || analyzer.nativeRunnerStatus === VERIFIED_SIGROK_C_RUNNER_STATUS;
+  return (
+    !analyzer.nativeRunnerStatus ||
+    analyzer.nativeRunnerStatus === VERIFIED_SIGROK_C_RUNNER_STATUS ||
+    analyzer.nativeRunnerStatus === GENERIC_SIGROK_C_RUNNER_STATUS
+  );
 }
 
 export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDecodeSettings | null {

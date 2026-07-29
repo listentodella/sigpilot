@@ -143,13 +143,17 @@ pub struct SpiDecodeSettings {
     pub msb_first: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum NativeOptionValue {
     Boolean(bool),
     Integer(i64),
+    Float(f64),
     Text(String),
 }
+
+// Values arrive through JSON, which cannot represent NaN; equality is therefore total here.
+impl Eq for NativeOptionValue {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeDecodeSettings {

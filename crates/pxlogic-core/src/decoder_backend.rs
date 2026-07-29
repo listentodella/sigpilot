@@ -901,6 +901,9 @@ fn ensure_sigrok_protocol_available(
     probe: &SigrokSidecarProbe,
     settings: &AnalyzerDecodeSettings,
 ) -> Result<()> {
+    if matches!(settings, AnalyzerDecodeSettings::Native(_)) {
+        return Ok(());
+    }
     ensure_protocol_available(&probe.protocols, settings, "PXView Sigrok C")
 }
 
@@ -2185,6 +2188,14 @@ mod tests {
         assert!(probe.decoder_catalog.iter().any(|item| {
             item.id.as_deref() == Some("spi_c")
                 && item.runner_status.as_deref() == Some("verified_sparse_c")
+        }));
+        assert!(probe.decoder_catalog.iter().any(|item| {
+            item.id.as_deref() == Some("guess_bitrate_c")
+                && item.runner_status.as_deref() == Some("generic_sparse_c")
+        }));
+        assert!(probe.decoder_catalog.iter().any(|item| {
+            item.id.as_deref() == Some("modbus_c")
+                && item.runner_status.as_deref() == Some("catalog_only")
         }));
     }
 

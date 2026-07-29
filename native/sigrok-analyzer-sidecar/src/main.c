@@ -128,6 +128,7 @@ typedef enum {
     DECODER_CAN_FD,
     DECODER_LIN,
     DECODER_PARALLEL,
+    DECODER_GENERIC_C,
 } decoder_protocol;
 
 static void fatal(const char *message)
@@ -258,6 +259,35 @@ static int is_verified_sparse_c_decoder(const char *decoder_id)
             return 1;
     }
     return 0;
+}
+
+static int decoder_has_input(const struct srd_decoder *decoder, const char *input)
+{
+    for (const GSList *item = decoder ? decoder->inputs : NULL; item; item = item->next) {
+        if (item->data && strcmp((const char *)item->data, input) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int decoder_has_analog_channels(const struct srd_decoder *decoder)
+{
+    const GSList *groups[] = {decoder ? decoder->channels : NULL,
+                              decoder ? decoder->opt_channels : NULL};
+    for (size_t group = 0; group < sizeof(groups) / sizeof(groups[0]); group++) {
+        for (const GSList *item = groups[group]; item; item = item->next) {
+            const struct srd_channel *channel = item->data;
+            if (channel && channel->type == SRD_CHANNEL_ADATA)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int is_generic_sparse_c_decoder(const struct srd_decoder *decoder)
+{
+    return decoder && decoder->is_c_decoder && decoder->channels &&
+           decoder_has_input(decoder, "logic") && !decoder_has_analog_channels(decoder);
 }
 
 static int load_c_decoder_module(const char *decoder_root, const char *decoder_id)
@@ -405,10 +435,12 @@ static void add_decoder_catalog_item(cJSON *array, const struct srd_decoder *dec
     add_optional_string(entry, "desc", decoder->desc);
     add_optional_string(entry, "license", decoder->license);
     cJSON_AddStringToObject(entry, "kind", decoder->is_c_decoder ? "c" : "python");
-    cJSON_AddStringToObject(entry, "runner_status",
-                            decoder->is_c_decoder && is_verified_sparse_c_decoder(decoder->id)
-                                ? "verified_sparse_c"
-                                : "catalog_only");
+    const char *runner_status = "catalog_only";
+    if (decoder->is_c_decoder && is_verified_sparse_c_decoder(decoder->id))
+        runner_status = "verified_sparse_c";
+    else if (is_generic_sparse_c_decoder(decoder))
+        runner_status = "generic_sparse_c";
+    cJSON_AddStringToObject(entry, "runner_status", runner_status);
     add_gslist_strings(entry, "inputs", decoder->inputs);
     add_gslist_strings(entry, "outputs", decoder->outputs);
     add_gslist_strings(entry, "tags", decoder->tags);
@@ -555,8 +587,7 @@ static decoder_protocol parse_protocol(cJSON *request)
         return DECODER_LIN;
     if (strcmp(protocol, "parallel") == 0 || strcmp(protocol, "simple_parallel") == 0)
         return DECODER_PARALLEL;
-    fatal("decoder.protocol must be one of uart, i2c, spi, i2s, can, can_fd, lin, or parallel");
-    return DECODER_SPI;
+    return DECODER_GENERIC_C;
 }
 
 static void parse_spi_settings(cJSON *request, spi_settings *settings)
@@ -1212,6 +1243,60 @@ static cJSON *new_frame(uint64_t frame_id, uint64_t start_sample, uint64_t end_s
     return frame;
 }
 
+static const char *generic_annotation_row(const struct srd_decoder *decoder, int ann_class)
+{
+    for (const GSList *item = decoder ? decoder->annotation_rows : NULL; item; item = item->next) {
+        const struct srd_decoder_annotation_row *row = item->data;
+        if (!row)
+            continue;
+        for (const GSList *class_item = row->ann_classes; class_item; class_item = class_item->next) {
+            if ((int)GPOINTER_TO_SIZE(class_item->data) == ann_class)
+                return row->desc && *row->desc ? row->desc : row->id;
+        }
+    }
+    return decoder && decoder->name ? decoder->name : "Result";
+}
+
+static cJSON *render_generic_output(const decode_collector *collector,
+                                    const struct srd_decoder *decoder)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "backend", "sigrok_native");
+    cJSON_AddStringToObject(root, "protocol",
+                            decoder->longname && *decoder->longname ? decoder->longname : decoder->name);
+    cJSON *frames = add_array(root, "frames");
+    uint64_t frame_id = 0;
+
+    for (size_t index = 0; index < collector->annotations.count; index++) {
+        const annotation_item *item = &collector->annotations.items[index];
+        if (item->text_count == 0)
+            continue;
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample,
+                                 generic_annotation_row(decoder, item->ann_class));
+        cJSON *texts = cJSON_GetObjectItem(frame, "texts");
+        for (int text_index = 0; text_index < item->text_count; text_index++)
+            cJSON_AddItemToArray(texts, cJSON_CreateString(item->texts[text_index]));
+        cJSON_AddItemToArray(frames, frame);
+    }
+
+    for (size_t index = 0; index < collector->binaries.count; index++) {
+        const binary_item *item = &collector->binaries.items[index];
+        cJSON *frame = new_frame(frame_id++, item->start_sample, item->end_sample, "Binary");
+        char text[32];
+        snprintf(text, sizeof(text), "0x%0*llX", (int)(item->size * 2),
+                 (unsigned long long)item->value);
+        cJSON_AddItemToArray(cJSON_GetObjectItem(frame, "texts"), cJSON_CreateString(text));
+        cJSON *field = cJSON_CreateObject();
+        cJSON_AddStringToObject(field, "name", "binary");
+        cJSON_AddItemToObject(field, "value", field_value_unsigned(item->value));
+        cJSON_AddItemToArray(cJSON_GetObjectItem(frame, "fields"), field);
+        cJSON_AddItemToArray(frames, frame);
+    }
+
+    add_array(root, "diagnostics");
+    return root;
+}
+
 static int parse_parallel_annotation_value(const char *text, uint64_t *value)
 {
     if (!text || !*text)
@@ -1750,6 +1835,77 @@ static struct srd_decoder *initialize_decoder(const char *decoder_root,
     return srd_decoder_get_by_id(decoder_id);
 }
 
+static const struct srd_decoder_option *find_decoder_option(const struct srd_decoder *decoder,
+                                                            const char *id)
+{
+    for (const GSList *item = decoder ? decoder->options : NULL; item; item = item->next) {
+        const struct srd_decoder_option *option = item->data;
+        if (option && option->id && strcmp(option->id, id) == 0)
+            return option;
+    }
+    return NULL;
+}
+
+static GVariant *json_to_option_variant(const cJSON *value, GVariant *default_value)
+{
+    if (!value || !default_value)
+        return NULL;
+    if (g_variant_is_of_type(default_value, G_VARIANT_TYPE_STRING) && cJSON_IsString(value))
+        return g_variant_ref_sink(g_variant_new_string(value->valuestring));
+    if (g_variant_is_of_type(default_value, G_VARIANT_TYPE_BOOLEAN) &&
+        (cJSON_IsBool(value) || cJSON_IsNumber(value)))
+        return g_variant_ref_sink(g_variant_new_boolean(cJSON_IsTrue(value) || value->valueint != 0));
+    if (g_variant_is_of_type(default_value, G_VARIANT_TYPE_INT64) && cJSON_IsNumber(value))
+        return g_variant_ref_sink(g_variant_new_int64((int64_t)value->valuedouble));
+    if (g_variant_is_of_type(default_value, G_VARIANT_TYPE_UINT64) && cJSON_IsNumber(value) &&
+        value->valuedouble >= 0)
+        return g_variant_ref_sink(g_variant_new_uint64((uint64_t)value->valuedouble));
+    if (g_variant_is_of_type(default_value, G_VARIANT_TYPE_INT32) && cJSON_IsNumber(value))
+        return g_variant_ref_sink(g_variant_new_int32((int32_t)value->valuedouble));
+    if (g_variant_is_of_type(default_value, G_VARIANT_TYPE_UINT32) && cJSON_IsNumber(value) &&
+        value->valuedouble >= 0)
+        return g_variant_ref_sink(g_variant_new_uint32((uint32_t)value->valuedouble));
+    if (g_variant_is_of_type(default_value, G_VARIANT_TYPE_DOUBLE) && cJSON_IsNumber(value))
+        return g_variant_ref_sink(g_variant_new_double(value->valuedouble));
+    return NULL;
+}
+
+static GHashTable *generic_options(const struct srd_decoder *decoder, cJSON *request_decoder)
+{
+    GHashTable *options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                (GDestroyNotify)g_variant_unref);
+    cJSON *json_options = cJSON_GetObjectItem(request_decoder, "options");
+    if (!cJSON_IsObject(json_options))
+        return options;
+    for (cJSON *value = json_options->child; value; value = value->next) {
+        const struct srd_decoder_option *option = find_decoder_option(decoder, value->string);
+        if (!option)
+            fatal("generic decoder request contains an unknown option");
+        GVariant *variant = json_to_option_variant(value, option->def);
+        if (!variant)
+            fatal("generic decoder option has the wrong value type");
+        g_hash_table_insert(options, g_strdup(value->string), variant);
+    }
+    return options;
+}
+
+static GHashTable *generic_channels(cJSON *request_decoder, int channel_count)
+{
+    cJSON *json_channels = cJSON_GetObjectItem(request_decoder, "channels");
+    if (!cJSON_IsObject(json_channels))
+        fatal("generic decoder channels must be an object");
+    GHashTable *channels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                 (GDestroyNotify)g_variant_unref);
+    for (cJSON *value = json_channels->child; value; value = value->next) {
+        if (cJSON_IsNull(value))
+            continue;
+        if (!cJSON_IsNumber(value) || value->valueint < 0 || value->valueint >= channel_count)
+            fatal("generic decoder channel is outside the capture");
+        add_channel(channels, value->string, value->valueint);
+    }
+    return channels;
+}
+
 static cJSON *decode_request(cJSON *request, const char *decoder_root,
                              const char *python_decoder_root)
 {
@@ -1776,6 +1932,7 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     memset(&can, 0, sizeof(can));
     memset(&lin, 0, sizeof(lin));
     memset(&parallel, 0, sizeof(parallel));
+    cJSON *request_decoder = cJSON_GetObjectItem(request, "decoder");
     const char *decoder_id;
     if (protocol == DECODER_UART) {
         parse_uart_settings(request, &uart);
@@ -1798,9 +1955,13 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     } else if (protocol == DECODER_PARALLEL) {
         parse_parallel_settings(request, &parallel);
         decoder_id = "parallel_c";
-    } else {
+    } else if (protocol == DECODER_SPI) {
         parse_spi_settings(request, &spi);
         decoder_id = "spi_c";
+    } else {
+        decoder_id = request_decoder ? json_string(request_decoder, "protocol", "") : "";
+        if (!*decoder_id)
+            fatal("generic decoder protocol ID is required");
     }
     sparse_input input = build_sparse_input(request, channel_count, sample_count);
     if ((protocol == DECODER_CAN || protocol == DECODER_CAN_FD) && can.inverted)
@@ -1809,13 +1970,17 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     struct srd_decoder *decoder = initialize_decoder(decoder_root, python_decoder_root, decoder_id);
     if (!decoder)
         fatal("requested PXView C decoder is not available");
+    if (protocol == DECODER_GENERIC_C && !is_generic_sparse_c_decoder(decoder))
+        fatal("requested decoder does not support direct sparse digital input");
 
     struct srd_session *session = NULL;
     if (srd_session_new(&session) != SRD_OK || !session)
         fatal("failed to create libsigrokdecode session");
 
-    GHashTable *options = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                                (GDestroyNotify)g_variant_unref);
+    GHashTable *options = protocol == DECODER_GENERIC_C
+                              ? generic_options(decoder, request_decoder)
+                              : g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                      (GDestroyNotify)g_variant_unref);
     if (protocol == DECODER_UART) {
         add_option_i64(options, "baudrate", (int64_t)uart.baudrate);
         add_option_i64(options, "data_bits", (int64_t)uart.data_bits);
@@ -1851,7 +2016,7 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
         add_option_string(options, "clock_edge", parallel.clock_edge);
         add_option_i64(options, "wordsize", parallel.wordsize);
         add_option_string(options, "endianness", parallel.endianness);
-    } else {
+    } else if (protocol == DECODER_SPI) {
         add_option_string(options, "cs_polarity", spi.cs_active_low ? "active-low" : "active-high");
         add_option_u64(options, "cpol", (uint64_t)spi.cpol);
         add_option_u64(options, "cpha", (uint64_t)spi.cpha);
@@ -1865,8 +2030,10 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     if (!instance)
         fatal("failed to create PXView C decoder instance");
 
-    GHashTable *channels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                                 (GDestroyNotify)g_variant_unref);
+    GHashTable *channels = protocol == DECODER_GENERIC_C
+                               ? generic_channels(request_decoder, channel_count)
+                               : g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                       (GDestroyNotify)g_variant_unref);
     if (protocol == DECODER_UART) {
         add_channel(channels, "rx", uart.rx);
         add_channel(channels, "tx", uart.tx);
@@ -1888,13 +2055,14 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
             snprintf(role, sizeof(role), "d%d", index);
             add_channel(channels, role, parallel.data[index]);
         }
-    } else {
+    } else if (protocol == DECODER_SPI) {
         add_channel(channels, "clk", spi.clk);
         add_channel(channels, "miso", spi.miso);
         add_channel(channels, "mosi", spi.mosi);
         add_channel(channels, "cs", spi.cs);
     }
-    srd_inst_channel_set_all(instance, channels);
+    if (srd_inst_channel_set_all(instance, channels) != SRD_OK)
+        fatal("failed to configure decoder channels");
     g_hash_table_destroy(channels);
     struct srd_decoder_inst *source_instance = instance;
     if (protocol == DECODER_LIN) {
@@ -1938,7 +2106,9 @@ static cJSON *decode_request(cJSON *request, const char *decoder_root,
     source_instance->c_dec_inst->decode(source_instance);
     srd_session_end(session, &error);
 
-    cJSON *output = protocol == DECODER_UART
+    cJSON *output = protocol == DECODER_GENERIC_C
+                        ? render_generic_output(&collector, decoder)
+                        : protocol == DECODER_UART
                         ? render_uart_output(&collector, &uart)
                         : protocol == DECODER_I2C
                               ? render_i2c_output(&collector, &i2c)

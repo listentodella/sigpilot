@@ -37,7 +37,7 @@ test("new analyzers are offered only through external decoder ecosystems", () =>
   );
 });
 
-test("sigrok catalog analyzers keep schema while catalog-only entries do not run yet", () => {
+test("generic sigrok C catalog analyzers keep schema and run through the sparse runner", () => {
   const qspi = createAnalyzerInstanceFromSigrokCatalog(
     {
       id: "qspi_c",
@@ -46,7 +46,7 @@ test("sigrok catalog analyzers keep schema while catalog-only entries do not run
       desc: "Quad SPI decoder",
       license: "gplv2+",
       kind: "c",
-      runner_status: "catalog_only",
+      runner_status: "generic_sparse_c",
       inputs: ["logic"],
       outputs: ["spi"],
       tags: ["Embedded/industrial"],
@@ -73,7 +73,7 @@ test("sigrok catalog analyzers keep schema while catalog-only entries do not run
   assert.deepEqual(qspi.nativeChannels, { clk: 4, io0: 5, io1: null, cs: null });
   assert.deepEqual(qspi.nativeOptions, { cs_polarity: "active-low", cpol: 0 });
   assert.equal(analyzerSupportsDecoding(qspi), true);
-  assert.equal(analyzerCanRunDecoder(qspi), false);
+  assert.equal(analyzerCanRunDecoder(qspi), true);
   assert.deepEqual(analyzerChannelRoles(qspi).map((role) => [role.channel, role.title]), [
     [4, "CLK"],
     [5, "IO0"],

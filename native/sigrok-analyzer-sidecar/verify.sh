@@ -80,10 +80,33 @@ run_probe \
     and (.decoder_catalog | map(select(.id == "usb_power_delivery" and .kind == "python")) | length == 1)
     and (.decoder_catalog | map(select(.id == "jtag" and .kind == "python")) | length == 1)
     and (.decoder_catalog | map(select(.id == "spi_c" and .runner_status == "verified_sparse_c")) | length == 1)
+    and (.decoder_catalog | map(select(.runner_status == "generic_sparse_c")) | length >= 90)
+    and (.decoder_catalog | map(select(.id == "guess_bitrate_c" and .runner_status == "generic_sparse_c")) | length == 1)
+    and (.decoder_catalog | map(select(.id == "modbus_c" and .runner_status == "catalog_only")) | length == 1)
     and (.decoder_catalog | map(select(.id == "modbus" and .runner_status == "catalog_only")) | length == 1)
   ' >/dev/null
 
 failures=0
+generic_output="$(printf '%s' '{
+  "format":"pxlogic.decoder.v1",
+  "sample_rate_hz":1000000,
+  "sample_count":100,
+  "channel_count":1,
+  "initial_levels":[0],
+  "edges":[{"channel":0,"samples":[10,20,30,40]}],
+  "decoder":{"protocol":"guess_bitrate_c","channels":{"data":0},"options":{}}
+}' | run_sidecar --decoder-root "$DECODER_ROOT" --decode)"
+if jq -e '
+  .backend == "sigrok_native"
+  and .protocol == "Guess bitrate/baudrate (C)"
+  and ([.frames[] | select(.row == "Bitrate") | .texts[0]] == ["100000"])
+' >/dev/null <<<"$generic_output"; then
+  printf 'PASS generic-sparse-c-guess-bitrate\n'
+else
+  printf 'FAIL generic sparse C decoder did not produce the expected annotation\n' >&2
+  failures=$((failures + 1))
+fi
+
 while IFS= read -r fixture; do
   fixture_id="$(jq -r '.id' <<<"$fixture")"
   request="$(jq -c '{

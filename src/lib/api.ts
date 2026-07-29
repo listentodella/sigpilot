@@ -507,7 +507,7 @@ const PREVIEW_SIGROK_DECODER_CATALOG: SigrokDecoderCatalog = {
       desc: "Full-duplex, synchronous, serial bus compatible with Dual SPI and Quad SPI interfaces.",
       license: "gplv2+",
       kind: "c",
-      runner_status: "catalog_only",
+      runner_status: "generic_sparse_c",
       inputs: ["logic"],
       outputs: ["spi"],
       tags: ["Embedded/industrial"],

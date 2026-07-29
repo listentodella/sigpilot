@@ -108,7 +108,7 @@ export function AnalyzerLibraryMenu({
           >
             <span>{choice.name}</span>
             {choice.runnerStatus && (
-              <small className={choice.runnerStatus === "verified_sparse_c" ? "runnable" : ""}>
+              <small className={choice.runnerStatus !== "catalog_only" ? "runnable" : ""}>
                 {sigrokCatalogRunnerLabel(choice.runnerStatus)}
               </small>
             )}
