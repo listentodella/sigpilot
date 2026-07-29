@@ -81,6 +81,11 @@ import {
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
 import {
+  analyzerRenderRequestIntervalMs,
+  analyzerRenderViewportCanServe,
+  preserveLiveAnalyzerTracks,
+} from "./lib/analyzerRenderScheduling";
+import {
   cancelCapture,
   CaptureProgress,
   CaptureSettings,
@@ -1228,6 +1233,8 @@ export default function App() {
   const analyzerRenderRequestInFlightRef = useRef(false);
   const analyzerRenderRequestPendingRef = useRef(false);
   const analyzerRenderRequestLastStartedAtRef = useRef(0);
+  const analyzerRenderRequestTimerRef = useRef<number | null>(null);
+  const analyzerRenderRequestDirtyRef = useRef(false);
   const analyzerRequestSeq = useRef<Record<string, number>>({});
   const rangeMeasurementRequestSeq = useRef<Record<string, number>>({});
   const viewportAnimationRef = useRef<number | null>(null);
@@ -1894,49 +1901,67 @@ export default function App() {
   useEffect(() => {
     if (!activeSession?.summary) {
       analyzerRenderRequestSeq.current += 1;
+      analyzerRenderRequestDirtyRef.current = false;
       return;
     }
-    if (graphViewportInteracting) {
+    if (!activeSession.analyzers.some(analyzerCanRunDecoder)) {
       analyzerRenderRequestSeq.current += 1;
+      analyzerRenderRequestDirtyRef.current = false;
       return;
     }
 
-    const sessionSnapshot = activeSession;
-    const analyzerRequests = sessionSnapshot.analyzers.flatMap((analyzer) => {
-      const settings = analyzerDecodeSettings(analyzer);
-      if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
-      return [
-        {
-          analyzer_id: analyzer.id,
-          backend: analyzer.decoderBackend,
-          settings,
-          tracks: analyzerBubbleRoles(analyzer).map((role) => ({
-            channel: role.channel,
-            role: role.title,
-          })),
-        },
-      ];
-    });
-    if (analyzerRequests.length === 0) {
-      analyzerRenderRequestSeq.current += 1;
+    analyzerRenderRequestDirtyRef.current = true;
+    if (analyzerRenderRequestInFlightRef.current) {
+      analyzerRenderRequestPendingRef.current = true;
       return;
     }
+    if (analyzerRenderRequestTimerRef.current !== null) return;
 
-    const requestSeq = analyzerRenderRequestSeq.current + 1;
-    analyzerRenderRequestSeq.current = requestSeq;
-    const minimumRequestIntervalMs = sessionSnapshot.busy ? 100 : 40;
+    const minimumRequestIntervalMs = analyzerRenderRequestIntervalMs(
+      graphViewportInteracting,
+      activeSession.busy,
+    );
     const requestDelay = Math.max(
       0,
       minimumRequestIntervalMs -
         (performance.now() - analyzerRenderRequestLastStartedAtRef.current),
     );
-    const requestTimer = window.setTimeout(() => {
+    analyzerRenderRequestTimerRef.current = window.setTimeout(() => {
+      analyzerRenderRequestTimerRef.current = null;
       if (analyzerRenderRequestInFlightRef.current) {
         analyzerRenderRequestPendingRef.current = true;
         return;
       }
+
+      const sessionSnapshot = sessionsRef.current.find(
+        (session) => session.id === activeSessionIdRef.current,
+      );
+      if (!sessionSnapshot?.summary) return;
+      const analyzerRequests = sessionSnapshot.analyzers.flatMap((analyzer) => {
+        const settings = analyzerDecodeSettings(analyzer);
+        if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
+        return [
+          {
+            analyzer_id: analyzer.id,
+            backend: analyzer.decoderBackend,
+            settings,
+            tracks: analyzerBubbleRoles(analyzer).map((role) => ({
+              channel: role.channel,
+              role: role.title,
+            })),
+          },
+        ];
+      });
+      if (analyzerRequests.length === 0) return;
+
+      analyzerRenderRequestDirtyRef.current = false;
       analyzerRenderRequestInFlightRef.current = true;
       analyzerRenderRequestLastStartedAtRef.current = performance.now();
+      const requestSeq = analyzerRenderRequestSeq.current + 1;
+      analyzerRenderRequestSeq.current = requestSeq;
+      const requestAnalyzerSignature = sessionSnapshot.analyzers
+        .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}:${analyzer.displayRadix}`)
+        .join("|");
       void (async () => {
         try {
           const overscan = Math.max(64, Math.round(sessionSnapshot.viewportSamples * 0.5));
@@ -1951,6 +1976,11 @@ export default function App() {
             480,
             Math.min(2_600, Math.round(sessionSnapshot.canvasWidth * pixelScale)),
           );
+          const requestViewport = {
+            pixels: renderPixels,
+            sampleCount: requestSamples,
+            startSample: requestStart,
+          };
           const next = await renderGraphFrame(sessionSnapshot.id, {
             frame_id: requestSeq,
             waveform: {
@@ -1967,9 +1997,29 @@ export default function App() {
             },
             analyzers: analyzerRequests,
           });
+          const latestSession = sessionsRef.current.find(
+            (session) => session.id === sessionSnapshot.id,
+          );
+          const latestAnalyzerSignature = latestSession?.analyzers
+            .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}:${analyzer.displayRadix}`)
+            .join("|");
+          const canServeLatestViewport =
+            latestSession?.summary != null &&
+            activeSessionIdRef.current === sessionSnapshot.id &&
+            latestAnalyzerSignature === requestAnalyzerSignature &&
+            analyzerRenderViewportCanServe(
+              requestViewport,
+              {
+                pixels: latestSession.canvasWidth,
+                sampleCount: latestSession.viewportSamples,
+                startSample: latestSession.viewportStart,
+              },
+              latestSession.busy,
+            );
           if (
             requestSeq === analyzerRenderRequestSeq.current &&
-            next.frame_id === requestSeq
+            next.frame_id === requestSeq &&
+            canServeLatestViewport
           ) {
             const analyzerResults = new Map(
               next.analyzers.map((result) => [result.analyzer_id, result]),
@@ -1977,10 +2027,13 @@ export default function App() {
             updateSession(sessionSnapshot.id, (session) => ({
               ...session,
               analyzers: session.analyzers.map((analyzer) => {
-                const renderedTracks = analyzerResults.get(analyzer.id)?.tracks ?? [];
+                const nextTracks = analyzerResults.get(analyzer.id)?.tracks ?? [];
+                const renderedTracks = session.busy
+                  ? preserveLiveAnalyzerTracks(analyzer.renderedTracks, nextTracks)
+                  : nextTracks;
                 return {
                   ...analyzer,
-                  decodedFrames: mergeAnalyzerTrackFrames(analyzer.decodedFrames, renderedTracks),
+                  decodedFrames: mergeAnalyzerTrackFrames(analyzer.decodedFrames, nextTracks),
                   renderedTracks,
                   renderedDecodeSignature: getAnalyzerDecodeSignature(analyzer),
                 };
@@ -1996,14 +2049,16 @@ export default function App() {
           }
         } finally {
           analyzerRenderRequestInFlightRef.current = false;
-          if (analyzerRenderRequestPendingRef.current) {
+          if (
+            analyzerRenderRequestPendingRef.current ||
+            analyzerRenderRequestDirtyRef.current
+          ) {
             analyzerRenderRequestPendingRef.current = false;
             setAnalyzerRenderRequestEpoch((epoch) => epoch + 1);
           }
         }
       })();
     }, requestDelay);
-    return () => window.clearTimeout(requestTimer);
   }, [
     activeSession?.busy,
     activeSession?.canvasWidth,
@@ -2017,6 +2072,15 @@ export default function App() {
     graphViewportInteracting,
     updateSession,
   ]);
+
+  useEffect(() => {
+    return () => {
+      if (analyzerRenderRequestTimerRef.current !== null) {
+        window.clearTimeout(analyzerRenderRequestTimerRef.current);
+      }
+      analyzerRenderRequestSeq.current += 1;
+    };
+  }, []);
 
   const rangeMeasurementSignature =
     activeSession?.rangeMeasurements
