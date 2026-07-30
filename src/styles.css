@@ -702,17 +702,21 @@ button:disabled {
 }
 
 .memoryBufferButton {
-  min-width: 112px;
+  min-width: 136px;
+  min-height: 28px;
   height: 100%;
   display: grid;
   grid-template-columns: 15px minmax(58px, auto) 11px;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  border-left: 1px solid var(--border-20);
-  color: var(--on-background-20);
-  background: transparent;
-  font-size: 10px;
+  border: 1px solid var(--border-30);
+  border-radius: 3px;
+  color: var(--on-background-0);
+  background: var(--background-30);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 1px 4px rgba(0, 0, 0, 0.25);
+  font-size: 11px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
 }
@@ -720,7 +724,8 @@ button:disabled {
 .memoryBufferButton:hover,
 .memoryBufferButton.active {
   color: var(--on-background-0);
-  background: var(--hover-background);
+  border-color: var(--lightBlue);
+  background: var(--background-40);
 }
 
 .memoryBufferButton.recording svg:first-child {
@@ -732,7 +737,7 @@ button:disabled {
 }
 
 .memoryBufferPopover {
-  width: 304px;
+  width: 280px;
   position: absolute;
   top: calc(var(--main-toolbar-height) + 1px);
   right: 0;
@@ -743,14 +748,21 @@ button:disabled {
   color: var(--on-background-20);
   background: var(--background-20);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
-  padding: 14px;
+  padding: 12px 14px 14px;
 }
 
-.memoryBufferPopover header {
+.memoryBufferPopoverHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 14px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.memoryBufferPopoverHeader:active {
+  cursor: grabbing;
 }
 
 .memoryBufferPopover header strong {
@@ -857,40 +869,6 @@ button:disabled {
   font-size: 11px;
 }
 
-.memoryBufferBreakdown {
-  margin: 0 0 14px;
-  border-top: 1px solid var(--border-20);
-  border-bottom: 1px solid var(--border-20);
-  padding: 7px 0;
-}
-
-.memoryBufferBreakdown div {
-  min-height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.memoryBufferBreakdown dt,
-.memoryBufferBreakdown dd {
-  margin: 0;
-}
-
-.memoryBufferBreakdown dd {
-  color: var(--on-background-10);
-}
-
-.memoryBufferBreakdown .total {
-  border-top: 1px solid var(--border-20);
-  margin-top: 4px;
-  padding-top: 4px;
-  color: var(--on-background-0);
-  font-weight: 700;
-}
-
 .memoryBufferSetter {
   display: flex;
   align-items: center;
@@ -898,37 +876,52 @@ button:disabled {
   gap: 12px;
   color: var(--on-background-20);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
-.memoryBufferSetter > div {
+.memoryBufferStepper {
   height: 28px;
   display: grid;
-  grid-template-columns: 66px 26px;
+  grid-template-columns: 28px 90px 28px;
   align-items: center;
-  border: 1px solid var(--border-20);
+  border: 1px solid var(--border-30);
   border-radius: 3px;
-  background: var(--background-10);
+  background: var(--background-30);
 }
 
-.memoryBufferSetter input {
+.memoryBufferStepper button {
+  width: 28px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--on-background-10);
+  background: transparent;
+  cursor: pointer;
+}
+
+.memoryBufferStepper button:hover:not(:disabled) {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.memoryBufferStepper button:disabled {
+  color: var(--on-background-40);
+  cursor: not-allowed;
+}
+
+.memoryBufferStepper output {
   width: 100%;
   min-width: 0;
   height: 100%;
   color: var(--on-background-0);
-  background: transparent;
-  padding: 0 5px;
-  text-align: right;
+  border-right: 1px solid var(--border-20);
+  border-left: 1px solid var(--border-20);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
   font-variant-numeric: tabular-nums;
-}
-
-.memoryBufferSetter input:disabled {
-  color: var(--on-background-40);
-}
-
-.memoryBufferSetter > div > span {
-  color: var(--on-background-30);
-  font-size: 10px;
 }
 
 .saleaeAuxButton {

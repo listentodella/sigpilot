@@ -23,6 +23,7 @@ interface WaveformCanvasProps {
   tile: WaveformTile | null;
   onWidthChange: (width: number) => void;
   matchChannelColors?: boolean;
+  maximumViewportSamples?: number;
   sampleRateHz: number;
   timeOriginSample?: number;
   showInteractiveMeasurement?: boolean;
@@ -89,6 +90,7 @@ export function WaveformCanvas({
   tile,
   onWidthChange,
   matchChannelColors = true,
+  maximumViewportSamples,
   sampleRateHz,
   timeOriginSample = 0,
   showInteractiveMeasurement = true,
@@ -108,6 +110,7 @@ export function WaveformCanvas({
   const viewportPropsRef = useRef({ start: viewportStart, samples: viewportSamples });
   const sampleRateRef = useRef(sampleRateHz);
   const isLiveRef = useRef(isLive);
+  const maximumViewportSamplesRef = useRef(maximumViewportSamples);
   const timeOriginSampleRef = useRef(timeOriginSample);
   const totalSamplesRef = useRef(totalSamples);
   const rowHeightsRef = useRef(rowHeights);
@@ -166,6 +169,7 @@ export function WaveformCanvas({
     const colorsChanged = matchChannelColorsRef.current !== matchChannelColors;
 
     tileRef.current = tile;
+    maximumViewportSamplesRef.current = maximumViewportSamples;
     viewportPropsRef.current = { start: viewportStart, samples: viewportSamples };
     if (!isLive) {
       cancelLiveViewportAnimation();
@@ -198,7 +202,7 @@ export function WaveformCanvas({
     ) {
       scheduleDraw();
     }
-  }, [isLive, matchChannelColors, rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
+  }, [isLive, matchChannelColors, maximumViewportSamples, rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
 
   useEffect(() => {
     return () => {
@@ -265,6 +269,7 @@ export function WaveformCanvas({
       totalSamplesRef.current,
       isLiveRef.current,
       sampleRateRef.current,
+      maximumViewportSamplesRef.current,
     );
     scheduleViewportChange(next.start, next.samples);
   }
@@ -324,6 +329,7 @@ export function WaveformCanvas({
       totalSamplesRef.current,
       isLiveRef.current,
       sampleRateRef.current,
+      maximumViewportSamplesRef.current,
     );
     const initial = viewportRef.current;
     const startDelta = target.start - initial.start;
@@ -424,7 +430,16 @@ export function WaveformCanvas({
     const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
     const intensity = event.ctrlKey || event.metaKey || event.altKey ? 0.003 : 0.0015;
     const factor = Math.exp(Math.max(-800, Math.min(800, delta)) * intensity);
-    const nextSamples = current.samples * factor;
+    const requestedSamples = current.samples * factor;
+    const nextSamples = normalizeViewport(
+      current.start,
+      requestedSamples,
+      totalSamplesRef.current,
+      isLiveRef.current,
+      sampleRateRef.current,
+      maximumViewportSamplesRef.current,
+    ).samples;
+    if (nextSamples === Math.round(current.samples)) return;
     const anchor = current.start + current.samples * xRatio;
     clampViewport(anchor - nextSamples * xRatio, nextSamples);
   }
@@ -1612,10 +1627,17 @@ function normalizeViewport(
   totalSamples: number,
   isLive: boolean,
   sampleRateHz: number,
+  maximumViewportSamples?: number,
 ) {
   return isLive
-    ? normalizeLiveCaptureViewport(start, samples, totalSamples, sampleRateHz)
-    : normalizeCaptureViewport(start, samples, totalSamples);
+    ? normalizeLiveCaptureViewport(
+        start,
+        samples,
+        totalSamples,
+        sampleRateHz,
+        maximumViewportSamples,
+      )
+    : normalizeCaptureViewport(start, samples, totalSamples, maximumViewportSamples);
 }
 
 function easeOutCubic(progress: number) {

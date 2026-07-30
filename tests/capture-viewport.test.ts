@@ -27,6 +27,18 @@ test("DataLimited pan keeps at least 40 percent captured data visible", () => {
   });
 });
 
+test("a completed capture can preserve the wider viewport selected while recording", () => {
+  assert.deepEqual(
+    normalizeCaptureViewport(0, 500_000_000, 1_000_000, 500_000_000),
+    { samples: 500_000_000, start: 0 },
+  );
+  assert.deepEqual(
+    normalizeCaptureViewport(0, 900_000_000, 1_000_000, 500_000_000),
+    { samples: 500_000_000, start: 0 },
+  );
+  assert.equal(normalizeCaptureViewport(0, 500_000_000, 1_000_000).samples, 2_500_000);
+});
+
 test("live capture reserves a 500 second zoom-out range", () => {
   assert.equal(maximumLiveCaptureViewportSamples(1_000_000, 1_000_000), 500_000_000);
   assert.deepEqual(

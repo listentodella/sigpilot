@@ -1,5 +1,5 @@
-import { ChevronDown, Database, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ChevronDown, Database, Minus, Plus, Trash2 } from "lucide-react";
+import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { CaptureMemoryUsage } from "../lib/api";
 import { formatBytes } from "../lib/format";
 
@@ -19,6 +19,16 @@ export function MemoryBufferControl({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const wasBusyRef = useRef(false);
+  const dragRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
   const budgetBytes = memoryUsage?.buffer_bytes ?? bufferSizeMb * 1024 * 1024;
   const sampleBytes = memoryUsage?.sample_bytes ?? 0;
   const indexBytes = memoryUsage?.index_bytes ?? 0;
@@ -40,6 +50,43 @@ export function MemoryBufferControl({
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, []);
 
+  function startDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    const rect = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!rect) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      left: position?.left ?? rect.left,
+      top: position?.top ?? rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setPosition({
+      left: Math.max(8, Math.min(window.innerWidth - drag.width - 8, drag.left + event.clientX - drag.x)),
+      top: Math.max(8, Math.min(window.innerHeight - drag.height - 8, drag.top + event.clientY - drag.y)),
+    });
+  }
+
+  function stopDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  const normalizedBufferMb = Math.max(512, Math.round(bufferSizeMb / 512) * 512);
+  const adjustBuffer = (deltaGb: number) =>
+    onBufferSizeChange(Math.max(512, normalizedBufferMb + deltaGb * 1024));
+
   return (
     <div className="memoryBufferControl" ref={rootRef}>
       <button
@@ -55,8 +102,17 @@ export function MemoryBufferControl({
       </button>
 
       {open && (
-        <section className="memoryBufferPopover">
-          <header>
+        <section
+          className="memoryBufferPopover"
+          style={position ? { left: position.left, position: "fixed", right: "auto", top: position.top } : undefined}
+        >
+          <header
+            className="memoryBufferPopoverHeader"
+            onPointerDown={startDrag}
+            onPointerMove={moveDrag}
+            onPointerUp={stopDrag}
+            onPointerCancel={stopDrag}
+          >
             <strong>Memory Buffer</strong>
             <span className={busy ? "recording" : ""}>{busy ? "Recording" : "Ready"}</span>
           </header>
@@ -79,42 +135,26 @@ export function MemoryBufferControl({
             <span>/ {formatBytes(budgetBytes)}</span>
           </div>
 
-          <dl className="memoryBufferBreakdown">
-            <div>
-              <dt>Captured data</dt>
-              <dd>{formatBytes(sampleBytes)}</dd>
-            </div>
-            <div>
-              <dt>Waveform index</dt>
-              <dd>{formatBytes(indexBytes)}</dd>
-            </div>
-            <div>
-              <dt>Decoder cache</dt>
-              <dd>{formatBytes(analyzerBytes)}</dd>
-            </div>
-            <div className="total">
-              <dt>Total tracked</dt>
-              <dd>{formatBytes(totalBytes)}</dd>
-            </div>
-          </dl>
-
           <label className="memoryBufferSetter">
-            <span>Memory buffer size</span>
-            <div>
-              <input
+            <span>Buffer size</span>
+            <div className="memoryBufferStepper">
+              <button
+                disabled={busy || normalizedBufferMb <= 512}
+                onClick={() => adjustBuffer(-0.5)}
+                title="Decrease buffer size"
+                type="button"
+              >
+                <Minus size={13} />
+              </button>
+              <output>{(normalizedBufferMb / 1024).toFixed(1)} GB</output>
+              <button
                 disabled={busy}
-                min={0.5}
-                onChange={(event) => {
-                  const valueGb = Number(event.target.value);
-                  if (Number.isFinite(valueGb) && valueGb >= 0.5) {
-                    onBufferSizeChange(Math.round(valueGb * 1024));
-                  }
-                }}
-                step={0.5}
-                type="number"
-                value={bufferSizeMb / 1024}
-              />
-              <span>GB</span>
+                onClick={() => adjustBuffer(0.5)}
+                title="Increase buffer size"
+                type="button"
+              >
+                <Plus size={13} />
+              </button>
             </div>
           </label>
         </section>

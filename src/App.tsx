@@ -82,6 +82,7 @@ import { WaveformCanvas } from "./components/WaveformCanvas";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
 import {
   captureDataWindow,
+  maximumCaptureViewportSamples,
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
 } from "./lib/captureViewport";
@@ -252,6 +253,7 @@ interface UiSession {
   canvasWidth: number;
   viewportStart: number;
   viewportSamples: number;
+  viewportMaxSamples: number | null;
   liveViewportMode: "auto" | "manual";
   diagnostics: DiagnosticEvent[];
   busy: boolean;
@@ -854,6 +856,7 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     requestedViewportSamples,
     summary.metadata.sample_count,
     summary.metadata.sample_rate_hz,
+    session.viewportMaxSamples ?? undefined,
   );
 
   return {
@@ -861,6 +864,7 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     summary: summaryWithLabels(summary, syncedSession.channelLabels),
     viewportStart: viewport.start,
     viewportSamples: viewport.samples,
+    viewportMaxSamples: session.viewportMaxSamples,
     message: "Capturing",
   };
 }
@@ -885,10 +889,41 @@ function preserveCaptureViewport(session: UiSession, summary: CaptureSummary) {
     session.viewportStart,
     session.viewportSamples || Math.min(totalSamples, 100_000),
     totalSamples,
+    session.viewportMaxSamples ?? undefined,
   );
   return {
     viewportSamples: viewport.samples,
     viewportStart: viewport.start,
+    viewportMaxSamples: session.viewportMaxSamples,
+  };
+}
+
+function completedCaptureViewport(
+  session: UiSession,
+  summary: CaptureSummary,
+  panToTrigger: boolean,
+) {
+  const totalSamples = Math.max(1, summary.metadata.sample_count);
+  if (session.liveViewportMode === "manual") {
+    const viewportMaxSamples = Math.max(
+      maximumCaptureViewportSamples(totalSamples),
+      Math.round(session.viewportSamples),
+    );
+    const viewport = normalizeCaptureViewport(
+      session.viewportStart,
+      session.viewportSamples,
+      totalSamples,
+      viewportMaxSamples,
+    );
+    return {
+      viewportMaxSamples,
+      viewportSamples: viewport.samples,
+      viewportStart: viewport.start,
+    };
+  }
+  return {
+    ...(panToTrigger ? initialCaptureViewport(summary) : preserveCaptureViewport(session, summary)),
+    viewportMaxSamples: null,
   };
 }
 
@@ -1131,6 +1166,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     canvasWidth: 1000,
     viewportStart: 0,
     viewportSamples: 50_000,
+    viewportMaxSamples: null,
     liveViewportMode: "auto",
     diagnostics: [],
     busy: false,
@@ -1580,9 +1616,11 @@ export default function App() {
         if (!targetId) return;
         updateSession(targetId, (session) => {
           const syncedSession = syncSessionWithEffectiveCaptureMetadata(session, event.payload);
-          const initialViewport = preferencesRef.current.panToTrigger
-            ? initialCaptureViewport(event.payload)
-            : preserveCaptureViewport(session, event.payload);
+          const initialViewport = completedCaptureViewport(
+            session,
+            event.payload,
+            preferencesRef.current.panToTrigger,
+          );
           return {
             ...syncedSession,
             rangePlacement: null,
@@ -1749,8 +1787,14 @@ export default function App() {
               samples,
               sessionTotalSamples,
               session.summary!.metadata.sample_rate_hz,
+              session.viewportMaxSamples ?? undefined,
             )
-          : normalizeCaptureViewport(start, samples, sessionTotalSamples);
+          : normalizeCaptureViewport(
+              start,
+              samples,
+              sessionTotalSamples,
+              session.viewportMaxSamples ?? undefined,
+            );
         return {
           ...session,
           viewportStart: viewport.start,
@@ -1794,8 +1838,14 @@ export default function App() {
             samples,
             total,
             session.summary!.metadata.sample_rate_hz,
+            session.viewportMaxSamples ?? undefined,
           )
-        : normalizeCaptureViewport(start, samples, total);
+        : normalizeCaptureViewport(
+            start,
+            samples,
+            total,
+            session.viewportMaxSamples ?? undefined,
+          );
       const targetSamples = target.samples;
       const targetStart = target.start;
       const initialStart = session.viewportStart;
@@ -1828,7 +1878,22 @@ export default function App() {
     (factor: number) => {
       if (!activeSession?.summary) return;
       const anchor = activeSession.viewportStart + activeSession.viewportSamples / 2;
-      const nextSamples = activeSession.viewportSamples * factor;
+      const requestedSamples = activeSession.viewportSamples * factor;
+      const nextSamples = activeSession.busy
+        ? normalizeLiveCaptureViewport(
+            activeSession.viewportStart,
+            requestedSamples,
+            activeSession.summary.metadata.sample_count,
+            activeSession.summary.metadata.sample_rate_hz,
+            activeSession.viewportMaxSamples ?? undefined,
+          ).samples
+        : normalizeCaptureViewport(
+            activeSession.viewportStart,
+            requestedSamples,
+            activeSession.summary.metadata.sample_count,
+            activeSession.viewportMaxSamples ?? undefined,
+          ).samples;
+      if (nextSamples === Math.round(activeSession.viewportSamples)) return;
       updateViewport(activeSession.id, anchor - nextSamples / 2, nextSamples);
     },
     [activeSession, updateViewport],
@@ -2255,6 +2320,7 @@ export default function App() {
       liveViewportMode: "auto",
       viewportStart: 0,
       viewportSamples: 1,
+      viewportMaxSamples: null,
       progress: null,
       memoryUsage: {
         buffer_bytes: nextSettings.buffer_size_mb * 1024 * 1024,
@@ -2318,26 +2384,32 @@ export default function App() {
         },
         demoAnalyzers,
       );
-      const initialViewport = initialCaptureViewport(next);
-      updateSession(session.id, (current) => ({
-        ...applyLiveCaptureSummary(current, next),
-        ...initialViewport,
-        cursorState: {
-          ...defaultCursorState(next.metadata.sample_count, next.metadata.channel_count),
-          visible: current.cursorState.visible,
-        },
-        analyzers: current.analyzers.map((analyzer) => ({
-          ...analyzer,
-          protocolBubbles: [],
-          decodedFrames: [],
-          previousFrame: null,
-          nextFrame: null,
-          renderedTracks: [],
-          renderedDecodeSignature: null,
-          highlightedFrameIndex: null,
-        })),
-        message: "Capture complete",
-      }));
+      updateSession(session.id, (current) => {
+        const completedViewport = completedCaptureViewport(
+          current,
+          next,
+          preferencesRef.current.panToTrigger,
+        );
+        return {
+          ...applyLiveCaptureSummary(current, next),
+          ...completedViewport,
+          cursorState: {
+            ...defaultCursorState(next.metadata.sample_count, next.metadata.channel_count),
+            visible: current.cursorState.visible,
+          },
+          analyzers: current.analyzers.map((analyzer) => ({
+            ...analyzer,
+            protocolBubbles: [],
+            decodedFrames: [],
+            previousFrame: null,
+            nextFrame: null,
+            renderedTracks: [],
+            renderedDecodeSignature: null,
+            highlightedFrameIndex: null,
+          })),
+          message: "Capture complete",
+        };
+      });
     } catch (error) {
       updateSession(session.id, (current) => ({ ...current, message: String(error) }));
     } finally {
@@ -3882,6 +3954,7 @@ export default function App() {
                     <div className="graphViewport">
                       <WaveformCanvas
                         isLive={activeSession.busy}
+                        maximumViewportSamples={activeSession.viewportMaxSamples ?? undefined}
                         rowHeights={visibleOuterRowHeights}
                         rowTopInsets={visibleAnalyzerInsets}
                         tile={visibleTile}
