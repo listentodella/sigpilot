@@ -235,6 +235,7 @@ const SIDEBAR_TABS_CHANGER_WIDTH = 47;
 interface UiSession {
   id: string;
   name: string;
+  readOnly: boolean;
   selectedDevice: string;
   settings: CaptureSettings;
   deviceSettings: UiDeviceSettings;
@@ -1152,6 +1153,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
   return {
     id,
     name,
+    readOnly: false,
     selectedDevice: deviceId,
     settings,
     deviceSettings: source
@@ -2310,6 +2312,13 @@ export default function App() {
   ]);
 
   async function runCaptureForSession(session: UiSession, deviceId: string) {
+    if (session.readOnly) {
+      updateSession(session.id, (current) => ({
+        ...current,
+        message: "Opened capture cannot be overwritten. Create a new session to start capturing data.",
+      }));
+      return;
+    }
     const captureDevice = devices.find((device) => device.id === deviceId) ?? selected;
     const nextSettings = clampCaptureSettingsToCapabilities(
       settingsFromDeviceSettings(session, deviceId),
@@ -2535,7 +2544,7 @@ export default function App() {
     }
   }
 
-  async function loadCaptureIntoSession(opened: OpenCaptureResult, targetSession?: UiSession) {
+  async function loadCaptureIntoSession(opened: OpenCaptureResult, targetSession?: UiSession, sourcePath?: string) {
     const { summary, saleae_session: saleaeSession } = opened;
     const target =
       targetSession ??
@@ -2551,7 +2560,8 @@ export default function App() {
     );
     updateSession(target.id, (session) => ({
       ...session,
-      name: saleaeSession?.name.trim() || session.name,
+      name: captureNameFromSavedPath(sourcePath ?? "") || saleaeSession?.name.trim() || session.name,
+      readOnly: true,
       notes: saleaeSession?.notes ?? session.notes,
       selectedDevice: summary.metadata.source_device || session.selectedDevice,
       settings: {
@@ -2598,18 +2608,20 @@ export default function App() {
 
   async function handleOpen() {
     let target: UiSession | null = null;
+    let sourcePath: string | null = null;
     try {
       const path = await openDialog({
         multiple: false,
         filters: [{ name: "Logic Capture", extensions: ["pxl", "pxcap", "sal"] }],
       });
       if (typeof path !== "string") return;
+      sourcePath = path;
       target =
         activeSession && !activeSession.summary
           ? activeSession
           : createSession(selectedDevice, activeSession ?? undefined);
       const opened = await openCapture(target.id, path);
-      await loadCaptureIntoSession(opened, target);
+      await loadCaptureIntoSession(opened, target, path);
     } catch (error) {
       try {
         target ??=
@@ -2617,7 +2629,7 @@ export default function App() {
             ? activeSession
             : createSession(selectedDevice, activeSession ?? undefined);
         const opened = await openCapture(target.id, "preview");
-        await loadCaptureIntoSession(opened, target);
+        await loadCaptureIntoSession(opened, target, sourcePath ?? undefined);
         updateSession(target.id, (session) => ({ ...session, message: "Preview capture loaded" }));
       } catch {
         if (activeSession) {
@@ -3818,20 +3830,12 @@ export default function App() {
                 />
                 <LogicToolbar
                   availableAnalyzers={availableAnalyzers}
-                  bufferSizeMb={activeSession?.deviceSettings.bufferSizeMb ?? activeSettings.buffer_size_mb}
                   busy={Boolean(activeSession?.busy)}
                   hasCapture={Boolean(activeSession?.summary)}
                   memoryUsage={activeSession?.memoryUsage ?? null}
+                  readOnly={Boolean(activeSession?.readOnly)}
                   onCommand={invokeCommand}
                   onFit={fitViewport}
-                  onBufferSizeChange={(bufferSizeMb) => {
-                    if (!activeSession || activeSession.busy) return;
-                    updateSession(activeSession.id, (session) => ({
-                      ...session,
-                      deviceSettings: { ...session.deviceSettings, bufferSizeMb },
-                      settings: { ...session.settings, buffer_size_mb: bufferSizeMb },
-                    }));
-                  }}
                   onStart={handleCapture}
                   onStop={handleCancel}
                   onZoomIn={() => zoomViewport(0.5)}
@@ -4195,7 +4199,9 @@ export default function App() {
           onDuplicateSession={duplicateSessionSetup}
           onRefreshDevices={refreshDevices}
           onRenameSession={(sessionId, name) =>
-            updateSession(sessionId, (session) => ({ ...session, name: name.trim() ? name : session.name }))
+            updateSession(sessionId, (session) =>
+              session.readOnly ? session : { ...session, name: name.trim() ? name : session.name },
+            )
           }
           onSelectDevice={setSelectedDeviceForActive}
           onSelectSession={setActiveSessionId}
@@ -6107,7 +6113,7 @@ function SessionTab({
         setContextMenu({ x: event.clientX, y: event.clientY });
       }}
     >
-      {isActive ? (
+      {isActive && !session.readOnly ? (
         <input
           aria-label="Session name"
           value={session.name}
@@ -6116,6 +6122,9 @@ function SessionTab({
         />
       ) : (
         <span>{session.name}</span>
+      )}
+      {session.readOnly && (
+        <ReadOnlyLockIcon />
       )}
       <button
         aria-label={`Close ${session.name}`}
@@ -6154,6 +6163,31 @@ function SessionTab({
         document.body,
       )}
     </div>
+  );
+}
+
+function ReadOnlyLockIcon() {
+  return (
+    <svg
+      aria-label="Read-only session"
+      className="sessionTabLock"
+      width="10"
+      height="14"
+      viewBox="0 0 10 14"
+      fill="none"
+      role="img"
+    >
+      <path
+        d="M3.009 6.409h5.496a.952.952 0 0 1 .952.955v5.684a.952.952 0 0 1-.952.952H.955A.955.955 0 0 1 0 13.048V7.364a.955.955 0 0 1 .955-.955h2.054Z"
+        fill="currentColor"
+        opacity="0.61"
+      />
+      <path
+        d="M1.073 3.834V6.41h1.784V3.834c0-.524.2-1.026.555-1.396a1.86 1.86 0 0 1 2.679 0c.355.37.554.872.554 1.396V6.41H8.43V3.834C8.43 1.716 6.783 0 4.751 0 2.72 0 1.073 1.716 1.073 3.834Z"
+        fill="currentColor"
+        opacity="0.61"
+      />
+    </svg>
   );
 }
 

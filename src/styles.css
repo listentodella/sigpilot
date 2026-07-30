@@ -471,7 +471,24 @@ button:disabled {
 }
 
 .saleaeCaptureButton {
+  position: relative;
   color: var(--selected-highlight);
+}
+
+.saleaeCaptureButton:disabled {
+  color: var(--on-background-40);
+}
+
+.saleaeCaptureErrorBadge {
+  width: 13px;
+  height: 13px;
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  border: 2px solid var(--border-20);
+  border-radius: 50%;
+  background: #ed5074;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
 .saleaeCaptureButton:active:not(:disabled),
@@ -690,241 +707,72 @@ button:disabled {
   border-left: 1px solid var(--border-20);
 }
 
-.memoryBufferControl {
-  height: 100%;
-  z-index: 240;
-  margin-left: auto;
-}
-
-.memoryBufferControl + .saleaeToolbarAux {
-  margin-left: 0;
-}
-
-.memoryBufferButton {
-  width: 107px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--on-background-20);
-  background: transparent;
-  padding: 0 8px;
-  cursor: pointer;
-}
-
-.memoryBufferButton:hover,
-.memoryBufferButton.active {
-  color: var(--on-primary);
-  background: var(--selected-highlight);
-}
-
-.memoryBufferCachingIcon {
-  flex: 0 0 auto;
-  color: var(--on-background-10);
-}
-
-.memoryBufferButtonStack {
-  min-width: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-  text-align: left;
-}
-
-.memoryBufferButtonStack strong {
-  overflow: hidden;
-  color: currentColor;
-  font-family: "Roboto Mono", monospace;
-  font-size: 11px;
-  line-height: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.memoryBufferButtonStack small {
-  color: currentColor;
-  font-family: "Roboto Condensed", Roboto, sans-serif;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 10px;
-}
-
-.memoryBufferCaret {
-  flex: 0 0 auto;
-}
-
-.memoryBufferButton.active .memoryBufferCaret {
-  transform: rotate(180deg);
-}
-
-.memoryBufferPopover {
-  width: 244px;
+.captureMemoryProgress {
+  box-sizing: border-box;
+  width: 200px;
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  right: 55px;
+  bottom: 35px;
   z-index: 260;
-  border: 1px solid var(--border-20);
-  border-radius: 4px;
-  color: var(--on-background-20);
-  background: var(--background-20);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 16px;
-  padding: 14px 16px 16px;
-}
-
-.memoryBufferPopoverHeader {
+  border: 1px solid #56575f;
+  border-radius: 5px;
+  color: #a6a6aa;
+  background: #202124;
+  box-shadow: 0 4px 4px rgba(0, 0, 0, 0.15);
   display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: grab;
-  user-select: none;
+  flex-direction: column;
+  padding: 10px 14px;
+  cursor: move;
   touch-action: none;
+  user-select: none;
 }
 
-.memoryBufferPopoverHeader:active {
-  cursor: grabbing;
-}
-
-.memoryBufferPopoverHeader strong {
-  color: var(--on-background-0);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 13px;
-}
-
-.memoryBufferAction {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.memoryBufferFlow {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  color: var(--on-background-20);
-}
-
-.memoryDataPath {
-  overflow: hidden;
-  color: var(--border-20);
-}
-
-.memoryDataPath.flowing {
-  color: var(--selected-highlight);
-}
-
-.memoryDataPath.flowing g {
-  animation: memoryBufferDotFlow 800ms linear infinite;
-}
-
-@keyframes memoryBufferDotFlow {
-  from { transform: translateX(0); }
-  to { transform: translateX(6px); }
-}
-
-.memoryBufferProgress {
-  width: 48px;
-  height: 10px;
-  position: relative;
-}
-
-.memoryBufferProgressFrame {
-  width: 100%;
-  height: 100%;
-  border: 1px solid var(--on-background-30);
-  background: linear-gradient(var(--border-20), var(--border-20)) center / calc(100% - 2px) 1px no-repeat;
-}
-
-.memoryBufferWaveClip {
-  height: 10px;
+.captureMemoryProgressClose {
+  width: 20px;
+  height: 20px;
   position: absolute;
-  inset: 0 auto 0 1px;
-  overflow: hidden;
-}
-
-.memoryBufferWaveClip img {
-  width: 104px;
-  height: 10px;
-  position: absolute;
-  right: 0;
-  max-width: none;
-}
-
-.memoryBufferWaveClip img.flowing {
-  animation: memoryBufferWaveFlow 500ms linear infinite;
-}
-
-@keyframes memoryBufferWaveFlow {
-  from { transform: translateX(0); }
-  to { transform: translateX(4px); }
-}
-
-.memoryBufferTrash {
-  color: var(--border-20);
-}
-
-.memoryBufferValue {
-  font-family: "Roboto Mono", monospace;
-  font-size: 11px;
-  line-height: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.memoryBufferValue strong {
-  color: var(--on-background-0);
-}
-
-.memoryBufferStepper {
-  width: 100%;
-  height: 28px;
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 28px;
-  align-items: center;
-  border: 1px solid var(--border-30);
-  border-radius: 3px;
-  background: var(--background-30);
-}
-
-.memoryBufferStepper button {
-  width: 28px;
-  height: 26px;
-  display: inline-flex;
+  top: 2px;
+  right: 2px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--on-background-10);
+  padding: 4px;
+  color: var(--on-background-20);
   background: transparent;
   cursor: pointer;
 }
 
-.memoryBufferStepper button:hover:not(:disabled) {
+.captureMemoryProgressClose:hover {
   color: var(--on-background-0);
-  background: var(--hover-background);
 }
 
-.memoryBufferStepper button:disabled {
-  color: var(--on-background-40);
-  cursor: not-allowed;
+.captureMemoryProgressSpacer {
+  height: 12px;
 }
 
-.memoryBufferStepper output {
+.captureMemoryProgressLabels {
   width: 100%;
-  min-width: 0;
-  height: 100%;
-  color: var(--on-background-0);
-  border-right: 1px solid var(--border-20);
-  border-left: 1px solid var(--border-20);
   display: flex;
   align-items: center;
-  justify-content: center;
-  text-align: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: #a6a6aa;
+  font-size: 13px;
+  line-height: 16px;
   font-variant-numeric: tabular-nums;
+}
+
+.captureMemoryProgressTrack {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  background: #151516;
+}
+
+.captureMemoryProgressFill {
+  height: 100%;
+  min-width: 0;
+  background: #f3dc64;
 }
 
 .saleaeAuxButton {
@@ -6685,6 +6533,11 @@ body.timing-marker-col-resize * {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: center;
+}
+
+.sessionTabLock {
+  flex: 0 0 auto;
+  color: var(--on-background-20);
 }
 
 .sessionTab input {

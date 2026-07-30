@@ -14,11 +14,10 @@ import { MemoryBufferControl } from "./MemoryBufferControl";
 type MenuName = "analyzers" | "markers" | null;
 
 interface LogicToolbarProps {
-  bufferSizeMb: number;
   busy: boolean;
   hasCapture: boolean;
   memoryUsage: CaptureMemoryUsage | null;
-  onBufferSizeChange: (bufferSizeMb: number) => void;
+  readOnly: boolean;
   onStart: () => void;
   onStop: () => void;
   onCommand: (command: UiCommand, payload?: CommandPayload) => void;
@@ -29,10 +28,10 @@ interface LogicToolbarProps {
 }
 
 export function LogicToolbar({
-  bufferSizeMb,
   busy,
   hasCapture,
   memoryUsage,
+  readOnly,
   availableAnalyzers,
   onStart,
   onStop,
@@ -40,7 +39,6 @@ export function LogicToolbar({
   onZoomIn,
   onZoomOut,
   onFit,
-  onBufferSizeChange,
 }: LogicToolbarProps) {
   const [openMenu, setOpenMenu] = useState<MenuName>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -56,7 +54,11 @@ export function LogicToolbar({
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, []);
 
-  const captureTooltip = busy ? "Stop" : "Start";
+  const captureTooltip = busy
+    ? "Stop"
+    : readOnly
+      ? "Opened capture cannot be overwritten. Create a new session to start capturing data."
+      : "Start";
 
   return (
     <div className="saleaeToolbarWrapper" ref={rootRef}>
@@ -64,11 +66,13 @@ export function LogicToolbar({
         <div className="saleaeCaptureButtons">
           <ToolbarButton
             className="saleaeCaptureButton"
+            disabled={!busy && readOnly}
             isActive={busy}
             title={captureTooltip}
             onClick={busy ? onStop : onStart}
           >
             {busy ? <StopRecordingIcon /> : <StartRecordingIcon />}
+            {!busy && readOnly && <span className="saleaeCaptureErrorBadge" aria-hidden="true" />}
           </ToolbarButton>
         </div>
 
@@ -139,10 +143,8 @@ export function LogicToolbar({
       </div>
 
       <MemoryBufferControl
-        bufferSizeMb={bufferSizeMb}
         busy={busy}
         memoryUsage={memoryUsage}
-        onBufferSizeChange={onBufferSizeChange}
       />
 
       <div className="saleaeToolbarAux" aria-label="View tools">
