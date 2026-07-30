@@ -129,10 +129,19 @@ export function TimingMarkersOverlay({
   function clientXToSample(clientX: number, clientY?: number, snappingEnabled = true) {
     const root = rootRef.current;
     if (!root) return 0;
-    const rect = root.getBoundingClientRect();
+    const waveformHost = document.querySelector<HTMLElement>(".waveformCanvasHost");
+    const rect = waveformHost?.getBoundingClientRect() ?? root.getBoundingClientRect();
     const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
     const rawSample = clampSample(viewportStart + ratio * viewportSamples, totalSamples);
-    if (!snappingEnabled || !tile || clientY == null) return rawSample;
+    if (
+      !snappingEnabled
+      || !tile
+      || clientY == null
+      || clientX < rect.left
+      || clientX > rect.right
+      || clientY < rect.top
+      || clientY > rect.bottom
+    ) return rawSample;
     const channelIndex = findSaleaeGraphChannelIndexAtY(
       getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets),
       clientY - rect.top,

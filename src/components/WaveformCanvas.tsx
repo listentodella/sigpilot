@@ -182,7 +182,6 @@ export function WaveformCanvas({
     const colorsChanged = matchChannelColorsRef.current !== matchChannelColors;
 
     tileRef.current = tile;
-    if (tileChanged) edgeJumpRef.current = null;
     maximumViewportSamplesRef.current = maximumViewportSamples;
     viewportPropsRef.current = { start: viewportStart, samples: viewportSamples };
     if (!isLive) {
@@ -207,6 +206,13 @@ export function WaveformCanvas({
     rowHeightsRef.current = rowHeights;
     rowTopInsetsRef.current = rowTopInsets;
     if (!showInteractiveMeasurement) hoverRef.current = null;
+    if (tileChanged && edgeJumpRef.current && hostRef.current) {
+      const rect = hostRef.current.getBoundingClientRect();
+      updateEdgeJumpAt(
+        rect.left + edgeJumpRef.current.pointerX,
+        rect.top + edgeJumpRef.current.pointerY,
+      );
+    }
     if (
       tileChanged ||
       (!isLive && visualViewportChanged) ||
@@ -419,7 +425,6 @@ export function WaveformCanvas({
   function handleWheel(event: WheelEvent) {
     if (!totalSamplesRef.current) return;
     event.preventDefault();
-    edgeJumpRef.current = null;
     setViewportInteractionActive(true);
     if (wheelInteractionTimerRef.current !== null) {
       window.clearTimeout(wheelInteractionTimerRef.current);
@@ -441,6 +446,7 @@ export function WaveformCanvas({
       const deltaPixels = normalizeWheelDelta(event.deltaX || event.deltaY, event.deltaMode);
       const deltaSamples = (deltaPixels / Math.max(1, rect.width)) * current.samples;
       clampViewport(current.start + deltaSamples, current.samples);
+      if (edgeJumpRef.current) updateEdgeJumpAt(event.clientX, event.clientY);
       return;
     }
 
@@ -459,6 +465,7 @@ export function WaveformCanvas({
     if (nextSamples === Math.round(current.samples)) return;
     const anchor = current.start + current.samples * xRatio;
     clampViewport(anchor - nextSamples * xRatio, nextSamples);
+    if (edgeJumpRef.current) updateEdgeJumpAt(event.clientX, event.clientY);
   }
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
