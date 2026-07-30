@@ -28,5 +28,6 @@ Saleae GraphServer/analyzer runtimes remain macOS-only and are not required by t
 Windows or Linux jobs. `.sal` import/export is therefore macOS-only.
 
 Pushes and pull requests for `codex/graph-server-32ch`, `main` and `master`
-trigger the workflow. A `v*` tag publishes all successful artifacts to a GitHub
-release.
+trigger the workflow. A `v*` tag always reaches the release job after its build
+jobs settle; it publishes every artifact that completed successfully, even when
+another platform build failed.

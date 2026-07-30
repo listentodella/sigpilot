@@ -474,7 +474,8 @@ jobs:
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A successful platform package should not be held back by another runner.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
     needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     permissions:
@@ -490,3 +491,4 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: release-artifacts/*
+          fail_on_unmatched_files: false

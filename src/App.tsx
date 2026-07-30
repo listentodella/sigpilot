@@ -2358,7 +2358,9 @@ export default function App() {
         total_bytes: 0,
       },
       rangePlacement: null,
+      rangeMeasurements: [],
       timingMarkerPlacement: null,
+      timingMarkers: [],
       analyzers: current.analyzers.map((analyzer) => ({
         ...analyzer,
         protocolBubbles: [],
