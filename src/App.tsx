@@ -14,6 +14,7 @@ import {
   GripVertical,
   Maximize2,
   MoreVertical,
+  Minus,
   Plus,
   RefreshCw,
   Save,
@@ -6952,23 +6953,14 @@ function DeviceSettingsPanel({
             />
           </label>
         )}
-        <label className="stack-field">
-          <span>Memory buffer size (GB)</span>
-          <input
-            disabled={session.busy}
-            min={0.5}
-            onChange={(event) => {
-              const valueGb = Number(event.target.value);
-              if (!Number.isFinite(valueGb) || valueGb < 0.5) return;
-              const bufferSizeMb = Math.round(valueGb * 1024);
-              updateDeviceSettings({ bufferSizeMb });
-              onUpdateSettings({ buffer_size_mb: bufferSizeMb });
-            }}
-            step={0.5}
-            type="number"
-            value={session.deviceSettings.bufferSizeMb / 1024}
-          />
-        </label>
+        <MemoryBufferSizeSetter
+          bufferSizeMb={session.deviceSettings.bufferSizeMb}
+          disabled={session.busy || session.readOnly}
+          onChange={(bufferSizeMb) => {
+            updateDeviceSettings({ bufferSizeMb });
+            onUpdateSettings({ buffer_size_mb: bufferSizeMb });
+          }}
+        />
       </section>
 
       <section className="deviceSettingsBlock compact">
@@ -7086,7 +7078,90 @@ function DeviceSettingsPanel({
         />
       </section>
 
-      {session.busy && <div className="deviceSettingsDisabledOverlay">Settings are disabled during capture</div>}
+      {(session.busy || session.readOnly) && (
+        <div className="deviceSettingsDisabledOverlay">
+          {session.readOnly ? "This is a read-only session" : "Settings are disabled during capture"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MemoryBufferSizeSetter({
+  bufferSizeMb,
+  disabled,
+  onChange,
+}: {
+  bufferSizeMb: number;
+  disabled: boolean;
+  onChange: (bufferSizeMb: number) => void;
+}) {
+  const valueGb = Math.max(0.5, Math.round((bufferSizeMb / 1024) * 100) / 100);
+  const [draftValue, setDraftValue] = useState(String(valueGb));
+
+  useEffect(() => {
+    setDraftValue(String(valueGb));
+  }, [valueGb]);
+
+  function setValue(nextValueGb: number) {
+    if (!Number.isFinite(nextValueGb)) return;
+    const normalizedValue = Math.max(0.5, Math.round(nextValueGb * 100) / 100);
+    setDraftValue(String(normalizedValue));
+    onChange(Math.round(normalizedValue * 1024));
+  }
+
+  function commitDraftValue() {
+    const parsedValue = Number(draftValue);
+    if (!Number.isFinite(parsedValue)) {
+      setDraftValue(String(valueGb));
+      return;
+    }
+    setValue(parsedValue);
+  }
+
+  return (
+    <div className={`memoryBufferSizeSetter ${disabled ? "disabled" : ""}`}>
+      <span className="memoryBufferSizeLabel">Memory buffer size</span>
+      <div className="memoryBufferValueSetter">
+        <button
+          aria-label="Decrease memory buffer size"
+          disabled={disabled || valueGb <= 0.5}
+          onClick={() => setValue(valueGb - 0.5)}
+          title="Decrease memory buffer size"
+          type="button"
+        >
+          <Minus size={16} strokeWidth={2.5} />
+        </button>
+        <label className="memoryBufferValueInput">
+          <input
+            aria-label="Memory buffer size"
+            disabled={disabled}
+            min={0.5}
+            onBlur={commitDraftValue}
+            onChange={(event) => setDraftValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+              if (event.key === "Escape") {
+                setDraftValue(String(valueGb));
+                event.currentTarget.blur();
+              }
+            }}
+            step={0.5}
+            type="number"
+            value={draftValue}
+          />
+          <span>GB</span>
+        </label>
+        <button
+          aria-label="Increase memory buffer size"
+          disabled={disabled}
+          onClick={() => setValue(valueGb + 0.5)}
+          title="Increase memory buffer size"
+          type="button"
+        >
+          <Plus size={16} strokeWidth={2.5} />
+        </button>
+      </div>
     </div>
   );
 }

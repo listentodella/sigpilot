@@ -3479,6 +3479,102 @@ button:disabled {
   gap: 8px;
 }
 
+.memoryBufferSizeSetter {
+  min-height: 35px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memoryBufferSizeLabel {
+  color: var(--on-background-10);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.memoryBufferValueSetter {
+  width: 142px;
+  height: 32px;
+  flex: 0 0 142px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  border: 1px solid #57575e;
+  border-radius: 4px;
+  overflow: hidden;
+  color: var(--on-background-0);
+  background: transparent;
+}
+
+.memoryBufferValueSetter button {
+  width: 34px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--on-background-0);
+  background: transparent;
+  cursor: pointer;
+}
+
+.memoryBufferValueSetter button:first-child {
+  border-right: 1px solid #57575e;
+}
+
+.memoryBufferValueSetter button:last-child {
+  border-left: 1px solid #57575e;
+}
+
+.memoryBufferValueSetter button:hover:not(:disabled) {
+  background: var(--background-30);
+}
+
+.memoryBufferValueSetter button:disabled {
+  color: var(--on-background-40);
+  cursor: default;
+}
+
+.memoryBufferValueInput {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+}
+
+.memoryBufferValueInput input {
+  width: 30px;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--on-background-0);
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+  line-height: 16px;
+  text-align: right;
+  outline: none;
+  appearance: textfield;
+}
+
+.memoryBufferValueInput input::-webkit-inner-spin-button,
+.memoryBufferValueInput input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.memoryBufferValueInput span {
+  color: var(--on-background-30);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.memoryBufferSizeSetter.disabled {
+  opacity: 0.45;
+}
+
 .deviceSettingsBlockTitle {
   display: flex;
   align-items: center;
