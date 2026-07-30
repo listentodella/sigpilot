@@ -184,6 +184,12 @@ pub struct DigitalGraph {
     last_word: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NearestDigitalTransition {
+    pub sample: u64,
+    pub next_sample: Option<u64>,
+}
+
 impl DigitalGraph {
     pub fn new(mut metadata: CaptureMetadata) -> Result<Self> {
         validate_metadata(&metadata)?;
@@ -309,6 +315,36 @@ impl DigitalGraph {
 
     pub fn sample_count(&self) -> u64 {
         self.sample_count
+    }
+
+    pub fn nearest_transition(
+        &self,
+        channel: u8,
+        sample: u64,
+    ) -> Result<Option<NearestDigitalTransition>> {
+        let index = self
+            .channels
+            .get(usize::from(channel))
+            .ok_or(GraphError::InvalidWaveformRequest)?;
+        let right = index.first_edge_at_or_after(sample);
+        let left = right.checked_sub(1);
+        let nearest_index = match (left, index.edges.get(right)) {
+            (Some(left), Some(right_sample)) => {
+                let left_sample = index.edge(left);
+                if sample.saturating_sub(left_sample) <= right_sample.saturating_sub(sample) {
+                    left
+                } else {
+                    right
+                }
+            }
+            (Some(left), None) => left,
+            (None, Some(_)) => right,
+            (None, None) => return Ok(None),
+        };
+        Ok(Some(NearestDigitalTransition {
+            sample: index.edge(nearest_index),
+            next_sample: index.edges.get(nearest_index + 1).copied(),
+        }))
     }
 
     fn set_trigger(&mut self, trigger: CaptureTriggerMetadata) {
@@ -1073,6 +1109,18 @@ impl GraphSession {
             .as_ref()
             .map(DigitalGraph::sample_count)
             .unwrap_or(0)
+    }
+
+    pub fn nearest_transition(
+        &self,
+        channel: u8,
+        sample: u64,
+    ) -> Result<Option<NearestDigitalTransition>> {
+        self.graph
+            .read()
+            .as_ref()
+            .ok_or(GraphError::EmptyGraph)?
+            .nearest_transition(channel, sample)
     }
 
     pub fn revision(&self) -> u64 {
@@ -2361,6 +2409,38 @@ mod tests {
             assert_eq!(trimmed.initial_high, expected.initial_high);
             assert_eq!(trimmed.edges, expected.edges);
         }
+    }
+
+    #[test]
+    fn nearest_transition_uses_the_index_without_a_viewport_tile() {
+        let mut metadata = demo_capture(1, 1_000).metadata;
+        metadata.sample_count = 1_000;
+        let session = GraphSession::default();
+        session
+            .replace_sparse_capture(SparseCaptureData {
+                metadata,
+                channels: vec![SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: vec![100, 300, 700, 900],
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(
+            session.nearest_transition(0, 260).unwrap(),
+            Some(NearestDigitalTransition {
+                sample: 300,
+                next_sample: Some(700),
+            }),
+        );
+        assert_eq!(
+            session.nearest_transition(0, 995).unwrap(),
+            Some(NearestDigitalTransition {
+                sample: 900,
+                next_sample: None,
+            }),
+        );
     }
 
     #[test]

@@ -116,6 +116,7 @@ import {
   HardwareChannelModeInfo,
   listDevices,
   measureDigitalRange,
+  nearestDigitalTransition,
   openCapture,
   OpenCaptureResult,
   prepareDevice,
@@ -4093,6 +4094,7 @@ export default function App() {
                     rowHeights={visibleOuterRowHeights}
                     rowTopInsets={visibleAnalyzerInsets}
                     sampleRateHz={activeSession.summary.metadata.sample_rate_hz}
+                    sessionId={activeSession.id}
                     tile={visibleTile}
                     totalSamples={totalSamples}
                     viewportSamples={activeSession.viewportSamples}
@@ -5041,6 +5043,7 @@ function RangeMeasurementsOverlay({
   const dragRef = useRef<{ edge: "start" | "end"; id: string } | null>(null);
   const placementDragRef = useRef<{ channelIndex: number; pointerId: number; startSample: number; startX: number } | null>(null);
   const lastPlacementPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const rangeSnapRequestRef = useRef(0);
   const totalSamples = session.summary?.metadata.sample_count ?? 0;
   const rowLayout = useMemo(
     () => getSaleaeGraphChannelLayout(rowHeights, visibleChannelIndexes.length, 1, rowTopInsets),
@@ -5115,8 +5118,47 @@ function RangeMeasurementsOverlay({
     if (channelIndex == null) return null;
     return {
       channelIndex,
+      sourceChannel: tile?.channels[rowIndex]?.channel ?? channelIndex,
+      rawSample: resolved.rawSample,
       sample: Math.round(resolved.sample),
     };
+  }
+
+  function requestRangePlacementSnap(
+    clientX: number,
+    clientY: number,
+    host: HTMLElement,
+    fixedChannelIndex?: number,
+  ) {
+    const next = pointerToPlacement(clientX, clientY, host, fixedChannelIndex);
+    if (!next) return;
+    const requestId = rangeSnapRequestRef.current + 1;
+    rangeSnapRequestRef.current = requestId;
+    void nearestDigitalTransition(session.id, {
+      channel: next.sourceChannel,
+      sample: Math.round(next.rawSample),
+    }).then((transition) => {
+      if (!transition || requestId !== rangeSnapRequestRef.current) return;
+      const samplesPerPixel = session.viewportSamples / Math.max(1, host.clientWidth);
+      const withinThreshold = Math.abs(transition.sample - next.rawSample) <= samplesPerPixel * 8;
+      const pulseIsWideEnough = transition.next_sample == null
+        || (transition.next_sample - transition.sample) / samplesPerPixel >= 8;
+      if (!withinThreshold || !pulseIsWideEnough) return;
+      onUpdateSession((current) => {
+        const placement = current.rangePlacement;
+        if (!placement) return current;
+        return {
+          ...current,
+          rangePlacement: {
+            ...placement,
+            channelIndex: placement.startSample === null ? next.channelIndex : placement.channelIndex,
+            currentSample: Math.round(transition.sample),
+          },
+        };
+      });
+    }).catch(() => {
+      // Coarse tile data remains the immediate placement fallback.
+    });
   }
 
   function selectRange(id: string, showTooltip = false) {
@@ -5208,6 +5250,12 @@ function RangeMeasurementsOverlay({
         },
       };
     });
+    requestRangePlacementSnap(
+      clientX,
+      clientY,
+      host,
+      session.rangePlacement.startSample !== null ? session.rangePlacement.channelIndex ?? undefined : undefined,
+    );
   }
 
   function finishPlacement(channelIndex: number, startSample: number, endSample: number) {

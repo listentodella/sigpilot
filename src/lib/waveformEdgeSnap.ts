@@ -21,13 +21,10 @@ export function findNearestEdgeSample(
   }
   if (nearestIndex < 0) return null;
   if (rejectCrowdedEdges) {
-    const previousGap = nearestIndex > 0
-      ? (edgeSamples[nearestIndex] - edgeSamples[nearestIndex - 1]) / samplesPerPixel
-      : Number.POSITIVE_INFINITY;
     const nextGap = nearestIndex + 1 < edgeSamples.length
       ? (edgeSamples[nearestIndex + 1] - edgeSamples[nearestIndex]) / samplesPerPixel
       : Number.POSITIVE_INFINITY;
-    if (Math.min(previousGap, nextGap) < thresholdPx) return null;
+    if (nextGap < thresholdPx) return null;
   }
   return edgeSamples[nearestIndex];
 }

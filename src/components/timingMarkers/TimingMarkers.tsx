@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { WaveformTile } from "../../lib/api";
+import { nearestDigitalTransition, type WaveformTile } from "../../lib/api";
 import { resolveWaveformPointerSample } from "../../lib/waveformEdgeSnap";
 import {
   getNextTimingMarkerNumber,
@@ -45,6 +45,7 @@ interface TimingMarkersOverlayProps {
   sampleRateHz: number;
   rowHeights: number[];
   rowTopInsets?: number[];
+  sessionId: string;
   tile: WaveformTile | null;
   totalSamples: number;
   viewportSamples: number;
@@ -86,6 +87,7 @@ export function TimingMarkersOverlay({
   sampleRateHz,
   rowHeights,
   rowTopInsets = [],
+  sessionId,
   tile,
   totalSamples,
   viewportSamples,
@@ -105,6 +107,7 @@ export function TimingMarkersOverlay({
   });
   const previewSampleRef = useRef<number | null>(null);
   const previewSampleFrameRef = useRef<number | null>(null);
+  const snapRequestRef = useRef(0);
   const [dragging, setDragging] = useState<HoverState | null>(null);
   const [hovered, setHovered] = useState<HoverState | null>(null);
   const [contextMenu, setContextMenu] = useState<GraphContextMenuState | null>(null);
@@ -170,11 +173,11 @@ export function TimingMarkersOverlay({
     return ((sample - viewportStart) / Math.max(1, viewportSamples)) * 100;
   }
 
-  function clientXToSample(clientX: number, clientY?: number, snappingEnabled = true) {
+  function resolvePointerSample(clientX: number, clientY?: number, snappingEnabled = true) {
     const waveformHost = document.querySelector<HTMLElement>(".waveformCanvasHost");
     const root = rootRef.current;
     const rect = waveformHost?.getBoundingClientRect() ?? root?.getBoundingClientRect();
-    if (!rect) return 0;
+    if (!rect) return null;
     const context = placementContextRef.current;
     return resolveWaveformPointerSample({
       clientX,
@@ -187,7 +190,21 @@ export function TimingMarkersOverlay({
       totalSamples: context.totalSamples,
       viewportSamples: context.viewportSamples,
       viewportStart: context.viewportStart,
-    }).sample;
+    });
+  }
+
+  function clientXToSample(clientX: number, clientY?: number, snappingEnabled = true) {
+    return resolvePointerSample(clientX, clientY, snappingEnabled)?.sample ?? 0;
+  }
+
+  function queuePreviewSample(sample: number) {
+    previewSampleRef.current = sample;
+    if (previewSampleFrameRef.current !== null) return;
+    previewSampleFrameRef.current = window.requestAnimationFrame(() => {
+      previewSampleFrameRef.current = null;
+      const next = previewSampleRef.current;
+      setPreviewSample((current) => current === next ? current : next);
+    });
   }
 
   function selectMarker(id: string, event: Pick<ReactPointerEvent, "button" | "ctrlKey" | "metaKey" | "shiftKey">) {
@@ -276,11 +293,35 @@ export function TimingMarkersOverlay({
   function updatePlacementPreview(clientX: number, clientY: number, snappingEnabled = true) {
     const sample = clientXToSample(clientX, clientY, snappingEnabled);
     previewSampleRef.current = sample;
-    if (previewSampleFrameRef.current !== null) return;
-    previewSampleFrameRef.current = window.requestAnimationFrame(() => {
-      previewSampleFrameRef.current = null;
-      const next = previewSampleRef.current;
-      setPreviewSample((current) => current === next ? current : next);
+    if (!placementContextRef.current.viewportInteracting) queuePreviewSample(sample);
+  }
+
+  function requestExactPlacementSnap(clientX: number, clientY: number) {
+    const context = placementContextRef.current;
+    if (context.viewportInteracting || !context.tile) return;
+    const pointer = resolvePointerSample(clientX, clientY, false);
+    if (pointer?.channelIndex == null) return;
+    const channel = context.tile.channels[pointer.channelIndex];
+    if (!channel) return;
+    const requestId = snapRequestRef.current + 1;
+    snapRequestRef.current = requestId;
+    void nearestDigitalTransition(sessionId, {
+      channel: channel.channel,
+      sample: Math.round(pointer.rawSample),
+    }).then((transition) => {
+      const latest = placementContextRef.current;
+      if (
+        !transition
+        || requestId !== snapRequestRef.current
+        || latest.viewportInteracting
+      ) return;
+      const samplesPerPixel = latest.viewportSamples / Math.max(1, document.querySelector<HTMLElement>(".waveformCanvasHost")?.clientWidth ?? 1);
+      const withinThreshold = Math.abs(transition.sample - pointer.rawSample) <= samplesPerPixel * 8;
+      const pulseIsWideEnough = transition.next_sample == null
+        || (transition.next_sample - transition.sample) / samplesPerPixel >= 8;
+      if (withinThreshold && pulseIsWideEnough) queuePreviewSample(transition.sample);
+    }).catch(() => {
+      // The immediate tile snap remains available when the graph query is unavailable.
     });
   }
 
@@ -357,6 +398,7 @@ export function TimingMarkersOverlay({
           event.clientY,
           !placementContextRef.current.viewportInteracting,
         );
+        requestExactPlacementSnap(event.clientX, event.clientY);
       }
     }
     function handlePointerDown(event: PointerEvent) {
@@ -382,11 +424,22 @@ export function TimingMarkersOverlay({
 
   useEffect(() => {
     if (!placement || !lastPlacementPointerRef.current) return;
+    snapRequestRef.current += 1;
     const { x, y } = lastPlacementPointerRef.current;
-    updatePlacementPreview(x, y, !viewportInteracting);
+    if (viewportInteracting) return;
+    updatePlacementPreview(x, y, true);
+    requestExactPlacementSnap(x, y);
   }, [tile, viewportInteracting, viewportSamples, viewportStart]);
 
   if (totalSamples <= 0) return null;
+
+  const zoomPreviewSample = placement && viewportInteracting && lastPlacementPointerRef.current
+    ? clientXToSample(
+        lastPlacementPointerRef.current.x,
+        lastPlacementPointerRef.current.y,
+        false,
+      )
+    : previewSample;
 
   function addSingleMarkerFromRuler(event: ReactPointerEvent<HTMLDivElement>) {
     if (placement || event.button !== 0 || event.target !== event.currentTarget) return;
@@ -575,7 +628,7 @@ export function TimingMarkersOverlay({
 
       {placement && (
         <TemporaryGraphMarkers
-          placement={placementWithPreviewSample(placement, previewSample)}
+          placement={placementWithPreviewSample(placement, zoomPreviewSample)}
           sampleToPercent={sampleToPercent}
           sampleRateHz={sampleRateHz}
         />

@@ -163,6 +163,16 @@ export interface DigitalRangeMeasurementRequest {
   end_sample: number;
 }
 
+export interface NearestDigitalTransitionRequest {
+  channel: number;
+  sample: number;
+}
+
+export interface NearestDigitalTransition {
+  sample: number;
+  next_sample: number | null;
+}
+
 export interface DigitalRangeMeasurementStats {
   channel: number;
   start_sample: number;
@@ -1025,6 +1035,34 @@ export function getWaveformTile(sessionId: string, request: WaveformRequest): Pr
     return Promise.resolve(withPreviewCapture(sessionId, () => buildPreviewTile(request)));
   }
   return callBackend("get_waveform_tile", { sessionId, request });
+}
+
+export function nearestDigitalTransition(
+  sessionId: string,
+  request: NearestDigitalTransitionRequest,
+): Promise<NearestDigitalTransition | null> {
+  if (isTauriRuntime()) {
+    return callBackend("nearest_digital_transition", { sessionId, request });
+  }
+  const radius = 2_048;
+  const start = Math.max(0, Math.round(request.sample) - radius);
+  return getWaveformTile(sessionId, {
+    channels: [request.channel],
+    pixels: radius * 2,
+    sample_count: radius * 2,
+    start_sample: start,
+  }).then((tile) => {
+    const channel = tile.channels[0];
+    if (!channel) return null;
+    const edges = [...channel.rising_edges, ...channel.falling_edges].sort((left, right) => left - right);
+    if (edges.length === 0) return null;
+    const nearestIndex = edges.reduce(
+      (best, edge, index) =>
+        Math.abs(edge - request.sample) < Math.abs(edges[best] - request.sample) ? index : best,
+      0,
+    );
+    return { sample: edges[nearestIndex], next_sample: edges[nearestIndex + 1] ?? null };
+  });
 }
 
 export function measureDigitalRange(

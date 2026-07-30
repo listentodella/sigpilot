@@ -11,6 +11,10 @@ test("timing marker snapping rejects visually crowded edge pairs", () => {
   assert.equal(findNearestEdgeSample([200, 250], 200, 10, 8, true), null);
 });
 
+test("a narrow preceding pulse does not suppress the next distinct edge", () => {
+  assert.equal(findNearestEdgeSample([150, 200, 400], 200, 10, 8, true), 200);
+});
+
 test("empty exact edge data cannot produce a timing marker snap", () => {
   assert.equal(findNearestEdgeSample([], 200, 10, 8, true), null);
 });

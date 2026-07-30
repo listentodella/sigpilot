@@ -22,7 +22,10 @@ use pxlogic_core::{
     PwmConfiguration, PwmSettings, PxUsbSpeed, SigrokDecoderCatalog, SigrokNativeDecoder,
     SparseCaptureData,
 };
-use pxlogic_graph::{CaptureMemoryUsage, GraphFrameRequest, GraphFrameResponse, GraphSession};
+use pxlogic_graph::{
+    CaptureMemoryUsage, GraphFrameRequest, GraphFrameResponse, GraphSession,
+    NearestDigitalTransition,
+};
 use pxlogic_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
@@ -120,6 +123,12 @@ struct CaptureTriggeredEvent {
 struct TrimCaptureRequest {
     trim_before_sample: Option<u64>,
     trim_after_sample: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NearestDigitalTransitionRequest {
+    channel: u8,
+    sample: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1362,6 +1371,22 @@ async fn get_waveform_tile(
 }
 
 #[tauri::command]
+async fn nearest_digital_transition(
+    session_id: String,
+    request: NearestDigitalTransitionRequest,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<NearestDigitalTransition>> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .nearest_transition(request.channel, request.sample)
+            .map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn measure_digital_range(
     session_id: String,
     request: DigitalRangeMeasurementRequest,
@@ -1644,6 +1669,7 @@ fn main() {
             write_screenshot_file,
             write_text_file,
             get_waveform_tile,
+            nearest_digital_transition,
             render_graph_frame,
             measure_digital_range,
             decode_analyzer_frames,
