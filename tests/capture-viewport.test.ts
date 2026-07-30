@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   captureDataWindow,
-  maximumLiveCaptureViewportSamples,
   maximumCaptureViewportSamples,
+  maximumDataViewportSamples,
+  maximumLiveCaptureViewportSamples,
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
 } from "../src/lib/captureViewport.ts";
@@ -43,6 +44,15 @@ test("live capture reserves a 500 second zoom-out range", () => {
   assert.equal(maximumLiveCaptureViewportSamples(1_000_000, 1_000_000), 500_000_000);
   assert.deepEqual(
     normalizeLiveCaptureViewport(-200_000_000, 900_000_000, 1_000_000, 1_000_000),
+    { samples: 500_000_000, start: 0 },
+  );
+});
+
+test("loaded data uses the same 500 second zoom-out range as capture", () => {
+  const maximum = maximumDataViewportSamples(1_000_000, 1_000_000);
+  assert.equal(maximum, 500_000_000);
+  assert.deepEqual(
+    normalizeCaptureViewport(200_000, 900_000_000, 1_000_000, maximum),
     { samples: 500_000_000, start: 0 },
   );
 });

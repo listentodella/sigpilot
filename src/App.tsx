@@ -82,7 +82,7 @@ import { WaveformCanvas } from "./components/WaveformCanvas";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
 import {
   captureDataWindow,
-  maximumCaptureViewportSamples,
+  maximumDataViewportSamples,
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
 } from "./lib/captureViewport";
@@ -871,6 +871,10 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
 
 function initialCaptureViewport(summary: CaptureSummary) {
   const totalSamples = Math.max(1, summary.metadata.sample_count);
+  const viewportMaxSamples = maximumDataViewportSamples(
+    totalSamples,
+    summary.metadata.sample_rate_hz,
+  );
   const viewportSamples = defaultCaptureViewportSamples(
     summary.metadata.sample_count,
     summary.metadata.sample_rate_hz,
@@ -880,21 +884,25 @@ function initialCaptureViewport(summary: CaptureSummary) {
     triggerSample == null
       ? 0
       : Math.max(0, Math.min(totalSamples - viewportSamples, triggerSample - viewportSamples / 2));
-  return { viewportSamples, viewportStart };
+  return { viewportMaxSamples, viewportSamples, viewportStart };
 }
 
 function preserveCaptureViewport(session: UiSession, summary: CaptureSummary) {
   const totalSamples = Math.max(1, summary.metadata.sample_count);
+  const viewportMaxSamples = maximumDataViewportSamples(
+    totalSamples,
+    summary.metadata.sample_rate_hz,
+  );
   const viewport = normalizeCaptureViewport(
     session.viewportStart,
     session.viewportSamples || Math.min(totalSamples, 100_000),
     totalSamples,
-    session.viewportMaxSamples ?? undefined,
+    Math.max(viewportMaxSamples, session.viewportMaxSamples ?? 0),
   );
   return {
     viewportSamples: viewport.samples,
     viewportStart: viewport.start,
-    viewportMaxSamples: session.viewportMaxSamples,
+    viewportMaxSamples: Math.max(viewportMaxSamples, session.viewportMaxSamples ?? 0),
   };
 }
 
@@ -904,9 +912,13 @@ function completedCaptureViewport(
   panToTrigger: boolean,
 ) {
   const totalSamples = Math.max(1, summary.metadata.sample_count);
+  const dataViewportMaxSamples = maximumDataViewportSamples(
+    totalSamples,
+    summary.metadata.sample_rate_hz,
+  );
   if (session.liveViewportMode === "manual") {
     const viewportMaxSamples = Math.max(
-      maximumCaptureViewportSamples(totalSamples),
+      dataViewportMaxSamples,
       Math.round(session.viewportSamples),
     );
     const viewport = normalizeCaptureViewport(
@@ -923,7 +935,7 @@ function completedCaptureViewport(
   }
   return {
     ...(panToTrigger ? initialCaptureViewport(summary) : preserveCaptureViewport(session, summary)),
-    viewportMaxSamples: null,
+    viewportMaxSamples: dataViewportMaxSamples,
   };
 }
 

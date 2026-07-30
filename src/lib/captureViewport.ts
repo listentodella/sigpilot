@@ -27,6 +27,10 @@ export function maximumLiveCaptureViewportSamples(
   return Math.max(maximumCaptureViewportSamples(totalSamples), reservedSamples);
 }
 
+export function maximumDataViewportSamples(totalSamples: number, sampleRateHz: number) {
+  return maximumLiveCaptureViewportSamples(totalSamples, sampleRateHz);
+}
+
 // Logic 2's DataLimited mode permits zooming and panning while at least 40%
 // of the viewport still intersects captured data.
 export function normalizeCaptureViewport(
