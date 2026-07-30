@@ -1960,11 +1960,13 @@ export default function App() {
       graphRequestLastStartedAtRef.current = performance.now();
       void (async () => {
       try {
-        const overscan = Math.max(64, Math.round(sessionSnapshot.viewportSamples * 0.5));
-        const requestStart = Math.max(0, sessionSnapshot.viewportStart - overscan);
+        const overscan = Math.max(64, Math.ceil(sessionSnapshot.viewportSamples * 0.5));
+        // Viewport coordinates are fractional so a marker can remain exactly
+        // under the zoom anchor. Graph requests target integer samples only.
+        const requestStart = Math.max(0, Math.floor(sessionSnapshot.viewportStart - overscan));
         const requestEnd = Math.min(
           sessionSnapshot.summary!.metadata.sample_count,
-          sessionSnapshot.viewportStart + sessionSnapshot.viewportSamples + overscan,
+          Math.ceil(sessionSnapshot.viewportStart + sessionSnapshot.viewportSamples + overscan),
         );
         const requestSamples = Math.max(1, requestEnd - requestStart);
         const pixelScale = requestSamples / Math.max(1, sessionSnapshot.viewportSamples);
@@ -2106,11 +2108,11 @@ export default function App() {
         .join("|");
       void (async () => {
         try {
-          const overscan = Math.max(64, Math.round(sessionSnapshot.viewportSamples * 0.5));
-          const requestStart = Math.max(0, sessionSnapshot.viewportStart - overscan);
+          const overscan = Math.max(64, Math.ceil(sessionSnapshot.viewportSamples * 0.5));
+          const requestStart = Math.max(0, Math.floor(sessionSnapshot.viewportStart - overscan));
           const requestEnd = Math.min(
             sessionSnapshot.summary!.metadata.sample_count,
-            sessionSnapshot.viewportStart + sessionSnapshot.viewportSamples + overscan,
+            Math.ceil(sessionSnapshot.viewportStart + sessionSnapshot.viewportSamples + overscan),
           );
           const requestSamples = Math.max(1, requestEnd - requestStart);
           const pixelScale = requestSamples / Math.max(1, sessionSnapshot.viewportSamples);

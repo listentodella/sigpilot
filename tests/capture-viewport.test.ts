@@ -28,6 +28,13 @@ test("DataLimited pan keeps at least 40 percent captured data visible", () => {
   });
 });
 
+test("viewport normalization preserves a fractional zoom anchor", () => {
+  assert.deepEqual(normalizeCaptureViewport(125.25, 500.5, 10_000), {
+    start: 125.25,
+    samples: 500.5,
+  });
+});
+
 test("a completed capture can preserve the wider viewport selected while recording", () => {
   assert.deepEqual(
     normalizeCaptureViewport(0, 500_000_000, 1_000_000, 500_000_000),
