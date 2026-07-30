@@ -13,7 +13,7 @@ export interface CaptureDataWindow {
 }
 
 export function maximumCaptureViewportSamples(totalSamples: number) {
-  const total = Math.max(1, Math.round(totalSamples));
+  const total = Math.max(1, totalSamples);
   return Math.ceil(total / MIN_CAPTURE_DATA_VISIBLE_RATIO);
 }
 
@@ -39,19 +39,19 @@ export function normalizeCaptureViewport(
   totalSamples: number,
   maximumSamples?: number,
 ): CaptureViewport {
-  const total = Math.max(1, Math.round(totalSamples));
+  const total = Math.max(1, totalSamples);
   const dataLimitedMaximum = maximumCaptureViewportSamples(total);
   const maximum = Math.max(dataLimitedMaximum, Math.round(maximumSamples ?? 0));
   const nextSamples = Math.max(
     1,
-    Math.min(maximum, Math.round(samples)),
+    Math.min(maximum, samples),
   );
   if (nextSamples > dataLimitedMaximum) {
     return { samples: nextSamples, start: 0 };
   }
-  const minimumStart = Math.ceil(-(1 - MIN_CAPTURE_DATA_VISIBLE_RATIO) * nextSamples);
-  const maximumStart = Math.floor(total - MIN_CAPTURE_DATA_VISIBLE_RATIO * nextSamples);
-  const nextStart = Math.max(minimumStart, Math.min(maximumStart, Math.round(start)));
+  const minimumStart = -(1 - MIN_CAPTURE_DATA_VISIBLE_RATIO) * nextSamples;
+  const maximumStart = total - MIN_CAPTURE_DATA_VISIBLE_RATIO * nextSamples;
+  const nextStart = Math.max(minimumStart, Math.min(maximumStart, start));
   return { samples: nextSamples, start: nextStart };
 }
 
@@ -62,7 +62,7 @@ export function normalizeLiveCaptureViewport(
   sampleRateHz: number,
   maximumSamples?: number,
 ): CaptureViewport {
-  const total = Math.max(1, Math.round(totalSamples));
+  const total = Math.max(1, totalSamples);
   const nextSamples = Math.max(
     1,
     Math.min(
@@ -70,7 +70,7 @@ export function normalizeLiveCaptureViewport(
         maximumLiveCaptureViewportSamples(total, sampleRateHz),
         Math.round(maximumSamples ?? 0),
       ),
-      Math.round(samples),
+      samples,
     ),
   );
 

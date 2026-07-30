@@ -414,11 +414,34 @@ export function TimingMarkersOverlay({
       lastPlacementPointerRef.current = { x: event.clientX, y: event.clientY };
       commitPlacementAt(event.clientX, event.clientY);
     }
+    function handleWheel(event: WheelEvent) {
+      // Placement runs in an overlay. Forward from capture phase so temporary
+      // graph layers cannot consume the viewport gesture.
+      if (!event.isTrusted || !isInsideWaveform(event.clientX, event.clientY)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      placementHost.dispatchEvent(new WheelEvent("wheel", {
+        altKey: event.altKey,
+        bubbles: true,
+        cancelable: true,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        ctrlKey: event.ctrlKey,
+        deltaMode: event.deltaMode,
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        deltaZ: event.deltaZ,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+      }));
+    }
     document.addEventListener("pointermove", handlePointerMove, { passive: true });
     document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("wheel", handleWheel, { capture: true, passive: false });
     return () => {
       document.removeEventListener("pointermove", handlePointerMove);
       document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("wheel", handleWheel, true);
     };
   }, [placement?.id, placement?.placingSide, placement?.type]);
 

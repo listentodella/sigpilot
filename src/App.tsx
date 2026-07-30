@@ -1286,6 +1286,7 @@ export default function App() {
   const [graphRequestEpoch, setGraphRequestEpoch] = useState(0);
   const [analyzerRenderRequestEpoch, setAnalyzerRenderRequestEpoch] = useState(0);
   const [graphViewportInteracting, setGraphViewportInteracting] = useState(false);
+  const graphPointerRatioRef = useRef(0.5);
   const [startupMessage, setStartupMessage] = useState("Ready");
 
   const footerRef = useRef<HTMLElement>(null);
@@ -3671,18 +3672,19 @@ export default function App() {
 
       if (activeSession?.summary) {
         const viewportCenter = activeSession.viewportStart + activeSession.viewportSamples / 2;
+        const viewportAnchor = activeSession.viewportStart + activeSession.viewportSamples * graphPointerRatioRef.current;
         if (key === "arrowup" || key === "=" || key === "w") {
           event.preventDefault();
           event.stopImmediatePropagation();
           const samples = activeSession.viewportSamples * 0.5;
-          animateViewport(activeSession.id, viewportCenter - samples / 2, samples, 100);
+          animateViewport(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples, 100);
           return;
         }
         if (key === "arrowdown" || key === "-" || key === "s") {
           event.preventDefault();
           event.stopImmediatePropagation();
           const samples = activeSession.viewportSamples * 2;
-          animateViewport(activeSession.id, viewportCenter - samples / 2, samples, 100);
+          animateViewport(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples, 100);
           return;
         }
         if (key === "arrowleft" || key === "a") {
@@ -3997,6 +3999,9 @@ export default function App() {
                             x: clientX,
                             y: clientY,
                           });
+                        }}
+                        onPointerPositionChange={(xRatio) => {
+                          graphPointerRatioRef.current = xRatio;
                         }}
                         onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
                         onViewportInteractionChange={(active) =>

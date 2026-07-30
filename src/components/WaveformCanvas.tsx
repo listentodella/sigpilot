@@ -37,6 +37,7 @@ interface WaveformCanvasProps {
     clientY: number;
     sample: number;
   }) => void;
+  onPointerPositionChange?: (xRatio: number) => void;
   onViewportChange: (start: number, samples: number) => void;
   onViewportInteractionChange?: (active: boolean) => void;
 }
@@ -109,6 +110,7 @@ export function WaveformCanvas({
   viewportStart,
   viewportSamples,
   onOpenContextMenu,
+  onPointerPositionChange,
   onViewportChange,
   onViewportInteractionChange,
 }: WaveformCanvasProps) {
@@ -127,6 +129,7 @@ export function WaveformCanvas({
   const rowHeightsRef = useRef(rowHeights);
   const rowTopInsetsRef = useRef(rowTopInsets);
   const onViewportChangeRef = useRef(onViewportChange);
+  const onPointerPositionChangeRef = useRef(onPointerPositionChange);
   const onViewportInteractionChangeRef = useRef(onViewportInteractionChange);
   const onWidthChangeRef = useRef(onWidthChange);
   const hoverRef = useRef<HoverMeasurement | null>(null);
@@ -144,6 +147,7 @@ export function WaveformCanvas({
   const viewportInteractionActiveRef = useRef(false);
   const [hoverNavigation, setHoverNavigation] = useState<HoverNavigation | null>(null);
   onViewportChangeRef.current = onViewportChange;
+  onPointerPositionChangeRef.current = onPointerPositionChange;
   onViewportInteractionChangeRef.current = onViewportInteractionChange;
   onWidthChangeRef.current = onWidthChange;
 
@@ -440,6 +444,7 @@ export function WaveformCanvas({
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const xRatio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    onPointerPositionChangeRef.current?.(xRatio);
     const current = viewportRef.current;
 
     if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY) * 1.2) {
@@ -462,7 +467,7 @@ export function WaveformCanvas({
       sampleRateRef.current,
       maximumViewportSamplesRef.current,
     ).samples;
-    if (nextSamples === Math.round(current.samples)) return;
+    if (Math.abs(nextSamples - current.samples) < 0.001) return;
     const anchor = current.start + current.samples * xRatio;
     clampViewport(anchor - nextSamples * xRatio, nextSamples);
     if (edgeJumpRef.current) updateEdgeJumpAt(event.clientX, event.clientY);
@@ -575,6 +580,9 @@ export function WaveformCanvas({
     const host = hostRef.current;
     if (!current || !host) return;
     const rect = host.getBoundingClientRect();
+    onPointerPositionChangeRef.current?.(
+      clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+    );
     const hit = findEdgeHitAtClientPoint(
       host,
       tileRef.current,
@@ -641,6 +649,9 @@ export function WaveformCanvas({
     const host = hostRef.current;
     if (!canvas || !host) return;
     const rect = host.getBoundingClientRect();
+    onPointerPositionChangeRef.current?.(
+      clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+    );
     const dpr = window.devicePixelRatio || 1;
     const x = (clientX - rect.left) * dpr;
     const y = (clientY - rect.top) * dpr;
