@@ -129,6 +129,15 @@ export interface CaptureProgress {
   bytes_read: number;
   bytes_expected: number;
   samples_read: number;
+  sample_memory_bytes: number;
+}
+
+export interface CaptureMemoryUsage {
+  buffer_bytes: number;
+  sample_bytes: number;
+  index_bytes: number;
+  analyzer_bytes: number;
+  total_bytes: number;
 }
 
 export type DiagnosticLevel = "Info" | "Warn" | "Error";
@@ -919,6 +928,7 @@ export function startCapture(
           bytes_read: previewCapture.bytes,
           bytes_expected: targetBytes,
           samples_read: sampleCount,
+          sample_memory_bytes: previewCapture.bytes,
         });
         callbacks.onSummary?.(previewCapture);
 

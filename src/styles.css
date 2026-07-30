@@ -690,6 +690,247 @@ button:disabled {
   border-left: 1px solid var(--border-20);
 }
 
+.memoryBufferControl {
+  height: 100%;
+  position: relative;
+  z-index: 240;
+  margin-left: auto;
+}
+
+.memoryBufferControl + .saleaeToolbarAux {
+  margin-left: 0;
+}
+
+.memoryBufferButton {
+  min-width: 112px;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 15px minmax(58px, auto) 11px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-left: 1px solid var(--border-20);
+  color: var(--on-background-20);
+  background: transparent;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.memoryBufferButton:hover,
+.memoryBufferButton.active {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.memoryBufferButton.recording svg:first-child {
+  color: var(--green);
+}
+
+.memoryBufferButton svg.open {
+  transform: rotate(180deg);
+}
+
+.memoryBufferPopover {
+  width: 304px;
+  position: absolute;
+  top: calc(var(--main-toolbar-height) + 1px);
+  right: 0;
+  z-index: 260;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: var(--on-background-20);
+  background: var(--background-20);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
+  padding: 14px;
+}
+
+.memoryBufferPopover header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.memoryBufferPopover header strong {
+  color: var(--on-background-0);
+  font-size: 13px;
+}
+
+.memoryBufferPopover header span {
+  color: var(--on-background-30);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.memoryBufferPopover header span.recording {
+  color: var(--green);
+}
+
+.memoryBufferFlow {
+  height: 30px;
+  display: grid;
+  grid-template-columns: 22px 38px minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 7px;
+  color: var(--on-background-30);
+}
+
+.memoryFlowDots {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.memoryFlowDots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--on-background-40);
+}
+
+.memoryFlowDots.flowing i {
+  background: var(--lightBlue);
+  animation: memoryFlowDot 900ms linear infinite;
+}
+
+.memoryFlowDots.flowing i:nth-child(2) {
+  animation-delay: 150ms;
+}
+
+.memoryFlowDots.flowing i:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+@keyframes memoryFlowDot {
+  0%, 100% { opacity: 0.25; transform: translateX(-2px); }
+  50% { opacity: 1; transform: translateX(2px); }
+}
+
+.memoryBufferTrack {
+  height: 17px;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border-20);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 9px, rgba(255, 255, 255, 0.035) 9px 10px),
+    var(--background-30);
+}
+
+.memoryBufferFill {
+  height: 100%;
+  min-width: 0;
+  background: var(--lightBlue);
+  transition: width 120ms linear;
+}
+
+.memoryBufferFill.flowing {
+  background:
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.22) 0 5px, transparent 5px 10px),
+    var(--lightBlue);
+  animation: memoryBufferStripe 600ms linear infinite;
+}
+
+@keyframes memoryBufferStripe {
+  from { background-position: 0 0; }
+  to { background-position: 14px 0; }
+}
+
+.memoryBufferValue {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+  margin: 3px 29px 13px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.memoryBufferValue strong {
+  color: var(--on-background-0);
+  font-size: 15px;
+}
+
+.memoryBufferValue span {
+  color: var(--on-background-30);
+  font-size: 11px;
+}
+
+.memoryBufferBreakdown {
+  margin: 0 0 14px;
+  border-top: 1px solid var(--border-20);
+  border-bottom: 1px solid var(--border-20);
+  padding: 7px 0;
+}
+
+.memoryBufferBreakdown div {
+  min-height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.memoryBufferBreakdown dt,
+.memoryBufferBreakdown dd {
+  margin: 0;
+}
+
+.memoryBufferBreakdown dd {
+  color: var(--on-background-10);
+}
+
+.memoryBufferBreakdown .total {
+  border-top: 1px solid var(--border-20);
+  margin-top: 4px;
+  padding-top: 4px;
+  color: var(--on-background-0);
+  font-weight: 700;
+}
+
+.memoryBufferSetter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--on-background-20);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.memoryBufferSetter > div {
+  height: 28px;
+  display: grid;
+  grid-template-columns: 66px 26px;
+  align-items: center;
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  background: var(--background-10);
+}
+
+.memoryBufferSetter input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  color: var(--on-background-0);
+  background: transparent;
+  padding: 0 5px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.memoryBufferSetter input:disabled {
+  color: var(--on-background-40);
+}
+
+.memoryBufferSetter > div > span {
+  color: var(--on-background-30);
+  font-size: 10px;
+}
+
 .saleaeAuxButton {
   width: 26px;
   height: 22px;

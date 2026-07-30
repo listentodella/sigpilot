@@ -193,6 +193,7 @@ pub struct CaptureProgress {
     pub bytes_read: u64,
     pub bytes_expected: u64,
     pub samples_read: u64,
+    pub sample_memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

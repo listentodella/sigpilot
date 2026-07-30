@@ -22,7 +22,7 @@ use pxlogic_core::{
     PwmConfiguration, PwmSettings, PxUsbSpeed, SigrokDecoderCatalog, SigrokNativeDecoder,
     SparseCaptureData,
 };
-use pxlogic_graph::{GraphFrameRequest, GraphFrameResponse, GraphSession};
+use pxlogic_graph::{CaptureMemoryUsage, GraphFrameRequest, GraphFrameResponse, GraphSession};
 use pxlogic_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
@@ -102,6 +102,12 @@ fn sparse_capture_summary(capture: &SparseCaptureData) -> CaptureSummary {
 struct CaptureUpdatedEvent {
     session_id: String,
     summary: CaptureSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CaptureMemoryUpdatedEvent {
+    session_id: String,
+    usage: CaptureMemoryUsage,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,9 +360,25 @@ async fn start_capture(
             device_id: settings.device_id.clone(),
             session_id: session_id.clone(),
         });
+        let buffer_bytes = settings.buffer_size_mb.saturating_mul(1024 * 1024);
         let progress_app = app.clone();
+        let progress_graph = graph.clone();
+        let progress_session_id = session_id.clone();
+        let progress_cancel = cancel.clone();
         let mut progress = |event: CaptureProgress| {
             let _ = progress_app.emit("capture_progress", &event);
+            let usage =
+                progress_graph.capture_memory_usage(buffer_bytes, Some(event.sample_memory_bytes));
+            if usage.total_bytes >= buffer_bytes {
+                progress_cancel.store(true, Ordering::Release);
+            }
+            let _ = progress_app.emit(
+                "capture_memory_updated",
+                &CaptureMemoryUpdatedEvent {
+                    session_id: progress_session_id.clone(),
+                    usage,
+                },
+            );
         };
         let diagnostics_app = app.clone();
         let mut diagnostics = |event: DiagnosticEvent| {
@@ -385,11 +407,12 @@ async fn start_capture(
                 *samples_error.lock() = Some(error.to_string());
                 return;
             }
+            let metadata = samples_graph.metadata();
             if last_update.elapsed() < Duration::from_millis(33) {
                 return;
             }
             last_update = Instant::now();
-            if let Some(metadata) = samples_graph.metadata() {
+            if let Some(metadata) = metadata {
                 let summary = CaptureSummary {
                     bytes: usize::try_from(metadata.sample_count)
                         .unwrap_or(usize::MAX)
@@ -472,6 +495,13 @@ async fn start_capture(
                     bytes: capture.samples.len(),
                 };
                 graph.finish_capture(capture).map_err(to_string)?;
+                let _ = app.emit(
+                    "capture_memory_updated",
+                    &CaptureMemoryUpdatedEvent {
+                        session_id: session_id.clone(),
+                        usage: graph.capture_memory_usage(buffer_bytes, None),
+                    },
+                );
                 let _ = app.emit("capture_completed", &summary);
                 Ok(summary)
             }

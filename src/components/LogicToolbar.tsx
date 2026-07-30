@@ -7,13 +7,18 @@ import {
   MeasurementCommands,
   UiCommand,
 } from "../lib/sidebar";
+import { CaptureMemoryUsage } from "../lib/api";
 import { AnalyzerLibraryChoice, AnalyzerLibraryMenu } from "./AnalyzerLibraryMenu";
+import { MemoryBufferControl } from "./MemoryBufferControl";
 
 type MenuName = "analyzers" | "markers" | null;
 
 interface LogicToolbarProps {
+  bufferSizeMb: number;
   busy: boolean;
   hasCapture: boolean;
+  memoryUsage: CaptureMemoryUsage | null;
+  onBufferSizeChange: (bufferSizeMb: number) => void;
   onStart: () => void;
   onStop: () => void;
   onCommand: (command: UiCommand, payload?: CommandPayload) => void;
@@ -24,8 +29,10 @@ interface LogicToolbarProps {
 }
 
 export function LogicToolbar({
+  bufferSizeMb,
   busy,
   hasCapture,
+  memoryUsage,
   availableAnalyzers,
   onStart,
   onStop,
@@ -33,6 +40,7 @@ export function LogicToolbar({
   onZoomIn,
   onZoomOut,
   onFit,
+  onBufferSizeChange,
 }: LogicToolbarProps) {
   const [openMenu, setOpenMenu] = useState<MenuName>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -129,6 +137,13 @@ export function LogicToolbar({
           </ToolbarMenu>
         )}
       </div>
+
+      <MemoryBufferControl
+        bufferSizeMb={bufferSizeMb}
+        busy={busy}
+        memoryUsage={memoryUsage}
+        onBufferSizeChange={onBufferSizeChange}
+      />
 
       <div className="saleaeToolbarAux" aria-label="View tools">
         <ToolbarIconButton title="Zoom in" disabled={!hasCapture} onClick={onZoomIn}>

@@ -594,6 +594,11 @@ impl RusbBackend {
                             bytes_read: bytes_read.min(target_raw_len) as u64,
                             bytes_expected: target_raw_bytes,
                             samples_read: samples_read.min(sample_count),
+                            sample_memory_bytes: if decode_cross {
+                                decoded_samples.capacity() as u64
+                            } else {
+                                raw.capacity() as u64
+                            },
                         });
                     }
                 }

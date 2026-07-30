@@ -92,6 +92,7 @@ import {
 } from "./lib/analyzerRenderScheduling";
 import {
   cancelCapture,
+  CaptureMemoryUsage,
   CaptureProgress,
   CaptureSettings,
   CaptureSummary,
@@ -245,6 +246,7 @@ interface UiSession {
   graphScrollTop: number;
   summary: CaptureSummary | null;
   progress: CaptureProgress | null;
+  memoryUsage: CaptureMemoryUsage | null;
   tile: WaveformTile | null;
   cursorState: UiCursorState;
   canvasWidth: number;
@@ -267,6 +269,11 @@ interface UiSession {
 interface CaptureUpdatedEvent {
   session_id: string;
   summary: CaptureSummary;
+}
+
+interface CaptureMemoryUpdatedEvent {
+  session_id: string;
+  usage: CaptureMemoryUsage;
 }
 
 interface CaptureTriggeredEvent {
@@ -1116,6 +1123,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     graphScrollTop: 0,
     summary: null,
     progress: null,
+    memoryUsage: null,
     tile: null,
     cursorState: source
       ? { ...source.cursorState }
@@ -1539,7 +1547,25 @@ export default function App() {
       listen<CaptureProgress>("capture_progress", (event) => {
         const targetId = captureSessionRef.current;
         if (!targetId) return;
-        updateSession(targetId, (session) => ({ ...session, progress: event.payload }));
+        updateSession(targetId, (session) => {
+          const indexBytes = session.memoryUsage?.index_bytes ?? 0;
+          const analyzerBytes = session.memoryUsage?.analyzer_bytes ?? 0;
+          return {
+            ...session,
+            progress: event.payload,
+            memoryUsage: {
+              buffer_bytes: session.settings.buffer_size_mb * 1024 * 1024,
+              sample_bytes: event.payload.sample_memory_bytes,
+              index_bytes: indexBytes,
+              analyzer_bytes: analyzerBytes,
+              total_bytes: event.payload.sample_memory_bytes + indexBytes + analyzerBytes,
+            },
+          };
+        });
+      }).catch(() => () => {}),
+      listen<CaptureMemoryUpdatedEvent>("capture_memory_updated", (event) => {
+        const { session_id: sessionId, usage } = event.payload;
+        updateSession(sessionId, (session) => ({ ...session, memoryUsage: usage }));
       }).catch(() => () => {}),
       listen<CaptureUpdatedEvent>("capture_updated", (event) => {
         const { session_id: sessionId, summary } = event.payload;
@@ -1696,9 +1722,11 @@ export default function App() {
 
   const totalSamples = activeSession?.summary?.metadata.sample_count ?? 0;
   const progressPercent =
-    activeSession?.progress && activeSession.progress.bytes_expected > 0
-      ? Math.min(100, (activeSession.progress.bytes_read / activeSession.progress.bytes_expected) * 100)
-      : 0;
+    activeSession?.settings.mode === "Stream" && activeSession.memoryUsage && activeSession.memoryUsage.buffer_bytes > 0
+      ? Math.min(100, (activeSession.memoryUsage.total_bytes / activeSession.memoryUsage.buffer_bytes) * 100)
+      : activeSession?.progress && activeSession.progress.bytes_expected > 0
+        ? Math.min(100, (activeSession.progress.bytes_read / activeSession.progress.bytes_expected) * 100)
+        : 0;
   const activeSettings = activeSession?.settings ?? defaultSettings(selectedDevice);
   const activeMessage = activeSession?.message ?? startupMessage;
 
@@ -2228,6 +2256,13 @@ export default function App() {
       viewportStart: 0,
       viewportSamples: 1,
       progress: null,
+      memoryUsage: {
+        buffer_bytes: nextSettings.buffer_size_mb * 1024 * 1024,
+        sample_bytes: 0,
+        index_bytes: 0,
+        analyzer_bytes: 0,
+        total_bytes: 0,
+      },
       rangePlacement: null,
       timingMarkerPlacement: null,
       analyzers: current.analyzers.map((analyzer) => ({
@@ -2258,7 +2293,21 @@ export default function App() {
         nextSettings,
         {
           onProgress: (progress) => {
-            updateSession(session.id, (current) => ({ ...current, progress }));
+            updateSession(session.id, (current) => {
+              const indexBytes = current.memoryUsage?.index_bytes ?? 0;
+              const analyzerBytes = current.memoryUsage?.analyzer_bytes ?? 0;
+              return {
+                ...current,
+                progress,
+                memoryUsage: {
+                  buffer_bytes: nextSettings.buffer_size_mb * 1024 * 1024,
+                  sample_bytes: progress.sample_memory_bytes,
+                  index_bytes: indexBytes,
+                  analyzer_bytes: analyzerBytes,
+                  total_bytes: progress.sample_memory_bytes + indexBytes + analyzerBytes,
+                },
+              };
+            });
           },
           onSummary: (summary) => {
             updateSession(session.id, (current) => applyLiveCaptureSummary(current, summary));
@@ -3685,10 +3734,20 @@ export default function App() {
                 />
                 <LogicToolbar
                   availableAnalyzers={availableAnalyzers}
+                  bufferSizeMb={activeSession?.deviceSettings.bufferSizeMb ?? activeSettings.buffer_size_mb}
                   busy={Boolean(activeSession?.busy)}
                   hasCapture={Boolean(activeSession?.summary)}
+                  memoryUsage={activeSession?.memoryUsage ?? null}
                   onCommand={invokeCommand}
                   onFit={fitViewport}
+                  onBufferSizeChange={(bufferSizeMb) => {
+                    if (!activeSession || activeSession.busy) return;
+                    updateSession(activeSession.id, (session) => ({
+                      ...session,
+                      deviceSettings: { ...session.deviceSettings, bufferSizeMb },
+                      settings: { ...session.settings, buffer_size_mb: bufferSizeMb },
+                    }));
+                  }}
                   onStart={handleCapture}
                   onStop={handleCancel}
                   onZoomIn={() => zoomViewport(0.5)}
@@ -6775,21 +6834,21 @@ function DeviceSettingsPanel({
           </label>
         )}
         <label className="stack-field">
-          <span>Buffer size</span>
-          <select
-            value={session.deviceSettings.bufferSizeMb}
+          <span>Memory buffer size (GB)</span>
+          <input
+            disabled={session.busy}
+            min={0.5}
             onChange={(event) => {
-              const bufferSizeMb = Number(event.target.value);
+              const valueGb = Number(event.target.value);
+              if (!Number.isFinite(valueGb) || valueGb < 0.5) return;
+              const bufferSizeMb = Math.round(valueGb * 1024);
               updateDeviceSettings({ bufferSizeMb });
               onUpdateSettings({ buffer_size_mb: bufferSizeMb });
             }}
-          >
-            {[256, 512, 1024, 2048, 4096].map((size) => (
-              <option key={size} value={size}>
-                {formatBytes(size * 1024 * 1024)}
-              </option>
-            ))}
-          </select>
+            step={0.5}
+            type="number"
+            value={session.deviceSettings.bufferSizeMb / 1024}
+          />
         </label>
       </section>
 

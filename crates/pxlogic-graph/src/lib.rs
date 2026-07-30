@@ -857,7 +857,102 @@ struct AnalyzerCacheEntry {
     frames: Arc<Vec<DecodedFrame>>,
 }
 
+fn decoded_frames_allocated_bytes(frames: &Arc<Vec<DecodedFrame>>) -> u64 {
+    frames.iter().fold(
+        u64::try_from(
+            frames
+                .capacity()
+                .saturating_mul(std::mem::size_of::<DecodedFrame>()),
+        )
+        .unwrap_or(u64::MAX),
+        |bytes, frame| {
+            let frame_strings = frame
+                .frame_type
+                .capacity()
+                .saturating_add(frame.label.capacity());
+            let channel_values = frame.channel_values.iter().fold(
+                frame
+                    .channel_values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<DecodedChannelValue>()),
+                |channel_bytes, value| {
+                    channel_bytes
+                        .saturating_add(value.role.capacity())
+                        .saturating_add(value.label.capacity())
+                },
+            );
+            bytes
+                .saturating_add(u64::try_from(frame_strings).unwrap_or(u64::MAX))
+                .saturating_add(u64::try_from(channel_values).unwrap_or(u64::MAX))
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CaptureMemoryUsage {
+    pub buffer_bytes: u64,
+    pub sample_bytes: u64,
+    pub index_bytes: u64,
+    pub analyzer_bytes: u64,
+    pub total_bytes: u64,
+}
+
 impl GraphSession {
+    pub fn capture_memory_usage(
+        &self,
+        buffer_bytes: u64,
+        in_flight_sample_bytes: Option<u64>,
+    ) -> CaptureMemoryUsage {
+        let sample_bytes = in_flight_sample_bytes.unwrap_or_else(|| {
+            if let Some(capture) = self.capture.read().as_ref() {
+                return u64::try_from(capture.samples.capacity()).unwrap_or(u64::MAX);
+            }
+            self.sparse_capture
+                .read()
+                .as_ref()
+                .map(|capture| {
+                    capture.channels.iter().fold(0u64, |bytes, channel| {
+                        bytes.saturating_add(
+                            u64::try_from(channel.transitions.capacity())
+                                .unwrap_or(u64::MAX)
+                                .saturating_mul(std::mem::size_of::<u64>() as u64),
+                        )
+                    })
+                })
+                .unwrap_or(0)
+        });
+        let index_bytes = self
+            .graph
+            .read()
+            .as_ref()
+            .map(|graph| {
+                graph.channels.iter().fold(0u64, |bytes, channel| {
+                    bytes.saturating_add(
+                        u64::try_from(channel.edges.capacity())
+                            .unwrap_or(u64::MAX)
+                            .saturating_mul(std::mem::size_of::<u64>() as u64),
+                    )
+                })
+            })
+            .unwrap_or(0);
+        let analyzer_bytes = self
+            .analyzer_cache
+            .lock()
+            .values()
+            .fold(0u64, |bytes, entry| {
+                bytes.saturating_add(decoded_frames_allocated_bytes(&entry.frames))
+            });
+        CaptureMemoryUsage {
+            buffer_bytes,
+            sample_bytes,
+            index_bytes,
+            analyzer_bytes,
+            total_bytes: sample_bytes
+                .saturating_add(index_bytes)
+                .saturating_add(analyzer_bytes),
+        }
+    }
+
     pub fn begin_capture(&self, metadata: CaptureMetadata) -> Result<()> {
         *self.graph.write() = Some(DigitalGraph::new(metadata)?);
         *self.capture.write() = None;
@@ -2124,6 +2219,31 @@ mod tests {
             1
         };
         generate_sample_words_with_count(&settings, sample_count, unit_size).unwrap()
+    }
+
+    #[test]
+    fn capture_memory_usage_tracks_samples_and_edge_index() {
+        let capture = demo_capture(8, 80_000);
+        let session = GraphSession::default();
+        session.begin_capture(capture.metadata.clone()).unwrap();
+        session.append_samples(&capture.samples).unwrap();
+
+        let usage =
+            session.capture_memory_usage(512 * 1024 * 1024, Some(capture.samples.len() as u64));
+        assert_eq!(usage.buffer_bytes, 512 * 1024 * 1024);
+        assert_eq!(usage.sample_bytes, capture.samples.len() as u64);
+        assert!(usage.index_bytes > 0);
+        assert_eq!(usage.analyzer_bytes, 0);
+        assert_eq!(
+            usage.total_bytes,
+            usage.sample_bytes + usage.index_bytes + usage.analyzer_bytes
+        );
+
+        session.finish_capture(capture.clone()).unwrap();
+        let finalized = session.capture_memory_usage(512 * 1024 * 1024, None);
+        assert_eq!(finalized.sample_bytes, capture.samples.capacity() as u64);
+        assert!(finalized.sample_bytes >= capture.samples.len() as u64);
+        assert_eq!(finalized.index_bytes, usage.index_bytes);
     }
 
     #[test]
