@@ -8,6 +8,8 @@ import {
   useState,
 } from "react";
 import type { WaveformTile } from "../../lib/api";
+import { findNearestEdgeSample } from "../../lib/waveformEdgeSnap";
+import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "../../lib/saleaeGraphLayout";
 import {
   getNextTimingMarkerNumber,
   getTimingMarkerFullLabel,
@@ -40,6 +42,8 @@ interface TimingMarkersOverlayProps {
   onViewportChange: (start: number, samples: number) => void;
   placement: UiTimingMarkerPlacement | null;
   sampleRateHz: number;
+  rowHeights: number[];
+  rowTopInsets?: number[];
   tile: WaveformTile | null;
   totalSamples: number;
   viewportSamples: number;
@@ -78,6 +82,8 @@ export function TimingMarkersOverlay({
   onViewportChange,
   placement,
   sampleRateHz,
+  rowHeights,
+  rowTopInsets = [],
   tile,
   totalSamples,
   viewportSamples,
@@ -120,34 +126,28 @@ export function TimingMarkersOverlay({
     return ((sample - viewportStart) / Math.max(1, viewportSamples)) * 100;
   }
 
-  function clientXToSample(clientX: number, snappingEnabled = true) {
+  function clientXToSample(clientX: number, clientY?: number, snappingEnabled = true) {
     const root = rootRef.current;
     if (!root) return 0;
     const rect = root.getBoundingClientRect();
     const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
     const rawSample = clampSample(viewportStart + ratio * viewportSamples, totalSamples);
-    if (!snappingEnabled || !tile) return rawSample;
-
-    const thresholdSamples = Math.max(1, (viewportSamples / Math.max(1, rect.width)) * 5);
-    let nearest = rawSample;
-    let nearestDistance = thresholdSamples;
-    for (const channel of tile.channels) {
-      for (const edge of channel.rising_edges) {
-        const distance = Math.abs(edge - rawSample);
-        if (distance < nearestDistance) {
-          nearest = edge;
-          nearestDistance = distance;
-        }
-      }
-      for (const edge of channel.falling_edges) {
-        const distance = Math.abs(edge - rawSample);
-        if (distance < nearestDistance) {
-          nearest = edge;
-          nearestDistance = distance;
-        }
-      }
-    }
-    return clampSample(nearest, totalSamples);
+    if (!snappingEnabled || !tile || clientY == null) return rawSample;
+    const channelIndex = findSaleaeGraphChannelIndexAtY(
+      getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets),
+      clientY - rect.top,
+    );
+    if (channelIndex == null) return rawSample;
+    const channel = tile.channels[channelIndex];
+    const exactEdges = [...channel.rising_edges, ...channel.falling_edges].sort((left, right) => left - right);
+    const snapped = findNearestEdgeSample(
+      exactEdges,
+      rawSample,
+      viewportSamples / Math.max(1, rect.width),
+      8,
+      true,
+    );
+    return clampSample(snapped ?? rawSample, totalSamples);
   }
 
   function selectMarker(id: string, event: Pick<ReactPointerEvent, "button" | "ctrlKey" | "metaKey" | "shiftKey">) {
@@ -164,8 +164,8 @@ export function TimingMarkersOverlay({
     );
   }
 
-  function updateMarkerPoint(id: string, itemType: TimingMarkerItemType, clientX: number) {
-    const sample = clientXToSample(clientX);
+  function updateMarkerPoint(id: string, itemType: TimingMarkerItemType, clientX: number, clientY: number) {
+    const sample = clientXToSample(clientX, clientY);
     onChangeMarkers((current) =>
       current.map((marker) => {
         if (marker.id !== id) return marker;
@@ -215,7 +215,7 @@ export function TimingMarkersOverlay({
     if (Math.abs(event.clientX - drag.initialClientX) >= TIMING_MARKER_MOVEMENT_THRESHOLD_PX) {
       drag.moved = true;
     }
-    updateMarkerPoint(drag.id, drag.itemType, event.clientX);
+    updateMarkerPoint(drag.id, drag.itemType, event.clientX, event.clientY);
   }
 
   function endMarkerDrag(event: ReactPointerEvent<HTMLDivElement>) {
@@ -233,8 +233,8 @@ export function TimingMarkersOverlay({
     if (drag.editOnClick) openEditPopup(drag.id, drag.itemType);
   }
 
-  function updatePlacement(clientX: number) {
-    const sample = clientXToSample(clientX);
+  function updatePlacement(clientX: number, clientY: number) {
+    const sample = clientXToSample(clientX, clientY);
     onChangePlacement((current) => {
       if (!current) return null;
       if (current.type === "single" || current.placingSide === "start") {
@@ -249,7 +249,7 @@ export function TimingMarkersOverlay({
     if ((event.target as Element | null)?.closest?.("[data-finalized-timing-marker]")) return;
     event.preventDefault();
     event.stopPropagation();
-    const sample = clientXToSample(event.clientX);
+    const sample = clientXToSample(event.clientX, event.clientY);
 
     if (placement.type === "pair" && placement.placingSide === "start") {
       onChangePlacement((current) =>
@@ -286,7 +286,7 @@ export function TimingMarkersOverlay({
     if (placement || event.button !== 0 || event.target !== event.currentTarget) return;
     event.preventDefault();
     event.stopPropagation();
-    onAddSingleMarker(clientXToSample(event.clientX));
+    onAddSingleMarker(clientXToSample(event.clientX, event.clientY));
   }
 
   function openGraphContextMenu(
@@ -394,7 +394,7 @@ export function TimingMarkersOverlay({
       data-timing-marker-interactive={placement ? "true" : undefined}
       onDoubleClick={(event) => event.stopPropagation()}
       onPointerDown={commitPlacement}
-      onPointerMove={(event) => placement && updatePlacement(event.clientX)}
+      onPointerMove={(event) => placement && updatePlacement(event.clientX, event.clientY)}
       ref={rootRef}
     >
       {!placement && (

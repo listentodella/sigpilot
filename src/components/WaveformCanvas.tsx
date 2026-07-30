@@ -15,6 +15,7 @@ import {
   SALEAE_DARK_GRIDLINE_PRIMARY,
   SALEAE_DARK_GRIDLINE_SECONDARY,
 } from "../lib/saleaeTimingDisplay";
+import { findNearestEdgeSample } from "../lib/waveformEdgeSnap";
 
 interface WaveformCanvasProps {
   isLive?: boolean;
@@ -62,6 +63,16 @@ type EdgeKind = "rising" | "falling";
 interface DigitalEdge {
   sample: number;
   kind: EdgeKind;
+}
+
+interface EdgeJumpMeasurement {
+  endChannelIndex: number;
+  endSample: number;
+  pointerX: number;
+  pointerY: number;
+  snapped: boolean;
+  startChannelIndex: number;
+  startSample: number;
 }
 
 interface HoverMeasurement {
@@ -119,6 +130,8 @@ export function WaveformCanvas({
   const onViewportInteractionChangeRef = useRef(onViewportInteractionChange);
   const onWidthChangeRef = useRef(onWidthChange);
   const hoverRef = useRef<HoverMeasurement | null>(null);
+  const edgeJumpRef = useRef<EdgeJumpMeasurement | null>(null);
+  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
   const showInteractiveMeasurementRef = useRef(showInteractiveMeasurement);
   const matchChannelColorsRef = useRef(matchChannelColors);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
@@ -169,6 +182,7 @@ export function WaveformCanvas({
     const colorsChanged = matchChannelColorsRef.current !== matchChannelColors;
 
     tileRef.current = tile;
+    if (tileChanged) edgeJumpRef.current = null;
     maximumViewportSamplesRef.current = maximumViewportSamples;
     viewportPropsRef.current = { start: viewportStart, samples: viewportSamples };
     if (!isLive) {
@@ -246,6 +260,7 @@ export function WaveformCanvas({
       measurementCanvas,
       tileRef.current,
       showInteractiveMeasurementRef.current ? hoverRef.current : null,
+      edgeJumpRef.current,
       viewportRef.current.start,
       viewportRef.current.samples,
       sampleRateRef.current,
@@ -397,12 +412,14 @@ export function WaveformCanvas({
     const current = viewportRef.current;
     const offset = current.samples * (direction === "next" ? 0.25 : 0.75);
     hoverRef.current = null;
+    edgeJumpRef.current = null;
     animateViewportTo(edgeSample - offset, current.samples);
   }
 
   function handleWheel(event: WheelEvent) {
     if (!totalSamplesRef.current) return;
     event.preventDefault();
+    edgeJumpRef.current = null;
     setViewportInteractionActive(true);
     if (wheelInteractionTimerRef.current !== null) {
       window.clearTimeout(wheelInteractionTimerRef.current);
@@ -447,6 +464,14 @@ export function WaveformCanvas({
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (!totalSamplesRef.current) return;
     if (event.button !== 0) return;
+    if (edgeJumpRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      edgeJumpRef.current = null;
+      pointerDownRef.current = null;
+      scheduleDraw();
+      return;
+    }
     if (wheelInteractionTimerRef.current !== null) {
       window.clearTimeout(wheelInteractionTimerRef.current);
       wheelInteractionTimerRef.current = null;
@@ -456,6 +481,7 @@ export function WaveformCanvas({
     cancelLiveViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
     hoverRef.current = null;
+    pointerDownRef.current = { x: event.clientX, y: event.clientY };
     dragRef.current = {
       x: event.clientX,
       start: viewportRef.current.start,
@@ -465,6 +491,10 @@ export function WaveformCanvas({
 
   function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
     if (!totalSamplesRef.current) return;
+    if (edgeJumpRef.current) {
+      updateEdgeJumpAt(event.clientX, event.clientY);
+      return;
+    }
     if (!dragRef.current) {
       updateHoverAt(event.clientX, event.clientY);
       return;
@@ -476,11 +506,17 @@ export function WaveformCanvas({
   }
 
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+    const pointerDown = pointerDownRef.current;
+    pointerDownRef.current = null;
     dragRef.current = null;
     setViewportInteractionActive(false);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    const clickDistance = pointerDown
+      ? Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y)
+      : Number.POSITIVE_INFINITY;
+    if (clickDistance <= 4 && startEdgeJumpAt(event.clientX, event.clientY)) return;
     updateHoverAt(event.clientX, event.clientY);
   }
 
@@ -493,6 +529,73 @@ export function WaveformCanvas({
   function clearHover() {
     hoverRef.current = null;
     setNavigation(null);
+    scheduleDraw();
+  }
+
+  function startEdgeJumpAt(clientX: number, clientY: number) {
+    const hit = findEdgeHitAtClientPoint(
+      hostRef.current,
+      tileRef.current,
+      viewportRef.current.start,
+      viewportRef.current.samples,
+      rowHeightsRef.current,
+      rowTopInsetsRef.current,
+      clientX,
+      clientY,
+      10,
+      false,
+    );
+    if (!hit) return false;
+    const rect = hostRef.current?.getBoundingClientRect();
+    if (!rect) return false;
+    edgeJumpRef.current = {
+      startSample: hit.sample,
+      startChannelIndex: hit.channelIndex,
+      endSample: hit.sample,
+      endChannelIndex: hit.channelIndex,
+      pointerX: clientX - rect.left,
+      pointerY: clientY - rect.top,
+      snapped: true,
+    };
+    hoverRef.current = null;
+    setNavigation(null);
+    scheduleDraw();
+    return true;
+  }
+
+  function updateEdgeJumpAt(clientX: number, clientY: number) {
+    const current = edgeJumpRef.current;
+    const host = hostRef.current;
+    if (!current || !host) return;
+    const rect = host.getBoundingClientRect();
+    const hit = findEdgeHitAtClientPoint(
+      host,
+      tileRef.current,
+      viewportRef.current.start,
+      viewportRef.current.samples,
+      rowHeightsRef.current,
+      rowTopInsetsRef.current,
+      clientX,
+      clientY,
+      10,
+      false,
+    );
+    const rawSample = viewportRef.current.start
+      + clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1) * viewportRef.current.samples;
+    edgeJumpRef.current = {
+      ...current,
+      endSample: hit?.sample ?? rawSample,
+      endChannelIndex: hit?.channelIndex ?? channelIndexAtClientY(
+        rect,
+        tileRef.current,
+        rowHeightsRef.current,
+        rowTopInsetsRef.current,
+        clientY,
+      ) ?? current.endChannelIndex,
+      pointerX: clamp(clientX - rect.left, 0, rect.width),
+      pointerY: clamp(clientY - rect.top, 0, rect.height),
+      snapped: Boolean(hit),
+    };
     scheduleDraw();
   }
 
@@ -575,6 +678,10 @@ export function WaveformCanvas({
 
     const handleOverlayPointerMove = (event: globalThis.PointerEvent) => {
       if (dragRef.current || (event.target instanceof Node && host.contains(event.target))) return;
+      if (edgeJumpRef.current) {
+        updateEdgeJumpAt(event.clientX, event.clientY);
+        return;
+      }
       updateHoverAt(event.clientX, event.clientY);
     };
     const handleGraphSurfaceLeave = () => clearHover();
@@ -588,6 +695,12 @@ export function WaveformCanvas({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && edgeJumpRef.current) {
+        event.preventDefault();
+        edgeJumpRef.current = null;
+        scheduleDraw();
+        return;
+      }
       if (!hoverNavigationRef.current || isTextEditingTarget(event.target)) return;
       const isCommandOrCtrl = event.metaKey || event.ctrlKey;
       if (!isCommandOrCtrl) return;
@@ -651,6 +764,7 @@ function drawMeasurementOverlay(
   canvas: HTMLCanvasElement,
   tile: WaveformTile | null,
   hover: HoverMeasurement | null,
+  edgeJump: EdgeJumpMeasurement | null,
   viewportStart: number,
   viewportSamples: number,
   sampleRateHz: number,
@@ -660,18 +774,117 @@ function drawMeasurementOverlay(
   const context = canvas.getContext("2d");
   if (!context) return;
   context.clearRect(0, 0, canvas.width, canvas.height);
-  if (!tile || !hover) return;
-  drawHoverMeasurement(
-    context,
-    canvas,
-    tile,
-    hover,
-    viewportStart,
-    viewportSamples,
-    sampleRateHz,
-    rowHeights,
-    rowTopInsets,
-  );
+  if (!tile) return;
+  if (hover) {
+    drawHoverMeasurement(
+      context,
+      canvas,
+      tile,
+      hover,
+      viewportStart,
+      viewportSamples,
+      sampleRateHz,
+      rowHeights,
+      rowTopInsets,
+    );
+  }
+  if (edgeJump) {
+    drawEdgeJumpMeasurement(
+      context,
+      canvas,
+      tile,
+      edgeJump,
+      viewportStart,
+      viewportSamples,
+      sampleRateHz,
+      rowHeights,
+      rowTopInsets,
+    );
+  }
+}
+
+function drawEdgeJumpMeasurement(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  tile: WaveformTile,
+  measurement: EdgeJumpMeasurement,
+  viewportStart: number,
+  viewportSamples: number,
+  sampleRateHz: number,
+  rowHeights: number[],
+  rowTopInsets: number[],
+) {
+  const dpr = window.devicePixelRatio || 1;
+  const layouts = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets);
+  const startLayout = layouts[measurement.startChannelIndex];
+  const endLayout = layouts[measurement.endChannelIndex];
+  if (!startLayout || !endLayout) return;
+
+  const startX = xForSample(measurement.startSample, 0, canvas.width, viewportStart, viewportSamples);
+  const endX = measurement.snapped
+    ? xForSample(measurement.endSample, 0, canvas.width, viewportStart, viewportSamples)
+    : measurement.pointerX * dpr;
+  const startY = startLayout.top + startLayout.height / 2;
+  const endY = measurement.snapped
+    ? endLayout.top + endLayout.height / 2
+    : measurement.pointerY * dpr;
+  const deltaSamples = Math.abs(Math.round(measurement.endSample - measurement.startSample));
+  const color = "rgb(255, 166, 64)";
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = Math.max(1, dpr);
+  ctx.beginPath();
+  ctx.moveTo(startX, startY);
+  const middleX = (startX + endX) / 2;
+  ctx.bezierCurveTo(middleX, startY, middleX, endY, endX, endY);
+  ctx.stroke();
+  drawEdgeJumpTarget(ctx, startX, startY, dpr);
+  if (measurement.snapped) drawEdgeJumpTarget(ctx, endX, endY, dpr);
+
+  if (Math.hypot(endX - startX, endY - startY) > 20 * dpr) {
+    const duration = formatDuration(deltaSamples, sampleRateHz);
+    const label = `${duration} / ${deltaSamples.toLocaleString()} samples`;
+    drawEdgeJumpPopup(ctx, label, measurement.pointerX * dpr, measurement.pointerY * dpr, canvas, dpr);
+  }
+  ctx.restore();
+}
+
+function drawEdgeJumpTarget(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  dpr: number,
+) {
+  const radius = 2.5 * dpr;
+  ctx.fillRect(x - 0.5 * dpr, y - radius, dpr, radius * 2);
+  ctx.fillRect(x - radius, y - 0.5 * dpr, radius * 2, dpr);
+}
+
+function drawEdgeJumpPopup(
+  ctx: CanvasRenderingContext2D,
+  label: string,
+  pointerX: number,
+  pointerY: number,
+  canvas: HTMLCanvasElement,
+  dpr: number,
+) {
+  const paddingX = 9 * dpr;
+  const height = 28 * dpr;
+  ctx.font = `${12 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
+  const width = ctx.measureText(label).width + paddingX * 2;
+  const preferLeft = pointerX > canvas.width / 2;
+  const rawX = preferLeft ? pointerX - width - 14 * dpr : pointerX + 14 * dpr;
+  const x = clamp(rawX, 4 * dpr, Math.max(4 * dpr, canvas.width - width - 4 * dpr));
+  const y = clamp(pointerY - height - 10 * dpr, 4 * dpr, Math.max(4 * dpr, canvas.height - height - 4 * dpr));
+  ctx.fillStyle = "rgba(30, 30, 34, 0.96)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.24)";
+  roundRect(ctx, x, y, width, height, 3 * dpr);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+  ctx.fillText(label, x + paddingX, y + height * 0.68);
 }
 
 function getWaveformRowHitTargets(
@@ -1473,6 +1686,60 @@ function collectDigitalEdges(tile: WaveformTile, channelIndex: number): DigitalE
   edges.sort((a, b) => a.sample - b.sample);
   digitalEdgeCache.set(channel, edges);
   return edges;
+}
+
+interface EdgeHit {
+  channelIndex: number;
+  sample: number;
+}
+
+function channelIndexAtClientY(
+  rect: DOMRect,
+  tile: WaveformTile | null,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  clientY: number,
+) {
+  if (!tile) return null;
+  return findSaleaeGraphChannelIndexAtY(
+    getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets),
+    clientY - rect.top,
+  );
+}
+
+function findEdgeHitAtClientPoint(
+  host: HTMLElement | null,
+  tile: WaveformTile | null,
+  viewportStart: number,
+  viewportSamples: number,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  clientX: number,
+  clientY: number,
+  thresholdPx: number,
+  rejectCrowdedEdges: boolean,
+): EdgeHit | null {
+  if (!host || !tile || viewportSamples <= 0) return null;
+  const rect = host.getBoundingClientRect();
+  const channelIndex = channelIndexAtClientY(rect, tile, rowHeights, rowTopInsets, clientY);
+  if (channelIndex == null) return null;
+  const edges = collectDigitalEdges(tile, channelIndex);
+  if (edges.length === 0) return null;
+  const channel = tile.channels[channelIndex];
+  if (rejectCrowdedEdges && channel.rising_edges.length === 0 && channel.falling_edges.length === 0) {
+    return null;
+  }
+  const pointerSample = viewportStart
+    + clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1) * viewportSamples;
+  const samplesPerPixel = viewportSamples / Math.max(1, rect.width);
+  const sample = findNearestEdgeSample(
+    edges.map((edge) => edge.sample),
+    pointerSample,
+    samplesPerPixel,
+    thresholdPx,
+    rejectCrowdedEdges,
+  );
+  return sample == null ? null : { channelIndex, sample };
 }
 
 type DigitalBinVisitor = (

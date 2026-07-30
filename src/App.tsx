@@ -4088,6 +4088,8 @@ export default function App() {
                       animateViewport(activeSession.id, start, samples)
                     }
                     placement={activeSession.timingMarkerPlacement}
+                    rowHeights={visibleOuterRowHeights}
+                    rowTopInsets={visibleAnalyzerInsets}
                     sampleRateHz={activeSession.summary.metadata.sample_rate_hz}
                     tile={visibleTile}
                     totalSamples={totalSamples}
