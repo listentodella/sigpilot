@@ -2224,7 +2224,7 @@ button:disabled {
 
 .rangeOverlay.placing {
   cursor: crosshair;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .rangeBand {
@@ -2250,8 +2250,6 @@ button:disabled {
 .rangeCenterFill {
   flex: 1;
   min-width: 0;
-  border-left: 1px solid var(--range-color);
-  border-right: 1px solid var(--range-color);
 }
 
 .rangeEdge {
@@ -2266,19 +2264,28 @@ button:disabled {
 
 .rangeEdge.start {
   left: -6px;
-  border-left: 1px solid var(--range-color);
 }
 
 .rangeEdge.end {
   right: -6px;
-  border-right: 1px solid var(--range-color);
 }
+
+.rangeBand.selected .rangeEdge.start::after,
+.rangeBand.selected .rangeEdge.end::after {
+  content: "";
+  width: 1px;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--range-color) 72%, transparent);
+}
+
+.rangeBand.selected .rangeEdge.start::after { left: 6px; }
+.rangeBand.selected .rangeEdge.end::after { right: 6px; }
 
 .placingRangeBand {
   position: absolute;
   min-width: 2px;
-  border-left: 1px solid var(--range-color);
-  border-right: 1px solid var(--range-color);
   background: color-mix(in srgb, var(--range-color) 18%, transparent);
   pointer-events: none;
 }
@@ -2290,13 +2297,12 @@ button:disabled {
 }
 
 .placingRangeIndicator {
-  width: 11px;
+  width: 3px;
   position: absolute;
-  min-width: 11px;
-  border-right: 1px solid var(--range-color);
-  background: color-mix(in srgb, var(--range-color) 16%, transparent);
+  min-width: 3px;
+  background: color-mix(in srgb, var(--range-color) 72%, transparent);
   pointer-events: none;
-  transform: translateX(-6px);
+  transform: translateX(-1px);
 }
 
 .rangeMeasurementTooltip {
@@ -4909,7 +4915,7 @@ button:disabled {
 
 .timingMarkerStage.placing {
   cursor: col-resize;
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 /* GraphMarkers owns the timing-display strip even when no marker exists. */

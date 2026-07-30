@@ -80,6 +80,7 @@ import {
   TimingMarkersPanel,
 } from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
+import { resolveWaveformPointerSample } from "./lib/waveformEdgeSnap";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
 import {
   captureDataWindow,
@@ -4030,6 +4031,7 @@ export default function App() {
                         rowHeights={visibleOuterRowHeights}
                         rowTopInsets={visibleAnalyzerInsets}
                         session={activeSession}
+                        tile={visibleTile}
                         visibleChannelIndexes={visibleChannelIndexes}
                       />
                       {activePendingChannelTrim && (
@@ -5024,6 +5026,7 @@ function RangeMeasurementsOverlay({
   rowHeights,
   rowTopInsets,
   session,
+  tile,
   visibleChannelIndexes,
 }: {
   onOpenExtensions: () => void;
@@ -5031,10 +5034,12 @@ function RangeMeasurementsOverlay({
   rowHeights: number[];
   rowTopInsets: number[];
   session: UiSession;
+  tile: WaveformTile | null;
   visibleChannelIndexes: number[];
 }) {
   const dragRef = useRef<{ edge: "start" | "end"; id: string } | null>(null);
   const placementDragRef = useRef<{ channelIndex: number; pointerId: number; startSample: number; startX: number } | null>(null);
+  const lastPlacementPointerRef = useRef<{ x: number; y: number } | null>(null);
   const totalSamples = session.summary?.metadata.sample_count ?? 0;
   const rowLayout = useMemo(
     () => getSaleaeGraphChannelLayout(rowHeights, visibleChannelIndexes.length, 1, rowTopInsets),
@@ -5077,10 +5082,6 @@ function RangeMeasurementsOverlay({
     return () => document.removeEventListener("pointerdown", handlePointerDown, true);
   }, [onUpdateSession, session.rangeMeasurements]);
 
-  if (!session.summary || totalSamples <= 0 || (session.rangeMeasurements.length === 0 && !session.rangePlacement)) {
-    return null;
-  }
-
   function sampleToPercent(sample: number) {
     const ratio = (sample - session.viewportStart) / Math.max(1, session.viewportSamples);
     return ratio * 100;
@@ -5092,15 +5093,28 @@ function RangeMeasurementsOverlay({
     return Math.max(0, Math.min(totalSamples, Math.round(session.viewportStart + ratio * session.viewportSamples)));
   }
 
-  function pointerToPlacement(clientX: number, clientY: number, host: HTMLElement) {
+  function pointerToPlacement(clientX: number, clientY: number, host: HTMLElement, fixedChannelIndex?: number) {
     const rect = host.getBoundingClientRect();
-    const rowIndex = findSaleaeGraphChannelIndexAtY(rowLayout, clientY - rect.top);
+    const fixedRowIndex = fixedChannelIndex == null ? undefined : visibleChannelIndexes.indexOf(fixedChannelIndex);
+    const resolved = resolveWaveformPointerSample({
+      clientX,
+      clientY,
+      fixedChannelIndex: fixedRowIndex != null && fixedRowIndex >= 0 ? fixedRowIndex : undefined,
+      rect,
+      rowHeights,
+      rowTopInsets,
+      tile,
+      totalSamples,
+      viewportSamples: session.viewportSamples,
+      viewportStart: session.viewportStart,
+    });
+    const rowIndex = resolved.channelIndex;
     if (rowIndex === null) return null;
     const channelIndex = visibleChannelIndexes[rowIndex];
     if (channelIndex == null) return null;
     return {
       channelIndex,
-      sample: clientXToSample(clientX, host),
+      sample: Math.round(resolved.sample),
     };
   }
 
@@ -5118,7 +5132,15 @@ function RangeMeasurementsOverlay({
   function updateDraggedRange(clientX: number, host: HTMLElement) {
     const drag = dragRef.current;
     if (!drag) return;
-    const sample = clientXToSample(clientX, host);
+    const draggedRange = session.rangeMeasurements.find((range) => range.id === drag.id);
+    if (!draggedRange) return;
+    const hostRect = host.getBoundingClientRect();
+    const sample = pointerToPlacement(
+      clientX,
+      hostRect.top + hostRect.height / 2,
+      host,
+      draggedRange.channelIndex,
+    )?.sample ?? clientXToSample(clientX, host);
     onUpdateSession((current) => ({
       ...current,
       rangeMeasurements: current.rangeMeasurements.map((range) => {
@@ -5166,9 +5188,14 @@ function RangeMeasurementsOverlay({
     event.stopPropagation();
   }
 
-  function updatePlacementHover(event: ReactPointerEvent<HTMLDivElement>) {
+  function updatePlacementHover(clientX: number, clientY: number, host: HTMLElement) {
     if (!session.rangePlacement) return;
-    const next = pointerToPlacement(event.clientX, event.clientY, event.currentTarget);
+    const next = pointerToPlacement(
+      clientX,
+      clientY,
+      host,
+      session.rangePlacement.startSample !== null ? session.rangePlacement.channelIndex ?? undefined : undefined,
+    );
     onUpdateSession((current) => {
       if (!current.rangePlacement) return current;
       return {
@@ -5194,13 +5221,17 @@ function RangeMeasurementsOverlay({
     }));
   }
 
-  function handlePlacementPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+  function handlePlacementPointerDown(event: PointerEvent, host: HTMLElement) {
     if (!session.rangePlacement || event.button !== 0) return;
-    const next = pointerToPlacement(event.clientX, event.clientY, event.currentTarget);
+    const next = pointerToPlacement(
+      event.clientX,
+      event.clientY,
+      host,
+      session.rangePlacement.startSample !== null ? session.rangePlacement.channelIndex ?? undefined : undefined,
+    );
     if (!next) return;
     event.preventDefault();
     event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
 
     if (session.rangePlacement.startSample !== null) {
       finishPlacement(session.rangePlacement.channelIndex ?? next.channelIndex, session.rangePlacement.startSample, next.sample);
@@ -5226,15 +5257,12 @@ function RangeMeasurementsOverlay({
     }));
   }
 
-  function handlePlacementPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+  function handlePlacementPointerUp(event: PointerEvent, host: HTMLElement) {
     if (!session.rangePlacement) return;
     const drag = placementDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    const next = pointerToPlacement(event.clientX, event.clientY, event.currentTarget);
+    const next = pointerToPlacement(event.clientX, event.clientY, host, drag.channelIndex);
     placementDragRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
     if (!next) return;
     const distance = Math.abs(event.clientX - drag.startX);
     if (distance > 2) {
@@ -5242,6 +5270,69 @@ function RangeMeasurementsOverlay({
       event.stopPropagation();
       finishPlacement(drag.channelIndex, drag.startSample, next.sample);
     }
+  }
+
+  useEffect(() => {
+    if (!session.rangePlacement) {
+      lastPlacementPointerRef.current = null;
+      return;
+    }
+    const host = document.querySelector<HTMLElement>(".waveformCanvasHost");
+    if (!host) return;
+    const placementHost = host;
+    function insideHost(clientX: number, clientY: number) {
+      const rect = placementHost.getBoundingClientRect();
+      return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+    }
+    function handleMove(event: PointerEvent) {
+      lastPlacementPointerRef.current = { x: event.clientX, y: event.clientY };
+      const hasStart = session.rangePlacement?.startSample !== null;
+      if (hasStart || insideHost(event.clientX, event.clientY)) {
+        updatePlacementHover(event.clientX, event.clientY, placementHost);
+      }
+    }
+    function handleDown(event: PointerEvent) {
+      if (event.button !== 0 || !insideHost(event.clientX, event.clientY)) return;
+      lastPlacementPointerRef.current = { x: event.clientX, y: event.clientY };
+      handlePlacementPointerDown(event, placementHost);
+    }
+    function handleUp(event: PointerEvent) {
+      if (!placementDragRef.current) return;
+      handlePlacementPointerUp(event, placementHost);
+    }
+    document.addEventListener("pointermove", handleMove, { passive: true });
+    document.addEventListener("pointerdown", handleDown, true);
+    document.addEventListener("pointerup", handleUp, true);
+    document.addEventListener("pointercancel", handleUp, true);
+    return () => {
+      document.removeEventListener("pointermove", handleMove);
+      document.removeEventListener("pointerdown", handleDown, true);
+      document.removeEventListener("pointerup", handleUp, true);
+      document.removeEventListener("pointercancel", handleUp, true);
+    };
+  }, [
+    rowHeights,
+    rowTopInsets,
+    session.rangePlacement?.channelIndex,
+    session.rangePlacement?.startSample,
+    session.rangePlacement?.startedBy,
+    session.viewportSamples,
+    session.viewportStart,
+    tile,
+    totalSamples,
+    visibleChannelIndexes,
+  ]);
+
+  useEffect(() => {
+    if (!session.rangePlacement || !lastPlacementPointerRef.current) return;
+    const host = document.querySelector<HTMLElement>(".waveformCanvasHost");
+    if (!host) return;
+    const { x, y } = lastPlacementPointerRef.current;
+    updatePlacementHover(x, y, host);
+  }, [session.viewportSamples, session.viewportStart, tile]);
+
+  if (!session.summary || totalSamples <= 0 || (session.rangeMeasurements.length === 0 && !session.rangePlacement)) {
+    return null;
   }
 
   function updateTooltipRange(id: string, patch: Partial<UiRangeMeasurement>) {
@@ -5263,10 +5354,6 @@ function RangeMeasurementsOverlay({
     <div
       className={`rangeOverlay ${session.rangePlacement ? "placing" : ""}`}
       aria-hidden="false"
-      onPointerDown={handlePlacementPointerDown}
-      onPointerMove={updatePlacementHover}
-      onPointerUp={handlePlacementPointerUp}
-      onPointerCancel={handlePlacementPointerUp}
     >
       {session.rangeMeasurements.map((range) => {
         const rowIndex = visibleChannelIndexes.indexOf(range.channelIndex);

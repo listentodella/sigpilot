@@ -3,13 +3,13 @@ import {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import type { WaveformTile } from "../../lib/api";
-import { findNearestEdgeSample } from "../../lib/waveformEdgeSnap";
-import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "../../lib/saleaeGraphLayout";
+import { resolveWaveformPointerSample } from "../../lib/waveformEdgeSnap";
 import {
   getNextTimingMarkerNumber,
   getTimingMarkerFullLabel,
@@ -91,9 +91,32 @@ export function TimingMarkersOverlay({
 }: TimingMarkersOverlayProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const lastPlacementPointerRef = useRef<{ x: number; y: number } | null>(null);
   const [dragging, setDragging] = useState<HoverState | null>(null);
   const [hovered, setHovered] = useState<HoverState | null>(null);
   const [contextMenu, setContextMenu] = useState<GraphContextMenuState | null>(null);
+  const [graphBounds, setGraphBounds] = useState<{ left: number; width: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const waveformHost = document.querySelector<HTMLElement>(".waveformCanvasHost");
+    const offsetParent = root?.offsetParent as HTMLElement | null;
+    if (!root || !waveformHost || !offsetParent) return;
+    const updateBounds = () => {
+      const hostRect = waveformHost.getBoundingClientRect();
+      const parentRect = offsetParent.getBoundingClientRect();
+      setGraphBounds({ left: hostRect.left - parentRect.left, width: hostRect.width });
+    };
+    updateBounds();
+    const observer = new ResizeObserver(updateBounds);
+    observer.observe(waveformHost);
+    observer.observe(offsetParent);
+    window.addEventListener("resize", updateBounds);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateBounds);
+    };
+  }, []);
 
   useEffect(() => {
     const isDragging = Boolean(placement || dragging);
@@ -120,43 +143,27 @@ export function TimingMarkersOverlay({
     return () => document.removeEventListener("pointerdown", handleOutsidePointerDown);
   }, [contextMenu, markers, onChangeMarkers]);
 
-  if (totalSamples <= 0) return null;
-
   function sampleToPercent(sample: number) {
     return ((sample - viewportStart) / Math.max(1, viewportSamples)) * 100;
   }
 
   function clientXToSample(clientX: number, clientY?: number, snappingEnabled = true) {
-    const root = rootRef.current;
-    if (!root) return 0;
     const waveformHost = document.querySelector<HTMLElement>(".waveformCanvasHost");
-    const rect = waveformHost?.getBoundingClientRect() ?? root.getBoundingClientRect();
-    const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-    const rawSample = clampSample(viewportStart + ratio * viewportSamples, totalSamples);
-    if (
-      !snappingEnabled
-      || !tile
-      || clientY == null
-      || clientX < rect.left
-      || clientX > rect.right
-      || clientY < rect.top
-      || clientY > rect.bottom
-    ) return rawSample;
-    const channelIndex = findSaleaeGraphChannelIndexAtY(
-      getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, 1, rowTopInsets),
-      clientY - rect.top,
-    );
-    if (channelIndex == null) return rawSample;
-    const channel = tile.channels[channelIndex];
-    const exactEdges = [...channel.rising_edges, ...channel.falling_edges].sort((left, right) => left - right);
-    const snapped = findNearestEdgeSample(
-      exactEdges,
-      rawSample,
-      viewportSamples / Math.max(1, rect.width),
-      8,
-      true,
-    );
-    return clampSample(snapped ?? rawSample, totalSamples);
+    const root = rootRef.current;
+    const rect = waveformHost?.getBoundingClientRect() ?? root?.getBoundingClientRect();
+    if (!rect) return 0;
+    return resolveWaveformPointerSample({
+      clientX,
+      clientY: clientY ?? rect.top,
+      rect,
+      rejectCrowdedEdges: snappingEnabled,
+      rowHeights,
+      rowTopInsets,
+      tile: snappingEnabled ? tile : null,
+      totalSamples,
+      viewportSamples,
+      viewportStart,
+    }).sample;
   }
 
   function selectMarker(id: string, event: Pick<ReactPointerEvent, "button" | "ctrlKey" | "metaKey" | "shiftKey">) {
@@ -253,12 +260,9 @@ export function TimingMarkersOverlay({
     });
   }
 
-  function commitPlacement(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!placement || event.button !== 0) return;
-    if ((event.target as Element | null)?.closest?.("[data-finalized-timing-marker]")) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const sample = clientXToSample(event.clientX, event.clientY);
+  function commitPlacementAt(clientX: number, clientY: number) {
+    if (!placement) return;
+    const sample = clientXToSample(clientX, clientY);
 
     if (placement.type === "pair" && placement.placingSide === "start") {
       onChangePlacement((current) =>
@@ -290,6 +294,47 @@ export function TimingMarkersOverlay({
     onChangePlacement(() => null);
     onMessage(marker.type === "pair" ? "Marker pair added" : "Single marker added");
   }
+
+  useEffect(() => {
+    if (!placement) {
+      lastPlacementPointerRef.current = null;
+      return;
+    }
+    const waveformHost = document.querySelector<HTMLElement>(".waveformCanvasHost");
+    if (!waveformHost) return;
+    const placementHost = waveformHost;
+    function isInsideWaveform(clientX: number, clientY: number) {
+      const rect = placementHost.getBoundingClientRect();
+      return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+    }
+    function handlePointerMove(event: PointerEvent) {
+      lastPlacementPointerRef.current = { x: event.clientX, y: event.clientY };
+      if (isInsideWaveform(event.clientX, event.clientY)) {
+        updatePlacement(event.clientX, event.clientY);
+      }
+    }
+    function handlePointerDown(event: PointerEvent) {
+      if (event.button !== 0 || !isInsideWaveform(event.clientX, event.clientY)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      lastPlacementPointerRef.current = { x: event.clientX, y: event.clientY };
+      commitPlacementAt(event.clientX, event.clientY);
+    }
+    document.addEventListener("pointermove", handlePointerMove, { passive: true });
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [placement?.id, placement?.placingSide, placement?.type, rowHeights, rowTopInsets, tile, totalSamples, viewportSamples, viewportStart]);
+
+  useEffect(() => {
+    if (!placement || !lastPlacementPointerRef.current) return;
+    const { x, y } = lastPlacementPointerRef.current;
+    updatePlacement(x, y);
+  }, [tile, viewportSamples, viewportStart]);
+
+  if (totalSamples <= 0) return null;
 
   function addSingleMarkerFromRuler(event: ReactPointerEvent<HTMLDivElement>) {
     if (placement || event.button !== 0 || event.target !== event.currentTarget) return;
@@ -402,9 +447,8 @@ export function TimingMarkersOverlay({
       className={`timingMarkerStage ${placement ? "placing" : ""}`}
       data-timing-marker-interactive={placement ? "true" : undefined}
       onDoubleClick={(event) => event.stopPropagation()}
-      onPointerDown={commitPlacement}
-      onPointerMove={(event) => placement && updatePlacement(event.clientX, event.clientY)}
       ref={rootRef}
+      style={graphBounds ? { left: graphBounds.left, right: "auto", width: graphBounds.width } : undefined}
     >
       {!placement && (
         <div
