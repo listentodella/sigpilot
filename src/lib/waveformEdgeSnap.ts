@@ -21,10 +21,15 @@ export function findNearestEdgeSample(
   }
   if (nearestIndex < 0) return null;
   if (rejectCrowdedEdges) {
+    const previousGap = nearestIndex > 0
+      ? (edgeSamples[nearestIndex] - edgeSamples[nearestIndex - 1]) / samplesPerPixel
+      : 0;
     const nextGap = nearestIndex + 1 < edgeSamples.length
       ? (edgeSamples[nearestIndex + 1] - edgeSamples[nearestIndex]) / samplesPerPixel
       : Number.POSITIVE_INFINITY;
-    if (nextGap < thresholdPx) return null;
+    // Logic 2 rejects only transitions surrounded by an unresolvable pulse.
+    // A distinct boundary beside one narrow pulse must remain selectable.
+    if (previousGap < thresholdPx && nextGap < thresholdPx) return null;
   }
   return edgeSamples[nearestIndex];
 }

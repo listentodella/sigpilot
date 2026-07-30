@@ -2,6 +2,7 @@ import {
   CSSProperties,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -317,8 +318,13 @@ export function TimingMarkersOverlay({
       ) return;
       const samplesPerPixel = latest.viewportSamples / Math.max(1, document.querySelector<HTMLElement>(".waveformCanvasHost")?.clientWidth ?? 1);
       const withinThreshold = Math.abs(transition.sample - pointer.rawSample) <= samplesPerPixel * 8;
-      const pulseIsWideEnough = transition.next_sample == null
-        || (transition.next_sample - transition.sample) / samplesPerPixel >= 8;
+      const previousGap = transition.previous_sample == null
+        ? 0
+        : (transition.sample - transition.previous_sample) / samplesPerPixel;
+      const nextGap = transition.next_sample == null
+        ? Number.POSITIVE_INFINITY
+        : (transition.next_sample - transition.sample) / samplesPerPixel;
+      const pulseIsWideEnough = previousGap >= 8 || nextGap >= 8;
       if (withinThreshold && pulseIsWideEnough) queuePreviewSample(transition.sample);
     }).catch(() => {
       // The immediate tile snap remains available when the graph query is unavailable.
@@ -713,6 +719,30 @@ interface GraphMarkerProps {
   viewportStart: number;
 }
 
+// Timing markers sit above the canvas and otherwise swallow its native wheel
+// listener. This mirrors Logic 2's usePassWheelEvent on its marker line.
+function passWheelToWaveform(event: ReactWheelEvent<HTMLElement>) {
+  const host = document.querySelector<HTMLElement>(".waveformCanvasHost");
+  if (!host) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const source = event.nativeEvent;
+  host.dispatchEvent(new WheelEvent("wheel", {
+    altKey: source.altKey,
+    bubbles: true,
+    cancelable: true,
+    clientX: source.clientX,
+    clientY: source.clientY,
+    ctrlKey: source.ctrlKey,
+    deltaMode: source.deltaMode,
+    deltaX: source.deltaX,
+    deltaY: source.deltaY,
+    deltaZ: source.deltaZ,
+    metaKey: source.metaKey,
+    shiftKey: source.shiftKey,
+  }));
+}
+
 function GraphMarker({
   dragging,
   hovered,
@@ -755,7 +785,7 @@ function GraphMarker({
       onPointerUp={onPointerUp}
       style={{ "--timing-marker-color": color, left: `${left}%` } as CSSProperties}
     >
-      <div className="timingMarkerHitLine">
+      <div className="timingMarkerHitLine" onWheel={passWheelToWaveform}>
         <span className="timingMarkerVisibleLine" />
       </div>
       <button

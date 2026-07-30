@@ -186,6 +186,7 @@ pub struct DigitalGraph {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NearestDigitalTransition {
+    pub previous_sample: Option<u64>,
     pub sample: u64,
     pub next_sample: Option<u64>,
 }
@@ -342,6 +343,9 @@ impl DigitalGraph {
             (None, None) => return Ok(None),
         };
         Ok(Some(NearestDigitalTransition {
+            previous_sample: nearest_index
+                .checked_sub(1)
+                .and_then(|previous| index.edges.get(previous).copied()),
             sample: index.edge(nearest_index),
             next_sample: index.edges.get(nearest_index + 1).copied(),
         }))
@@ -2430,6 +2434,7 @@ mod tests {
         assert_eq!(
             session.nearest_transition(0, 260).unwrap(),
             Some(NearestDigitalTransition {
+                previous_sample: Some(100),
                 sample: 300,
                 next_sample: Some(700),
             }),
@@ -2437,6 +2442,7 @@ mod tests {
         assert_eq!(
             session.nearest_transition(0, 995).unwrap(),
             Some(NearestDigitalTransition {
+                previous_sample: Some(700),
                 sample: 900,
                 next_sample: None,
             }),

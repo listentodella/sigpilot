@@ -38,6 +38,7 @@ import {
   ReactNode,
   RefObject,
   UIEvent as ReactUIEvent,
+  WheelEvent as ReactWheelEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -5141,8 +5142,13 @@ function RangeMeasurementsOverlay({
       if (!transition || requestId !== rangeSnapRequestRef.current) return;
       const samplesPerPixel = session.viewportSamples / Math.max(1, host.clientWidth);
       const withinThreshold = Math.abs(transition.sample - next.rawSample) <= samplesPerPixel * 8;
-      const pulseIsWideEnough = transition.next_sample == null
-        || (transition.next_sample - transition.sample) / samplesPerPixel >= 8;
+      const previousGap = transition.previous_sample == null
+        ? 0
+        : (transition.sample - transition.previous_sample) / samplesPerPixel;
+      const nextGap = transition.next_sample == null
+        ? Number.POSITIVE_INFINITY
+        : (transition.next_sample - transition.sample) / samplesPerPixel;
+      const pulseIsWideEnough = previousGap >= 8 || nextGap >= 8;
       if (!withinThreshold || !pulseIsWideEnough) return;
       onUpdateSession((current) => {
         const placement = current.rangePlacement;
@@ -5393,6 +5399,28 @@ function RangeMeasurementsOverlay({
     }));
   }
 
+  function passWheelToWaveform(event: ReactWheelEvent<HTMLElement>) {
+    const host = document.querySelector<HTMLElement>(".waveformCanvasHost");
+    if (!host) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const source = event.nativeEvent;
+    host.dispatchEvent(new WheelEvent("wheel", {
+      altKey: source.altKey,
+      bubbles: true,
+      cancelable: true,
+      clientX: source.clientX,
+      clientY: source.clientY,
+      ctrlKey: source.ctrlKey,
+      deltaMode: source.deltaMode,
+      deltaX: source.deltaX,
+      deltaY: source.deltaY,
+      deltaZ: source.deltaZ,
+      metaKey: source.metaKey,
+      shiftKey: source.shiftKey,
+    }));
+  }
+
   const placingPreview =
     session.rangePlacement?.channelIndex !== null &&
     session.rangePlacement?.currentSample !== null
@@ -5418,6 +5446,7 @@ function RangeMeasurementsOverlay({
           <div
             className={`rangeBand ${range.selected ? "selected" : ""}`}
             key={range.id}
+            onWheel={passWheelToWaveform}
             onPointerDown={(event) => {
               event.stopPropagation();
               selectRange(range.id, true);

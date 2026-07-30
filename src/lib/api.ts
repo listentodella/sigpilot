@@ -169,6 +169,7 @@ export interface NearestDigitalTransitionRequest {
 }
 
 export interface NearestDigitalTransition {
+  previous_sample: number | null;
   sample: number;
   next_sample: number | null;
 }
@@ -1061,7 +1062,11 @@ export function nearestDigitalTransition(
         Math.abs(edge - request.sample) < Math.abs(edges[best] - request.sample) ? index : best,
       0,
     );
-    return { sample: edges[nearestIndex], next_sample: edges[nearestIndex + 1] ?? null };
+    return {
+      previous_sample: edges[nearestIndex - 1] ?? null,
+      sample: edges[nearestIndex],
+      next_sample: edges[nearestIndex + 1] ?? null,
+    };
   });
 }
 

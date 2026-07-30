@@ -15,6 +15,10 @@ test("a narrow preceding pulse does not suppress the next distinct edge", () => 
   assert.equal(findNearestEdgeSample([150, 200, 400], 200, 10, 8, true), 200);
 });
 
+test("a distinct transition stays selectable beside one narrow pulse", () => {
+  assert.equal(findNearestEdgeSample([100, 150, 400], 150, 10, 8, true), 150);
+});
+
 test("empty exact edge data cannot produce a timing marker snap", () => {
   assert.equal(findNearestEdgeSample([], 200, 10, 8, true), null);
 });
