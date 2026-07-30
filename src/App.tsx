@@ -4097,6 +4097,7 @@ export default function App() {
                     totalSamples={totalSamples}
                     viewportSamples={activeSession.viewportSamples}
                     viewportStart={activeSession.viewportStart}
+                    viewportInteracting={graphViewportInteracting}
                   />
                 )}
               </>

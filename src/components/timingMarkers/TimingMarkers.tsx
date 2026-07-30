@@ -41,6 +41,7 @@ interface TimingMarkersOverlayProps {
   onOpenSidebar: () => void;
   onViewportChange: (start: number, samples: number) => void;
   placement: UiTimingMarkerPlacement | null;
+  viewportInteracting: boolean;
   sampleRateHz: number;
   rowHeights: number[];
   rowTopInsets?: number[];
@@ -81,6 +82,7 @@ export function TimingMarkersOverlay({
   onOpenSidebar,
   onViewportChange,
   placement,
+  viewportInteracting,
   sampleRateHz,
   rowHeights,
   rowTopInsets = [],
@@ -92,10 +94,31 @@ export function TimingMarkersOverlay({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const lastPlacementPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const placementContextRef = useRef({
+    rowHeights,
+    rowTopInsets,
+    tile,
+    totalSamples,
+    viewportInteracting,
+    viewportSamples,
+    viewportStart,
+  });
+  const previewSampleRef = useRef<number | null>(null);
+  const previewSampleFrameRef = useRef<number | null>(null);
   const [dragging, setDragging] = useState<HoverState | null>(null);
   const [hovered, setHovered] = useState<HoverState | null>(null);
   const [contextMenu, setContextMenu] = useState<GraphContextMenuState | null>(null);
   const [graphBounds, setGraphBounds] = useState<{ left: number; width: number } | null>(null);
+  const [previewSample, setPreviewSample] = useState<number | null>(null);
+  placementContextRef.current = {
+    rowHeights,
+    rowTopInsets,
+    tile,
+    totalSamples,
+    viewportInteracting,
+    viewportSamples,
+    viewportStart,
+  };
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -152,17 +175,18 @@ export function TimingMarkersOverlay({
     const root = rootRef.current;
     const rect = waveformHost?.getBoundingClientRect() ?? root?.getBoundingClientRect();
     if (!rect) return 0;
+    const context = placementContextRef.current;
     return resolveWaveformPointerSample({
       clientX,
       clientY: clientY ?? rect.top,
       rect,
       rejectCrowdedEdges: snappingEnabled,
-      rowHeights,
-      rowTopInsets,
-      tile: snappingEnabled ? tile : null,
-      totalSamples,
-      viewportSamples,
-      viewportStart,
+      rowHeights: context.rowHeights,
+      rowTopInsets: context.rowTopInsets,
+      tile: snappingEnabled ? context.tile : null,
+      totalSamples: context.totalSamples,
+      viewportSamples: context.viewportSamples,
+      viewportStart: context.viewportStart,
     }).sample;
   }
 
@@ -249,14 +273,14 @@ export function TimingMarkersOverlay({
     if (drag.editOnClick) openEditPopup(drag.id, drag.itemType);
   }
 
-  function updatePlacement(clientX: number, clientY: number) {
-    const sample = clientXToSample(clientX, clientY);
-    onChangePlacement((current) => {
-      if (!current) return null;
-      if (current.type === "single" || current.placingSide === "start") {
-        return { ...current, sample };
-      }
-      return { ...current, endSample: sample };
+  function updatePlacementPreview(clientX: number, clientY: number, snappingEnabled = true) {
+    const sample = clientXToSample(clientX, clientY, snappingEnabled);
+    previewSampleRef.current = sample;
+    if (previewSampleFrameRef.current !== null) return;
+    previewSampleFrameRef.current = window.requestAnimationFrame(() => {
+      previewSampleFrameRef.current = null;
+      const next = previewSampleRef.current;
+      setPreviewSample((current) => current === next ? current : next);
     });
   }
 
@@ -271,6 +295,12 @@ export function TimingMarkersOverlay({
           : null,
       );
       onMessage("Move the pointer and click again to place the second marker");
+      previewSampleRef.current = sample;
+      if (previewSampleFrameRef.current !== null) {
+        window.cancelAnimationFrame(previewSampleFrameRef.current);
+        previewSampleFrameRef.current = null;
+      }
+      setPreviewSample(sample);
       return;
     }
 
@@ -292,12 +322,24 @@ export function TimingMarkersOverlay({
       marker,
     ]);
     onChangePlacement(() => null);
+    previewSampleRef.current = null;
+    if (previewSampleFrameRef.current !== null) {
+      window.cancelAnimationFrame(previewSampleFrameRef.current);
+      previewSampleFrameRef.current = null;
+    }
+    setPreviewSample(null);
     onMessage(marker.type === "pair" ? "Marker pair added" : "Single marker added");
   }
 
   useEffect(() => {
     if (!placement) {
       lastPlacementPointerRef.current = null;
+      previewSampleRef.current = null;
+      if (previewSampleFrameRef.current !== null) {
+        window.cancelAnimationFrame(previewSampleFrameRef.current);
+        previewSampleFrameRef.current = null;
+      }
+      setPreviewSample(null);
       return;
     }
     const waveformHost = document.querySelector<HTMLElement>(".waveformCanvasHost");
@@ -310,7 +352,11 @@ export function TimingMarkersOverlay({
     function handlePointerMove(event: PointerEvent) {
       lastPlacementPointerRef.current = { x: event.clientX, y: event.clientY };
       if (isInsideWaveform(event.clientX, event.clientY)) {
-        updatePlacement(event.clientX, event.clientY);
+        updatePlacementPreview(
+          event.clientX,
+          event.clientY,
+          !placementContextRef.current.viewportInteracting,
+        );
       }
     }
     function handlePointerDown(event: PointerEvent) {
@@ -326,13 +372,19 @@ export function TimingMarkersOverlay({
       document.removeEventListener("pointermove", handlePointerMove);
       document.removeEventListener("pointerdown", handlePointerDown, true);
     };
-  }, [placement?.id, placement?.placingSide, placement?.type, rowHeights, rowTopInsets, tile, totalSamples, viewportSamples, viewportStart]);
+  }, [placement?.id, placement?.placingSide, placement?.type]);
+
+  useEffect(() => () => {
+    if (previewSampleFrameRef.current !== null) {
+      window.cancelAnimationFrame(previewSampleFrameRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!placement || !lastPlacementPointerRef.current) return;
     const { x, y } = lastPlacementPointerRef.current;
-    updatePlacement(x, y);
-  }, [tile, viewportSamples, viewportStart]);
+    updatePlacementPreview(x, y, !viewportInteracting);
+  }, [tile, viewportInteracting, viewportSamples, viewportStart]);
 
   if (totalSamples <= 0) return null;
 
@@ -523,7 +575,7 @@ export function TimingMarkersOverlay({
 
       {placement && (
         <TemporaryGraphMarkers
-          placement={placement}
+          placement={placementWithPreviewSample(placement, previewSample)}
           sampleToPercent={sampleToPercent}
           sampleRateHz={sampleRateHz}
         />
@@ -760,6 +812,17 @@ function TemporaryGraphMarkers({
       })}
     </>
   );
+}
+
+function placementWithPreviewSample(
+  placement: UiTimingMarkerPlacement,
+  previewSample: number | null,
+): UiTimingMarkerPlacement {
+  if (previewSample == null) return placement;
+  if (placement.type === "single" || placement.placingSide === "start") {
+    return { ...placement, sample: previewSample };
+  }
+  return { ...placement, endSample: previewSample };
 }
 
 function TimingMarkerSummary({
