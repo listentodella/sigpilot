@@ -53,6 +53,14 @@ pub fn capture_profile_from_settings(
     settings: &CaptureSettings,
     channel_count: u8,
 ) -> Result<CaptureProfile> {
+    const MAX_THRESHOLD_VOLTS: f64 = 2.0 * 3.334;
+    if !settings.threshold_volts.is_finite()
+        || !(0.0..=MAX_THRESHOLD_VOLTS).contains(&settings.threshold_volts)
+    {
+        return Err(CoreError::Decode(format!(
+            "threshold voltage must be between 0 and {MAX_THRESHOLD_VOLTS:.3} V"
+        )));
+    }
     let enabled_channels = resolve_enabled_channels(channel_count, &settings.enabled_channels)?;
     let mut profile = CaptureProfile {
         stream_mode: matches!(settings.mode, CaptureMode::Stream),
@@ -80,6 +88,16 @@ pub fn capture_profile_from_settings(
             CaptureTriggerKind::High => profile.trigger_one = trigger_bit,
             CaptureTriggerKind::Low => profile.trigger_zero = trigger_bit,
         }
+        let enabled_mask = enabled_channel_mask(channel_count, &enabled_channels)?;
+        // PXView passes all simple trigger conditions as bitmasks. Rejecting
+        // disabled channels avoids silently programming an unreachable condition.
+        if (settings.trigger_high_mask | settings.trigger_low_mask) & !enabled_mask != 0 {
+            return Err(CoreError::Decode(
+                "trigger conditions include a disabled channel".to_string(),
+            ));
+        }
+        profile.trigger_one |= settings.trigger_high_mask;
+        profile.trigger_zero |= settings.trigger_low_mask;
     }
 
     Ok(profile)
@@ -617,27 +635,47 @@ pub fn decode_cross_data_to_physical_channels(
         .checked_mul(64)
         .and_then(|samples| samples.checked_mul(unitsize))
         .ok_or(CoreError::InvalidCaptureDuration)?;
-    let mut output = Vec::with_capacity(output_capacity);
+    let mut output = vec![0; output_capacity];
+    let mut output_offset = 0;
     for stripe in input.chunks_exact(stripe_bytes) {
-        let mut words = [0u64; 32];
-        for (raw_lane, bytes) in stripe.chunks_exact(8).enumerate() {
-            words[raw_lane] = u64::from_le_bytes(bytes.try_into().expect("fixed lane"));
-        }
-        for bit_index in 0..64 {
-            let source_bit = if reverse_bits_in_word {
-                63 - bit_index
+        for sample_block in 0..8 {
+            let source_byte = if reverse_bits_in_word {
+                7 - sample_block
             } else {
-                bit_index
+                sample_block
             };
-            let mut sample_word = 0u32;
+            let mut output_byte_matrices = [0u64; 4];
             for (raw_lane, physical_channel) in enabled_channels.iter().copied().enumerate() {
-                let bit_value = ((words[raw_lane] >> source_bit) & 1) as u32;
-                sample_word |= bit_value << physical_channel;
+                let mut lane_samples = stripe[raw_lane * 8 + source_byte];
+                if reverse_bits_in_word {
+                    lane_samples = lane_samples.reverse_bits();
+                }
+                let output_byte = usize::from(physical_channel / 8);
+                let channel_in_byte = usize::from(physical_channel % 8);
+                output_byte_matrices[output_byte] |=
+                    u64::from(lane_samples) << (channel_in_byte * 8);
             }
-            write_sample_word(&mut output, sample_word, unitsize);
+
+            for output_byte in 0..unitsize {
+                let samples = transpose_8x8_bits(output_byte_matrices[output_byte]).to_le_bytes();
+                for (sample, value) in samples.into_iter().enumerate() {
+                    output[output_offset + sample * unitsize + output_byte] = value;
+                }
+            }
+            output_offset += 8 * unitsize;
         }
     }
     Ok(output)
+}
+
+#[inline]
+fn transpose_8x8_bits(mut rows: u64) -> u64 {
+    let mut swap = (rows ^ (rows >> 7)) & 0x00aa_00aa_00aa_00aa;
+    rows ^= swap ^ (swap << 7);
+    swap = (rows ^ (rows >> 14)) & 0x0000_cccc_0000_cccc;
+    rows ^= swap ^ (swap << 14);
+    swap = (rows ^ (rows >> 28)) & 0x0000_0000_f0f0_f0f0;
+    rows ^ swap ^ (swap << 28)
 }
 
 pub fn decode_cross_data_with_map(
@@ -1322,6 +1360,39 @@ mod tests {
     }
 
     #[test]
+    fn writes_pxview_equivalent_threshold_voltage() {
+        let profile = CaptureProfile {
+            vth_volts: 3.3,
+            ..CaptureProfile::default()
+        };
+        let script =
+            build_capture_register_script_for_channels(4096, 16, 1, &[0], 10_000_000, profile)
+                .unwrap();
+
+        let threshold = script
+            .iter()
+            .find(|write| write.addr == protocol::REG_THRESHOLD_VALUE)
+            .expect("threshold register");
+        // PXView: vth * (100 / 200) / 3.334 * (120 MHz / 10 kHz).
+        assert_eq!(threshold.value, (3.3 * 0.5 / 3.334 * 12_000.0) as u32);
+    }
+
+    #[test]
+    fn rejects_thresholds_outside_the_hardware_pwm_range() {
+        let settings = CaptureSettings {
+            threshold_volts: 6.669,
+            ..CaptureSettings::default()
+        };
+        assert!(capture_profile_from_settings(&settings, 8).is_err());
+
+        let settings = CaptureSettings {
+            threshold_volts: 6.668,
+            ..CaptureSettings::default()
+        };
+        assert!(capture_profile_from_settings(&settings, 8).is_ok());
+    }
+
+    #[test]
     fn validates_and_canonicalizes_enabled_physical_channels() {
         assert_eq!(
             resolve_enabled_channels(8, &[]).unwrap(),
@@ -1391,6 +1462,28 @@ mod tests {
             addr: protocol::REG_STREAM_CONTROL,
             value: 1 << protocol::STREAM_FILTER_SHIFT,
         }));
+    }
+
+    #[test]
+    fn maps_additional_level_conditions_to_pxview_trigger_masks() {
+        let profile = capture_profile_from_settings(
+            &CaptureSettings {
+                channel_count: 8,
+                enabled_channels: vec![0, 1, 2, 3],
+                trigger_enabled: true,
+                trigger_channel: 0,
+                trigger_kind: CaptureTriggerKind::Rising,
+                trigger_high_mask: 1 << 2,
+                trigger_low_mask: 1 << 3,
+                ..CaptureSettings::default()
+            },
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(profile.trigger_rise, 1);
+        assert_eq!(profile.trigger_one, 1 << 2);
+        assert_eq!(profile.trigger_zero, 1 << 3);
     }
 
     #[test]

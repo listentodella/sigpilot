@@ -48,6 +48,7 @@ export interface HardwareCaptureCapabilities {
   default_channel_count: number;
   default_sample_rate_hz: number;
   sample_rates: number[];
+  threshold_volts: number[];
   channel_modes: HardwareChannelModeInfo[];
 }
 
@@ -65,6 +66,8 @@ export interface CaptureSettings {
   trigger_enabled: boolean;
   trigger_channel: number;
   trigger_kind: CaptureTriggerKind;
+  trigger_high_mask: number;
+  trigger_low_mask: number;
   trigger_position_percent: number;
   glitch_filter_enabled: boolean;
   clock_edge: boolean;
@@ -172,6 +175,20 @@ export interface NearestDigitalTransition {
   previous_sample: number | null;
   sample: number;
   next_sample: number | null;
+}
+
+export interface DigitalPointMeasurementRequest {
+  channel: number;
+  sample: number;
+}
+
+export interface DigitalPointMeasurement {
+  channel: number;
+  cursor_sample: number;
+  high: boolean;
+  width_start_sample: number;
+  width_end_sample: number;
+  period_end_sample: number | null;
 }
 
 export interface DigitalRangeMeasurementStats {
@@ -473,7 +490,7 @@ const PREVIEW_MAX_ANALYZER_MARKER_RESULTS = 300;
 const PREVIEW_MAX_MULTI_BUBBLE_STRINGS = 400;
 const PREVIEW_MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME = 15;
 const PREVIEW_MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES = 30;
-const PREVIEW_CAPTURE_UPDATE_MS = 33;
+const PREVIEW_CAPTURE_UPDATE_MS = 50;
 const PREVIEW_SAMPLE_RATES = [
   2_000,
   5_000,
@@ -818,6 +835,7 @@ function previewDeviceCapabilities(deviceId: string): HardwareCaptureCapabilitie
     default_channel_count: 8,
     default_sample_rate_hz: 25_000_000,
     sample_rates: PREVIEW_SAMPLE_RATES,
+    threshold_volts: [1.8, 2.5, 3.3, 5.0],
     channel_modes: channelModes,
   };
 }
@@ -1068,6 +1086,16 @@ export function nearestDigitalTransition(
       next_sample: edges[nearestIndex + 1] ?? null,
     };
   });
+}
+
+export function measureDigitalPoint(
+  sessionId: string,
+  request: DigitalPointMeasurementRequest,
+): Promise<DigitalPointMeasurement | null> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(withPreviewCapture(sessionId, () => measurePreviewDigitalPoint(request)));
+  }
+  return callBackend("measure_digital_point", { sessionId, request });
 }
 
 export function measureDigitalRange(
@@ -1840,6 +1868,49 @@ function findPreviewTransitionsOutsideRange(
     findPreviewTransition(channel, startSample, totalSamples, sampleRateHz, "previous"),
     findPreviewTransition(channel, endSample, totalSamples, sampleRateHz, "next"),
   ];
+}
+
+function measurePreviewDigitalPoint(
+  request: DigitalPointMeasurementRequest,
+): DigitalPointMeasurement | null {
+  const metadata = previewCapture.metadata;
+  if (request.channel < 0 || request.channel >= metadata.channel_count || metadata.sample_count <= 0) {
+    return null;
+  }
+  const cursorSample = Math.max(
+    0,
+    Math.min(metadata.sample_count - 1, Math.round(request.sample)),
+  );
+  const widthStart = findPreviewTransition(
+    request.channel,
+    cursorSample + 1,
+    metadata.sample_count,
+    metadata.sample_rate_hz,
+    "previous",
+  );
+  const widthEnd = findPreviewTransition(
+    request.channel,
+    cursorSample + 1,
+    metadata.sample_count,
+    metadata.sample_rate_hz,
+    "next",
+  );
+  if (widthStart == null || widthEnd == null) return null;
+
+  return {
+    channel: request.channel,
+    cursor_sample: cursorSample,
+    high: previewDigitalLevelAt(cursorSample, request.channel, metadata.sample_rate_hz),
+    width_start_sample: widthStart,
+    width_end_sample: widthEnd,
+    period_end_sample: findPreviewTransition(
+      request.channel,
+      widthEnd + 1,
+      metadata.sample_count,
+      metadata.sample_rate_hz,
+      "next",
+    ),
+  };
 }
 
 function findPreviewTransition(

@@ -1,5 +1,5 @@
 import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useState } from "react";
-import type { WaveformTile } from "../lib/api";
+import { measureDigitalPoint, type WaveformTile } from "../lib/api";
 import {
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
@@ -19,6 +19,7 @@ import { findNearestEdgeSample } from "../lib/waveformEdgeSnap";
 
 interface WaveformCanvasProps {
   isLive?: boolean;
+  sessionId: string;
   rowHeights: number[];
   rowTopInsets?: number[];
   tile: WaveformTile | null;
@@ -59,6 +60,20 @@ const packedDigitalBinBytes = 16;
 const packedDigitalBinCache = new WeakMap<object, DataView>();
 const digitalEdgeCache = new WeakMap<object, DigitalEdge[]>();
 
+interface WaveLayerCache {
+  canvas: HTMLCanvasElement;
+  height: number;
+  matchChannelColors: boolean;
+  rowHeights: number[];
+  rowTopInsets: number[];
+  tile: WaveformTile;
+  width: number;
+}
+
+interface WaveLayerCacheRef {
+  current: WaveLayerCache | null;
+}
+
 type EdgeKind = "rising" | "falling";
 
 interface DigitalEdge {
@@ -79,11 +94,17 @@ interface EdgeJumpMeasurement {
 interface HoverMeasurement {
   channelIndex: number;
   pointerX: number;
-  anchorKind: EdgeKind;
   widthStart: number;
-  widthEnd: number | null;
+  widthEnd: number;
   periodStart: number;
   periodEnd: number | null;
+}
+
+interface HoverMeasurementTarget {
+  channel: number;
+  channelIndex: number;
+  pointerX: number;
+  sample: number;
 }
 
 type EdgeNavigationDirection = "previous" | "next";
@@ -97,6 +118,7 @@ interface HoverNavigation {
 
 export function WaveformCanvas({
   isLive = false,
+  sessionId,
   rowHeights,
   rowTopInsets = [],
   tile,
@@ -117,11 +139,13 @@ export function WaveformCanvas({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const waveLayerCacheRef = useRef<WaveLayerCache | null>(null);
   const dragRef = useRef<{ x: number; start: number; samples: number } | null>(null);
   const tileRef = useRef<WaveformTile | null>(null);
   const viewportRef = useRef({ start: viewportStart, samples: viewportSamples });
   const viewportPropsRef = useRef({ start: viewportStart, samples: viewportSamples });
   const sampleRateRef = useRef(sampleRateHz);
+  const sessionIdRef = useRef(sessionId);
   const isLiveRef = useRef(isLive);
   const maximumViewportSamplesRef = useRef(maximumViewportSamples);
   const timeOriginSampleRef = useRef(timeOriginSample);
@@ -133,6 +157,11 @@ export function WaveformCanvas({
   const onViewportInteractionChangeRef = useRef(onViewportInteractionChange);
   const onWidthChangeRef = useRef(onWidthChange);
   const hoverRef = useRef<HoverMeasurement | null>(null);
+  const hoverMeasurementTargetRef = useRef<HoverMeasurementTarget | null>(null);
+  const hoverMeasurementPendingRef = useRef<HoverMeasurementTarget | null>(null);
+  const hoverMeasurementTimerRef = useRef<number | null>(null);
+  const hoverMeasurementInFlightRef = useRef(false);
+  const hoverMeasurementGenerationRef = useRef(0);
   const edgeJumpRef = useRef<EdgeJumpMeasurement | null>(null);
   const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
   const showInteractiveMeasurementRef = useRef(showInteractiveMeasurement);
@@ -150,6 +179,7 @@ export function WaveformCanvas({
   onPointerPositionChangeRef.current = onPointerPositionChange;
   onViewportInteractionChangeRef.current = onViewportInteractionChange;
   onWidthChangeRef.current = onWidthChange;
+  sessionIdRef.current = sessionId;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -209,7 +239,7 @@ export function WaveformCanvas({
     totalSamplesRef.current = totalSamples;
     rowHeightsRef.current = rowHeights;
     rowTopInsetsRef.current = rowTopInsets;
-    if (!showInteractiveMeasurement) hoverRef.current = null;
+    if (!showInteractiveMeasurement) cancelHoverMeasurementRequest();
     if (tileChanged && edgeJumpRef.current && hostRef.current) {
       const rect = hostRef.current.getBoundingClientRect();
       updateEdgeJumpAt(
@@ -241,6 +271,7 @@ export function WaveformCanvas({
       if (wheelInteractionTimerRef.current !== null) {
         window.clearTimeout(wheelInteractionTimerRef.current);
       }
+      cancelHoverMeasurementRequest();
       setViewportInteractionActive(false);
     };
   }, []);
@@ -265,6 +296,7 @@ export function WaveformCanvas({
       rowHeightsRef.current,
       rowTopInsetsRef.current,
       matchChannelColorsRef.current,
+      waveLayerCacheRef,
     );
     drawMeasurementOverlay(
       measurementCanvas,
@@ -421,7 +453,7 @@ export function WaveformCanvas({
 
     const current = viewportRef.current;
     const offset = current.samples * (direction === "next" ? 0.25 : 0.75);
-    hoverRef.current = null;
+    cancelHoverMeasurementRequest();
     edgeJumpRef.current = null;
     animateViewportTo(edgeSample - offset, current.samples);
   }
@@ -435,11 +467,14 @@ export function WaveformCanvas({
     }
     wheelInteractionTimerRef.current = window.setTimeout(() => {
       wheelInteractionTimerRef.current = null;
-      if (!dragRef.current) setViewportInteractionActive(false);
+      if (!dragRef.current) {
+        setViewportInteractionActive(false);
+        updateHoverAt(event.clientX, event.clientY);
+      }
     }, 90);
     cancelViewportAnimation();
     cancelLiveViewportAnimation();
-    hoverRef.current = null;
+    cancelHoverMeasurementRequest();
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -492,7 +527,7 @@ export function WaveformCanvas({
     cancelViewportAnimation();
     cancelLiveViewportAnimation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    hoverRef.current = null;
+    cancelHoverMeasurementRequest();
     pointerDownRef.current = { x: event.clientX, y: event.clientY };
     dragRef.current = {
       x: event.clientX,
@@ -539,9 +574,85 @@ export function WaveformCanvas({
   }
 
   function clearHover() {
-    hoverRef.current = null;
+    cancelHoverMeasurementRequest();
     setNavigation(null);
     scheduleDraw();
+  }
+
+  function cancelHoverMeasurementRequest() {
+    hoverMeasurementGenerationRef.current += 1;
+    hoverMeasurementTargetRef.current = null;
+    hoverMeasurementPendingRef.current = null;
+    hoverRef.current = null;
+    if (hoverMeasurementTimerRef.current !== null) {
+      window.clearTimeout(hoverMeasurementTimerRef.current);
+      hoverMeasurementTimerRef.current = null;
+    }
+  }
+
+  function queueHoverMeasurement(target: HoverMeasurementTarget) {
+    hoverMeasurementTargetRef.current = target;
+    const current = hoverRef.current;
+    if (
+      current?.channelIndex === target.channelIndex &&
+      target.sample > current.widthStart &&
+      target.sample < current.widthEnd
+    ) {
+      current.pointerX = target.pointerX;
+      scheduleDraw();
+      return;
+    }
+
+    hoverRef.current = null;
+    hoverMeasurementPendingRef.current = target;
+    if (hoverMeasurementTimerRef.current !== null || hoverMeasurementInFlightRef.current) return;
+    hoverMeasurementTimerRef.current = window.setTimeout(() => {
+      hoverMeasurementTimerRef.current = null;
+      void runHoverMeasurementRequest();
+    }, 16);
+  }
+
+  async function runHoverMeasurementRequest() {
+    const target = hoverMeasurementPendingRef.current;
+    if (!target || hoverMeasurementInFlightRef.current) return;
+    hoverMeasurementPendingRef.current = null;
+    hoverMeasurementInFlightRef.current = true;
+    const generation = hoverMeasurementGenerationRef.current;
+    try {
+      const measurement = await measureDigitalPoint(sessionIdRef.current, {
+        channel: target.channel,
+        sample: Math.round(target.sample),
+      });
+      const latest = hoverMeasurementTargetRef.current;
+      if (
+        generation === hoverMeasurementGenerationRef.current &&
+        measurement &&
+        latest?.channel === measurement.channel &&
+        latest.sample >= measurement.width_start_sample &&
+        latest.sample < measurement.width_end_sample
+      ) {
+        hoverMeasurementPendingRef.current = null;
+        hoverRef.current = {
+          channelIndex: latest.channelIndex,
+          pointerX: latest.pointerX,
+          widthStart: measurement.width_start_sample,
+          widthEnd: measurement.width_end_sample,
+          periodStart: measurement.width_start_sample,
+          periodEnd: measurement.period_end_sample,
+        };
+        scheduleDraw();
+      }
+    } catch {
+      // The active capture may be replaced while this request is in flight.
+    } finally {
+      hoverMeasurementInFlightRef.current = false;
+      if (hoverMeasurementPendingRef.current) {
+        hoverMeasurementTimerRef.current = window.setTimeout(() => {
+          hoverMeasurementTimerRef.current = null;
+          void runHoverMeasurementRequest();
+        }, 0);
+      }
+    }
   }
 
   function startEdgeJumpAt(clientX: number, clientY: number) {
@@ -569,7 +680,7 @@ export function WaveformCanvas({
       pointerY: clientY - rect.top,
       snapped: true,
     };
-    hoverRef.current = null;
+    cancelHoverMeasurementRequest();
     setNavigation(null);
     scheduleDraw();
     return true;
@@ -655,18 +766,36 @@ export function WaveformCanvas({
     const dpr = window.devicePixelRatio || 1;
     const x = (clientX - rect.left) * dpr;
     const y = (clientY - rect.top) * dpr;
-    hoverRef.current = showInteractiveMeasurementRef.current
-      ? findHoverMeasurement(
-          canvas,
-          tileRef.current,
-          viewportRef.current.start,
-          viewportRef.current.samples,
-          x,
+    const tileSnapshot = tileRef.current;
+    const channelIndex = tileSnapshot
+      ? findSaleaeGraphChannelIndexAtY(
+          getSaleaeGraphChannelLayout(
+            rowHeightsRef.current,
+            tileSnapshot.channels.length,
+            dpr,
+            rowTopInsetsRef.current,
+          ),
           y,
-          rowHeightsRef.current,
-          rowTopInsetsRef.current,
         )
       : null;
+    const sample = viewportRef.current.start
+      + clamp(x / Math.max(1, canvas.width), 0, 1) * viewportRef.current.samples;
+    if (
+      showInteractiveMeasurementRef.current &&
+      tileSnapshot &&
+      channelIndex !== null &&
+      sample >= 0 &&
+      sample < totalSamplesRef.current
+    ) {
+      queueHoverMeasurement({
+        channel: tileSnapshot.channels[channelIndex].channel,
+        channelIndex,
+        pointerX: x,
+        sample,
+      });
+    } else {
+      cancelHoverMeasurementRequest();
+    }
     setNavigation(
       findHoverNavigation(
         rect,
@@ -1020,6 +1149,7 @@ function draw(
   rowHeights: number[],
   rowTopInsets: number[],
   matchChannelColors: boolean,
+  waveLayerCacheRef: WaveLayerCacheRef,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -1044,19 +1174,182 @@ function draw(
   }
 
   const dpr = window.devicePixelRatio || 1;
+  drawCachedWaveLayer(
+    ctx,
+    canvas,
+    tile,
+    viewportStart,
+    viewportSamples,
+    rowHeights,
+    rowTopInsets,
+    matchChannelColors,
+    waveLayerCacheRef,
+  );
+
+  if (hover) {
+    drawHoverMeasurement(
+      ctx,
+      canvas,
+      tile,
+      hover,
+      viewportStart,
+      viewportSamples,
+      sampleRateHz,
+      rowHeights,
+      rowTopInsets,
+    );
+  }
+}
+
+function drawCachedWaveLayer(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  tile: WaveformTile,
+  viewportStart: number,
+  viewportSamples: number,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  matchChannelColors: boolean,
+  cacheRef: WaveLayerCacheRef,
+) {
+  if (tile.sample_count <= 0 || viewportSamples <= 0) return;
+  // A tile includes overscan and its pixel budget is expressed in CSS pixels.
+  // Render that full budget at the display DPR so cropping the visible window
+  // remains 1:1. Using only the viewport width here stretches every vertical
+  // transition by the overscan ratio (normally about 2x).
+  const dpr = window.devicePixelRatio || 1;
+  const layerWidth = Math.max(1, Math.round(tile.pixels * dpr));
+  let cache = cacheRef.current;
+  if (
+    !cache ||
+    cache.tile !== tile ||
+    cache.width !== layerWidth ||
+    cache.height !== canvas.height ||
+    cache.rowHeights !== rowHeights ||
+    cache.rowTopInsets !== rowTopInsets ||
+    cache.matchChannelColors !== matchChannelColors
+  ) {
+    const layer = document.createElement("canvas");
+    layer.width = layerWidth;
+    layer.height = canvas.height;
+    renderWaveLayer(layer, tile, rowHeights, rowTopInsets, matchChannelColors);
+    cache = {
+      canvas: layer,
+      height: canvas.height,
+      matchChannelColors,
+      rowHeights,
+      rowTopInsets,
+      tile,
+      width: layerWidth,
+    };
+    cacheRef.current = cache;
+  }
+
+  const tileStart = tile.start_sample;
+  const tileEnd = tileStart + tile.sample_count;
+  const viewportEnd = viewportStart + viewportSamples;
+  const visibleStart = Math.max(tileStart, viewportStart);
+  const visibleEnd = Math.min(tileEnd, viewportEnd);
+  if (visibleEnd <= visibleStart) return;
+
+  const sourceX = ((visibleStart - tileStart) / tile.sample_count) * cache.width;
+  const sourceWidth = ((visibleEnd - visibleStart) / tile.sample_count) * cache.width;
+  const destinationX = ((visibleStart - viewportStart) / viewportSamples) * canvas.width;
+  const destinationWidth = ((visibleEnd - visibleStart) / viewportSamples) * canvas.width;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(
+    cache.canvas,
+    sourceX,
+    0,
+    Math.max(Number.EPSILON, sourceWidth),
+    cache.height,
+    destinationX,
+    0,
+    destinationWidth,
+    canvas.height,
+  );
+  ctx.restore();
+
+  drawExactWaveSegments(
+    ctx,
+    canvas,
+    tile,
+    viewportStart,
+    viewportSamples,
+    rowHeights,
+    rowTopInsets,
+    matchChannelColors,
+  );
+}
+
+function drawExactWaveSegments(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  tile: WaveformTile,
+  viewportStart: number,
+  viewportSamples: number,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  matchChannelColors: boolean,
+) {
+  const dpr = window.devicePixelRatio || 1;
+  const channelLayout = getSaleaeGraphChannelLayout(
+    rowHeights,
+    tile.channels.length,
+    dpr,
+    rowTopInsets,
+  );
+  const left = graphPaddingLeft * dpr;
+  const right = canvas.width - graphPaddingRight * dpr;
+  const viewSamples = Math.max(1, viewportSamples);
+
+  tile.channels.forEach((channel, index) => {
+    if (channel.segments.length === 0) return;
+    const layout = channelLayout[index];
+    const gutter = Math.min(
+      digitalGraphGutterPx * dpr,
+      Math.max(0, (layout.height - 2 * dpr) / 2),
+    );
+    const highY = layout.top + gutter + 0.5 * dpr;
+    const transitionHeight = Math.max(dpr, Math.round(layout.height - 2 * gutter));
+    const lowY = highY + transitionHeight - dpr;
+    drawDigitalSegments(ctx, {
+      color: matchChannelColors ? saleaeLegacyChannelColor(channel.channel) : "#ffffff",
+      highY,
+      lowY,
+      left,
+      right,
+      viewSamples,
+      viewStart: viewportStart,
+      segments: channel.segments,
+      dpr,
+    });
+  });
+}
+
+function renderWaveLayer(
+  canvas: HTMLCanvasElement,
+  tile: WaveformTile,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  matchChannelColors: boolean,
+) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.width;
   const channelLayout = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
-  const usableWidth = Math.max(1, right - left);
-  const viewSamples = Math.max(1, viewportSamples || tile.sample_count || 1);
-  const viewStart = viewportStart || 0;
+  const viewSamples = Math.max(1, tile.sample_count);
+  const viewStart = tile.start_sample;
 
   tile.channels.forEach((channel, index) => {
     const layout = channelLayout[index];
-    const top = layout.top;
     const laneHeight = layout.height;
     const gutter = Math.min(digitalGraphGutterPx * dpr, Math.max(0, (laneHeight - 2 * dpr) / 2));
-    const highY = top + gutter + 0.5 * dpr;
+    const highY = layout.top + gutter + 0.5 * dpr;
     const transitionHeight = Math.max(dpr, Math.round(laneHeight - 2 * gutter));
     const lowY = highY + transitionHeight - dpr;
     ctx.strokeStyle = "rgba(255,255,255,0.075)";
@@ -1066,19 +1359,7 @@ function draw(
     ctx.stroke();
 
     const channelColor = matchChannelColors ? saleaeLegacyChannelColor(channel.channel) : "#ffffff";
-    if (channel.segments.length > 0) {
-      drawDigitalSegments(ctx, {
-        color: channelColor,
-        highY,
-        lowY,
-        left,
-        right,
-        viewSamples,
-        viewStart,
-        segments: channel.segments,
-        dpr,
-      });
-    } else {
+    if (channel.segments.length === 0) {
       drawDigitalChannel(ctx, {
         color: channelColor,
         highY,
@@ -1094,20 +1375,6 @@ function draw(
       });
     }
   });
-
-  if (hover) {
-    drawHoverMeasurement(
-      ctx,
-      canvas,
-      tile,
-      hover,
-      viewportStart,
-      viewportSamples,
-      sampleRateHz,
-      rowHeights,
-      rowTopInsets,
-    );
-  }
 }
 
 interface DigitalChannelDrawArgs {
@@ -1333,69 +1600,6 @@ function findHoverChannelIndexAtY(
     if (y >= row.outerTop && y < nextTop) return index;
   }
   return null;
-}
-
-function findHoverMeasurement(
-  canvas: HTMLCanvasElement,
-  tile: WaveformTile | null,
-  viewportStart: number,
-  viewportSamples: number,
-  x: number,
-  y: number,
-  rowHeights: number[],
-  rowTopInsets: number[],
-): HoverMeasurement | null {
-  if (!tile || tile.channels.length === 0) return null;
-  const dpr = window.devicePixelRatio || 1;
-  const width = canvas.width;
-  const channelIndex = findSaleaeGraphChannelIndexAtY(
-    getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets),
-    y,
-  );
-  if (channelIndex === null) return null;
-  const channel = tile.channels[channelIndex];
-  const left = graphPaddingLeft * dpr;
-  const right = width - graphPaddingRight * dpr;
-  const viewSamples = Math.max(1, viewportSamples || tile.sample_count || 1);
-  const pointerSample = viewportStart + ((Math.max(left, Math.min(right, x)) - left) / Math.max(1, right - left)) * viewSamples;
-  const edges = collectDigitalEdges(tile, channelIndex);
-  if (edges.length === 0) return null;
-
-  const thresholdSamples = (14 * dpr * viewSamples) / Math.max(1, right - left);
-  const nearestEdge = edges.reduce(
-    (best, edge) => {
-      const distance = Math.abs(edge.sample - pointerSample);
-      return distance < best.distance ? { edge, distance } : best;
-    },
-    { edge: edges[0], distance: Math.abs(edges[0].sample - pointerSample) },
-  );
-  const snapped = nearestEdge.distance <= thresholdSamples;
-  if (!snapped) {
-    return null;
-  }
-
-  const risingEdges = channel.rising_edges.length
-    ? channel.rising_edges
-    : edges.filter((edge) => edge.kind === "rising").map((edge) => edge.sample);
-  const fallingEdges = channel.falling_edges.length
-    ? channel.falling_edges
-    : edges.filter((edge) => edge.kind === "falling").map((edge) => edge.sample);
-  const anchorKind = nearestEdge.edge.kind;
-  const sameKindEdges = anchorKind === "rising" ? risingEdges : fallingEdges;
-  const oppositeKindEdges = anchorKind === "rising" ? fallingEdges : risingEdges;
-  const widthStart = nearestEdge.edge.sample;
-  const widthEnd = findNextEdge(oppositeKindEdges, widthStart);
-  const periodEnd = findNextEdge(sameKindEdges, widthStart);
-
-  return {
-    channelIndex,
-    pointerX: x,
-    anchorKind,
-    widthStart,
-    widthEnd,
-    periodStart: widthStart,
-    periodEnd,
-  };
 }
 
 function drawHoverMeasurement(
@@ -1626,6 +1830,12 @@ interface DigitalExtraDataDrawArgs {
   dpr: number;
 }
 
+interface DigitalExtraDataLine {
+  label: string;
+  value: string;
+  superscript?: string;
+}
+
 function drawDigitalExtraData(ctx: CanvasRenderingContext2D, args: DigitalExtraDataDrawArgs) {
   const {
     hover,
@@ -1642,18 +1852,28 @@ function drawDigitalExtraData(ctx: CanvasRenderingContext2D, args: DigitalExtraD
   } = args;
   if (widthSamples == null || widthSamples <= 0 || sampleRateHz <= 0) return;
 
-  const lines: string[] = [];
+  const lines: DigitalExtraDataLine[] = [];
   if (periodSamples != null && periodSamples > 0) {
-    lines.push(`Duty: ${trim((widthSamples / periodSamples) * 100)} %`);
-    lines.push(`Freq: ${formatFrequency(sampleRateHz / periodSamples)}`);
+    lines.push({
+      label: "Duty",
+      value: `${formatRounded((widthSamples / periodSamples) * 100, 2)} %`,
+    });
+    lines.push({ label: "Freq", value: formatFrequency(sampleRateHz / periodSamples) });
+    lines.push({ label: "Period", value: formatDuration(periodSamples, sampleRateHz) });
   }
-  lines.push(`width^-1: ${formatFrequency(sampleRateHz / widthSamples)}`);
+  lines.push({
+    label: "width",
+    superscript: "-1",
+    value: formatFrequency(sampleRateHz / widthSamples),
+  });
 
   const padding = 5 * dpr;
   const lineHeight = 18 * dpr;
   const minWidth = digitalMeasurementBoxMinWidthPx * dpr;
-  ctx.font = `${12 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
-  const boxWidth = Math.max(minWidth, Math.max(...lines.map((line) => ctx.measureText(line).width)) + padding * 2);
+  const boxWidth = Math.max(
+    minWidth,
+    Math.max(...lines.map((line) => measureDigitalExtraDataLine(ctx, line, dpr))) + padding * 2,
+  );
   const boxHeight = lines.length * lineHeight + padding * 2;
   const margin = 30 * dpr;
   const placeOnLeft = hover.pointerX > canvasWidth / 2;
@@ -1672,10 +1892,50 @@ function drawDigitalExtraData(ctx: CanvasRenderingContext2D, args: DigitalExtraD
   ctx.fill();
   ctx.stroke();
 
-  lines.forEach((line, index) => {
-    ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
-    ctx.fillText(line, boxX + padding, boxY + padding + (index + 0.78) * lineHeight);
-  });
+  ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+  lines.forEach((line, index) =>
+    drawDigitalExtraDataLine(
+      ctx,
+      line,
+      boxX + padding,
+      boxY + padding + (index + 0.78) * lineHeight,
+      dpr,
+    ),
+  );
+}
+
+function measureDigitalExtraDataLine(
+  ctx: CanvasRenderingContext2D,
+  line: DigitalExtraDataLine,
+  dpr: number,
+) {
+  ctx.font = `${12 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
+  let width = ctx.measureText(line.label).width;
+  if (line.superscript) {
+    ctx.font = `${8 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
+    width += ctx.measureText(line.superscript).width;
+  }
+  ctx.font = `${12 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
+  return width + ctx.measureText(`: ${line.value}`).width;
+}
+
+function drawDigitalExtraDataLine(
+  ctx: CanvasRenderingContext2D,
+  line: DigitalExtraDataLine,
+  x: number,
+  baseline: number,
+  dpr: number,
+) {
+  ctx.font = `${12 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
+  ctx.fillText(line.label, x, baseline);
+  let cursor = x + ctx.measureText(line.label).width;
+  if (line.superscript) {
+    ctx.font = `${8 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
+    ctx.fillText(line.superscript, cursor, baseline - 5 * dpr);
+    cursor += ctx.measureText(line.superscript).width;
+  }
+  ctx.font = `${12 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
+  ctx.fillText(`: ${line.value}`, cursor, baseline);
 }
 
 function collectDigitalEdges(tile: WaveformTile, channelIndex: number): DigitalEdge[] {
@@ -1880,26 +2140,24 @@ function withAlpha(color: string, alpha: number) {
 function formatDuration(samples: number, sampleRateHz: number) {
   if (!Number.isFinite(samples) || !Number.isFinite(sampleRateHz) || sampleRateHz <= 0) return "--";
   const seconds = samples / sampleRateHz;
-  if (seconds < 1e-9) return `${trim(seconds * 1e12)} ps`;
-  if (seconds < 1e-6) return `${trim(seconds * 1e9)} ns`;
-  if (seconds < 1e-3) return `${trim(seconds * 1e6)} us`;
-  if (seconds < 1) return `${trim(seconds * 1e3)} ms`;
-  return `${trim(seconds)} s`;
+  if (seconds < 1e-9) return `${formatRounded(seconds * 1e12, 3)} ps`;
+  if (seconds < 1e-6) return `${formatRounded(seconds * 1e9, 0)} ns`;
+  if (seconds < 1e-3) return `${formatRounded(seconds * 1e6, 3)} us`;
+  if (seconds < 1) return `${formatRounded(seconds * 1e3, 6)} ms`;
+  return `${formatRounded(seconds, 9)} s`;
 }
 
 function formatFrequency(hz: number) {
   if (!Number.isFinite(hz)) return "--";
   const value = Math.abs(hz);
-  if (value >= 1e9) return `${trim(hz / 1e9)} GHz`;
-  if (value >= 1e6) return `${trim(hz / 1e6)} MHz`;
-  if (value >= 1e3) return `${trim(hz / 1e3)} kHz`;
-  return `${trim(hz)} Hz`;
+  if (value >= 1e9) return `${formatRounded(hz / 1e9, 3)} GHz`;
+  if (value >= 1e6) return `${formatRounded(hz / 1e6, 3)} MHz`;
+  if (value >= 1e3) return `${formatRounded(hz / 1e3, 3)} kHz`;
+  return `${formatRounded(hz, 3)} Hz`;
 }
 
-function trim(value: number) {
-  if (Math.abs(value) >= 100) return value.toFixed(0);
-  if (Math.abs(value) >= 10) return value.toFixed(1).replace(/\.0$/, "");
-  return value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+function formatRounded(value: number, places: number) {
+  return Number(value.toFixed(places)).toString();
 }
 
 function clamp(value: number, min: number, max: number) {

@@ -673,11 +673,11 @@ export function TimingMarkersOverlay({
             marker={marker}
             onCreatePair={createPairFromSelectedGraphMarkers}
             onDelete={() => {
-              onChangeMarkers((current) => current.filter((item) => item.id !== marker.id));
+              onChangeMarkers((current) => current.filter((item) => item.id !== marker.id || item.isCaptureTrigger));
               setContextMenu(null);
             }}
             onDeleteAll={() => {
-              onChangeMarkers(() => []);
+              onChangeMarkers((current) => current.filter((item) => item.isCaptureTrigger));
               setContextMenu(null);
             }}
             onEdit={() => {
@@ -1160,9 +1160,9 @@ export function TimingMarkersPanel({
                   canCreatePair={marker.type === "single" && markers.filter((item) => item.type === "single" && item.selected).length === 2}
                   marker={marker}
                   onCreatePair={createPairFromSelected}
-                  onDelete={() => deleteMarker(marker.id)}
+                  onDelete={() => marker.isCaptureTrigger ? undefined : deleteMarker(marker.id)}
                   onDeleteAll={() => {
-                    onChangeMarkers(() => []);
+                    onChangeMarkers((current) => current.filter((item) => item.isCaptureTrigger));
                     setMenuMarkerId(null);
                   }}
                   onEdit={() => {
@@ -1212,7 +1212,7 @@ export function TimingMarkersPanel({
           className="sidebarTimingMarkerEditPopup"
           marker={editMarker}
           onClose={() => setEditMarkerId(null)}
-          onDelete={() => deleteMarker(editMarker.id)}
+          onDelete={() => editMarker.isCaptureTrigger ? undefined : deleteMarker(editMarker.id)}
           onUpdate={(patch) => updateMarker(editMarker.id, patch)}
           style={{ right: 5, top: 42 }}
         />
@@ -1374,7 +1374,7 @@ function TimingMarkerItemMenu({
     >
       {canCreatePair && <button onClick={onCreatePair} type="button">Create Pair</button>}
       {canCreatePair && <div className="timingMarkerMenuSeparator" />}
-      <button onClick={onEdit} type="button">Edit</button>
+      {!marker.isCaptureTrigger && <button onClick={onEdit} type="button">Edit</button>}
       <div className="timingMarkerMenuSeparator" />
       <button onClick={onGoTo} type="button">{marker.type === "pair" ? "Go to Pair" : "Go to Marker"}</button>
       {marker.type === "pair" && <button onClick={onZoom} type="button">Zoom on Pair</button>}
@@ -1389,7 +1389,7 @@ function TimingMarkerItemMenu({
         {marker.type === "pair" ? "Delete Data Outside Pair" : "Delete Data"}
       </button>
       <div className="timingMarkerMenuSeparator" />
-      <button onClick={onDelete} type="button">Delete</button>
+      {!marker.isCaptureTrigger && <button onClick={onDelete} type="button">Delete</button>}
       <button onClick={onDeleteAll} type="button">Delete All</button>
     </div>
   );

@@ -30,6 +30,7 @@ const DENSE_BUBBLE_THRESHOLD: usize = MAX_ANALYZER_MARKER_RESULTS * 4;
 const MAX_COARSE_EDGE_MARKERS: usize = 400;
 const PACKED_DIGITAL_BIN_BYTES: usize = 16;
 const MAX_EXACT_SAMPLES_PER_PIXEL: u64 = 8;
+const PIXELS_PER_EXACT_TRANSITION: u32 = 10;
 const NATIVE_VIEW_EDGE_BUDGET: usize = 32_768;
 const NATIVE_FIT_MAX_CHUNKS: usize = 16;
 const NATIVE_FIT_EDGES_PER_CHUNK: usize = 1_024;
@@ -191,6 +192,16 @@ pub struct NearestDigitalTransition {
     pub next_sample: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DigitalPointMeasurement {
+    pub channel: u8,
+    pub cursor_sample: u64,
+    pub high: bool,
+    pub width_start_sample: u64,
+    pub width_end_sample: u64,
+    pub period_end_sample: Option<u64>,
+}
+
 impl DigitalGraph {
     pub fn new(mut metadata: CaptureMetadata) -> Result<Self> {
         validate_metadata(&metadata)?;
@@ -310,6 +321,72 @@ impl DigitalGraph {
         Ok(self.sample_count)
     }
 
+    /// Appends PXLogic `LA_CROSS_DATA` without first transposing every sample
+    /// into an interleaved word. Each lane is a little-endian 64-sample bitset.
+    pub fn append_cross_lanes(
+        &mut self,
+        enabled_channels: &[u8],
+        input: &[u8],
+        reverse_bits_in_word: bool,
+    ) -> Result<u64> {
+        let enabled_channels =
+            resolve_enabled_channels(self.metadata.channel_count, enabled_channels)
+                .map_err(|_| GraphError::InvalidMetadata)?;
+        if enabled_channels != self.metadata.enabled_channels {
+            return Err(GraphError::InvalidMetadata);
+        }
+        let stripe_bytes = enabled_channels
+            .len()
+            .checked_mul(8)
+            .ok_or(GraphError::InvalidMetadata)?;
+        if stripe_bytes == 0 || input.len() % stripe_bytes != 0 {
+            return Err(GraphError::UnalignedSamples);
+        }
+
+        for stripe in input.chunks_exact(stripe_bytes) {
+            let stripe_start = self.sample_count;
+            let mut next_word = 0u32;
+            for (lane, physical_channel) in enabled_channels.iter().copied().enumerate() {
+                let offset = lane * 8;
+                let mut word = u64::from_le_bytes(
+                    stripe[offset..offset + 8]
+                        .try_into()
+                        .expect("fixed cross-lane word"),
+                );
+                if reverse_bits_in_word {
+                    word = word.reverse_bits();
+                }
+
+                let first_high = word & 1 != 0;
+                let channel = &mut self.channels[usize::from(physical_channel)];
+                if let Some(previous_word) = self.last_word {
+                    let previous_high = previous_word & (1u32 << physical_channel) != 0;
+                    if previous_high != first_high {
+                        channel.edges.push(stripe_start);
+                    }
+                } else {
+                    channel.initial_high = first_high;
+                }
+
+                // Bit n is set when sample n differs from sample n - 1. Bit 0
+                // represents the boundary handled above and is discarded.
+                let mut transitions = (word ^ (word << 1)) & !1u64;
+                while transitions != 0 {
+                    let bit = transitions.trailing_zeros() as u64;
+                    channel.edges.push(stripe_start.saturating_add(bit));
+                    transitions &= transitions - 1;
+                }
+                if word >> 63 != 0 {
+                    next_word |= 1u32 << physical_channel;
+                }
+            }
+            self.last_word = Some(next_word);
+            self.sample_count = self.sample_count.saturating_add(64);
+        }
+        self.metadata.sample_count = self.sample_count;
+        Ok(self.sample_count)
+    }
+
     pub fn metadata(&self) -> &CaptureMetadata {
         &self.metadata
     }
@@ -348,6 +425,39 @@ impl DigitalGraph {
                 .and_then(|previous| index.edges.get(previous).copied()),
             sample: index.edge(nearest_index),
             next_sample: index.edges.get(nearest_index + 1).copied(),
+        }))
+    }
+
+    pub fn measure_point(
+        &self,
+        channel: u8,
+        sample: u64,
+    ) -> Result<Option<DigitalPointMeasurement>> {
+        let index = self
+            .channels
+            .get(usize::from(channel))
+            .ok_or(GraphError::InvalidWaveformRequest)?;
+        if self.sample_count == 0 {
+            return Ok(None);
+        }
+
+        let cursor_sample = sample.min(self.sample_count - 1);
+        let width_end_index = index.first_edge_after(cursor_sample);
+        let Some(width_start_index) = width_end_index.checked_sub(1) else {
+            return Ok(None);
+        };
+        let Some(&width_end_sample) = index.edges.get(width_end_index) else {
+            return Ok(None);
+        };
+        let width_start_sample = index.edge(width_start_index);
+
+        Ok(Some(DigitalPointMeasurement {
+            channel,
+            cursor_sample,
+            high: index.level_at(cursor_sample),
+            width_start_sample,
+            width_end_sample,
+            period_end_sample: index.edges.get(width_end_index + 1).copied(),
         }))
     }
 
@@ -443,6 +553,14 @@ impl DigitalGraph {
             bins.push(summarize_indexed_bin(index, x, bin_start, bin_end));
         }
 
+        // PXView switches from individual transition lines to pixel-level
+        // activity once the edge count exceeds roughly one transition per ten
+        // pixels. This also bounds IPC payloads and frontend Path2D work.
+        let first_edge = index.first_edge_after(start);
+        let edge_end = index.first_edge_at_or_after(end);
+        let exact_transition_budget = (bin_count / PIXELS_PER_EXACT_TRANSITION).max(1) as usize;
+        let include_exact =
+            include_exact && edge_end.saturating_sub(first_edge) < exact_transition_budget;
         let (segments, rising_edges, falling_edges) = if include_exact {
             exact_channel_data(index, start, end)
         } else {
@@ -1013,6 +1131,22 @@ impl GraphSession {
         Ok(count)
     }
 
+    pub fn append_cross_lanes(
+        &self,
+        enabled_channels: &[u8],
+        samples: &[u8],
+        reverse_bits_in_word: bool,
+    ) -> Result<u64> {
+        let count = self
+            .graph
+            .write()
+            .as_mut()
+            .ok_or(GraphError::EmptyGraph)?
+            .append_cross_lanes(enabled_channels, samples, reverse_bits_in_word)?;
+        self.bump_revision();
+        Ok(count)
+    }
+
     pub fn set_trigger(&self, trigger: CaptureTriggerMetadata) -> Result<()> {
         self.graph
             .write()
@@ -1125,6 +1259,18 @@ impl GraphSession {
             .as_ref()
             .ok_or(GraphError::EmptyGraph)?
             .nearest_transition(channel, sample)
+    }
+
+    pub fn measure_point(
+        &self,
+        channel: u8,
+        sample: u64,
+    ) -> Result<Option<DigitalPointMeasurement>> {
+        self.graph
+            .read()
+            .as_ref()
+            .ok_or(GraphError::EmptyGraph)?
+            .measure_point(channel, sample)
     }
 
     pub fn revision(&self) -> u64 {
@@ -2450,6 +2596,37 @@ mod tests {
     }
 
     #[test]
+    fn point_measurement_uses_the_full_edge_index_outside_the_viewport() {
+        let mut metadata = demo_capture(1, 1_000).metadata;
+        metadata.sample_count = 1_000;
+        let session = GraphSession::default();
+        session
+            .replace_sparse_capture(SparseCaptureData {
+                metadata,
+                channels: vec![SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: vec![100, 300, 700, 900],
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(
+            session.measure_point(0, 500).unwrap(),
+            Some(DigitalPointMeasurement {
+                channel: 0,
+                cursor_sample: 500,
+                high: false,
+                width_start_sample: 300,
+                width_end_sample: 700,
+                period_end_sample: Some(900),
+            }),
+        );
+        assert_eq!(session.measure_point(0, 50).unwrap(), None);
+        assert_eq!(session.measure_point(0, 950).unwrap(), None);
+    }
+
+    #[test]
     fn incremental_append_matches_one_shot_and_supports_channel_31() {
         let words = [0u32, 1u32 << 31, (1u32 << 31) | 1, 0];
         let samples = words
@@ -2501,6 +2678,65 @@ mod tests {
             .unwrap();
         assert_eq!(navigation_tile.channels[0].previous_transition, Some(1));
         assert_eq!(navigation_tile.channels[0].next_transition, Some(3));
+    }
+
+    #[test]
+    fn packed_cross_lane_append_matches_interleaved_index() {
+        let enabled_channels = vec![0, 4, 31];
+        let lane_words = [
+            0x00ff_00ff_00ff_00ffu64,
+            0xaaaa_aaaa_5555_5555u64,
+            0x8000_0000_0000_0001u64,
+            0xff00_ff00_ff00_ff00u64,
+            0x5555_5555_aaaa_aaaau64,
+            0x7fff_ffff_ffff_fffeu64,
+        ];
+        let packed = lane_words
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let interleaved = pxlogic_core::decode_cross_data_to_physical_channels(
+            32,
+            &enabled_channels,
+            &packed,
+            false,
+        )
+        .unwrap();
+        let metadata = CaptureMetadata {
+            version: 1,
+            source_device: "packed-cross-test".to_string(),
+            sample_rate_hz: 100_000_000,
+            channel_count: 32,
+            enabled_channels: enabled_channels.clone(),
+            unitsize: 4,
+            sample_count: 0,
+            captured_at: Utc::now(),
+            labels: (0..32).map(|channel| format!("D{channel}")).collect(),
+            trigger: None,
+        };
+        let mut expected = DigitalGraph::new(metadata.clone()).unwrap();
+        expected.append_interleaved(&interleaved).unwrap();
+        let mut packed_graph = DigitalGraph::new(metadata).unwrap();
+        packed_graph
+            .append_cross_lanes(&enabled_channels, &packed[..24], false)
+            .unwrap();
+        packed_graph
+            .append_cross_lanes(&enabled_channels, &packed[24..], false)
+            .unwrap();
+
+        assert_eq!(packed_graph.sample_count(), 128);
+        for channel in [0, 4, 31] {
+            let request = WaveformRequest {
+                start_sample: 0,
+                sample_count: 128,
+                pixels: 128,
+                channels: vec![channel],
+            };
+            assert_eq!(
+                packed_graph.build_tile(&request).unwrap(),
+                expected.build_tile(&request).unwrap()
+            );
+        }
     }
 
     #[test]
@@ -2865,6 +3101,54 @@ mod tests {
                     .is_some_and(|data| !data.is_empty())));
         }
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn dense_exact_view_switches_to_pixel_primitives() {
+        let sample_count = 4_096u64;
+        let metadata = CaptureMetadata {
+            version: 1,
+            source_device: "dense-render-test".to_string(),
+            sample_rate_hz: 100_000_000,
+            channel_count: 1,
+            enabled_channels: vec![0],
+            unitsize: 1,
+            sample_count,
+            captured_at: Utc::now(),
+            labels: vec!["D0".to_string()],
+            trigger: None,
+        };
+        let dense = CaptureData {
+            metadata: metadata.clone(),
+            samples: (0..sample_count)
+                .map(|sample| u8::from(sample % 2 != 0))
+                .collect(),
+        };
+        let sparse = CaptureData {
+            metadata,
+            samples: (0..sample_count)
+                .map(|sample| u8::from(sample >= sample_count / 2))
+                .collect(),
+        };
+        let request = WaveformRequest {
+            start_sample: 0,
+            sample_count,
+            pixels: 1_024,
+            channels: vec![0],
+        };
+
+        let dense_tile = DigitalGraph::from_capture(&dense)
+            .unwrap()
+            .build_tile(&request)
+            .unwrap();
+        assert!(dense_tile.channels[0].segments.is_empty());
+        assert!(dense_tile.channels[0].packed_bins.is_some());
+
+        let sparse_tile = DigitalGraph::from_capture(&sparse)
+            .unwrap()
+            .build_tile(&request)
+            .unwrap();
+        assert_eq!(sparse_tile.channels[0].segments.len(), 2);
     }
 
     #[test]

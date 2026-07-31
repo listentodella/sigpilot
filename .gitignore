@@ -12,6 +12,7 @@
 # Local captures are useful while debugging, but should be promoted to a
 # deliberate test fixture before they enter version control.
 /debug-captures/
+/assets/*.pxl
 
 # Generated bundle helper resources. Keep the directory in git, but rebuild
 # native helper binaries during packaging.

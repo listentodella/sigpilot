@@ -39,7 +39,7 @@ pub struct HardwareChannelModeInfo {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HardwareCaptureCapabilities {
     pub device_id: String,
     pub profile_vendor: Option<String>,
@@ -50,6 +50,8 @@ pub struct HardwareCaptureCapabilities {
     pub default_channel_count: u8,
     pub default_sample_rate_hz: u64,
     pub sample_rates: Vec<u64>,
+    #[serde(default)]
+    pub threshold_volts: Vec<f64>,
     pub channel_modes: Vec<HardwareChannelModeInfo>,
 }
 
@@ -70,6 +72,11 @@ pub struct CaptureSettings {
     pub trigger_enabled: bool,
     pub trigger_channel: u8,
     pub trigger_kind: CaptureTriggerKind,
+    /// Additional level conditions, matching PXView's per-channel simple trigger masks.
+    #[serde(default)]
+    pub trigger_high_mask: u32,
+    #[serde(default)]
+    pub trigger_low_mask: u32,
     #[serde(default = "default_trigger_position_percent")]
     pub trigger_position_percent: u8,
     pub glitch_filter_enabled: bool,
@@ -121,6 +128,8 @@ impl Default for CaptureSettings {
             trigger_enabled: false,
             trigger_channel: 0,
             trigger_kind: CaptureTriggerKind::Rising,
+            trigger_high_mask: 0,
+            trigger_low_mask: 0,
             trigger_position_percent: default_trigger_position_percent(),
             glitch_filter_enabled: false,
             clock_edge: false,

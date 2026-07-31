@@ -62,10 +62,13 @@ import measurementsIcon from "./assets/saleae/sidebar/measurements.svg";
 import notesIcon from "./assets/saleae/sidebar/notes.svg";
 import recordingSettingsIcon from "./assets/saleae/sidebar/recordingSettings.svg";
 import timingMarkersIcon from "./assets/saleae/sidebar/timingMarkers.svg";
+import triggerFallingIcon from "./assets/saleae/trigger/falling.svg";
+import triggerPulseHighIcon from "./assets/saleae/trigger/pulse-high.svg";
+import triggerPulseLowIcon from "./assets/saleae/trigger/pulse-low.svg";
+import triggerRisingIcon from "./assets/saleae/trigger/rising.svg";
 import emptyMeasurementArt from "./assets/saleae/empty_measurement.svg";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
-import { CaptureTriggerMarker } from "./components/CaptureTriggerMarker";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
@@ -273,6 +276,12 @@ interface UiSession {
   notes: string;
 }
 
+interface PendingCaptureUiUpdate {
+  progress?: CaptureProgress;
+  memoryUsage?: CaptureMemoryUsage;
+  summary?: CaptureSummary;
+}
+
 interface CaptureUpdatedEvent {
   session_id: string;
   summary: CaptureSummary;
@@ -304,6 +313,7 @@ interface AnalyzerEditState {
 
 type UiRecordingMode = "FreeRun" | "Timer" | "Trigger";
 type UiTriggerEdge = "Rising Edge" | "Falling Edge" | "High Pulse" | "Low Pulse";
+type UiTriggerCondition = "Ignore" | "Low" | "High";
 
 interface UiDeviceSettings {
   bufferSizeMb: number;
@@ -312,7 +322,6 @@ interface UiDeviceSettings {
   digitalChannels: boolean[];
   externalTriggerMode: ExternalTriggerMode;
   glitchFilterEnabled: boolean;
-  glitchFilterNs: number;
   pwmDutyPercent: number;
   pwmEffectiveDutyPercent: number | null;
   pwmEffectiveFrequencyHz: number | null;
@@ -325,6 +334,7 @@ interface UiDeviceSettings {
   triggerHoldoffMs: number;
   triggerOutEnabled: boolean;
   triggerChannel: number;
+  triggerConditions: UiTriggerCondition[];
   triggerEdge: UiTriggerEdge;
   triggerSamplingEnabled: boolean;
   triggerSamplingPriority: "Sample Rate" | "Duration";
@@ -420,6 +430,7 @@ const FALLBACK_SAMPLE_RATES = [
   100_000_000,
 ];
 const FALLBACK_CHANNEL_COUNTS = [1, 2, 4, 8, 16, 24, 32];
+const FALLBACK_THRESHOLD_VOLTAGES = [0.8, 1.0, 1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 3.3, 5.0];
   const RANGE_COLORS = [
   "hsl(334, 58%, 53%)",
   "hsl(150, 100%, 30%)",
@@ -492,6 +503,8 @@ function defaultSettings(deviceId: string): CaptureSettings {
     trigger_enabled: false,
     trigger_channel: 0,
     trigger_kind: "Rising",
+    trigger_high_mask: 0,
+    trigger_low_mask: 0,
     trigger_position_percent: 50,
     glitch_filter_enabled: false,
     clock_edge: false,
@@ -506,7 +519,9 @@ function defaultBufferSizeMb(deviceId: string) {
 }
 
 function backendCaptureMode(mode: UiRecordingMode): CaptureSettings["mode"] {
-  return mode === "Timer" ? "Buffer" : "Stream";
+  // A triggered recording must use the FPGA's finite buffer path so the
+  // programmed post-trigger window can stop deterministically.
+  return mode === "FreeRun" ? "Stream" : "Buffer";
 }
 
 function captureTriggerKind(edge: UiTriggerEdge): CaptureTriggerKind {
@@ -535,11 +550,23 @@ function settingsFromDeviceSettings(session: UiSession, deviceId: string): Captu
     deviceSettings.digitalChannels,
     session.settings.channel_count,
   );
+  const triggerMasks = (deviceSettings.triggerConditions ?? []).reduce(
+    (masks, condition, channel) => {
+      if (channel === deviceSettings.triggerChannel || channel >= session.settings.channel_count) return masks;
+      if (!enabledChannels.includes(channel)) return masks;
+      const bit = 2 ** channel;
+      if (condition === "High") masks.high += bit;
+      if (condition === "Low") masks.low += bit;
+      return masks;
+    },
+    { high: 0, low: 0 },
+  );
   return {
     ...session.settings,
     clock_edge: deviceSettings.clockNegedge,
     device_id: deviceId,
     buffer_size_mb: deviceSettings.bufferSizeMb,
+    duration_ms: deviceSettings.captureMode === "Trigger" ? Math.max(1, triggerWindowMs) : session.settings.duration_ms,
     enabled_channels: enabledChannels,
     external_trigger_mode: deviceSettings.externalTriggerMode,
     glitch_filter_enabled: deviceSettings.glitchFilterEnabled,
@@ -548,6 +575,8 @@ function settingsFromDeviceSettings(session: UiSession, deviceId: string): Captu
     trigger_channel: deviceSettings.triggerChannel,
     trigger_enabled: deviceSettings.captureMode === "Trigger",
     trigger_kind: captureTriggerKind(deviceSettings.triggerEdge),
+    trigger_high_mask: triggerMasks.high,
+    trigger_low_mask: triggerMasks.low,
     trigger_position_percent: Math.max(0, Math.min(100, triggerPositionPercent)),
     trigger_out_enabled: deviceSettings.triggerOutEnabled,
   };
@@ -607,6 +636,14 @@ function sampleRateSelectOptionsForCapabilities(
   const options = sampleRateOptionsForCapabilities(capabilities, mode, channelCount);
   if (!options.includes(current)) return uniqueSortedNumbers([...options, current]);
   return options;
+}
+
+function thresholdOptionsForCapabilities(
+  capabilities: HardwareCaptureCapabilities | null | undefined,
+  current: number,
+) {
+  const configured = capabilities?.threshold_volts?.filter((voltage) => Number.isFinite(voltage) && voltage > 0) ?? [];
+  return uniqueSortedNumbers([...FALLBACK_THRESHOLD_VOLTAGES, ...configured, current]);
 }
 
 function selectedHardwareChannelMode(
@@ -796,9 +833,6 @@ function graphTileCanServeViewport(
   const tileEnd = tile.start_sample + tile.sample_count;
   if (dataWindow.start < tile.start_sample || dataWindow.end > tileEnd) return false;
   const desiredSamplesPerPixel = viewportSamples / Math.max(1, canvasWidth);
-  if (desiredSamplesPerPixel <= 8 && tile.channels.some((channel) => channel.segments.length === 0)) {
-    return false;
-  }
   const projectedDataPixels = dataWindow.samples / Math.max(Number.EPSILON, desiredSamplesPerPixel);
   if (projectedDataPixels <= 1.5) return true;
   const resolutionRatio = tile.samples_per_pixel / Math.max(Number.EPSILON, desiredSamplesPerPixel);
@@ -945,6 +979,18 @@ function completedCaptureViewport(
 }
 
 function applyCaptureTrigger(session: UiSession, trigger: CaptureTriggerMetadata): UiSession {
+  const triggerMarker = {
+    color: "orange2" as const,
+    graphPopupOpen: null,
+    id: "capture-trigger",
+    isCaptureTrigger: true,
+    isExpanded: false,
+    label: "Trigger",
+    note: `D${trigger.channel} ${trigger.kind.toLowerCase()} edge`,
+    sample: Math.max(0, Math.round(trigger.sample_index)),
+    selected: false,
+    type: "single" as const,
+  };
   return {
     ...session,
     summary: session.summary
@@ -953,6 +999,7 @@ function applyCaptureTrigger(session: UiSession, trigger: CaptureTriggerMetadata
           metadata: { ...session.summary.metadata, trigger },
         }
       : session.summary,
+    timingMarkers: [...session.timingMarkers.filter((marker) => !marker.isCaptureTrigger), triggerMarker],
     message: `Triggered on D${trigger.channel} (${trigger.kind})`,
   };
 }
@@ -1034,8 +1081,7 @@ function defaultDeviceSettings(channelCount: number, bufferSizeMb = DEFAULT_BUFF
     clockNegedge: false,
     digitalChannels: makeDigitalChannels(channelCount),
     externalTriggerMode: "Close",
-    glitchFilterEnabled: false,
-    glitchFilterNs: 10,
+    glitchFilterEnabled: true,
     pwmDutyPercent: 50,
     pwmEffectiveDutyPercent: null,
     pwmEffectiveFrequencyHz: null,
@@ -1043,11 +1089,12 @@ function defaultDeviceSettings(channelCount: number, bufferSizeMb = DEFAULT_BUFF
     pwmFrequencyHz: 1_000,
     singleShotEnabled: false,
     singleShotHighResolution: false,
-    singleShotPostTriggerMs: 5,
-    singleShotPreTriggerMs: 5,
+    singleShotPostTriggerMs: 1_000,
+    singleShotPreTriggerMs: 0,
     triggerHoldoffMs: 0,
     triggerOutEnabled: false,
     triggerChannel: 0,
+    triggerConditions: Array.from({ length: 32 }, () => "Ignore"),
     triggerEdge: "Rising Edge",
     triggerSamplingEnabled: false,
     triggerSamplingPriority: "Sample Rate",
@@ -1298,6 +1345,8 @@ export default function App() {
   const sessionsRef = useRef<UiSession[]>([]);
   const activeSessionIdRef = useRef<string | null>(null);
   const captureSessionRef = useRef<string | null>(null);
+  const pendingCaptureUiRef = useRef(new Map<string, PendingCaptureUiUpdate>());
+  const captureUiFrameRef = useRef<number | null>(null);
   const sidebarShortcutRef = useRef<{ prefix: "m" | "n" | null; timeout: number | null }>({
     prefix: null,
     timeout: null,
@@ -1453,6 +1502,42 @@ export default function App() {
     setSessions((current) => current.map((session) => (session.id === sessionId ? updater(session) : session)));
   }, []);
 
+  const queueCaptureUiUpdate = useCallback((sessionId: string, update: PendingCaptureUiUpdate) => {
+    const pending = pendingCaptureUiRef.current;
+    pending.set(sessionId, { ...pending.get(sessionId), ...update });
+    if (captureUiFrameRef.current !== null) return;
+    captureUiFrameRef.current = window.requestAnimationFrame(() => {
+      captureUiFrameRef.current = null;
+      const updates = new Map(pendingCaptureUiRef.current);
+      pendingCaptureUiRef.current.clear();
+      setSessions((current) =>
+        current.map((session) => {
+          const next = updates.get(session.id);
+          if (!next) return session;
+          let updated = session;
+          if (next.progress) {
+            const indexBytes = updated.memoryUsage?.index_bytes ?? 0;
+            const analyzerBytes = updated.memoryUsage?.analyzer_bytes ?? 0;
+            updated = {
+              ...updated,
+              progress: next.progress,
+              memoryUsage: {
+                buffer_bytes: updated.settings.buffer_size_mb * 1024 * 1024,
+                sample_bytes: next.progress.sample_memory_bytes,
+                index_bytes: indexBytes,
+                analyzer_bytes: analyzerBytes,
+                total_bytes: next.progress.sample_memory_bytes + indexBytes + analyzerBytes,
+              },
+            };
+          }
+          if (next.memoryUsage) updated = { ...updated, memoryUsage: next.memoryUsage };
+          if (next.summary) updated = applyLiveCaptureSummary(updated, next.summary);
+          return updated;
+        }),
+      );
+    });
+  }, []);
+
   const createSession = useCallback(
     (deviceId = draftSelectedDevice, source?: UiSession) => {
       const index = sessionCounter.current;
@@ -1547,7 +1632,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedDevice]);
+  }, [selectedDevice, selected?.logic_mode, selected?.pid, selected?.usb_speed, selected?.vid]);
 
   useEffect(() => {
     if (!activeSession || !selectedCapabilities) return;
@@ -1602,29 +1687,15 @@ export default function App() {
       listen<CaptureProgress>("capture_progress", (event) => {
         const targetId = captureSessionRef.current;
         if (!targetId) return;
-        updateSession(targetId, (session) => {
-          const indexBytes = session.memoryUsage?.index_bytes ?? 0;
-          const analyzerBytes = session.memoryUsage?.analyzer_bytes ?? 0;
-          return {
-            ...session,
-            progress: event.payload,
-            memoryUsage: {
-              buffer_bytes: session.settings.buffer_size_mb * 1024 * 1024,
-              sample_bytes: event.payload.sample_memory_bytes,
-              index_bytes: indexBytes,
-              analyzer_bytes: analyzerBytes,
-              total_bytes: event.payload.sample_memory_bytes + indexBytes + analyzerBytes,
-            },
-          };
-        });
+        queueCaptureUiUpdate(targetId, { progress: event.payload });
       }).catch(() => () => {}),
       listen<CaptureMemoryUpdatedEvent>("capture_memory_updated", (event) => {
         const { session_id: sessionId, usage } = event.payload;
-        updateSession(sessionId, (session) => ({ ...session, memoryUsage: usage }));
+        queueCaptureUiUpdate(sessionId, { memoryUsage: usage });
       }).catch(() => () => {}),
       listen<CaptureUpdatedEvent>("capture_updated", (event) => {
         const { session_id: sessionId, summary } = event.payload;
-        updateSession(sessionId, (session) => applyLiveCaptureSummary(session, summary));
+        queueCaptureUiUpdate(sessionId, { summary });
       }).catch(() => () => {}),
       listen<CaptureTriggeredEvent>("capture_triggered", (event) => {
         const { session_id: sessionId, trigger } = event.payload;
@@ -1633,6 +1704,7 @@ export default function App() {
       listen<CaptureSummary>("capture_completed", (event) => {
         const targetId = captureSessionRef.current;
         if (!targetId) return;
+        pendingCaptureUiRef.current.delete(targetId);
         updateSession(targetId, (session) => {
           const syncedSession = syncSessionWithEffectiveCaptureMetadata(session, event.payload);
           const initialViewport = completedCaptureViewport(
@@ -1670,6 +1742,7 @@ export default function App() {
           setStartupMessage(event.payload);
           return;
         }
+        pendingCaptureUiRef.current.delete(targetId);
         updateSession(targetId, (session) => ({ ...session, busy: false, message: event.payload }));
       }).catch(() => () => {}),
       listen<DiagnosticEvent>("usb_diagnostic", (event) => {
@@ -1683,9 +1756,14 @@ export default function App() {
       }).catch(() => () => {}),
     ];
     return () => {
+      if (captureUiFrameRef.current !== null) {
+        window.cancelAnimationFrame(captureUiFrameRef.current);
+        captureUiFrameRef.current = null;
+      }
+      pendingCaptureUiRef.current.clear();
       void Promise.all(subscriptions).then((unlisten) => unlisten.forEach((dispose) => dispose()));
     };
-  }, [updateSession]);
+  }, [queueCaptureUiUpdate, updateSession]);
 
   const channelLabels = useMemo(
     () => {
@@ -1946,7 +2024,10 @@ export default function App() {
 
     const requestSeq = tileRequestSeq.current + 1;
     tileRequestSeq.current = requestSeq;
-    const minimumRequestIntervalMs = sessionSnapshot.busy ? 33 : 24;
+    // Live viewport movement is interpolated by WaveformCanvas. A 20 Hz
+    // latest-only tile cadence leaves the main thread enough time to paint and
+    // mirrors Logic's preference for dropping stale backend frames.
+    const minimumRequestIntervalMs = sessionSnapshot.busy ? 50 : 24;
     const requestDelay = Math.max(
       0,
       minimumRequestIntervalMs - (performance.now() - graphRequestLastStartedAtRef.current),
@@ -2389,24 +2470,10 @@ export default function App() {
         nextSettings,
         {
           onProgress: (progress) => {
-            updateSession(session.id, (current) => {
-              const indexBytes = current.memoryUsage?.index_bytes ?? 0;
-              const analyzerBytes = current.memoryUsage?.analyzer_bytes ?? 0;
-              return {
-                ...current,
-                progress,
-                memoryUsage: {
-                  buffer_bytes: nextSettings.buffer_size_mb * 1024 * 1024,
-                  sample_bytes: progress.sample_memory_bytes,
-                  index_bytes: indexBytes,
-                  analyzer_bytes: analyzerBytes,
-                  total_bytes: progress.sample_memory_bytes + indexBytes + analyzerBytes,
-                },
-              };
-            });
+            queueCaptureUiUpdate(session.id, { progress });
           },
           onSummary: (summary) => {
-            updateSession(session.id, (current) => applyLiveCaptureSummary(current, summary));
+            queueCaptureUiUpdate(session.id, { summary });
           },
           onTrigger: (trigger) => {
             updateSession(session.id, (current) => applyCaptureTrigger(current, trigger));
@@ -2414,6 +2481,7 @@ export default function App() {
         },
         demoAnalyzers,
       );
+      pendingCaptureUiRef.current.delete(session.id);
       updateSession(session.id, (current) => {
         const completedViewport = completedCaptureViewport(
           current,
@@ -2441,6 +2509,7 @@ export default function App() {
         };
       });
     } catch (error) {
+      pendingCaptureUiRef.current.delete(session.id);
       updateSession(session.id, (current) => ({ ...current, message: String(error) }));
     } finally {
       updateSession(session.id, (current) => ({ ...current, busy: false }));
@@ -3602,10 +3671,10 @@ export default function App() {
       if (!hasCommandModifier && !event.altKey && (key === "backspace" || key === "delete") && hasSelectedTimingMarker && activeSession) {
         event.preventDefault();
         updateSession(activeSession.id, (session) => {
-          const deleted = session.timingMarkers.filter((marker) => marker.selected).length;
+          const deleted = session.timingMarkers.filter((marker) => marker.selected && !marker.isCaptureTrigger).length;
           return {
             ...session,
-            timingMarkers: session.timingMarkers.filter((marker) => !marker.selected),
+            timingMarkers: session.timingMarkers.filter((marker) => !marker.selected || marker.isCaptureTrigger),
             message: `${deleted} timing marker${deleted === 1 ? "" : "s"} deleted`,
           };
         });
@@ -3834,7 +3903,6 @@ export default function App() {
                   graphWidthPx={activeSession?.canvasWidth ?? 0}
                   sampleRateHz={activeSession?.summary?.metadata.sample_rate_hz ?? activeSettings.sample_rate_hz}
                   timeOriginSample={activeSession?.summary?.metadata.trigger?.sample_index ?? 0}
-                  triggerSample={activeSession?.summary?.metadata.trigger?.sample_index}
                   viewportSamples={activeSession?.summary ? activeSession.viewportSamples : 0}
                   viewportStart={activeSession?.summary ? activeSession.viewportStart : 0}
                 />
@@ -3980,6 +4048,7 @@ export default function App() {
                     <div className="graphViewport">
                       <WaveformCanvas
                         isLive={activeSession.busy}
+                        sessionId={activeSession.id}
                         maximumViewportSamples={activeSession.viewportMaxSamples ?? undefined}
                         rowHeights={visibleOuterRowHeights}
                         rowTopInsets={visibleAnalyzerInsets}
@@ -4011,11 +4080,6 @@ export default function App() {
                         onViewportInteractionChange={(active) =>
                           setGraphViewportInteraction("waveform", active)
                         }
-                      />
-                      <CaptureTriggerMarker
-                        triggerSample={activeSession.summary?.metadata.trigger?.sample_index}
-                        viewportSamples={activeSession.viewportSamples}
-                        viewportStart={activeSession.viewportStart}
                       />
                       <AnalyzerBubblesOverlay
                         analyzers={activeSession.analyzers}
@@ -6793,6 +6857,10 @@ function DeviceSettingsPanel({
     session.settings.channel_count,
     session.settings.sample_rate_hz,
   );
+  const thresholdOptions = thresholdOptionsForCapabilities(
+    selectedCapabilities,
+    session.settings.threshold_volts,
+  );
   const channelCountOptions = channelCountOptionsForCapabilities(
     selectedCapabilities,
     activeBackendMode,
@@ -6827,7 +6895,6 @@ function DeviceSettingsPanel({
 
   function setCaptureMode(mode: UiRecordingMode) {
     updateDeviceSettings({ captureMode: mode });
-    onUpdateSettings({ mode: backendCaptureMode(mode) });
   }
 
   function setChannelCount(channelCount: number) {
@@ -6992,19 +7059,27 @@ function DeviceSettingsPanel({
           ))}
         </div>
 
-        <label className="stack-field">
-          <span>Sample rate</span>
-          <select
-            value={session.settings.sample_rate_hz}
-            onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
-          >
-            {sampleRateOptions.map((rate) => (
-              <option key={rate} value={rate}>
-                {formatRate(rate)}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="twoColumnFields captureInputRow">
+          <label className="stack-field">
+            <span>Sample rate</span>
+            <select
+              value={session.settings.sample_rate_hz}
+              onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
+            >
+              {sampleRateOptions.map((rate) => (
+                <option key={rate} value={rate}>
+                  {formatRate(rate)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <ThresholdVoltageField
+            disabled={session.busy || session.readOnly}
+            onChange={(threshold_volts) => onUpdateSettings({ threshold_volts })}
+            presets={thresholdOptions}
+            value={session.settings.threshold_volts}
+          />
+        </div>
         <label className="stack-field">
           <span>Active channels</span>
           <select value={session.settings.channel_count} onChange={(event) => setChannelCount(Number(event.target.value))}>
@@ -7018,16 +7093,6 @@ function DeviceSettingsPanel({
         {selectedChannelMode && (
           <div className="deviceSettingsModeHint">{selectedChannelMode.description}</div>
         )}
-        <label className="stack-field">
-          <span>Digital threshold</span>
-          <input
-            min={0}
-            onChange={(event) => onUpdateSettings({ threshold_volts: Number(event.target.value) })}
-            step={0.1}
-            type="number"
-            value={session.settings.threshold_volts}
-          />
-        </label>
       </section>
 
       <section className="deviceSettingsBlock">
@@ -7062,41 +7127,18 @@ function DeviceSettingsPanel({
 
         {session.deviceSettings.captureMode === "Trigger" && (
           <div className="triggerSettingsGrid">
-            <label className="stack-field">
-              <span>Trigger channel</span>
-              <select
-                value={session.deviceSettings.triggerChannel}
-                onChange={(event) => updateDeviceSettings({ triggerChannel: Number(event.target.value) })}
-              >
-                {Array.from({ length: Math.max(1, session.settings.channel_count) }, (_, index) => (
-                  <option key={index} value={index}>
-                    D{index}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="stack-field">
-              <span>Trigger type</span>
-              <select
-                value={session.deviceSettings.triggerEdge}
-                onChange={(event) => updateDeviceSettings({ triggerEdge: event.target.value as UiTriggerEdge })}
-              >
-                {(["Rising Edge", "Falling Edge", "High Pulse", "Low Pulse"] as UiTriggerEdge[]).map((edge) => (
-                  <option key={edge} value={edge}>
-                    {edge}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="stack-field">
-              <span>Pulse width us</span>
-              <input
-                min={0}
-                onChange={(event) => updateDeviceSettings({ triggerPulseWidthUs: Number(event.target.value) })}
-                type="number"
-                value={session.deviceSettings.triggerPulseWidthUs}
-              />
-            </label>
+            <TriggerSettingsEditor
+              channelLabels={session.channelLabels}
+              channelCount={session.settings.channel_count}
+              conditions={session.deviceSettings.triggerConditions ?? []}
+              edge={session.deviceSettings.triggerEdge}
+              triggerChannel={session.deviceSettings.triggerChannel}
+              onChange={(patch) => updateDeviceSettings(patch)}
+            />
+            <TriggerDurationField
+              valueMs={session.deviceSettings.singleShotPostTriggerMs}
+              onChange={(singleShotPostTriggerMs) => updateDeviceSettings({ singleShotPostTriggerMs })}
+            />
           </div>
         )}
       </section>
@@ -7110,25 +7152,16 @@ function DeviceSettingsPanel({
           />
           Trim after capture
         </label>
-        <label className="toggle-field panel-toggle">
-          <input
-            checked={session.deviceSettings.glitchFilterEnabled}
-            onChange={(event) => updateDeviceSettings({ glitchFilterEnabled: event.target.checked })}
-            type="checkbox"
-          />
-          Glitch filter
+        <label className="stack-field">
+          <span>Glitch filter</span>
+          <select
+            onChange={(event) => updateDeviceSettings({ glitchFilterEnabled: event.target.value === "one-sample" })}
+            value={session.deviceSettings.glitchFilterEnabled ? "one-sample" : "none"}
+          >
+            <option value="none">None</option>
+            <option value="one-sample">1 sample clock</option>
+          </select>
         </label>
-        {session.deviceSettings.glitchFilterEnabled && (
-          <label className="stack-field">
-            <span>Glitch filter width ns</span>
-            <input
-              min={1}
-              onChange={(event) => updateDeviceSettings({ glitchFilterNs: Number(event.target.value) })}
-              type="number"
-              value={session.deviceSettings.glitchFilterNs}
-            />
-          </label>
-        )}
         <MemoryBufferSizeSetter
           bufferSizeMb={session.deviceSettings.bufferSizeMb}
           disabled={session.busy || session.readOnly}
@@ -7373,6 +7406,201 @@ function trimNumber(value: number) {
   return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function ThresholdVoltageField({
+  disabled,
+  onChange,
+  presets,
+  value,
+}: {
+  disabled: boolean;
+  onChange: (value: number) => void;
+  presets: number[];
+  value: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(() => trimNumber(value));
+  const hostRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => setText(trimNumber(value)), [value]);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (!hostRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [open]);
+
+  function commit(raw: string) {
+    const next = Number(raw);
+    if (!Number.isFinite(next) || next < 0 || next > 6.668) return;
+    onChange(next);
+  }
+
+  return (
+    <label className="stack-field thresholdVoltageField">
+      <span>Threshold</span>
+      <div className={`thresholdVoltageControl ${open ? "open" : ""}`} ref={hostRef}>
+        <input
+          aria-label="Threshold voltage"
+          disabled={disabled}
+          inputMode="decimal"
+          max={6.668}
+          min={0}
+          onBlur={(event) => commit(event.currentTarget.value)}
+          onChange={(event) => {
+            setText(event.currentTarget.value);
+            commit(event.currentTarget.value);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              setText(trimNumber(value));
+              event.currentTarget.blur();
+            }
+          }}
+          step={0.001}
+          type="number"
+          value={text}
+        />
+        <span>V</span>
+        <button
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          disabled={disabled}
+          onClick={() => setOpen((current) => !current)}
+          title="Threshold presets"
+          type="button"
+        >
+          <ChevronDown size={14} />
+        </button>
+        {open && (
+          <div className="thresholdVoltageMenu" role="listbox">
+            {presets.map((preset) => (
+              <button
+                aria-selected={Math.abs(value - preset) < 0.0005}
+                key={preset}
+                onClick={() => {
+                  setText(trimNumber(preset));
+                  onChange(preset);
+                  setOpen(false);
+                }}
+                role="option"
+                type="button"
+              >
+                {trimNumber(preset)} V
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </label>
+  );
+}
+
+function TriggerSettingsEditor({
+  channelLabels,
+  channelCount,
+  conditions,
+  edge,
+  onChange,
+  triggerChannel,
+}: {
+  channelLabels: string[];
+  channelCount: number;
+  conditions: UiTriggerCondition[];
+  edge: UiTriggerEdge;
+  onChange: (patch: Partial<UiDeviceSettings>) => void;
+  triggerChannel: number;
+}) {
+  const channels = Array.from({ length: Math.max(1, channelCount) }, (_, index) => index);
+  const activeConditions = channels.filter((channel) => channel !== triggerChannel && (conditions[channel] ?? "Ignore") !== "Ignore").length;
+  function setCondition(channel: number, condition: UiTriggerCondition) {
+    const next = Array.from({ length: 32 }, (_, index) => conditions[index] ?? "Ignore");
+    next[channel] = next[channel] === condition ? "Ignore" : condition;
+    onChange({ triggerConditions: next });
+  }
+
+  return (
+    <div className="triggerEditor">
+      <div className="triggerPatternRow">
+        <div className="triggerEdgeChoices" role="group" aria-label="Trigger edge">
+          <TriggerEdgePicker edge={edge} onChange={onChange} />
+        </div>
+        <TriggerChannelPicker channelLabels={channelLabels} channels={channels} onChange={onChange} triggerChannel={triggerChannel} />
+      </div>
+      <details className="triggerConditions" open={activeConditions > 0}>
+        <summary>Other channel conditions{activeConditions > 0 ? ` (${activeConditions})` : ""}</summary>
+        <div className="triggerConditionRows">
+          {channels.filter((channel) => channel !== triggerChannel).map((channel) => {
+            const condition = conditions[channel] ?? "Ignore";
+            return (
+              <div className="triggerConditionRow" key={channel}>
+                <TriggerChannelIdentifier channel={channel} name={channelLabels[channel] ?? `D${channel}`} />
+                <div className="triggerConditionChoices" role="group" aria-label={`D${channel} trigger condition`}>
+                  {(["Low", "High"] as const).map((value) => (
+                    <button
+                      aria-pressed={condition === value}
+                      className={condition === value ? "active" : ""}
+                      key={value}
+                      onClick={() => setCondition(channel, value)}
+                      type="button"
+                    >
+                      {value === "Low" ? "Lo" : "Hi"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function TriggerEdgePicker({ edge, onChange }: {
+  edge: UiTriggerEdge;
+  onChange: (patch: Partial<UiDeviceSettings>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { const close = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) setOpen(false); }; window.addEventListener("pointerdown", close); return () => window.removeEventListener("pointerdown", close); }, []);
+  const options: Array<{ icon: string; label: UiTriggerEdge; }> = [
+    { icon: triggerRisingIcon, label: "Rising Edge" },
+    { icon: triggerFallingIcon, label: "Falling Edge" },
+    { icon: triggerPulseHighIcon, label: "High Pulse" },
+    { icon: triggerPulseLowIcon, label: "Low Pulse" },
+  ];
+  const selected = options.find((option) => option.label === edge) ?? options[0];
+  return <div className="triggerPicker" ref={ref}><button aria-expanded={open} aria-haspopup="listbox" onClick={() => setOpen(!open)} title={edge} type="button"><TriggerTypeIcon icon={selected.icon} /><ChevronDown size={14} /></button>{open && <div className="triggerPickerMenu" role="listbox">{options.map((option) => <button aria-selected={edge === option.label} key={option.label} onClick={() => { onChange({ triggerEdge: option.label }); setOpen(false); }} role="option" type="button"><TriggerTypeIcon icon={option.icon} /><span>{option.label}</span>{edge === option.label && <Check size={16} />}</button>)}</div>}</div>;
+}
+
+function TriggerChannelPicker({ channelLabels, channels, onChange, triggerChannel }: {
+  channelLabels: string[];
+  channels: number[];
+  onChange: (patch: Partial<UiDeviceSettings>) => void;
+  triggerChannel: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { const close = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) setOpen(false); }; window.addEventListener("pointerdown", close); return () => window.removeEventListener("pointerdown", close); }, []);
+  const name = (channel: number) => channelLabels[channel] ?? `D${channel}`;
+  return <div className="triggerChannelPicker" ref={ref}><button aria-expanded={open} aria-haspopup="listbox" onClick={() => setOpen(!open)} type="button"><TriggerChannelIdentifier channel={triggerChannel} name={name(triggerChannel)} /><ChevronDown size={14} /></button>{open && <div className="triggerChannelMenu" role="listbox">{channels.map((channel) => <button aria-selected={channel === triggerChannel} key={channel} onClick={() => { onChange({ triggerChannel: channel }); setOpen(false); }} role="option" type="button"><TriggerChannelIdentifier channel={channel} name={name(channel)} />{channel === triggerChannel && <Check size={16} />}</button>)}</div>}</div>;
+}
+
+function TriggerTypeIcon({ icon }: { icon: string }) {
+  return <span aria-hidden="true" className="triggerTypeIcon" style={{ "--trigger-type-icon": `url(${icon})` } as CSSProperties} />;
+}
+
+function TriggerChannelIdentifier({ channel, name }: { channel: number; name: string }) {
+  return <span className="triggerChannelIdentifier"><span className="triggerChannelNumber" style={{ color: saleaeLegacyChannelColor(channel) }}>{String(channel).padStart(2, "0")}.</span><span className="triggerChannelName">{name}</span></span>;
+}
+
+function TriggerDurationField({ onChange, valueMs }: { onChange: (valueMs: number) => void; valueMs: number }) {
+  return <label className="stack-field triggerDurationField"><span>Capture duration after trigger</span><div><input min={0.001} onChange={(event) => onChange(Math.max(1, Math.round(Number(event.target.value) * 1_000)))} step={0.001} type="number" value={trimNumber(valueMs / 1_000)} /><span>s</span></div></label>;
+}
+
 function RecordingSettingsPanel({
   onUpdateSettings,
   onUpdateSession,
@@ -7393,7 +7621,7 @@ function RecordingSettingsPanel({
   );
   const triggerSampleRateOptions = sampleRateSelectOptionsForCapabilities(
     selectedCapabilities,
-    "Stream",
+    activeBackendMode,
     session.settings.channel_count,
     session.deviceSettings.triggerSamplingRateHz,
   );
@@ -7417,7 +7645,6 @@ function RecordingSettingsPanel({
 
   function setCaptureMode(mode: UiRecordingMode) {
     updateDeviceSettings({ captureMode: mode });
-    onUpdateSettings({ mode: backendCaptureMode(mode) });
   }
 
   return (
@@ -7507,129 +7734,27 @@ function RecordingSettingsPanel({
         <>
           <section className="deviceSettingsBlock">
             <div className="deviceSettingsBlockTitle">
-              <span>Trigger Settings</span>
-              <small>Digital</small>
+              <span>Pattern and Channel</span>
+              <small>Digital trigger</small>
             </div>
-            <label className="stack-field">
-              <span>Trigger channel</span>
-              <select
-                value={session.deviceSettings.triggerChannel}
-                onChange={(event) => updateDeviceSettings({ triggerChannel: Number(event.target.value) })}
-              >
-                {Array.from({ length: Math.max(1, session.settings.channel_count) }, (_, index) => (
-                  <option key={index} value={index}>
-                    D{index}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="stack-field">
-              <span>Trigger type</span>
-              <select
-                value={session.deviceSettings.triggerEdge}
-                onChange={(event) => updateDeviceSettings({ triggerEdge: event.target.value as UiTriggerEdge })}
-              >
-                {(["Rising Edge", "Falling Edge", "High Pulse", "Low Pulse"] as UiTriggerEdge[]).map((edge) => (
-                  <option key={edge} value={edge}>
-                    {edge}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="stack-field">
-              <span>Holdoff ms</span>
-              <input
-                min={0}
-                onChange={(event) => updateDeviceSettings({ triggerHoldoffMs: Number(event.target.value) })}
-                type="number"
-                value={session.deviceSettings.triggerHoldoffMs}
-              />
-            </label>
+            <TriggerSettingsEditor
+              channelLabels={session.channelLabels}
+              channelCount={session.settings.channel_count}
+              conditions={session.deviceSettings.triggerConditions ?? []}
+              edge={session.deviceSettings.triggerEdge}
+              triggerChannel={session.deviceSettings.triggerChannel}
+              onChange={(patch) => updateDeviceSettings(patch)}
+            />
           </section>
-
           <section className="deviceSettingsBlock compact">
             <div className="deviceSettingsBlockTitle">
-              <span>Single Shot</span>
-              <small>{session.deviceSettings.singleShotEnabled ? "On" : "Off"}</small>
+              <span>Capture Window</span>
+              <small>Stops after trigger</small>
             </div>
-            <label className="toggle-field panel-toggle">
-              <input
-                checked={session.deviceSettings.singleShotEnabled}
-                onChange={(event) => updateDeviceSettings({ singleShotEnabled: event.target.checked })}
-                type="checkbox"
-              />
-              Enable single shot
-            </label>
-            <label className="toggle-field panel-toggle">
-              <input
-                checked={session.deviceSettings.singleShotHighResolution}
-                onChange={(event) => updateDeviceSettings({ singleShotHighResolution: event.target.checked })}
-                type="checkbox"
-              />
-              High resolution
-            </label>
-            <div className="twoColumnFields">
-              <label className="stack-field">
-                <span>Pre-trigger ms</span>
-                <input
-                  min={0}
-                  onChange={(event) => updateDeviceSettings({ singleShotPreTriggerMs: Number(event.target.value) })}
-                  type="number"
-                  value={session.deviceSettings.singleShotPreTriggerMs}
-                />
-              </label>
-              <label className="stack-field">
-                <span>Post-trigger ms</span>
-                <input
-                  min={0}
-                  onChange={(event) => updateDeviceSettings({ singleShotPostTriggerMs: Number(event.target.value) })}
-                  type="number"
-                  value={session.deviceSettings.singleShotPostTriggerMs}
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className="deviceSettingsBlock compact">
-            <div className="deviceSettingsBlockTitle">
-              <span>Trigger Sampling</span>
-              <small>{session.deviceSettings.triggerSamplingEnabled ? "Manual" : "Auto"}</small>
-            </div>
-            <label className="toggle-field panel-toggle">
-              <input
-                checked={session.deviceSettings.triggerSamplingEnabled}
-                onChange={(event) => updateDeviceSettings({ triggerSamplingEnabled: event.target.checked })}
-                type="checkbox"
-              />
-              Manual trigger sample rate
-            </label>
-            <label className="stack-field">
-              <span>Sample rate</span>
-              <select
-                disabled={!session.deviceSettings.triggerSamplingEnabled}
-                value={session.deviceSettings.triggerSamplingRateHz}
-                onChange={(event) => updateDeviceSettings({ triggerSamplingRateHz: Number(event.target.value) })}
-              >
-                {triggerSampleRateOptions.map((rate) => (
-                  <option key={rate} value={rate}>
-                    {formatRate(rate)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="stack-field">
-              <span>Priority</span>
-              <select
-                disabled={!session.deviceSettings.triggerSamplingEnabled}
-                value={session.deviceSettings.triggerSamplingPriority}
-                onChange={(event) =>
-                  updateDeviceSettings({ triggerSamplingPriority: event.target.value as UiDeviceSettings["triggerSamplingPriority"] })
-                }
-              >
-                <option value="Sample Rate">Sample Rate</option>
-                <option value="Duration">Duration</option>
-              </select>
-            </label>
+            <TriggerDurationField
+              valueMs={session.deviceSettings.singleShotPostTriggerMs}
+              onChange={(singleShotPostTriggerMs) => updateDeviceSettings({ singleShotPostTriggerMs })}
+            />
           </section>
         </>
       )}

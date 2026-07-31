@@ -23,8 +23,8 @@ use pxlogic_core::{
     SparseCaptureData,
 };
 use pxlogic_graph::{
-    CaptureMemoryUsage, GraphFrameRequest, GraphFrameResponse, GraphSession,
-    NearestDigitalTransition,
+    CaptureMemoryUsage, DigitalPointMeasurement, GraphFrameRequest, GraphFrameResponse,
+    GraphSession, NearestDigitalTransition,
 };
 use pxlogic_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
@@ -127,6 +127,12 @@ struct TrimCaptureRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 struct NearestDigitalTransitionRequest {
+    channel: u8,
+    sample: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DigitalPointMeasurementRequest {
     channel: u8,
     sample: u64,
 }
@@ -374,13 +380,24 @@ async fn start_capture(
         let progress_graph = graph.clone();
         let progress_session_id = session_id.clone();
         let progress_cancel = cancel.clone();
+        let mut last_progress_emit = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         let mut progress = |event: CaptureProgress| {
-            let _ = progress_app.emit("capture_progress", &event);
             let usage =
                 progress_graph.capture_memory_usage(buffer_bytes, Some(event.sample_memory_bytes));
             if usage.total_bytes >= buffer_bytes {
                 progress_cancel.store(true, Ordering::Release);
             }
+            // Capture values are informational UI state. Publishing every USB
+            // transfer couples React work to hardware throughput, so keep this
+            // at Logic 2's 5 Hz status cadence while enforcing memory limits on
+            // every callback above.
+            if last_progress_emit.elapsed() < Duration::from_millis(200) {
+                return;
+            }
+            last_progress_emit = Instant::now();
+            let _ = progress_app.emit("capture_progress", &event);
             let _ = progress_app.emit(
                 "capture_memory_updated",
                 &CaptureMemoryUpdatedEvent {
@@ -394,6 +411,8 @@ async fn start_capture(
             let _ = diagnostics_app.emit("usb_diagnostic", &event);
         };
         let graph_error = Arc::new(Mutex::new(None::<String>));
+        let use_packed_graph =
+            settings.device_id != FakeBackend::DEVICE_ID && settings.decode_cross;
         let started_graph = graph.clone();
         let started_error = graph_error.clone();
         let mut started = move |metadata: &CaptureMetadata| {
@@ -412,12 +431,14 @@ async fn start_capture(
             if samples_error.lock().is_some() {
                 return;
             }
-            if let Err(error) = samples_graph.append_samples(chunk) {
-                *samples_error.lock() = Some(error.to_string());
-                return;
+            if !use_packed_graph {
+                if let Err(error) = samples_graph.append_samples(chunk) {
+                    *samples_error.lock() = Some(error.to_string());
+                    return;
+                }
             }
             let metadata = samples_graph.metadata();
-            if last_update.elapsed() < Duration::from_millis(33) {
+            if last_update.elapsed() < Duration::from_millis(50) {
                 return;
             }
             last_update = Instant::now();
@@ -435,6 +456,16 @@ async fn start_capture(
                         summary,
                     },
                 );
+            }
+        };
+        let cross_graph = graph.clone();
+        let cross_error = graph_error.clone();
+        let mut cross_lanes = move |enabled_channels: &[u8], chunk: &[u8]| {
+            if cross_error.lock().is_some() {
+                return;
+            }
+            if let Err(error) = cross_graph.append_cross_lanes(enabled_channels, chunk, false) {
+                *cross_error.lock() = Some(error.to_string());
             }
         };
         let trigger_graph = graph.clone();
@@ -482,6 +513,7 @@ async fn start_capture(
                         &mut diagnostics,
                         &mut started,
                         &mut samples,
+                        &mut cross_lanes,
                         &mut triggered,
                     ),
                     Err(error) => Err(error),
@@ -1387,6 +1419,22 @@ async fn nearest_digital_transition(
 }
 
 #[tauri::command]
+async fn measure_digital_point(
+    session_id: String,
+    request: DigitalPointMeasurementRequest,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<DigitalPointMeasurement>> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .measure_point(request.channel, request.sample)
+            .map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn measure_digital_range(
     session_id: String,
     request: DigitalRangeMeasurementRequest,
@@ -1670,6 +1718,7 @@ fn main() {
             write_text_file,
             get_waveform_tile,
             nearest_digital_transition,
+            measure_digital_point,
             render_graph_frame,
             measure_digital_range,
             decode_analyzer_frames,

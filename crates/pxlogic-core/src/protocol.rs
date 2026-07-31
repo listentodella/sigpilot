@@ -60,6 +60,9 @@ pub const STREAM_STOP_FLAGS: u32 = 0xFFFF_FFFF;
 pub const DEFAULT_TRANSFER_SIZE: usize = 256 * 1024;
 pub const DEFAULT_REGISTER_TIMEOUT_MS: u64 = 1_000;
 pub const DEFAULT_BULK_TIMEOUT_MS: u64 = 1_000;
+/// PXView passes a zero timeout for the FPGA loader bulk transfer, meaning it
+/// waits until the device accepts the complete page-aligned bitstream.
+pub const FPGA_UPLOAD_TIMEOUT_MS: u64 = 0;
 pub const DATA_MODE_FPGA_DDR: u32 = 2;
 pub const DATA_READ_BASE_ADDR: u32 = 0x1;
 pub const EXPECTED_FIRMWARE_VERSION: u32 = 0x5690_0028;

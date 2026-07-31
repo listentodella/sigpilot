@@ -192,6 +192,114 @@ impl RusbBackend {
         load_bitstreams_from_dir(dir.as_ref())
     }
 
+    /// Loads the PXView-provided CH569 application firmware. Updating this
+    /// firmware is intentionally a separate, explicit operation because the
+    /// device disconnects and re-enumerates immediately after the reset.
+    pub fn load_mcu_firmware() -> Result<Option<Vec<u8>>> {
+        if let Some(path) = env::var_os("PXLOGIC_MCU_FIRMWARE") {
+            return Ok(Some(fs::read(path)?));
+        }
+
+        for dir in firmware_search_dirs() {
+            let firmware = dir.join("SCI_LOGIC.bin");
+            if firmware.is_file() {
+                return Ok(Some(fs::read(firmware)?));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Programs the PXView CH569 MCU application firmware, then resets the
+    /// device. Callers must rediscover the device before any further USB I/O.
+    pub fn flash_mcu_firmware_with_trace(
+        &self,
+        device_id: &str,
+        firmware: &[u8],
+        sink: &mut TraceSink<'_>,
+    ) -> Result<()> {
+        const MCU_FIRMWARE_BLOCK_BYTES: usize = 48 * 1024;
+        const MCU_FIRMWARE_COPIES: usize = 3;
+
+        if firmware.is_empty() || firmware.len() > MCU_FIRMWARE_BLOCK_BYTES {
+            return Err(CoreError::Decode(format!(
+                "invalid SCI_LOGIC.bin size {}; expected 1..={MCU_FIRMWARE_BLOCK_BYTES} bytes",
+                firmware.len()
+            )));
+        }
+
+        trace(
+            sink,
+            "firmware",
+            format!("opening {device_id} for MCU upgrade"),
+        );
+        let mut handle = self.open_device(device_id)?;
+        Self::claim_pxlogic_interfaces(&mut handle)?;
+        let previous = Self::read_register(&mut handle, protocol::REG_FIRMWARE_VERSION)?;
+        trace(
+            sink,
+            "firmware",
+            format!(
+                "programming SCI_LOGIC.bin: current=0x{previous:08x}, target=0x{:08x}",
+                protocol::EXPECTED_FIRMWARE_VERSION
+            ),
+        );
+
+        // Exact PXView layout: a 48 KiB FF-padded image at offset 48 KiB,
+        // duplicated three times before a single mode-0 EP 0x03 transfer.
+        let mut block = vec![0xff; MCU_FIRMWARE_BLOCK_BYTES];
+        block[..firmware.len()].copy_from_slice(firmware);
+        let mut payload = Vec::with_capacity(MCU_FIRMWARE_BLOCK_BYTES * MCU_FIRMWARE_COPIES);
+        for _ in 0..MCU_FIRMWARE_COPIES {
+            payload.extend_from_slice(&block);
+        }
+        // PXView clears only the loader endpoint here. Clearing the capture
+        // endpoints can perturb a newly attached SuperSpeed device before its
+        // first FPGA configuration.
+        if let Err(error) = handle.clear_halt(protocol::BULK_EP_DATA_OUT) {
+            trace_warn(
+                sink,
+                "firmware",
+                format!("clear_halt 0x03 before MCU upload failed: {error}"),
+            );
+        }
+        let base_addr = MCU_FIRMWARE_BLOCK_BYTES as u32;
+        let end_addr = base_addr + u32::try_from(payload.len()).expect("fixed MCU payload");
+        trace(sink, "firmware", "programming MCU loader range");
+        Self::write_register_with_trace(
+            &mut handle,
+            protocol::REG_WRITE_DATA_START,
+            base_addr,
+            sink,
+        )?;
+        Self::write_register_with_trace(&mut handle, protocol::REG_WRITE_DATA_END, end_addr, sink)?;
+        Self::write_register_with_trace(&mut handle, protocol::REG_WRITE_DATA_MODE, 0, sink)?;
+        trace(
+            sink,
+            "firmware",
+            format!("writing {} MCU firmware bytes to EP 0x03", payload.len()),
+        );
+        bulk_write_exact(&mut handle, protocol::BULK_EP_DATA_OUT, &payload, 0)?;
+        trace(sink, "firmware", "MCU image written; requesting USB reset");
+        // The CH569 drops USB as soon as this register write reaches the
+        // device. PXView does not require the ACK here either: successful
+        // re-enumeration and a version read below are the authoritative proof.
+        if let Err(error) = Self::write_register(&mut handle, protocol::REG_DEVICE_RESET, 0) {
+            trace_warn(
+                sink,
+                "firmware",
+                format!("USB disconnected while acknowledging MCU reset (expected): {error}"),
+            );
+        }
+        let _ = handle.release_interface(1);
+        let _ = handle.release_interface(0);
+        trace(
+            sink,
+            "firmware",
+            "MCU upgrade submitted; wait for device re-enumeration before preparing the FPGA",
+        );
+        Ok(())
+    }
+
     pub fn prepare_device_with_trace(
         &self,
         device_id: &str,
@@ -203,7 +311,35 @@ impl RusbBackend {
         let mut handle = self.open_device(device_id)?;
         trace(sink, "prepare", "claiming USB interfaces 0 and 1");
         Self::claim_pxlogic_interfaces(&mut handle)?;
-        Self::trace_firmware_version(&mut handle, sink);
+        let firmware_version = Self::read_register(&mut handle, protocol::REG_FIRMWARE_VERSION)?;
+        if firmware_version != protocol::EXPECTED_FIRMWARE_VERSION {
+            trace_warn(
+                sink,
+                "firmware",
+                format!(
+                    "MCU firmware version 0x{firmware_version:08x} differs from PXView expected 0x{:08x}; upgrading before FPGA prepare",
+                    protocol::EXPECTED_FIRMWARE_VERSION,
+                ),
+            );
+            let _ = handle.release_interface(1);
+            let _ = handle.release_interface(0);
+            drop(handle);
+
+            let firmware = Self::load_mcu_firmware()?.ok_or_else(|| {
+                CoreError::Decode(
+                    "MCU firmware is missing; expected resources/firmware/SCI_LOGIC.bin"
+                        .to_string(),
+                )
+            })?;
+            self.flash_mcu_firmware_with_trace(device_id, &firmware, sink)?;
+            handle = self.wait_for_updated_device(device_id, sink)?;
+        } else {
+            trace(
+                sink,
+                "firmware",
+                format!("MCU firmware version 0x{firmware_version:08x} matches PXView"),
+            );
+        }
         trace(
             sink,
             "prepare",
@@ -213,12 +349,8 @@ impl RusbBackend {
                 bitstreams.main.len()
             ),
         );
-        trace(sink, "prepare", "clearing PXLogic USB endpoints");
-        Self::clear_pxlogic_endpoints(&mut handle, sink);
         trace(sink, "prepare", "uploading reset bitstream");
         Self::upload_bitstream_with_trace(&mut handle, &bitstreams.reset, 4, "reset", sink)?;
-        trace(sink, "prepare", "clearing PXLogic USB endpoints");
-        Self::clear_pxlogic_endpoints(&mut handle, sink);
         trace(sink, "prepare", "uploading main bitstream");
         Self::upload_bitstream_with_trace(&mut handle, &bitstreams.main, 4, "main", sink)?;
         trace(sink, "prepare", "FPGA upload complete, waiting 100 ms");
@@ -271,6 +403,7 @@ impl RusbBackend {
             sink,
             &mut |_| {},
             &mut |_| {},
+            &mut |_, _| {},
             &mut |_| {},
         )
     }
@@ -283,6 +416,7 @@ impl RusbBackend {
         sink: &mut TraceSink<'_>,
         started: &mut dyn FnMut(&CaptureMetadata),
         on_samples: &mut dyn FnMut(&[u8]),
+        on_cross_lanes: &mut dyn FnMut(&[u8], &[u8]),
         on_trigger: &mut dyn FnMut(&CaptureTriggerMetadata),
     ) -> Result<CaptureData> {
         trace(sink, "capture", format!("opening {}", settings.device_id));
@@ -436,13 +570,11 @@ impl RusbBackend {
 
         trace(sink, "registers", "reset block pointer");
         Self::write_register(&mut handle, protocol::REG_BLOCK_START, 0)?;
-        trace(sink, "capture", "clearing data endpoints");
-        let _ = handle.clear_halt(protocol::BULK_EP_REG_OUT);
-        let _ = handle.clear_halt(protocol::BULK_EP_REG_IN);
-        let _ = handle.clear_halt(protocol::BULK_EP_DATA_OUT);
+        // PXView clears only the active stream receive endpoints immediately
+        // before programming capture registers. Clearing the register or FPGA
+        // loader endpoints makes this U3 device reject the next control write.
+        trace(sink, "capture", "clearing PXView stream receive endpoints");
         let _ = handle.clear_halt(protocol::BULK_EP_DATA_IN);
-        let _ = handle.clear_halt(protocol::BULK_EP_BUFFER_DATA_IN);
-        let _ = handle.clear_halt(0x02);
         let _ = handle.clear_halt(0x04);
         let _ = handle.clear_halt(0x84);
         trace(
@@ -533,6 +665,9 @@ impl RusbBackend {
             capture_stall_timeout(&effective_settings, enabled_channel_count, transfer_size);
         let mut idle_poll_count = 0u32;
         let mut last_data_at = Instant::now();
+        let mut last_bulk_trace = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         let mut last_trigger_status_poll = Instant::now();
         let mut cancelled = false;
         trace(
@@ -566,6 +701,7 @@ impl RusbBackend {
                                 &mut pending_cross,
                                 &mut decoded_samples,
                                 on_samples,
+                                on_cross_lanes,
                             )?;
                         } else {
                             raw.extend_from_slice(&buffer[..accepted]);
@@ -578,15 +714,20 @@ impl RusbBackend {
                         }
                         idle_poll_count = 0;
                         last_data_at = Instant::now();
-                        trace(
-                            sink,
-                            "bulk",
-                            format!(
-                                "read {read} bytes, total {}/{}",
-                                bytes_read.min(target_raw_len),
-                                target_raw_bytes
-                            ),
-                        );
+                        if last_bulk_trace.elapsed() >= Duration::from_millis(500)
+                            || bytes_read >= target_raw_len
+                        {
+                            last_bulk_trace = Instant::now();
+                            trace(
+                                sink,
+                                "bulk",
+                                format!(
+                                    "read {read} bytes, total {}/{}",
+                                    bytes_read.min(target_raw_len),
+                                    target_raw_bytes
+                                ),
+                            );
+                        }
                         let samples_read = (bytes_read.min(target_raw_len) as u64)
                             .saturating_mul(8)
                             / u64::from(enabled_channel_count);
@@ -948,34 +1089,49 @@ impl RusbBackend {
         }
     }
 
-    fn trace_firmware_version(handle: &mut DeviceHandle<Context>, sink: &mut TraceSink<'_>) {
-        match Self::read_register(handle, protocol::REG_FIRMWARE_VERSION) {
-            Ok(version) if version == protocol::EXPECTED_FIRMWARE_VERSION => trace(
-                sink,
-                "firmware",
-                format!("MCU firmware version 0x{version:08x} matches PXView"),
-            ),
-            Ok(version) if version == protocol::BOOTLOADER_FIRMWARE_VERSION => trace_warn(
-                sink,
-                "firmware",
-                format!(
-                    "MCU bootloader version 0x{version:08x} detected; CPU firmware flashing is not enabled in this Tauri path"
-                ),
-            ),
-            Ok(version) => trace_warn(
-                sink,
-                "firmware",
-                format!(
-                    "MCU firmware version 0x{version:08x} differs from PXView expected 0x{:08x}; continuing with FPGA prepare only",
-                    protocol::EXPECTED_FIRMWARE_VERSION
-                ),
-            ),
-            Err(error) => trace_warn(
-                sink,
-                "firmware",
-                format!("failed to read MCU firmware version: {error}"),
-            ),
+    fn wait_for_updated_device(
+        &self,
+        device_id: &str,
+        sink: &mut TraceSink<'_>,
+    ) -> Result<DeviceHandle<Context>> {
+        const REENUMERATION_ATTEMPTS: usize = 30;
+        const REENUMERATION_DELAY: Duration = Duration::from_millis(250);
+        trace(
+            sink,
+            "firmware",
+            "waiting for the PXLogic MCU to re-enumerate",
+        );
+        let mut last_error = None;
+        for attempt in 1..=REENUMERATION_ATTEMPTS {
+            std::thread::sleep(REENUMERATION_DELAY);
+            match self.open_device(device_id).and_then(|mut handle| {
+                Self::claim_pxlogic_interfaces(&mut handle)?;
+                let version = Self::read_register(&mut handle, protocol::REG_FIRMWARE_VERSION)?;
+                if version == protocol::EXPECTED_FIRMWARE_VERSION {
+                    Ok(handle)
+                } else {
+                    let _ = handle.release_interface(1);
+                    let _ = handle.release_interface(0);
+                    Err(CoreError::Decode(format!(
+                        "MCU re-enumerated with firmware 0x{version:08x}, expected 0x{:08x}",
+                        protocol::EXPECTED_FIRMWARE_VERSION
+                    )))
+                }
+            }) {
+                Ok(handle) => {
+                    trace(
+                        sink,
+                        "firmware",
+                        format!("MCU re-enumerated after {attempt} check(s) with PXView firmware"),
+                    );
+                    return Ok(handle);
+                }
+                Err(error) => last_error = Some(error),
+            }
         }
+        Err(last_error.unwrap_or_else(|| {
+            CoreError::Decode("PXLogic MCU did not re-enumerate after firmware upgrade".to_string())
+        }))
     }
 
     fn clear_pxlogic_endpoints(handle: &mut DeviceHandle<Context>, sink: &mut TraceSink<'_>) {
@@ -1246,37 +1402,51 @@ impl RusbBackend {
     }
 
     fn upload_bitstream(handle: &mut DeviceHandle<Context>, data: &[u8], mode: u32) -> Result<()> {
+        // PXView programs the loader range, then submits one page-aligned EP 0x03
+        // transfer. Splitting this payload into independent transfers can make a
+        // SuperSpeed PXLogic loader abort during its reset-bitstream phase.
+        let _ = handle.clear_halt(protocol::BULK_EP_DATA_OUT);
+        Self::upload_data(handle, 0, mode, data, protocol::FPGA_UPLOAD_TIMEOUT_MS)
+    }
+
+    fn upload_data(
+        handle: &mut DeviceHandle<Context>,
+        base_addr: u32,
+        mode: u32,
+        data: &[u8],
+        timeout_ms: u64,
+    ) -> Result<()> {
         const PAGE_SIZE: usize = 4096;
         let aligned_len = data.len().div_ceil(PAGE_SIZE) * PAGE_SIZE;
-        let end_addr = u32::try_from(aligned_len)
-            .map_err(|_| CoreError::Decode("bitstream is too large".to_string()))?;
-
-        Self::write_register(handle, protocol::REG_WRITE_DATA_START, 0)?;
-        Self::write_register(handle, protocol::REG_WRITE_DATA_END, end_addr)?;
-        Self::write_register(handle, protocol::REG_WRITE_DATA_MODE, mode)?;
-
-        for chunk in data.chunks(64 * 1024) {
-            bulk_write_exact(
-                handle,
-                protocol::BULK_EP_DATA_OUT,
-                chunk,
-                protocol::DEFAULT_BULK_TIMEOUT_MS,
-            )?;
-        }
-
-        let padding = [0u8; PAGE_SIZE];
-        let mut remaining = aligned_len - data.len();
-        while remaining > 0 {
-            let size = remaining.min(PAGE_SIZE);
-            bulk_write_exact(
-                handle,
-                protocol::BULK_EP_DATA_OUT,
-                &padding[..size],
-                protocol::DEFAULT_BULK_TIMEOUT_MS,
-            )?;
-            remaining -= size;
-        }
-        Ok(())
+        let end_addr = base_addr
+            .checked_add(u32::try_from(aligned_len).map_err(|_| {
+                CoreError::Decode("PXLogic loader payload is too large".to_string())
+            })?)
+            .ok_or_else(|| CoreError::Decode("PXLogic loader range overflows".to_string()))?;
+        let mut payload = Vec::with_capacity(aligned_len);
+        payload.extend_from_slice(data);
+        payload.resize(aligned_len, 0);
+        Self::write_register(handle, protocol::REG_WRITE_DATA_START, base_addr).map_err(
+            |error| {
+                CoreError::Decode(format!(
+                    "PXLogic loader start-address write failed: {error}"
+                ))
+            },
+        )?;
+        Self::write_register(handle, protocol::REG_WRITE_DATA_END, end_addr).map_err(|error| {
+            CoreError::Decode(format!("PXLogic loader end-address write failed: {error}"))
+        })?;
+        Self::write_register(handle, protocol::REG_WRITE_DATA_MODE, mode).map_err(|error| {
+            CoreError::Decode(format!("PXLogic loader mode write failed: {error}"))
+        })?;
+        bulk_write_exact(handle, protocol::BULK_EP_DATA_OUT, &payload, timeout_ms).map_err(
+            |error| {
+                CoreError::Decode(format!(
+                    "PXLogic loader EP 0x{:02x} write failed: {error}",
+                    protocol::BULK_EP_DATA_OUT
+                ))
+            },
+        )
     }
 }
 
@@ -1302,6 +1472,7 @@ fn publish_cross_stream_samples(
     pending: &mut Vec<u8>,
     decoded_samples: &mut Vec<u8>,
     on_samples: &mut dyn FnMut(&[u8]),
+    on_cross_lanes: &mut dyn FnMut(&[u8], &[u8]),
 ) -> Result<()> {
     let stripe_bytes = enabled_channels.len() * 8;
     pending.extend_from_slice(input);
@@ -1310,10 +1481,12 @@ fn publish_cross_stream_samples(
         return Ok(());
     }
 
+    let aligned = &pending[..aligned_end];
+    on_cross_lanes(enabled_channels, aligned);
     let decoded = decode_cross_data_to_physical_channels(
         output_channel_count,
         enabled_channels,
-        &pending[..aligned_end],
+        aligned,
         false,
     )?;
     on_samples(&decoded);
@@ -1473,6 +1646,7 @@ impl CaptureBackend for RusbBackend {
             &mut sink,
             started,
             samples,
+            &mut |_, _| {},
             &mut |_| {},
         )
     }
@@ -1521,10 +1695,34 @@ fn bitstream_search_dirs() -> Vec<PathBuf> {
     dedup_paths(dirs)
 }
 
+fn firmware_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(cwd) = env::current_dir() {
+        push_relative_firmware_dirs(&mut dirs, &cwd);
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    push_relative_firmware_dirs(&mut dirs, &manifest_dir);
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        push_relative_firmware_dirs(&mut dirs, workspace_root);
+    }
+    if let Ok(exe) = env::current_exe() {
+        for ancestor in exe.ancestors().take(8) {
+            push_relative_firmware_dirs(&mut dirs, ancestor);
+        }
+    }
+    dedup_paths(dirs)
+}
+
 fn push_relative_resource_dirs(dirs: &mut Vec<PathBuf>, base: &Path) {
     dirs.push(base.join("resources").join("bitstreams"));
     dirs.push(base.join("src-tauri").join("resources").join("bitstreams"));
     dirs.push(base.join("Resources").join("resources").join("bitstreams"));
+}
+
+fn push_relative_firmware_dirs(dirs: &mut Vec<PathBuf>, base: &Path) {
+    dirs.push(base.join("resources").join("firmware"));
+    dirs.push(base.join("src-tauri").join("resources").join("firmware"));
+    dirs.push(base.join("Resources").join("resources").join("firmware"));
 }
 
 fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -1656,7 +1854,9 @@ mod tests {
             let mut pending = Vec::new();
             let mut decoded = Vec::new();
             let mut published = Vec::new();
+            let mut packed = Vec::new();
             let mut sink = |chunk: &[u8]| published.extend_from_slice(chunk);
+            let mut packed_sink = |_: &[u8], chunk: &[u8]| packed.extend_from_slice(chunk);
 
             for chunk in raw.chunks(73) {
                 publish_cross_stream_samples(
@@ -1666,6 +1866,7 @@ mod tests {
                     &mut pending,
                     &mut decoded,
                     &mut sink,
+                    &mut packed_sink,
                 )
                 .unwrap();
                 assert!(pending.len() < stripe_bytes);
@@ -1674,6 +1875,7 @@ mod tests {
             assert!(pending.is_empty());
             assert_eq!(decoded, expected);
             assert_eq!(published, expected);
+            assert_eq!(packed, raw);
         }
     }
 

@@ -83,6 +83,9 @@ pub const PXLOGIC_16_PLUS_HARDWARE_DEPTH_BITS: u64 = 2 * GHZ;
 pub const PXLOGIC_16_BASE_HARDWARE_DEPTH_BITS: u64 = GHZ;
 const DEFAULT_SAMPLELIMIT: u64 = 250 * MHZ;
 const MIN_SAMPLERATE: u64 = 2_000;
+/// PXView exposes these standard logic-level thresholds while retaining its
+/// underlying VTH register as a floating-point voltage.
+pub const PXLOGIC_THRESHOLD_VOLTAGES: &[f64] = &[1.8, 2.5, 3.3, 5.0];
 
 pub const PXLOGIC_CHANNEL_MODES: &[PxlogicChannelMode] = &[
     PxlogicChannelMode {
@@ -448,6 +451,7 @@ pub fn pxlogic_capture_capabilities_from_profile(
             .map(|mode| mode.default_samplerate_hz)
             .unwrap_or(25 * MHZ),
         sample_rates: union_sample_rates(&channel_modes),
+        threshold_volts: PXLOGIC_THRESHOLD_VOLTAGES.to_vec(),
         channel_modes,
     }
 }
@@ -498,6 +502,7 @@ pub fn generic_logic_capture_capabilities(
         default_channel_count: 8,
         default_sample_rate_hz: 25 * MHZ,
         sample_rates,
+        threshold_volts: PXLOGIC_THRESHOLD_VOLTAGES.to_vec(),
         channel_modes,
     }
 }
@@ -741,6 +746,7 @@ mod tests {
             Some("PX-Logic U2 channel 32")
         );
         assert_eq!(caps.max_channels, 32);
+        assert_eq!(caps.threshold_volts, PXLOGIC_THRESHOLD_VOLTAGES);
 
         let stream_32 = caps
             .channel_modes

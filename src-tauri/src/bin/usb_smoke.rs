@@ -37,6 +37,7 @@ struct Options {
     buffer_size_mb: u64,
     list_only: bool,
     prepare_only: bool,
+    flash_mcu: bool,
     output: Option<PathBuf>,
     trigger_channel: Option<u8>,
     trigger_kind: CaptureTriggerKind,
@@ -68,6 +69,7 @@ impl Default for Options {
             buffer_size_mb: 16,
             list_only: false,
             prepare_only: false,
+            flash_mcu: false,
             output: None,
             trigger_channel: None,
             trigger_kind: CaptureTriggerKind::Rising,
@@ -127,8 +129,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let bitstreams = RusbBackend::load_bitstreams()?
-        .ok_or("missing FPGA bitstreams; expected resources/bitstreams/*.bin")?;
     let mut trace = |event: DiagnosticEvent| {
         let level = match event.level {
             DiagnosticLevel::Info => "info",
@@ -137,6 +137,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         println!("[{}:{level}] {}", event.phase, event.message);
     };
+
+    if options.flash_mcu {
+        let firmware = RusbBackend::load_mcu_firmware()?
+            .ok_or("missing MCU firmware; expected resources/firmware/SCI_LOGIC.bin")?;
+        backend.flash_mcu_firmware_with_trace(device_id, &firmware, &mut trace)?;
+        println!("MCU firmware update submitted; rediscover the re-enumerated device, then run capture again");
+        return Ok(());
+    }
+
+    let bitstreams = RusbBackend::load_bitstreams()?
+        .ok_or("missing FPGA bitstreams; expected resources/bitstreams/*.bin")?;
 
     backend.prepare_device_with_trace(device_id, Some(&bitstreams), &mut trace)?;
     if options.pwm_configure || options.pwm_only {
@@ -253,6 +264,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &mut trace,
             &mut started,
             &mut samples,
+            &mut |_, _| {},
             &mut triggered,
         )?;
         if let Some(error) = graph_error.into_inner() {
@@ -360,6 +372,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--out" => options.output = Some(PathBuf::from(next_arg(&mut args, "--out")?)),
             "--list-only" => options.list_only = true,
             "--prepare-only" => options.prepare_only = true,
+            "--flash-mcu" => options.flash_mcu = true,
             "--raw-cross" => options.decode_cross = false,
             "--decode-cross" => options.decode_cross = true,
             "--compare-mappings" => options.compare_mappings = true,
@@ -429,7 +442,7 @@ fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "usb_smoke [--list-only] [--prepare-only] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms ms] [--graph-smoke] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 

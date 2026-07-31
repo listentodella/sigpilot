@@ -155,7 +155,7 @@ impl FakeBackend {
             if samples_read >= sample_count {
                 break;
             }
-            thread::sleep(Duration::from_millis(33));
+            thread::sleep(Duration::from_millis(50));
         }
 
         Ok(CaptureData {

@@ -36,3 +36,15 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# The capture hot path processes hundreds of millions of samples per second.
+# Keeping these workspace crates at opt-level 0 makes `tauri dev` saturate a
+# core even though packaged builds are smooth, which masks frontend regressions.
+[profile.dev.package.pxlogic-core]
+opt-level = 3
+
+[profile.dev.package.pxlogic-graph]
+opt-level = 3
+
+[profile.dev.package.pxlogic-waveform]
+opt-level = 3

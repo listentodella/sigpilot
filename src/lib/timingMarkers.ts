@@ -10,6 +10,7 @@ export interface UiTimingMarker {
   endSample?: number;
   graphPopupOpen: TimingMarkerItemType | null;
   id: string;
+  isCaptureTrigger?: boolean;
   isExpanded: boolean;
   label: string;
   note: string;
@@ -76,6 +77,7 @@ export function normalizeTimingMarker(marker: UiTimingMarker, index: number): Ui
 }
 
 export function getTimingMarkerFullLabel(marker: UiTimingMarker, itemType: TimingMarkerItemType = "root") {
+  if (marker.isCaptureTrigger) return "Trigger";
   if (marker.type === "single") return `T${marker.label}`;
   if (itemType === "left") return `${marker.label}-A`;
   if (itemType === "right") return `${marker.label}-B`;
