@@ -16,6 +16,7 @@ import {
   SALEAE_DARK_GRIDLINE_SECONDARY,
 } from "../lib/saleaeTimingDisplay";
 import { findNearestEdgeSample } from "../lib/waveformEdgeSnap";
+import { waveformTileRequiresDirectDraw } from "../lib/waveformTileCoverage";
 
 interface WaveformCanvasProps {
   isLive?: boolean;
@@ -1218,6 +1219,38 @@ function drawCachedWaveLayer(
   // remains 1:1. Using only the viewport width here stretches every vertical
   // transition by the overscan ratio (normally about 2x).
   const dpr = window.devicePixelRatio || 1;
+  const canvasCssWidth = canvas.width / dpr;
+  if (
+    waveformTileRequiresDirectDraw(
+      tile.samples_per_pixel,
+      viewportSamples,
+      canvasCssWidth,
+    )
+  ) {
+    // At sub-sample pixel scales the backend has already reached its physical
+    // 1 sample/pixel limit. Magnifying the cached raster would magnify its
+    // stroke width too, so draw the small set of visible bins in view space.
+    renderWaveLayer(
+      canvas,
+      tile,
+      rowHeights,
+      rowTopInsets,
+      matchChannelColors,
+      viewportStart,
+      viewportSamples,
+    );
+    drawExactWaveSegments(
+      ctx,
+      canvas,
+      tile,
+      viewportStart,
+      viewportSamples,
+      rowHeights,
+      rowTopInsets,
+      matchChannelColors,
+    );
+    return;
+  }
   const layerWidth = Math.max(1, Math.round(tile.pixels * dpr));
   let cache = cacheRef.current;
   if (
@@ -1334,6 +1367,8 @@ function renderWaveLayer(
   rowHeights: number[],
   rowTopInsets: number[],
   matchChannelColors: boolean,
+  viewportStart = tile.start_sample,
+  viewportSamples = tile.sample_count,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -1342,8 +1377,8 @@ function renderWaveLayer(
   const channelLayout = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets);
   const left = graphPaddingLeft * dpr;
   const right = width - graphPaddingRight * dpr;
-  const viewSamples = Math.max(1, tile.sample_count);
-  const viewStart = tile.start_sample;
+  const viewSamples = Math.max(Number.EPSILON, viewportSamples);
+  const viewStart = viewportStart;
 
   tile.channels.forEach((channel, index) => {
     const layout = channelLayout[index];

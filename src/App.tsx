@@ -85,9 +85,9 @@ import {
 } from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import { resolveWaveformPointerSample } from "./lib/waveformEdgeSnap";
+import { graphTileCanServeViewport } from "./lib/waveformTileCoverage";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
 import {
-  captureDataWindow,
   maximumDataViewportSamples,
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
@@ -817,26 +817,6 @@ function tileForVisibleChannels(tile: WaveformTile | null, channelIndexes: numbe
       };
     }),
   };
-}
-
-function graphTileCanServeViewport(
-  tile: WaveformTile | null,
-  viewportStart: number,
-  viewportSamples: number,
-  totalSamples: number,
-  canvasWidth: number,
-  channelIndexes: number[],
-) {
-  if (!tile || tile.channels.length !== channelIndexes.length || viewportSamples <= 0) return false;
-  if (tile.channels.some((channel, index) => channel.channel !== channelIndexes[index])) return false;
-  const dataWindow = captureDataWindow(viewportStart, viewportSamples, totalSamples);
-  const tileEnd = tile.start_sample + tile.sample_count;
-  if (dataWindow.start < tile.start_sample || dataWindow.end > tileEnd) return false;
-  const desiredSamplesPerPixel = viewportSamples / Math.max(1, canvasWidth);
-  const projectedDataPixels = dataWindow.samples / Math.max(Number.EPSILON, desiredSamplesPerPixel);
-  if (projectedDataPixels <= 1.5) return true;
-  const resolutionRatio = tile.samples_per_pixel / Math.max(Number.EPSILON, desiredSamplesPerPixel);
-  return resolutionRatio >= 0.5 && resolutionRatio <= 1.75;
 }
 
 function summaryWithLabels(summary: CaptureSummary, labels: string[]): CaptureSummary {
