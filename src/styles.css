@@ -3407,6 +3407,7 @@ button:disabled {
   white-space: nowrap;
 }
 
+.analyzerFrameNumber,
 .analyzerTimeCell,
 .analyzerDataCell {
   height: 28px;
@@ -3417,6 +3418,13 @@ button:disabled {
   padding: 0 6px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.analyzerFrameNumber {
+  justify-content: flex-end;
+  color: var(--on-background-30);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 .analyzerTimeCell {
@@ -6224,9 +6232,9 @@ body.timing-marker-col-resize * {
 
 .analyzerTableHeader {
   height: 28px;
-  min-width: 283px;
+  min-width: 331px;
   display: grid;
-  grid-template-columns: 18px 75px 110px 80px;
+  grid-template-columns: 18px 48px 75px 110px 80px;
   flex: 0 0 28px;
   border-top: 1px solid var(--border-20);
   border-bottom: 1px solid var(--border-20);
@@ -6251,16 +6259,22 @@ body.timing-marker-col-resize * {
 }
 
 .analyzerFramesList {
-  min-width: 283px;
+  min-width: 331px;
   min-height: 0;
   overflow: auto;
   background: var(--background-10);
 }
 
+.analyzerVirtualSpacer {
+  width: 1px;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
 .analyzerTerminal {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
   overflow: auto;
   border: 1px solid var(--border-20);
   border-radius: 4px;
@@ -6270,8 +6284,10 @@ body.timing-marker-col-resize * {
 }
 
 .terminalLine {
+  height: 18px;
+  flex: 0 0 18px;
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
+  grid-template-columns: 32px 74px minmax(0, 1fr);
   gap: 8px;
   color: var(--on-background-20);
   font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;

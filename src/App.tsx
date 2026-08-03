@@ -41,6 +41,7 @@ import {
   WheelEvent as ReactWheelEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -87,6 +88,7 @@ import {
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import { resolveWaveformPointerSample } from "./lib/waveformEdgeSnap";
 import { graphTileCanServeViewport } from "./lib/waveformTileCoverage";
+import { virtualListWindow } from "./lib/virtualList";
 import { defaultCaptureViewportSamples } from "./lib/liveViewport";
 import {
   maximumDataViewportSamples,
@@ -422,6 +424,10 @@ const SCREENSHOT_CONTEXT_MENU_CLOSE_DELAY_MS = 300;
 const SCREENSHOT_WINDOW_CONTEXT_MENU_CLOSE_DELAY_MS = 100;
 const SCREENSHOT_FEEDBACK_VISIBLE_MS = 520;
 const SCREENSHOT_NOTIFICATION_VISIBLE_MS = 4_000;
+const ANALYZER_TABLE_HEADER_HEIGHT_PX = 28;
+const ANALYZER_TABLE_ROW_HEIGHT_PX = 28;
+const ANALYZER_TERMINAL_ROW_HEIGHT_PX = 18;
+const ANALYZER_LIST_OVERSCAN_ROWS = 12;
 const FALLBACK_SAMPLE_RATES = [
   2_000,
   5_000,
@@ -7992,8 +7998,11 @@ function AnalyzersPanel({
   const [selectorAnchorRect, setSelectorAnchorRect] = useState<DOMRect | null>(null);
   const [activeAnalyzerMenu, setActiveAnalyzerMenu] = useState<{ analyzerId: string; anchorRect: DOMRect } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [tableViewport, setTableViewport] = useState({ height: 0, scrollTop: 0 });
+  const [terminalViewport, setTerminalViewport] = useState({ height: 0, scrollTop: 0 });
   const selectorButtonRef = useRef<HTMLButtonElement>(null);
   const tableBodyRef = useRef<HTMLDivElement>(null);
+  const terminalBodyRef = useRef<HTMLDivElement>(null);
 
   function addAnalyzer(choice: AnalyzerLibraryChoice) {
     setSelectorOpen(false);
@@ -8068,10 +8077,11 @@ function AnalyzersPanel({
       session.analyzers
         .filter((analyzer) => analyzer.showInDataTable)
         .flatMap((analyzer) =>
-          analyzer.decodedFrames.map((frame, frameIndex) => ({
+          analyzer.decodedFrames.map((frame, framePosition) => ({
             analyzer,
             frame,
-            frameIndex: frame.frame_id ?? frameIndex,
+            frameIndex: frame.frame_id ?? framePosition,
+            frameNumber: framePosition + 1,
           })),
         )
         .sort((a, b) => a.frame.start_sample - b.frame.start_sample),
@@ -8081,8 +8091,8 @@ function AnalyzersPanel({
   const filteredTableFrames = useMemo(
     () =>
       normalizedSearch
-        ? tableFrames.filter(({ analyzer, frame }) =>
-            `${analyzer.name} ${frame.frame_type} ${formatAnalyzerFrameLabel(analyzer, frame)} ${frame.channel_values
+        ? tableFrames.filter(({ analyzer, frame, frameNumber }) =>
+            `${analyzer.name} ${frameNumber} ${frame.frame_type} ${formatAnalyzerFrameLabel(analyzer, frame)} ${frame.channel_values
               .map((value) => `${value.role} ${formatAnalyzerChannelValue(analyzer, value)}`)
               .join(" ")}`
               .toLowerCase()
@@ -8100,28 +8110,67 @@ function AnalyzersPanel({
     });
     return roles;
   }, [tableFrames]);
-  const tableGridTemplate = `18px 75px 110px 80px${tableDataColumns.length > 0 ? ` repeat(${tableDataColumns.length}, minmax(75px, 1fr))` : ""}`;
-  const tableMinimumWidth = 283 + tableDataColumns.length * 75;
+  const tableGridTemplate = `18px 48px 75px 110px 80px${tableDataColumns.length > 0 ? ` repeat(${tableDataColumns.length}, minmax(75px, 1fr))` : ""}`;
+  const tableMinimumWidth = 331 + tableDataColumns.length * 75;
   const syncTableVisibleRight = useCallback(() => {
     const table = tableBodyRef.current;
     if (!table) return;
     const visibleRight = Math.max(0, table.scrollWidth - table.clientWidth - table.scrollLeft);
     table.style.setProperty("--table-visible-right", `${visibleRight}px`);
   }, []);
+  const syncTableViewport = useCallback(() => {
+    const table = tableBodyRef.current;
+    if (!table) return;
+    const next = { height: table.clientHeight, scrollTop: table.scrollTop };
+    setTableViewport((current) =>
+      current.height === next.height && current.scrollTop === next.scrollTop ? current : next,
+    );
+  }, []);
+  const handleTableScroll = useCallback(() => {
+    syncTableVisibleRight();
+    syncTableViewport();
+  }, [syncTableViewport, syncTableVisibleRight]);
   const terminalFrames = useMemo(
     () =>
       session.analyzers
         .filter((analyzer) => analyzer.streamToTerminal)
         .flatMap((analyzer) =>
-          analyzer.decodedFrames.map((frame, frameIndex) => ({
+          analyzer.decodedFrames.map((frame, framePosition) => ({
             analyzer,
             frame,
-            frameIndex: frame.frame_id ?? frameIndex,
+            frameIndex: frame.frame_id ?? framePosition,
+            frameNumber: framePosition + 1,
           })),
         )
         .sort((a, b) => a.frame.start_sample - b.frame.start_sample),
     [session.analyzers],
   );
+  const syncTerminalViewport = useCallback(() => {
+    const terminal = terminalBodyRef.current;
+    if (!terminal) return;
+    const next = { height: terminal.clientHeight, scrollTop: terminal.scrollTop };
+    setTerminalViewport((current) =>
+      current.height === next.height && current.scrollTop === next.scrollTop ? current : next,
+    );
+  }, []);
+  const tableWindow = virtualListWindow(
+    filteredTableFrames.length,
+    ANALYZER_TABLE_ROW_HEIGHT_PX,
+    tableViewport.scrollTop,
+    tableViewport.height,
+    ANALYZER_TABLE_HEADER_HEIGHT_PX,
+    ANALYZER_LIST_OVERSCAN_ROWS,
+  );
+  const visibleTableFrames = filteredTableFrames.slice(tableWindow.start, tableWindow.end);
+  const terminalWindow = virtualListWindow(
+    terminalFrames.length,
+    ANALYZER_TERMINAL_ROW_HEIGHT_PX,
+    terminalViewport.scrollTop,
+    terminalViewport.height,
+    0,
+    ANALYZER_LIST_OVERSCAN_ROWS,
+  );
+  const visibleTerminalFrames = terminalFrames.slice(terminalWindow.start, terminalWindow.end);
   const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
 
   async function exportAnalyzer(analyzerId: string, format: "csv" | "txt") {
@@ -8161,27 +8210,70 @@ function AnalyzersPanel({
 
   useEffect(() => {
     if (!highlightedFrame || session.analyzerDataPane !== "table") return;
-    window.requestAnimationFrame(() => {
-      tableBodyRef.current
-        ?.querySelector<HTMLElement>(
-          `[data-analyzer-frame="${highlightedFrame.analyzerId}:${highlightedFrame.frameIndex}"]`,
-        )
-        ?.scrollIntoView({ block: "nearest" });
-    });
-  }, [highlightedFrame?.analyzerId, highlightedFrame?.frameIndex, session.analyzerDataPane]);
+    const targetIndex = filteredTableFrames.findIndex(
+      ({ analyzer, frameIndex }) =>
+        analyzer.id === highlightedFrame.analyzerId && frameIndex === highlightedFrame.frameIndex,
+    );
+    const table = tableBodyRef.current;
+    if (!table || targetIndex < 0) return;
+    const rowTop = ANALYZER_TABLE_HEADER_HEIGHT_PX + targetIndex * ANALYZER_TABLE_ROW_HEIGHT_PX;
+    const rowBottom = rowTop + ANALYZER_TABLE_ROW_HEIGHT_PX;
+    const visibleTop = table.scrollTop + ANALYZER_TABLE_HEADER_HEIGHT_PX;
+    const visibleBottom = table.scrollTop + table.clientHeight;
+    if (rowTop < visibleTop) {
+      table.scrollTop = Math.max(0, rowTop - ANALYZER_TABLE_HEADER_HEIGHT_PX);
+    } else if (rowBottom > visibleBottom) {
+      table.scrollTop = Math.max(0, rowBottom - table.clientHeight);
+    }
+    syncTableViewport();
+  }, [
+    filteredTableFrames,
+    highlightedFrame?.analyzerId,
+    highlightedFrame?.frameIndex,
+    session.analyzerDataPane,
+    syncTableViewport,
+  ]);
+
+  useLayoutEffect(() => {
+    if (session.analyzerDataPane !== "table") return;
+    const table = tableBodyRef.current;
+    if (!table) return;
+    const contentHeight =
+      ANALYZER_TABLE_HEADER_HEIGHT_PX + filteredTableFrames.length * ANALYZER_TABLE_ROW_HEIGHT_PX;
+    const maximumScrollTop = Math.max(0, contentHeight - table.clientHeight);
+    if (table.scrollTop > maximumScrollTop) table.scrollTop = maximumScrollTop;
+    syncTableViewport();
+  }, [filteredTableFrames.length, session.analyzerDataPane, syncTableViewport]);
 
   useEffect(() => {
     if (session.analyzerDataPane !== "table") return;
     const table = tableBodyRef.current;
     if (!table) return;
-    const observer = new ResizeObserver(syncTableVisibleRight);
+    const syncTable = () => {
+      syncTableVisibleRight();
+      syncTableViewport();
+    };
+    const observer = new ResizeObserver(syncTable);
     observer.observe(table);
-    const frame = window.requestAnimationFrame(syncTableVisibleRight);
+    const frame = window.requestAnimationFrame(syncTable);
     return () => {
       observer.disconnect();
       window.cancelAnimationFrame(frame);
     };
-  }, [session.analyzerDataPane, syncTableVisibleRight, tableMinimumWidth]);
+  }, [session.analyzerDataPane, syncTableViewport, syncTableVisibleRight, tableMinimumWidth]);
+
+  useEffect(() => {
+    if (session.analyzerDataPane !== "terminal") return;
+    const terminal = terminalBodyRef.current;
+    if (!terminal) return;
+    const observer = new ResizeObserver(syncTerminalViewport);
+    observer.observe(terminal);
+    const frame = window.requestAnimationFrame(syncTerminalViewport);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [session.analyzerDataPane, syncTerminalViewport]);
 
   useEffect(() => {
     if (!selectorOpen && !activeAnalyzerMenu) return;
@@ -8384,9 +8476,10 @@ function AnalyzersPanel({
                 aria-label="Copy analyzer data"
                 disabled={filteredTableFrames.length === 0}
                 onClick={() => {
-                  const header = ["Type", "Start", "Duration", ...tableDataColumns].join("\t");
-                  const rows = filteredTableFrames.map(({ analyzer, frame }) =>
+                  const header = ["Frame", "Type", "Start", "Duration", ...tableDataColumns].join("\t");
+                  const rows = filteredTableFrames.map(({ analyzer, frame, frameNumber }) =>
                     [
+                      frameNumber,
                       frame.frame_type,
                       formatSeconds(frame.start_sample / Math.max(1, sampleRateHz)),
                       formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz)),
@@ -8406,13 +8499,14 @@ function AnalyzersPanel({
                 <Copy size={12} />
               </button>
             </div>
-            <div className="analyzerFramesList" onScroll={syncTableVisibleRight} ref={tableBodyRef}>
+            <div className="analyzerFramesList" onScroll={handleTableScroll} ref={tableBodyRef}>
               <div
                 className="analyzerTableHeader"
                 aria-hidden="true"
                 style={{ gridTemplateColumns: tableGridTemplate, minWidth: tableMinimumWidth }}
               >
                 <span />
+                <span>#</span>
                 <span>Type</span>
                 <span>Start</span>
                 <span>Duration</span>
@@ -8427,73 +8521,99 @@ function AnalyzersPanel({
               ) : filteredTableFrames.length === 0 ? (
                 <div className="empty-result">No matching frames</div>
               ) : (
-                filteredTableFrames.slice(0, 500).map(({ analyzer, frame, frameIndex }) => (
+                <>
                   <div
-                    className={`decode-row ${analyzer.highlightedFrameIndex === frameIndex ? "selected" : ""}`}
-                    data-analyzer-frame={`${analyzer.id}:${frameIndex}`}
-                    key={`${analyzer.id}-${frame.start_sample}-${frameIndex}`}
-                    onClick={() =>
-                      onUpdateSession((current) => ({
-                        ...current,
-                        analyzers: current.analyzers.map((item) => ({
-                          ...item,
-                          highlightedFrameIndex: item.id === analyzer.id ? frameIndex : null,
-                        })),
-                      }))
-                    }
-                    style={{
-                      "--analyzer-color": analyzer.color,
-                      gridTemplateColumns: tableGridTemplate,
-                      minWidth: tableMinimumWidth,
-                    } as CSSProperties}
-                  >
-                    <span className="decodeAnalyzerDot" title={analyzer.name} />
-                    <span className="analyzerDataCell">
-                      <HighlightedAnalyzerText query={searchQuery} text={frame.frame_type} />
-                    </span>
-                    <span className="analyzerTimeCell">{formatSeconds(frame.start_sample / Math.max(1, sampleRateHz))}</span>
-                    <span className="analyzerTimeCell">
-                      {formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz))}
-                    </span>
-                    {tableDataColumns.map((role) => (
-                      <span className="analyzerDataCell" key={role}>
-                        <HighlightedAnalyzerText
-                          query={searchQuery}
-                          text={formatAnalyzerTableRoleValue(analyzer, frame, role)}
-                        />
-                      </span>
-                    ))}
-                    <button
-                      className="analyzerGoToButton"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onGoToAnalyzerFrame(analyzer.id, frameIndex, false);
-                      }}
-                      onDoubleClick={(event) => {
-                        event.stopPropagation();
-                        onGoToAnalyzerFrame(analyzer.id, frameIndex, true);
-                      }}
-                      title={"Go to data\nDouble click to zoom"}
-                      type="button"
+                    aria-hidden="true"
+                    className="analyzerVirtualSpacer"
+                    style={{ height: tableWindow.startPaddingPx, minWidth: tableMinimumWidth }}
+                  />
+                  {visibleTableFrames.map(({ analyzer, frame, frameIndex, frameNumber }) => (
+                    <div
+                      className={`decode-row ${analyzer.highlightedFrameIndex === frameIndex ? "selected" : ""}`}
+                      data-analyzer-frame={`${analyzer.id}:${frameIndex}`}
+                      key={`${analyzer.id}-${frame.start_sample}-${frameIndex}`}
+                      onClick={() =>
+                        onUpdateSession((current) => ({
+                          ...current,
+                          analyzers: current.analyzers.map((item) => ({
+                            ...item,
+                            highlightedFrameIndex: item.id === analyzer.id ? frameIndex : null,
+                          })),
+                        }))
+                      }
+                      style={{
+                        "--analyzer-color": analyzer.color,
+                        gridTemplateColumns: tableGridTemplate,
+                        minWidth: tableMinimumWidth,
+                      } as CSSProperties}
                     >
-                      <SaleaeGoToIcon />
-                    </button>
-                  </div>
-                ))
+                      <span className="decodeAnalyzerDot" title={analyzer.name} />
+                      <span className="analyzerFrameNumber">{frameNumber}</span>
+                      <span className="analyzerDataCell">
+                        <HighlightedAnalyzerText query={searchQuery} text={frame.frame_type} />
+                      </span>
+                      <span className="analyzerTimeCell">{formatSeconds(frame.start_sample / Math.max(1, sampleRateHz))}</span>
+                      <span className="analyzerTimeCell">
+                        {formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz))}
+                      </span>
+                      {tableDataColumns.map((role) => (
+                        <span className="analyzerDataCell" key={role}>
+                          <HighlightedAnalyzerText
+                            query={searchQuery}
+                            text={formatAnalyzerTableRoleValue(analyzer, frame, role)}
+                          />
+                        </span>
+                      ))}
+                      <button
+                        className="analyzerGoToButton"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onGoToAnalyzerFrame(analyzer.id, frameIndex, false);
+                        }}
+                        onDoubleClick={(event) => {
+                          event.stopPropagation();
+                          onGoToAnalyzerFrame(analyzer.id, frameIndex, true);
+                        }}
+                        title={"Go to data\nDouble click to zoom"}
+                        type="button"
+                      >
+                        <SaleaeGoToIcon />
+                      </button>
+                    </div>
+                  ))}
+                  <div
+                    aria-hidden="true"
+                    className="analyzerVirtualSpacer"
+                    style={{ height: tableWindow.endPaddingPx, minWidth: tableMinimumWidth }}
+                  />
+                </>
               )}
             </div>
           </div>
         ) : (
-          <div className="analyzerTerminal">
+          <div className="analyzerTerminal" onScroll={syncTerminalViewport} ref={terminalBodyRef}>
             {terminalFrames.length === 0 ? (
               <div className="empty-result">No terminal data</div>
             ) : (
-              terminalFrames.slice(0, 500).map(({ analyzer, frame, frameIndex }) => (
-                <div className="terminalLine" key={`${analyzer.id}-${frame.start_sample}-${frameIndex}`}>
-                  <span>{formatSamples(frame.start_sample)}</span>
-                  <strong>{formatAnalyzerFrameLabel(analyzer, frame)}</strong>
-                </div>
-              ))
+              <>
+                <div
+                  aria-hidden="true"
+                  className="analyzerVirtualSpacer"
+                  style={{ height: terminalWindow.startPaddingPx }}
+                />
+                {visibleTerminalFrames.map(({ analyzer, frame, frameIndex, frameNumber }) => (
+                  <div className="terminalLine" key={`${analyzer.id}-${frame.start_sample}-${frameIndex}`}>
+                    <span>#{frameNumber}</span>
+                    <span>{formatSamples(frame.start_sample)}</span>
+                    <strong>{formatAnalyzerFrameLabel(analyzer, frame)}</strong>
+                  </div>
+                ))}
+                <div
+                  aria-hidden="true"
+                  className="analyzerVirtualSpacer"
+                  style={{ height: terminalWindow.endPaddingPx }}
+                />
+              </>
             )}
           </div>
         )}
@@ -8715,11 +8835,12 @@ function analyzerExportText(
       if (!roles.includes(value.role)) roles.push(value.role);
     });
   });
-  const headers = ["Type", "Start", "Duration", "Label", ...roles];
+  const headers = ["Frame", "Type", "Start", "Duration", "Label", ...roles];
   const rows = analyzer.decodedFrames
     .slice()
     .sort((left, right) => left.start_sample - right.start_sample || left.frame_id - right.frame_id)
-    .map((frame) => [
+    .map((frame, framePosition) => [
+      (framePosition + 1).toString(),
       frame.frame_type,
       formatSeconds(frame.start_sample / Math.max(1, sampleRateHz)),
       formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz)),

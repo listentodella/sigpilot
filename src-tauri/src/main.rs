@@ -1165,18 +1165,8 @@ async fn decode_analyzer_frames(
 ) -> CommandResult<Vec<DecodedFrame>> {
     let session = state.existing_session(&session_id)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let sample_count = session.sample_count();
         session
-            .decode_frames_with_backend_for_view(
-                &settings,
-                backend,
-                &WaveformRequest {
-                    start_sample: 0,
-                    sample_count,
-                    pixels: 1_200,
-                    channels: Vec::new(),
-                },
-            )
+            .decode_frames_with_backend(&settings, backend)
             .map(|frames| frames.as_ref().clone())
             .map_err(to_string)
     })
