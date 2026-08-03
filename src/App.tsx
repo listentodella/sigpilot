@@ -77,6 +77,7 @@ import { PreferencesDialog } from "./components/PreferencesDialog";
 import { SaleaeIcon } from "./components/SaleaeIcon";
 import { AnalyzerLibraryMenu } from "./components/AnalyzerLibraryMenu";
 import type { AnalyzerLibraryChoice } from "./components/AnalyzerLibraryMenu";
+import { AnalogWaveformOverlay } from "./components/AnalogWaveformOverlay";
 import { StripChartScrollbar } from "./components/StripChartScrollbar";
 import { TimingDisplayCanvas } from "./components/TimingDisplayCanvas";
 import {
@@ -127,6 +128,7 @@ import {
   releaseGraphSession,
   renderGraphFrame,
   saveCapture,
+  saleaeDecoderCatalog,
   SigrokDecoderCatalog,
   sigrokDecoderCatalog,
   SigrokDecoderCatalogItem,
@@ -158,6 +160,7 @@ import {
   formatAnalyzerText,
   analyzerStripInsetForChannel,
   createAnalyzerInstanceFromSigrokCatalog,
+  createAnalyzerInstanceFromSaleaeCatalog,
   mergeAnalyzerTrackFrames,
   normalizeAnalyzerDisplayRadix,
   SALEAE_ANALYZER_COLORS,
@@ -178,6 +181,15 @@ import {
   SALEAE_ROW_V2_SPACING_PX,
 } from "./lib/saleaeChannelLayout";
 import { saleaeLegacyChannelColor } from "./lib/saleaeChannelColors";
+import {
+  ANALOG_ROW_MIN_HEIGHT_PX,
+  ANALOG_SAMPLE_RATE_OPTIONS,
+  ANALOG_VIEW_RANGE_MIN_VOLTS,
+  cloneAnalogChannels,
+  enabledAnalogChannels,
+  makeDefaultAnalogChannels,
+  UiAnalogChannelSettings,
+} from "./lib/analogChannels";
 import {
   loadUiExtensions,
   saveUiExtensions,
@@ -316,6 +328,8 @@ type UiTriggerEdge = "Rising Edge" | "Falling Edge" | "High Pulse" | "Low Pulse"
 type UiTriggerCondition = "Ignore" | "Low" | "High";
 
 interface UiDeviceSettings {
+  analogChannels: UiAnalogChannelSettings[];
+  analogSampleRateHz: number;
   bufferSizeMb: number;
   captureMode: UiRecordingMode;
   clockNegedge: boolean;
@@ -1056,6 +1070,8 @@ function applyTrimmedCapture(
 
 function defaultDeviceSettings(channelCount: number, bufferSizeMb = DEFAULT_BUFFER_SIZE_MB): UiDeviceSettings {
   return {
+    analogChannels: makeDefaultAnalogChannels(),
+    analogSampleRateHz: 6_250_000,
     bufferSizeMb,
     captureMode: "FreeRun",
     clockNegedge: false,
@@ -1188,7 +1204,12 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     selectedDevice: deviceId,
     settings,
     deviceSettings: source
-      ? { ...source.deviceSettings, digitalChannels: [...source.deviceSettings.digitalChannels] }
+      ? {
+          ...source.deviceSettings,
+          analogChannels: cloneAnalogChannels(source.deviceSettings.analogChannels),
+          analogSampleRateHz: source.deviceSettings.analogSampleRateHz ?? 6_250_000,
+          digitalChannels: [...source.deviceSettings.digitalChannels],
+        }
       : defaultDeviceSettings(settings.channel_count, settings.buffer_size_mb),
     channelOrder: channelOrderForCount(32, source?.channelOrder),
     channelLabels: source
@@ -1296,6 +1317,7 @@ export default function App() {
   const [sessions, setSessions] = useState<UiSession[]>([]);
   const [extensions, setExtensions] = useState<UiExtensionRecord[]>(loadUiExtensions);
   const [sigrokCatalog, setSigrokCatalog] = useState<SigrokDecoderCatalog | null>(null);
+  const [saleaeCatalog, setSaleaeCatalog] = useState<SigrokDecoderCatalog | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedPanel, setSelectedPanel] = useState<SidebarPanel | undefined>(undefined);
   const [sidebarPanelWidth, setSidebarPanelWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
@@ -1447,7 +1469,12 @@ export default function App() {
   const availableAnalyzers = useMemo<AnalyzerLibraryChoice[]>(() => {
     const choices: AnalyzerLibraryChoice[] = [
       ...ANALYZER_CATALOG_GROUPS.flatMap((group) =>
-        group.analyzers.map((name) => ({ name, backend: group.backend, source: group.label })),
+        group.analyzers.map((name) => ({
+          name,
+          backend: group.backend,
+          runnerStatus: group.runnerStatus,
+          source: group.label,
+        })),
       ),
       ...(sigrokCatalog?.decoders ?? [])
         .filter((item) => item.id || item.name || item.longname)
@@ -1460,6 +1487,19 @@ export default function App() {
           name: sigrokCatalogDisplayName(item),
           runnerStatus: item.runner_status,
           source: item.kind === "python" ? "Sigrok Python Decoders" : "Sigrok C Decoders",
+        })),
+      ...(saleaeCatalog?.decoders ?? [])
+        .filter((item) => item.id || item.name || item.longname)
+        .filter((item) => !["serial", "i2c", "spi", "i2s", "can", "lin", "simple_parallel"].includes(item.id ?? ""))
+        .map((item) => ({
+          backend: "saleae_native" as const,
+          catalogItem: item,
+          description: [sigrokCatalogDetailName(item), item.desc?.trim()]
+            .filter((part, index, parts) => part && parts.indexOf(part) === index)
+            .join(" - ") || null,
+          name: sigrokCatalogDisplayName(item),
+          runnerStatus: item.runner_status,
+          source: "Saleae Native",
         })),
       ...extensions
         .filter((extension) => extension.installed && extension.enabled)
@@ -1476,7 +1516,7 @@ export default function App() {
       seen.add(key);
       return true;
     });
-  }, [extensions, sigrokCatalog]);
+  }, [extensions, saleaeCatalog, sigrokCatalog]);
 
   const updateSession = useCallback((sessionId: string, updater: (session: UiSession) => UiSession) => {
     setSessions((current) => current.map((session) => (session.id === sessionId ? updater(session) : session)));
@@ -1589,6 +1629,20 @@ export default function App() {
       })
       .catch((error) => {
         if (!cancelled) setStartupMessage(`Sigrok catalog: ${String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void saleaeDecoderCatalog()
+      .then((catalog) => {
+        if (!cancelled) setSaleaeCatalog(catalog);
+      })
+      .catch((error) => {
+        if (!cancelled) setStartupMessage(`Saleae catalog: ${String(error)}`);
       });
     return () => {
       cancelled = true;
@@ -1825,15 +1879,34 @@ export default function App() {
     () => visibleChannelHeights.map((height, index) => height + (visibleAnalyzerInsets[index] ?? 0)),
     [visibleAnalyzerInsets, visibleChannelHeights],
   );
+  const visibleAnalogChannelEntries = useMemo(
+    () => (activeSession ? enabledAnalogChannels(activeSession.deviceSettings.analogChannels) : []),
+    [activeSession?.deviceSettings.analogChannels],
+  );
+  const visibleAnalogRowHeights = useMemo(
+    () => visibleAnalogChannelEntries.map(({ settings }) => settings.height),
+    [visibleAnalogChannelEntries],
+  );
+  const allVisibleRowHeights = useMemo(
+    () => [...visibleOuterRowHeights, ...visibleAnalogRowHeights],
+    [visibleAnalogRowHeights, visibleOuterRowHeights],
+  );
   const visibleChannelLayouts = useMemo(
     () => getSaleaeGraphChannelLayout(visibleOuterRowHeights, visibleChannelIndexes.length),
     [visibleOuterRowHeights, visibleChannelIndexes.length],
+  );
+  const visibleAnalogLayouts = useMemo(
+    () =>
+      getSaleaeGraphChannelLayout(allVisibleRowHeights, allVisibleRowHeights.length).slice(
+        visibleOuterRowHeights.length,
+      ),
+    [allVisibleRowHeights, visibleOuterRowHeights.length],
   );
   const visibleTile = useMemo(
     () => tileForVisibleChannels(activeSession?.tile ?? null, visibleChannelIndexes, channelLabels),
     [activeSession?.tile, channelLabels, visibleChannelIndexes],
   );
-  const graphContentHeight = Math.max(graphViewportHeight, saleaeChannelContentHeight(visibleOuterRowHeights));
+  const graphContentHeight = Math.max(graphViewportHeight, saleaeChannelContentHeight(allVisibleRowHeights));
 
   const totalSamples = activeSession?.summary?.metadata.sample_count ?? 0;
   const progressPercent =
@@ -2948,6 +3021,29 @@ export default function App() {
     });
   }
 
+  function updateAnalogChannel(channelIndex: number, patch: Partial<UiAnalogChannelSettings>) {
+    if (!activeSession) return;
+    updateSession(activeSession.id, (session) => {
+      const analogChannels = cloneAnalogChannels(session.deviceSettings.analogChannels);
+      const current = analogChannels[channelIndex];
+      if (!current) return session;
+      analogChannels[channelIndex] = {
+        ...current,
+        ...patch,
+        height: Math.max(ANALOG_ROW_MIN_HEIGHT_PX, patch.height ?? current.height),
+        rangeVolts: Math.max(ANALOG_VIEW_RANGE_MIN_VOLTS, patch.rangeVolts ?? current.rangeVolts),
+        viewRangeVolts: Math.max(
+          ANALOG_VIEW_RANGE_MIN_VOLTS,
+          patch.viewRangeVolts ?? current.viewRangeVolts,
+        ),
+      };
+      return {
+        ...session,
+        deviceSettings: { ...session.deviceSettings, analogChannels },
+      };
+    });
+  }
+
   function reorderVisibleChannels(sourceIndex: number, destinationIndex: number) {
     if (!activeSession || sourceIndex === destinationIndex) return;
     updateSession(activeSession.id, (session) => {
@@ -3260,7 +3356,9 @@ export default function App() {
     const startChannel = channelIndex ?? Math.max(0, firstEnabledChannel);
     setAnalyzerInEdit({
       analyzer: catalogItem
-        ? createAnalyzerInstanceFromSigrokCatalog(catalogItem, activeSession.analyzers, startChannel)
+        ? decoderBackend === "saleae_native"
+          ? createAnalyzerInstanceFromSaleaeCatalog(catalogItem, activeSession.analyzers, startChannel)
+          : createAnalyzerInstanceFromSigrokCatalog(catalogItem, activeSession.analyzers, startChannel)
         : createAnalyzerInstance(name, activeSession.analyzers, startChannel, decoderBackend),
       isNew: true,
       sessionId: activeSession.id,
@@ -3402,19 +3500,26 @@ export default function App() {
 
     if (command === AnalyzerCommands.AddAnalyzer) {
       const catalogItem = payload?.analyzerCatalogId
-        ? sigrokCatalog?.decoders.find((item) => item.id === payload.analyzerCatalogId)
+        ? (payload.analyzerBackend === "saleae_native" ? saleaeCatalog : sigrokCatalog)?.decoders.find(
+            (item) => item.id === payload.analyzerCatalogId,
+          )
         : undefined;
       handleAddAnalyzer(
         catalogItem
           ? {
-              backend: "sigrok_native",
+              backend: payload?.analyzerBackend ?? "sigrok_native",
               catalogItem,
               description: [sigrokCatalogDetailName(catalogItem), catalogItem.desc?.trim()]
                 .filter((part, index, parts) => part && parts.indexOf(part) === index)
                 .join(" - ") || null,
               name: sigrokCatalogDisplayName(catalogItem),
               runnerStatus: catalogItem.runner_status,
-              source: catalogItem.kind === "python" ? "Sigrok Python Decoders" : "Sigrok C Decoders",
+              source:
+                payload?.analyzerBackend === "saleae_native"
+                  ? "Saleae Native"
+                  : catalogItem.kind === "python"
+                    ? "Sigrok Python Decoders"
+                    : "Sigrok C Decoders",
             }
           : payload?.analyzerName ?? "Async Serial",
         payload?.analyzerBackend ?? "sigrok_native",
@@ -3875,7 +3980,9 @@ export default function App() {
             <div className="topArea">
               <div className="channelLabelHeader">
                 <span className="channelCounter">
-                  {activeSession ? `${visibleChannelIndexes.length} Channels` : "Select Device"}
+                  {activeSession
+                    ? `${visibleChannelIndexes.length + visibleAnalogChannelEntries.length} Channels`
+                    : "Select Device"}
                 </span>
               </div>
               <div className="aboveGraph">
@@ -3990,6 +4097,19 @@ export default function App() {
                               </Draggable>
                             ))}
                             {droppableProvided.placeholder}
+                            {visibleAnalogChannelEntries.map(({ index, settings }, analogRowIndex) => (
+                              <div
+                                className="channelDragItem analogChannelDragItem"
+                                data-analog-channel-index={index}
+                                key={`analog-${index}`}
+                                style={{ height: visibleAnalogRowHeights[analogRowIndex] }}
+                              >
+                                <div className="channelLabelCell">
+                                  <AnalogChannelLabelRow index={index} settings={settings} />
+                                </div>
+                                <div className="channelDragWaveformGhost" aria-hidden="true" />
+                              </div>
+                            ))}
                           </div>
                         )}
                       </StrictModeDroppable>
@@ -4061,6 +4181,24 @@ export default function App() {
                           setGraphViewportInteraction("waveform", active)
                         }
                       />
+                      <AnalogWaveformOverlay
+                        analogSampleRateHz={activeSession.deviceSettings.analogSampleRateHz}
+                        channels={visibleAnalogChannelEntries}
+                        digitalSampleRateHz={activeSession.summary?.metadata.sample_rate_hz ?? activeSession.settings.sample_rate_hz}
+                        hasCapture={Boolean(activeSession.summary)}
+                        hasDemoData={selected?.kind === "Fake"}
+                        isLive={activeSession.busy}
+                        layouts={visibleAnalogLayouts}
+                        matchChannelColors={preferences.matchChannelColors}
+                        onChange={updateAnalogChannel}
+                        onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
+                        onViewportInteractionChange={(active) =>
+                          setGraphViewportInteraction("waveform", active)
+                        }
+                        totalSamples={totalSamples}
+                        viewportSamples={activeSession.viewportSamples}
+                        viewportStart={activeSession.viewportStart}
+                      />
                       <AnalyzerBubblesOverlay
                         analyzers={activeSession.analyzers}
                         onGoToFrame={(analyzerId, frameIndex) => goToAnalyzerFrame(analyzerId, frameIndex, false)}
@@ -4104,6 +4242,20 @@ export default function App() {
                         key={channelIndex}
                         onResize={(height) => setChannelHeight(channelIndex, height)}
                         top={saleaeChannelResizeHandleTop(visibleOuterRowHeights, rowIndex)}
+                      />
+                    ))}
+                    {visibleAnalogChannelEntries.map(({ index, settings }, rowIndex) => (
+                      <ChannelResizeHandle
+                        channelIndex={index}
+                        height={settings.height}
+                        key={`analog-resize-${index}`}
+                        label={`A${index}`}
+                        minHeight={ANALOG_ROW_MIN_HEIGHT_PX}
+                        onResize={(height) => updateAnalogChannel(index, { height })}
+                        top={saleaeChannelResizeHandleTop(
+                          allVisibleRowHeights,
+                          visibleOuterRowHeights.length + rowIndex,
+                        )}
                       />
                     ))}
                   </div>
@@ -4434,6 +4586,31 @@ function ChannelLabelRow({
   );
 }
 
+function AnalogChannelLabelRow({
+  index,
+  settings,
+}: {
+  index: number;
+  settings: UiAnalogChannelSettings;
+}) {
+  return (
+    <div
+      className="analogChannelLabelRow"
+      style={{ "--analog-channel-color": saleaeLegacyChannelColor(index) } as CSSProperties}
+      title={`${settings.label} analog channel`}
+    >
+      <span className="analogChannelRail">
+        <span className="analogChannelBadge">{index}</span>
+        <span className="analogChannelRailTicks" aria-hidden="true" />
+      </span>
+      <span className="channelText">
+        <strong>{settings.label}</strong>
+        <small>A{index} · Analog</small>
+      </span>
+    </div>
+  );
+}
+
 function ChannelDragWaveformPreview({ rowHeight, rowTop }: { rowHeight: number; rowTop: number }) {
   const previewRef = useRef<HTMLCanvasElement>(null);
 
@@ -4471,11 +4648,15 @@ function ChannelDragWaveformPreview({ rowHeight, rowTop }: { rowHeight: number; 
 function ChannelResizeHandle({
   channelIndex,
   height,
+  label,
+  minHeight = SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
   onResize,
   top,
 }: {
   channelIndex: number;
   height: number;
+  label?: string;
+  minHeight?: number;
   onResize: (height: number) => void;
   top: number;
 }) {
@@ -4491,9 +4672,9 @@ function ChannelResizeHandle({
 
   return (
     <div
-      aria-label={`Resize D${channelIndex} height`}
+      aria-label={`Resize ${label ?? `D${channelIndex}`} height`}
       aria-orientation="horizontal"
-      aria-valuemin={SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX}
+      aria-valuemin={minHeight}
       aria-valuenow={Math.round(height)}
       className="channelResizeHandle"
       onPointerCancel={finishDrag}
@@ -4511,13 +4692,13 @@ function ChannelResizeHandle({
         const drag = dragRef.current;
         if (!drag || drag.pointerId !== event.pointerId) return;
         event.preventDefault();
-        onResize(Math.max(SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX, drag.startHeight + event.clientY - drag.startY));
+        onResize(Math.max(minHeight, drag.startHeight + event.clientY - drag.startY));
       }}
       onPointerUp={finishDrag}
       role="separator"
       style={{ top, height: SALEAE_ROW_V2_SPACING_PX }}
       tabIndex={0}
-      title={`Drag to resize D${channelIndex}`}
+      title={`Drag to resize ${label ?? `D${channelIndex}`}`}
     />
   );
 }
@@ -6859,6 +7040,7 @@ function DeviceSettingsPanel({
     { length: maxDigitalChannels },
     (_, index) => session.deviceSettings.digitalChannels[index] ?? index < session.settings.channel_count,
   );
+  const analogChannels = cloneAnalogChannels(session.deviceSettings.analogChannels);
 
   function updateDeviceSettings(patch: Partial<UiDeviceSettings>) {
     onUpdateSession((current) => ({
@@ -6866,6 +7048,9 @@ function DeviceSettingsPanel({
       deviceSettings: {
         ...current.deviceSettings,
         ...patch,
+        analogChannels: patch.analogChannels
+          ? cloneAnalogChannels(patch.analogChannels)
+          : cloneAnalogChannels(current.deviceSettings.analogChannels),
         digitalChannels: patch.digitalChannels
           ? [...patch.digitalChannels]
           : [...current.deviceSettings.digitalChannels],
@@ -6947,6 +7132,29 @@ function DeviceSettingsPanel({
       hiddenDigitalChannels: makeHiddenDigitalChannels(),
       message: enabled ? `All ${nextCount} digital channels shown and enabled` : "All digital channels hidden and disabled",
     }));
+  }
+
+  function updateAnalogDeviceChannel(index: number, patch: Partial<UiAnalogChannelSettings>) {
+    const nextChannels = cloneAnalogChannels(analogChannels);
+    const current = nextChannels[index];
+    if (!current) return;
+    nextChannels[index] = {
+      ...current,
+      ...patch,
+      rangeVolts: Math.max(0.1, patch.rangeVolts ?? current.rangeVolts),
+      viewRangeVolts: Math.max(0.1, patch.viewRangeVolts ?? current.viewRangeVolts),
+    };
+    updateDeviceSettings({ analogChannels: nextChannels });
+  }
+
+  function selectAllAnalogChannels(enabled: boolean) {
+    updateDeviceSettings({
+      analogChannels: analogChannels.map((channel) => ({ ...channel, enabled })),
+    });
+  }
+
+  function toggleAnalogChannel(index: number) {
+    updateAnalogDeviceChannel(index, { enabled: !analogChannels[index]?.enabled });
   }
 
   async function applyPwm0() {
@@ -7073,6 +7281,47 @@ function DeviceSettingsPanel({
         {selectedChannelMode && (
           <div className="deviceSettingsModeHint">{selectedChannelMode.description}</div>
         )}
+      </section>
+
+      <section className="deviceSettingsBlock analogDeviceSettingsBlock">
+        <div className="deviceSettingsBlockTitle">
+          <span>Analog</span>
+          <div className="deviceSettingsActions">
+            <button type="button" onClick={() => selectAllAnalogChannels(true)}>
+              All
+            </button>
+            <button type="button" onClick={() => selectAllAnalogChannels(false)}>
+              Clear
+            </button>
+          </div>
+        </div>
+        <div className="channelPickerGrid">
+          {analogChannels.map((channel, index) => (
+            <button
+              className={`channelPickerButton ${channel.enabled ? "enabled" : ""}`}
+              key={index}
+              onClick={() => toggleAnalogChannel(index)}
+              style={{ "--channel-color": saleaeLegacyChannelColor(index) } as CSSProperties}
+              title={`${channel.enabled ? "Hide and disable" : "Show and enable"} A${index}`}
+              type="button"
+            >
+              {index}
+            </button>
+          ))}
+        </div>
+        <label className="stack-field">
+          <span>Sample rate</span>
+          <select
+            value={session.deviceSettings.analogSampleRateHz}
+            onChange={(event) => updateDeviceSettings({ analogSampleRateHz: Number(event.target.value) })}
+          >
+            {ANALOG_SAMPLE_RATE_OPTIONS.map((rate) => (
+              <option key={rate} value={rate}>
+                {formatRate(rate)}
+              </option>
+            ))}
+          </select>
+        </label>
       </section>
 
       <section className="deviceSettingsBlock">

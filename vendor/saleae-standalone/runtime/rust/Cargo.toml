@@ -1,0 +1,24 @@
+[package]
+name = "saleae-runtime"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[features]
+default = []
+capture = ["dep:serde", "dep:serde_json", "dep:tempfile"]
+cli = ["capture", "dep:clap", "dep:csv", "dep:wait-timeout"]
+validation = ["capture", "dep:csv"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
+csv = { version = "1.4", optional = true }
+wait-timeout = { version = "0.2", optional = true }
+
+[[bin]]
+name = "saleae-runtime"
+path = "src/main.rs"
+required-features = ["cli"]

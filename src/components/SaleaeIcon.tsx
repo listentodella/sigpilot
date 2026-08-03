@@ -6,8 +6,12 @@ export type SaleaeIconName =
   | "checkmark"
   | "copy"
   | "cross"
+  | "fitVertical"
   | "gear"
   | "goto"
+  | "marqueeZoomX"
+  | "marqueeZoomXY"
+  | "marqueeZoomY"
   | "markerBullet"
   | "markerDownArrow"
   | "markerStop"
@@ -16,7 +20,9 @@ export type SaleaeIconName =
   | "plus"
   | "timeMarker"
   | "trash"
-  | "verticalThreeDots";
+  | "verticalThreeDots"
+  | "zoomInVertical"
+  | "zoomOutVertical";
 
 interface SaleaeIconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {
   name: SaleaeIconName;
@@ -29,8 +35,12 @@ const iconSizes: Record<SaleaeIconName, { height: number; viewBox: string; width
   checkmark: { width: 10, height: 10, viewBox: "0 -1 10 10" },
   copy: { width: 16, height: 16, viewBox: "0 0 16 16" },
   cross: { width: 12, height: 12, viewBox: "0 0 12 12" },
+  fitVertical: { width: 16, height: 16, viewBox: "0 0 16 16" },
   gear: { width: 13, height: 13, viewBox: "0 0 13 13" },
   goto: { width: 9, height: 8, viewBox: "0 0 9 8" },
+  marqueeZoomX: { width: 15, height: 14, viewBox: "0 0 15 14" },
+  marqueeZoomXY: { width: 14, height: 14, viewBox: "0 0 14 14" },
+  marqueeZoomY: { width: 15, height: 16, viewBox: "0 0 15 16" },
   markerBullet: { width: 8, height: 8, viewBox: "0 0 8 8" },
   markerDownArrow: { width: 9, height: 6, viewBox: "0 0 9 6" },
   markerStop: { width: 7, height: 7, viewBox: "0 0 7 7" },
@@ -40,6 +50,8 @@ const iconSizes: Record<SaleaeIconName, { height: number; viewBox: string; width
   timeMarker: { width: 21, height: 24, viewBox: "0 0 21 24" },
   trash: { width: 16, height: 16, viewBox: "0 0 16 16" },
   verticalThreeDots: { width: 20, height: 20, viewBox: "0 0 20 20" },
+  zoomInVertical: { width: 16, height: 16, viewBox: "0 0 16 16" },
+  zoomOutVertical: { width: 16, height: 16, viewBox: "0 0 16 16" },
 };
 
 export function SaleaeIcon({ name, size, style, ...props }: SaleaeIconProps) {
@@ -97,6 +109,15 @@ function SaleaeIconPath({ name }: { name: SaleaeIconName }) {
           />
         </>
       );
+    case "fitVertical":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M3 2H13V3H3V2ZM3 13H13V14H3V13ZM10.5049 7.00098L8.0065 4.00503L5.51784 7.00907L7.50933 7.00584L7.50933 9.00581L5.50811 9.00906L8.0065 12.005L10.4952 9.00097L8.50751 9.00419L8.50751 7.00422L10.5049 7.00098Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
     case "copy":
       return (
         <path
@@ -117,6 +138,33 @@ function SaleaeIconPath({ name }: { name: SaleaeIconName }) {
         <path
           clipRule="evenodd"
           d="M8.38251 3.28221L8.75336 2.90909L8.38251 2.53597L5.86198 0L5.11699 0.746248L6.77722 2.41665C5.40072 2.44137 4.30341 2.52756 3.43081 2.68882C2.38124 2.88278 1.60603 3.19407 1.06057 3.68567C0.502764 4.1884 0.24287 4.82691 0.119121 5.54781C-0.0000376701 6.24197 -0.0000199676 7.06173 0 7.96527V8H1C1 7.05398 1.00156 6.31786 1.10471 5.71699C1.20478 5.13398 1.39254 4.73268 1.73005 4.4285C2.0799 4.11319 2.64764 3.85048 3.61253 3.67217C4.40473 3.52577 5.4306 3.44213 6.76172 3.41712L5.11699 5.07193L5.86198 5.81818L8.38251 3.28221Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
+    case "marqueeZoomXY":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M1.31918 13.3371L1.09182 13.7824C1.36435 13.9215 1.67301 14 2 14H3.5V13H2C1.83472 13 1.68153 12.9607 1.54653 12.8918L1.31918 13.3371ZM10.5 14H12C12.327 14 12.6357 13.9215 12.9082 13.7824L12.4535 12.8918C12.3185 12.9607 12.1653 13 12 13H10.5V14ZM14 3.5V2C14 1.67301 13.9215 1.36435 13.7824 1.09182L12.8918 1.54653C12.9607 1.68153 13 1.83472 13 2V3.5H14ZM2 0H3.5V1H2C1.83472 1 1.68153 1.03933 1.54653 1.10825L1.09182.21761C1.36435.0784715 1.67301 0 2 0ZM0 10.5V12C0 12.327.0784716 12.6356.21761 12.9082L1.10825 12.4535C1.03933 12.3185 1 12.1653 1 12V10.5H0ZM0 5.5H1V8.5H0V5.5ZM0 2C0 1.67301.0784716 1.36435.21761 1.09182L1.10825 1.54653C1.03933 1.68153 1 1.83472 1 2V3.5H0V2ZM5.5 0H8.5V1H5.5V0ZM10.5 0H12C12.327 0 12.6357.0784716 12.9082.21761L12.4535 1.10825C12.3185 1.03933 12.1653 1 12 1H10.5V0ZM13 5.5H14V8.5H13V5.5ZM13 10.5H14V12C14 12.327 13.9215 12.6357 13.7824 12.9082L12.8918 12.4535C12.9607 12.3185 13 12.1653 13 12V10.5ZM8.5 13V14H5.5V13H8.5ZM10.046 7.73533L10.3996 3.84624L6.5105 4.1998L7.9472 5.6365L5.5417 7.8524L4.12132 6.43202L3.76777 10.3211L7.65685 9.96756L6.24881 8.55951L8.65431 6.34361L10.046 7.73533Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
+    case "marqueeZoomX":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M1 0H0V1.86667H1V0ZM1 3.46667H0V6.2H1V3.46667ZM1 7.8H0V10.5333H1V7.8ZM1 12.1333H0V14H1V12.1333ZM3.00583 7.51157L6.00583 5.01157V7.01157H9.00585V5.01157L12.0058 7.51157L9.00585 10.0116V8.01157H6.00585V10.0116L3.00583 7.51157ZM15 0H14V1.86667H15V0ZM15 3.46667H14V6.2H15V3.46667ZM15 7.8H14V10.5333H15V7.8ZM15 12.1333H14V14H15V12.1333Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
+    case "marqueeZoomY":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M14.5.5H12.6333V1.5H14.5V.5ZM11.0333.5H8.3V1.5H11.0333V.5ZM6.7.5H3.96667V1.5H6.7V.5ZM2.36667.5H.5V1.5H2.36667V.5ZM6.98843 3.50583L9.48843 6.50583H7.48843V9.50585H9.48843L6.98843 12.5058L4.48843 9.50585H6.48843V6.50585H4.48843L6.98843 3.50583ZM14.5 14.5H12.6333V15.5H14.5V14.5ZM11.0333 14.5H8.3V15.5H11.0333V14.5ZM6.7 14.5H3.96667V15.5H6.7V14.5ZM2.36667 14.5H.5V15.5H2.36667V14.5Z"
           fill="currentColor"
           fillRule="evenodd"
         />
@@ -178,6 +226,24 @@ function SaleaeIconPath({ name }: { name: SaleaeIconName }) {
         <path
           clipRule="evenodd"
           d="M10.5 6C11.3284 6 12 5.32843 12 4.5C12 3.67157 11.3284 3 10.5 3C9.67157 3 9 3.67157 9 4.5C9 5.32843 9.67157 6 10.5 6ZM10.5 12C11.3284 12 12 11.3284 12 10.5C12 9.67157 11.3284 9 10.5 9C9.67157 9 9 9.67157 9 10.5C9 11.3284 9.67157 12 10.5 12ZM12 16.5C12 17.3284 11.3284 18 10.5 18C9.67157 18 9 17.3284 9 16.5C9 15.6716 9.67157 15 10.5 15C11.3284 15 12 15.6716 12 16.5Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
+    case "zoomInVertical":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M8.00099 5.00089L5.49806 2.00494L3.00487 5.00899L5 5.00575V11.0058L2.99513 11.009L5.49806 14.005L7.99126 11.0009L6 11.0042V5.00413L8.00099 5.00089ZM14 11.0047H12V9H11.0341V11.0047H9V12H11.0341V14H11.9659L12 12H14V11.0047Z"
+          fill="currentColor"
+          fillRule="evenodd"
+        />
+      );
+    case "zoomOutVertical":
+      return (
+        <path
+          clipRule="evenodd"
+          d="M8.00099 5.00089L5.49806 2.00494L3.00486 5.00899L5 5.00575V11.0058L2.99513 11.009L5.49806 14.005L7.99125 11.0009L6 11.0042V5.00413L8.00099 5.00089ZM9 12H14V11H9V12Z"
           fill="currentColor"
           fillRule="evenodd"
         />

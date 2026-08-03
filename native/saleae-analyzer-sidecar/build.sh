@@ -4,11 +4,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE_DIR="$ROOT_DIR/native/saleae-analyzer-sidecar"
+RUNTIME_SOURCE_DIR="$ROOT_DIR/vendor/saleae-standalone/runtime"
 CACHE_DIR="${PXLOGIC_NATIVE_CACHE_DIR:-$ROOT_DIR/target/native-cache}"
 BUILD_DIR="${PXLOGIC_NATIVE_BUILD_DIR:-$ROOT_DIR/target/native/saleae-analyzer-sidecar}"
-SDK_DIR="$CACHE_DIR/AnalyzerSDK"
+RUNTIME_BUILD_DIR="${PXLOGIC_SALEAE_RUNTIME_BUILD_DIR:-$ROOT_DIR/target/native/saleae-standalone-runtime}"
 JSON_DIR="$CACHE_DIR/json"
-SDK_COMMIT="16a9ebff783614691781a8cd69d733abc8c8c722"
 JSON_COMMIT="9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -16,15 +16,11 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-mkdir -p "$CACHE_DIR" "$BUILD_DIR"
+mkdir -p "$CACHE_DIR" "$BUILD_DIR" "$RUNTIME_BUILD_DIR"
 
-if [[ ! -d "$SDK_DIR/.git" ]]; then
-  git clone https://github.com/saleae/AnalyzerSDK.git "$SDK_DIR"
-fi
-if ! git -C "$SDK_DIR" cat-file -e "$SDK_COMMIT^{commit}" 2>/dev/null; then
-  git -C "$SDK_DIR" fetch --quiet origin "$SDK_COMMIT"
-fi
-git -C "$SDK_DIR" checkout --quiet --detach "$SDK_COMMIT"
+cmake -S "$RUNTIME_SOURCE_DIR" -B "$RUNTIME_BUILD_DIR" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
+cmake --build "$RUNTIME_BUILD_DIR"
 
 if [[ ! -d "$JSON_DIR/.git" ]]; then
   git clone https://github.com/nlohmann/json.git "$JSON_DIR"
@@ -42,31 +38,19 @@ fi
 COMMON_FLAGS=(
   -std=c++17
   -O2
-  -g
-  -DLOGIC2
-  -I"$SDK_DIR/include"
-  -I"$SDK_DIR/testlib"
+  -I"$RUNTIME_SOURCE_DIR/include"
   -I"$JSON_DIR/single_include"
-  -I"$SOURCE_DIR/src"
 )
 
-"${CXX_COMMAND[@]}" "${COMMON_FLAGS[@]}" -fPIC -dynamiclib \
-  -Wl,-install_name,@rpath/libAnalyzer.dylib \
-  "$SDK_DIR/testlib/AnalyzerStubs.cpp" \
-  "$SDK_DIR/testlib/HelperStubs.cpp" \
-  "$SDK_DIR/testlib/MockChannelData.cpp" \
-  "$SDK_DIR/testlib/MockSimulatedChannelDescriptor.cpp" \
-  "$SDK_DIR/testlib/SettingsStubs.cpp" \
-  "$SDK_DIR/testlib/StreamHelpers.cpp" \
-  "$SOURCE_DIR/src/instance_compat.cpp" \
-  "$SOURCE_DIR/src/result_capture.cpp" \
-  "$SOURCE_DIR/src/sdk_compat.cpp" \
-  -o "$BUILD_DIR/libAnalyzer.dylib"
-
 "${CXX_COMMAND[@]}" "${COMMON_FLAGS[@]}" \
-  "$SOURCE_DIR/src/main.cpp" \
-  -L"$BUILD_DIR" -lAnalyzer \
-  -Wl,-rpath,@loader_path \
+  "$SOURCE_DIR/src/standalone_main.cpp" \
+  -L"$RUNTIME_BUILD_DIR/lib" -lsaleae_compat \
+  -Wl,-rpath,@loader_path/runtime \
   -o "$BUILD_DIR/pxlogic-saleae-analyzer-sidecar"
+
+rm -rf "$BUILD_DIR/runtime"
+mkdir -p "$BUILD_DIR/runtime"
+cp "$RUNTIME_BUILD_DIR/lib/"libsaleae_compat.dylib "$BUILD_DIR/runtime/"
+cp "$RUNTIME_BUILD_DIR/lib/"lib*_analyzer.so "$BUILD_DIR/runtime/"
 
 printf '%s\n' "$BUILD_DIR/pxlogic-saleae-analyzer-sidecar"

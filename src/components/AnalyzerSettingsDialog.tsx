@@ -74,10 +74,10 @@ export function AnalyzerSettingsDialog({
         uartMsbFirst: false,
         i2cSdaChannel: 1,
         i2cSclChannel: 2,
-        spiMosiChannel: 3,
-        spiMisoChannel: 4,
-        spiClockChannel: 5,
-        spiEnableChannel: 6,
+        spiMosiChannel: 0,
+        spiMisoChannel: null,
+        spiClockChannel: 1,
+        spiEnableChannel: null,
         spiEnableActiveLow: true,
         spiClockPolarity: false,
         spiClockPhase: false,
@@ -749,8 +749,8 @@ export function AnalyzerSettingsDialog({
                   {decoderBackendLabel("legacy_rust")}
                 </option>
               )}
-              {draft.decoderBackend === "sigrok_native" && isSigrokCatalogAnalyzer && (
-                <option value="sigrok_native">{decoderBackendLabel("sigrok_native")}</option>
+              {isSigrokCatalogAnalyzer && (
+                <option value={draft.decoderBackend}>{decoderBackendLabel(draft.decoderBackend)}</option>
               )}
               {!isSigrokCatalogAnalyzer && analyzerBackendOptions(draft.type).map((backend) => (
                 <option key={backend} value={backend}>

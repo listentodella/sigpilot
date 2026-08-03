@@ -1,0 +1,11 @@
+kind,analyzer,index,type,start_sample,end_sample,fields_json,data1,data2,flags
+frame_v2,Async Serial,0,data,12500,24375,"[{""key"":""data"",""value"":{""Bytes"":[0]}}]",,,
+frame_v2,Async Serial,1,data,37500,49375,"[{""key"":""data"",""value"":{""Bytes"":[1]}}]",,,
+frame_v2,Async Serial,2,data,62500,74375,"[{""key"":""data"",""value"":{""Bytes"":[2]}}]",,,
+frame_v2,Async Serial,3,data,87500,99375,"[{""key"":""data"",""value"":{""Bytes"":[3]}}]",,,
+frame_v2,Async Serial,4,data,112500,124375,"[{""key"":""data"",""value"":{""Bytes"":[4]}}]",,,
+legacy,Async Serial,0,0,12500,24375,,0x0000000000000000,0x0000000000000000,0x00
+legacy,Async Serial,1,0,37500,49375,,0x0000000000000001,0x0000000000000000,0x00
+legacy,Async Serial,2,0,62500,74375,,0x0000000000000002,0x0000000000000000,0x00
+legacy,Async Serial,3,0,87500,99375,,0x0000000000000003,0x0000000000000000,0x00
+legacy,Async Serial,4,0,112500,124375,,0x0000000000000004,0x0000000000000000,0x00

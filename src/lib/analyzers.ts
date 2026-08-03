@@ -36,6 +36,7 @@ const VERIFIED_SIGROK_C_RUNNER_STATUS = "verified_sparse_c";
 const GENERIC_SIGROK_C_RUNNER_STATUS = "generic_sparse_c";
 const GENERIC_SIGROK_PYTHON_RUNNER_STATUS = "generic_sparse_python";
 const CATALOG_ONLY_SIGROK_RUNNER_STATUS = "catalog_only";
+const GENERIC_SALEAE_RUNNER_STATUS = "generic_sparse_saleae";
 const SIGROK_VERIFIED_C_RUNNER_TYPES: Record<string, string> = {
   uart_c: "Async Serial",
   i2c_c: "I2C",
@@ -382,6 +383,7 @@ function runnableSigrokDecoderId(item: SigrokDecoderCatalogItem) {
   const id = item.id ?? "";
   if (SIGROK_VERIFIED_C_RUNNER_TYPES[id]) return id.replace(/_c$/, "").replace(/-/g, "_");
   if (item.runner_status === GENERIC_SIGROK_PYTHON_RUNNER_STATUS) return `python:${id}`;
+  if (item.runner_status === GENERIC_SALEAE_RUNNER_STATUS) return id;
   return null;
 }
 
@@ -422,6 +424,7 @@ export function sigrokCatalogRunnerLabel(status?: string | null) {
   if (status === VERIFIED_SIGROK_C_RUNNER_STATUS) return "Runnable";
   if (status === GENERIC_SIGROK_C_RUNNER_STATUS) return "Generic C";
   if (status === GENERIC_SIGROK_PYTHON_RUNNER_STATUS) return "Python";
+  if (status === GENERIC_SALEAE_RUNNER_STATUS) return "Runnable";
   return "Catalog";
 }
 
@@ -461,9 +464,9 @@ export function createAnalyzerInstance(
     i2cSdaChannel: channel,
     i2cSclChannel: nextChannel(1),
     spiMosiChannel: channel,
-    spiMisoChannel: nextChannel(1),
-    spiClockChannel: nextChannel(2),
-    spiEnableChannel: nextChannel(3),
+    spiMisoChannel: null,
+    spiClockChannel: nextChannel(1),
+    spiEnableChannel: null,
     spiEnableActiveLow: true,
     spiClockPolarity: false,
     spiClockPhase: false,
@@ -503,6 +506,24 @@ export function createAnalyzerInstanceFromSigrokCatalog(
   const mappedType = item.id ? SIGROK_VERIFIED_C_RUNNER_TYPES[item.id] : undefined;
   const displayType = mappedType ?? sigrokCatalogDisplayName(item);
   const analyzer = createAnalyzerInstance(displayType, analyzers, channel, "sigrok_native", mappedType ? null : item);
+  return {
+    ...analyzer,
+    nativeRunnerStatus: item.runner_status,
+    nativeCatalogKind: item.kind,
+    nativeCatalogDescription: item.desc,
+    nativeCatalogTags: [...(item.tags ?? [])],
+    nativeCatalogChannels: analyzer.nativeCatalogChannels ?? catalogChannelsForItem(item),
+    nativeCatalogOptions: analyzer.nativeCatalogOptions ?? catalogOptionsForItem(item),
+  };
+}
+
+export function createAnalyzerInstanceFromSaleaeCatalog(
+  item: SigrokDecoderCatalogItem,
+  analyzers: UiAnalyzerInstance[],
+  channel = 0,
+): UiAnalyzerInstance {
+  const displayType = sigrokCatalogDisplayName(item);
+  const analyzer = createAnalyzerInstance(displayType, analyzers, channel, "saleae_native", item);
   return {
     ...analyzer,
     nativeRunnerStatus: item.runner_status,
@@ -637,7 +658,8 @@ export function analyzerCanRunDecoder(
     !analyzer.nativeRunnerStatus ||
     analyzer.nativeRunnerStatus === VERIFIED_SIGROK_C_RUNNER_STATUS ||
     analyzer.nativeRunnerStatus === GENERIC_SIGROK_C_RUNNER_STATUS ||
-    analyzer.nativeRunnerStatus === GENERIC_SIGROK_PYTHON_RUNNER_STATUS
+    analyzer.nativeRunnerStatus === GENERIC_SIGROK_PYTHON_RUNNER_STATUS ||
+    analyzer.nativeRunnerStatus === GENERIC_SALEAE_RUNNER_STATUS
   );
 }
 
@@ -912,6 +934,7 @@ export interface AnalyzerCatalogGroup {
   backend: DecoderBackendKind;
   label: string;
   analyzers: string[];
+  runnerStatus?: string;
 }
 
 export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
@@ -919,6 +942,7 @@ export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
     backend: "saleae_native",
     label: "Saleae Native",
     analyzers: catalogAnalyzersForBackend("saleae_native"),
+    runnerStatus: GENERIC_SALEAE_RUNNER_STATUS,
   },
   {
     backend: "sigrok_native",

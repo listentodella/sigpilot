@@ -1,0 +1,392 @@
+[
+  {
+    "plugin": "libasync_rgb_led_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "Addressable LEDs (Async)",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libasync_rgb_led_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 7200,
+      "frame_v2_count": 144,
+      "legacy_frame_count": 144
+    },
+    "error": null
+  },
+  {
+    "plugin": "libatmel_swi_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "Atmel SWI",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libatmel_swi_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 12916,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 228
+    },
+    "error": null
+  },
+  {
+    "plugin": "libbiss_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "BiSS C",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libbiss_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 2,
+      "transition_count": 15246,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 70
+    },
+    "error": null
+  },
+  {
+    "plugin": "libcan_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "CAN",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libcan_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 3246,
+      "frame_v2_count": 688,
+      "legacy_frame_count": 688
+    },
+    "error": null
+  },
+  {
+    "plugin": "libdmx_512_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "DMX-512",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libdmx_512_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 2573,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 1033
+    },
+    "error": null
+  },
+  {
+    "plugin": "libhd44780_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "HD44780",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libhd44780_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 11,
+      "transition_count": 144,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 29
+    },
+    "error": null
+  },
+  {
+    "plugin": "libhdlc_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "HDLC",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libhdlc_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 7644,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 2276
+    },
+    "error": null
+  },
+  {
+    "plugin": "libhdmi_cec_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "HDMI CEC",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libhdmi_cec_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 312,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 51
+    },
+    "error": null
+  },
+  {
+    "plugin": "libi2c_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "I2C",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libi2c_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 2,
+      "transition_count": 556,
+      "frame_v2_count": 40,
+      "legacy_frame_count": 24
+    },
+    "error": null
+  },
+  {
+    "plugin": "libi2s_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "I2S / PCM",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libi2s_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 3,
+      "transition_count": 1317,
+      "frame_v2_count": 32,
+      "legacy_frame_count": 32
+    },
+    "error": null
+  },
+  {
+    "plugin": "libjtag_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "JTAG",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libjtag_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 5,
+      "transition_count": 1941,
+      "frame_v2_count": 29,
+      "legacy_frame_count": 29
+    },
+    "error": null
+  },
+  {
+    "plugin": "liblin_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "LIN",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/liblin_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 100,
+      "frame_v2_count": 17,
+      "legacy_frame_count": 32
+    },
+    "error": null
+  },
+  {
+    "plugin": "libmanchester_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "Manchester",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libmanchester_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 43,
+      "frame_v2_count": 3,
+      "legacy_frame_count": 3
+    },
+    "error": null
+  },
+  {
+    "plugin": "libmcs04_analyzer.so",
+    "status": "generator-unavailable",
+    "summary": {
+      "analyzer": "MCS-4 Bus",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libmcs04_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 0,
+      "transition_count": 0,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 0
+    },
+    "error": null
+  },
+  {
+    "plugin": "libmdio_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "MDIO",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libmdio_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 2,
+      "transition_count": 34978,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 2754
+    },
+    "error": null
+  },
+  {
+    "plugin": "libmidi_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "Midi",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libmidi_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 92,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 22
+    },
+    "error": null
+  },
+  {
+    "plugin": "libmodbus_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "Modbus",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libmodbus_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 1194,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 51
+    },
+    "error": null
+  },
+  {
+    "plugin": "libone_wire_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "1-Wire",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libone_wire_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 868,
+      "frame_v2_count": 32,
+      "legacy_frame_count": 32
+    },
+    "error": null
+  },
+  {
+    "plugin": "libps2_keyboard_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "PS/2 Keyboard/Mouse",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libps2_keyboard_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 2,
+      "transition_count": 14190,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 313
+    },
+    "error": null
+  },
+  {
+    "plugin": "libserial_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "Async Serial",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libserial_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 18,
+      "frame_v2_count": 5,
+      "legacy_frame_count": 5
+    },
+    "error": null
+  },
+  {
+    "plugin": "libsimple_parallel_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "Simple Parallel",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libsimple_parallel_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 17,
+      "transition_count": 233,
+      "frame_v2_count": 59,
+      "legacy_frame_count": 59
+    },
+    "error": null
+  },
+  {
+    "plugin": "libsmbus_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "SMBus",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libsmbus_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 2,
+      "transition_count": 808,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 327
+    },
+    "error": null
+  },
+  {
+    "plugin": "libspi_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "SPI",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libspi_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 4,
+      "transition_count": 23470,
+      "frame_v2_count": 1155,
+      "legacy_frame_count": 693
+    },
+    "error": null
+  },
+  {
+    "plugin": "libswd_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "SWD",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libswd_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 2,
+      "transition_count": 268,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 1
+    },
+    "error": null
+  },
+  {
+    "plugin": "libunio_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "UNI/O",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libunio_analyzer.so",
+      "sample_rate_hz": 12000000,
+      "requested_sample_count": 120000,
+      "channel_count": 1,
+      "transition_count": 732,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 4
+    },
+    "error": null
+  },
+  {
+    "plugin": "libusb_analyzer.so",
+    "status": "matched",
+    "summary": {
+      "analyzer": "USB LS and FS",
+      "plugin": "/Volumes/tp7100s/work/logic2-anti/saleae/runtime/rust/../build/lib/libusb_analyzer.so",
+      "sample_rate_hz": 24000000,
+      "requested_sample_count": 1200000,
+      "channel_count": 2,
+      "transition_count": 441,
+      "frame_v2_count": 0,
+      "legacy_frame_count": 32
+    },
+    "error": null
+  }
+]

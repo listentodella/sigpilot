@@ -124,6 +124,11 @@ copy_python_runtime() {
 
 is_saleae_analyzer_runtime() {
   local source="$1"
+  if [[ -f "$source/libsaleae_compat.dylib" \
+    && -f "$source/libserial_analyzer.so" \
+    && -f "$source/libswd_analyzer.so" ]]; then
+    return 0
+  fi
   [[ -f "$source/libAnalyzer.dylib" \
     && -f "$source/Analyzers/libserial_analyzer.so" \
     && -f "$source/Analyzers/libi2c_analyzer.so" \
@@ -146,6 +151,7 @@ saleae_runtime_source() {
   local candidate
   for candidate in \
     "${PXLOGIC_SALEAE_RUNTIME_ROOT:-}" \
+    "$ROOT_DIR/target/native/saleae-analyzer-sidecar/runtime" \
     "$ROOT_DIR/vendor/saleae-runtime-2.4.43" \
     "$ROOT_DIR/target/native/saleae-runtime-2.4.43"
   do
@@ -197,8 +203,10 @@ if [[ "$HOST_OS" == "Darwin" && "$HOST_ARCH" == "arm64" ]]; then
   saleae_analyzer_dir="$(dirname "$saleae_analyzer")"
   copy_executable "$saleae_analyzer" \
     "$RESOURCE_DIR/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"
-  copy_file "$saleae_analyzer_dir/libAnalyzer.dylib" \
-    "$RESOURCE_DIR/saleae-analyzer-sidecar/libAnalyzer.dylib"
+  copy_directory "$saleae_analyzer_dir/runtime" \
+    "$RESOURCE_DIR/saleae-analyzer-sidecar/runtime"
+  find "$RESOURCE_DIR/saleae-analyzer-sidecar/runtime" \
+    -type f \( -name '*.dylib' -o -name '*.so' \) -exec chmod 755 {} +
 
   saleae_graph="$(run_build_script "$ROOT_DIR/native/saleae-graph-sidecar/build.sh")"
   copy_executable "$saleae_graph" \

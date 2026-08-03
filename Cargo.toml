@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor/saleae-standalone/runtime/rust"]
 members = [
     "crates/pxlogic-core",
     "crates/pxlogic-file",

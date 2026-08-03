@@ -19,8 +19,8 @@ use pxlogic_core::{
     AnalyzerDecodeSettings, CaptureBackend, CaptureMetadata, CaptureProgress, CaptureSettings,
     CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DeviceInfo, DeviceKind,
     DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend, HardwareCaptureCapabilities,
-    PwmConfiguration, PwmSettings, PxUsbSpeed, SigrokDecoderCatalog, SigrokNativeDecoder,
-    SparseCaptureData,
+    PwmConfiguration, PwmSettings, PxUsbSpeed, SaleaeNativeDecoder, SigrokDecoderCatalog,
+    SigrokNativeDecoder, SparseCaptureData,
 };
 use pxlogic_graph::{
     CaptureMemoryUsage, DigitalPointMeasurement, GraphFrameRequest, GraphFrameResponse,
@@ -596,7 +596,7 @@ fn cancel_capture(app: AppHandle, state: State<'_, AppState>) -> CommandResult<(
 }
 
 fn locate_saleae_runtime_root() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_RUNTIME_ROOT") {
+    if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_GRAPH_RUNTIME_ROOT") {
         return Some(PathBuf::from(path));
     }
     saleae_runtime_root_candidates()
@@ -1491,6 +1491,17 @@ async fn sigrok_decoder_catalog() -> CommandResult<SigrokDecoderCatalog> {
 }
 
 #[tauri::command]
+async fn saleae_decoder_catalog() -> CommandResult<SigrokDecoderCatalog> {
+    tauri::async_runtime::spawn_blocking(move || {
+        SaleaeNativeDecoder::from_env()
+            .and_then(|decoder| decoder.decoder_catalog())
+            .map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn render_graph_frame(
     session_id: String,
     request: GraphFrameRequest,
@@ -1685,6 +1696,11 @@ fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
         );
         set_bundled_path(
             "PXLOGIC_SALEAE_RUNTIME_ROOT",
+            native_dir.join("saleae-analyzer-sidecar").join("runtime"),
+            true,
+        );
+        set_bundled_path(
+            "PXLOGIC_SALEAE_GRAPH_RUNTIME_ROOT",
             native_dir.join("saleae-runtime-2.4.43"),
             true,
         );
@@ -1722,6 +1738,7 @@ fn main() {
             render_graph_frame,
             measure_digital_range,
             decode_analyzer_frames,
+            saleae_decoder_catalog,
             sigrok_decoder_catalog,
             release_graph_session,
             read_extension_package,

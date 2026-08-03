@@ -177,6 +177,12 @@ struct SaleaeSidecarProbe {
     runtime_sha256: String,
     plugin_sha256: String,
     abi_match: bool,
+    #[serde(default)]
+    decoder_catalog: Vec<SigrokDecoderCatalogItem>,
+    #[serde(default)]
+    c_decoder_count: usize,
+    #[serde(default)]
+    python_decoder_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -223,6 +229,7 @@ struct NativeSidecarRequest {
 #[derive(Debug, Serialize)]
 struct NativeSidecarSettings {
     protocol: String,
+    primary_channel: u8,
     channels: serde_json::Value,
     options: serde_json::Value,
 }
@@ -289,11 +296,28 @@ impl SaleaeNativeDecoder {
     }
 
     fn probe(&self) -> Result<SaleaeSidecarProbe> {
-        let output = Command::new(&self.sidecar_path)
+        self.probe_with_catalog(false)
+    }
+
+    pub fn decoder_catalog(&self) -> Result<SigrokDecoderCatalog> {
+        let probe = self.probe_with_catalog(true)?;
+        Ok(SigrokDecoderCatalog {
+            decoders: probe.decoder_catalog,
+            c_decoder_count: probe.c_decoder_count,
+            python_decoder_count: probe.python_decoder_count,
+        })
+    }
+
+    fn probe_with_catalog(&self, include_catalog: bool) -> Result<SaleaeSidecarProbe> {
+        let mut command = Command::new(&self.sidecar_path);
+        command
             .arg("--runtime-root")
             .arg(&self.runtime_root)
-            .arg("--probe")
-            .output()?;
+            .arg("--probe");
+        if include_catalog {
+            command.arg("--catalog");
+        }
+        let output = command.output()?;
         if !output.status.success() {
             return Err(sidecar_error("Saleae", "probe", &output.stderr));
         }
@@ -376,7 +400,6 @@ impl DecoderBackend for SaleaeNativeDecoder {
                 "Saleae Logic runtime does not match the pinned 2.4.43 ABI".to_string(),
             ));
         }
-        ensure_protocol_available(&probe.protocols, settings, "Saleae Native")?;
         let request = build_native_sidecar_request(capture, settings)?;
         self.decode_request(&request)
     }
@@ -392,7 +415,6 @@ impl DecoderBackend for SaleaeNativeDecoder {
                 "Saleae Logic runtime does not match the pinned 2.4.43 ABI".to_string(),
             ));
         }
-        ensure_protocol_available(&probe.protocols, settings, "Saleae Native")?;
         let request = build_sparse_native_sidecar_request(capture, settings)?;
         self.decode_request(&request)
     }
@@ -779,6 +801,25 @@ fn saleae_runtime_search_dirs() -> Vec<PathBuf> {
 }
 
 fn push_saleae_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
+    candidates.push(
+        base.join("target")
+            .join("native")
+            .join("saleae-analyzer-sidecar")
+            .join("runtime"),
+    );
+    candidates.push(
+        base.join("resources")
+            .join("native")
+            .join("saleae-analyzer-sidecar")
+            .join("runtime"),
+    );
+    candidates.push(
+        base.join("Resources")
+            .join("resources")
+            .join("native")
+            .join("saleae-analyzer-sidecar")
+            .join("runtime"),
+    );
     candidates.push(base.join("vendor").join("saleae-runtime-2.4.43"));
     candidates.push(
         base.join("target")
@@ -799,6 +840,12 @@ fn push_saleae_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
 }
 
 fn is_saleae_analyzer_runtime(path: &Path) -> bool {
+    if path.join("libsaleae_compat.dylib").is_file()
+        && path.join("libserial_analyzer.so").is_file()
+        && path.join("libswd_analyzer.so").is_file()
+    {
+        return true;
+    }
     path.join("libAnalyzer.dylib").is_file()
         && path.join("Analyzers/libserial_analyzer.so").is_file()
         && path.join("Analyzers/libi2c_analyzer.so").is_file()
@@ -1031,9 +1078,10 @@ fn sparse_transition_sets(
 }
 
 fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSettings {
-    let (protocol, channels, options) = match settings {
+    let (protocol, primary_channel, channels, options) = match settings {
         AnalyzerDecodeSettings::Uart(settings) => (
             "uart".to_string(),
+            settings.channel,
             serde_json::to_value(UartSidecarChannels {
                 rx: Some(settings.channel),
                 tx: None,
@@ -1061,6 +1109,7 @@ fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSe
         ),
         AnalyzerDecodeSettings::I2c(settings) => (
             "i2c".to_string(),
+            settings.sda_channel,
             serde_json::to_value(I2cSidecarChannels {
                 scl: settings.scl_channel,
                 sda: settings.sda_channel,
@@ -1077,18 +1126,24 @@ fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSe
             let spi = spi_sidecar_settings(settings);
             (
                 "spi".to_string(),
+                settings
+                    .mosi_channel
+                    .or(settings.miso_channel)
+                    .unwrap_or(settings.clock_channel),
                 serde_json::to_value(spi.channels).expect("SPI sidecar channels serialize"),
                 serde_json::to_value(spi.options).expect("SPI sidecar options serialize"),
             )
         }
         AnalyzerDecodeSettings::Native(settings) => (
             settings.decoder_id.clone(),
+            settings.primary_channel,
             serde_json::to_value(&settings.channels).expect("native sidecar channels serialize"),
             serde_json::to_value(&settings.options).expect("native sidecar options serialize"),
         ),
     };
     NativeSidecarSettings {
         protocol,
+        primary_channel,
         channels,
         options,
     }

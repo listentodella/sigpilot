@@ -2303,12 +2303,7 @@ fn display_frame_for_track<'a>(
     frame: &'a DecodedFrame,
     track: &AnalyzerTrackRequest,
 ) -> Option<DisplayFrame<'a>> {
-    let label = frame
-        .channel_values
-        .iter()
-        .find(|value| value.channel == track.channel && value.role == track.role)?
-        .label
-        .as_str();
+    let label = channel_value_for_track(frame, track)?.label.as_str();
     Some(DisplayFrame {
         frame_id: frame.frame_id,
         start_sample: frame.start_sample,
@@ -2318,15 +2313,28 @@ fn display_frame_for_track<'a>(
 }
 
 fn frame_for_track(frame: &DecodedFrame, track: &AnalyzerTrackRequest) -> Option<DecodedFrame> {
-    let value = frame
-        .channel_values
-        .iter()
-        .find(|value| value.channel == track.channel && value.role == track.role)?;
+    let value = channel_value_for_track(frame, track)?;
     let mut result = frame.clone();
     result.label = value.label.clone();
     result.value = value.value;
     result.channel_values = vec![value.clone()];
     Some(result)
+}
+
+fn channel_value_for_track<'a>(
+    frame: &'a DecodedFrame,
+    track: &AnalyzerTrackRequest,
+) -> Option<&'a DecodedChannelValue> {
+    frame
+        .channel_values
+        .iter()
+        .find(|value| value.channel == track.channel && value.role == track.role)
+        .or_else(|| {
+            frame
+                .channel_values
+                .iter()
+                .find(|value| value.channel == track.channel)
+        })
 }
 
 fn lower_bound_frame_end(frames: &[DecodedFrame], sample: u64) -> usize {
@@ -2969,6 +2977,55 @@ mod tests {
         assert!(slice.channels[0].initial_high);
         assert_eq!(slice.channels[0].transitions, vec![50, 150]);
         assert_eq!(slice.metadata.sample_count, 200);
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_spi_decodes_through_graph_session() {
+        let capture = demo_capture(16, 250_000);
+        let sample_count = capture.metadata.sample_count;
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(3),
+            miso_channel: Some(4),
+            clock_channel: 5,
+            enable_channel: Some(6),
+            ..SpiDecodeSettings::default()
+        });
+        let frames = session
+            .decode_frames_with_backend_for_view(
+                &settings,
+                DecoderBackendKind::SaleaeNative,
+                &WaveformRequest {
+                    start_sample: 0,
+                    sample_count,
+                    pixels: 1_200,
+                    channels: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(!frames.is_empty());
+        assert!(frames.iter().any(|frame| {
+            frame
+                .channel_values
+                .iter()
+                .any(|value| value.role == "MOSI")
+        }));
+        let track = render_analyzer_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 3,
+                role: "MOSI".to_string(),
+            },
+            &WaveformRequest {
+                start_sample: 0,
+                sample_count,
+                pixels: 1_200,
+                channels: Vec::new(),
+            },
+        );
+        assert!(!track.bubbles.is_empty());
     }
 
     #[test]

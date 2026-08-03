@@ -1,0 +1,2 @@
+kind,analyzer,index,type,start_sample,end_sample,fields_json,data1,data2,flags
+legacy,SWD,0,2,120000,120658,,0x0000000000000037,0x0000000000000000,0x00

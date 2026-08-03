@@ -1,0 +1,7 @@
+kind,analyzer,index,type,start_sample,end_sample,fields_json,data1,data2,flags
+frame_v2,Manchester,0,data,34000,94000,"[{""key"":""data"",""value"":{""Integer"":1}}]",,,
+frame_v2,Manchester,1,data,98000,158000,"[{""key"":""data"",""value"":{""Integer"":2}}]",,,
+frame_v2,Manchester,2,data,162000,222000,"[{""key"":""data"",""value"":{""Integer"":3}}]",,,
+legacy,Manchester,0,0,34000,94000,,0x0000000000000001,0x0000000000000000,0x00
+legacy,Manchester,1,0,98000,158000,,0x0000000000000002,0x0000000000000000,0x00
+legacy,Manchester,2,0,162000,222000,,0x0000000000000003,0x0000000000000000,0x00

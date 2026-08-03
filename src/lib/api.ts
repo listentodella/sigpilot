@@ -800,6 +800,11 @@ export function sigrokDecoderCatalog(): Promise<SigrokDecoderCatalog> {
   return callBackend("sigrok_decoder_catalog");
 }
 
+export function saleaeDecoderCatalog(): Promise<SigrokDecoderCatalog> {
+  if (!isTauriRuntime()) return Promise.resolve({ decoders: [], c_decoder_count: 0, python_decoder_count: 0 });
+  return callBackend("saleae_decoder_catalog");
+}
+
 function previewDeviceCapabilities(deviceId: string): HardwareCaptureCapabilities {
   const channelModes: HardwareChannelModeInfo[] = [
     {
