@@ -253,7 +253,6 @@ pub enum ExportFormat {
     Pxcap,
     Sr,
     Vcd,
-    Sal,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

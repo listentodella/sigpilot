@@ -151,7 +151,7 @@ export interface DiagnosticEvent {
   message: string;
 }
 
-export type ExportFormat = "Pxcap" | "Sr" | "Vcd" | "Sal";
+export type ExportFormat = "Pxcap" | "Sr" | "Vcd";
 
 export interface WaveformRequest {
   start_sample: number;
@@ -1008,10 +1008,9 @@ export function exportCapture(
   sessionId: string,
   path: string,
   format: ExportFormat,
-  saleaeSession?: SaleaeSessionMetadata,
 ): Promise<void> {
   if (!isTauriRuntime()) return Promise.resolve();
-  return callBackend("export_capture", { sessionId, path, format, saleaeSession });
+  return callBackend("export_capture", { sessionId, path, format });
 }
 
 export function writeTextFile(path: string, contents: string): Promise<void> {

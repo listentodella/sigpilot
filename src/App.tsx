@@ -2743,7 +2743,7 @@ export default function App() {
     try {
       const path = await openDialog({
         multiple: false,
-        filters: [{ name: "Logic Capture", extensions: ["pxl", "pxcap", "sal"] }],
+        filters: [{ name: "Logic Capture", extensions: ["pxl", "pxcap"] }],
       });
       if (typeof path !== "string") return;
       sourcePath = path;
@@ -2799,28 +2799,17 @@ export default function App() {
     }
   }
 
-  async function handleExport(format: "Sr" | "Vcd" | "Sal") {
+  async function handleExport(format: "Sr" | "Vcd") {
     if (!activeSession?.summary || activeSession.busy) return;
-    const ext = format === "Sr" ? "sr" : format === "Vcd" ? "vcd" : "sal";
-    const filterName = format === "Sr" ? "Sigrok Session" : format === "Vcd" ? "Value Change Dump" : "Saleae Logic Capture";
+    const ext = format === "Sr" ? "sr" : "vcd";
+    const filterName = format === "Sr" ? "Sigrok Session" : "Value Change Dump";
     try {
       const path = await saveDialog({
         defaultPath: `${activeSession.name || "capture"}.${ext}`,
         filters: [{ name: filterName, extensions: [ext] }],
       });
       if (!path) return;
-      await exportCapture(
-        activeSession.id,
-        path,
-        format,
-        format === "Sal"
-          ? {
-              name: activeSession.name,
-              notes: activeSession.notes,
-              analyzers: activeSession.analyzers.map(saleaeAnalyzerMetadata),
-            }
-          : undefined,
-      );
+      await exportCapture(activeSession.id, path, format);
       updateSession(activeSession.id, (session) => ({ ...session, message: `${ext.toUpperCase()} exported` }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
@@ -3944,15 +3933,6 @@ export default function App() {
               disabled={!activeSession?.summary || activeSession.busy}
             >
               <Save size={14} />
-            </button>
-            <button
-              className="tool-button text-tool"
-              title="Export Saleae Logic capture"
-              onClick={() => handleExport("Sal")}
-              disabled={!activeSession?.summary || activeSession.busy}
-            >
-              <FileDown size={14} />
-              SAL
             </button>
             <button
               className="tool-button text-tool"

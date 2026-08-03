@@ -786,17 +786,6 @@ fn saleae_runtime_search_dirs() -> Vec<PathBuf> {
         }
     }
 
-    candidates.extend([
-        PathBuf::from("/Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
-        PathBuf::from("/Applications/Logic 2.app/Contents/Resources/macos-arm64"),
-    ]);
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidates.extend([
-            home.join("Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
-            home.join("Applications/Logic 2.app/Contents/Resources/macos-arm64"),
-            home.join("Downloads/Saleae Logic.app/Contents/Resources/macos-arm64"),
-        ]);
-    }
     dedup_paths(candidates)
 }
 
@@ -820,42 +809,12 @@ fn push_saleae_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
             .join("saleae-analyzer-sidecar")
             .join("runtime"),
     );
-    candidates.push(base.join("vendor").join("saleae-runtime-2.4.43"));
-    candidates.push(
-        base.join("target")
-            .join("native")
-            .join("saleae-runtime-2.4.43"),
-    );
-    candidates.push(
-        base.join("resources")
-            .join("native")
-            .join("saleae-runtime-2.4.43"),
-    );
-    candidates.push(
-        base.join("Resources")
-            .join("resources")
-            .join("native")
-            .join("saleae-runtime-2.4.43"),
-    );
 }
 
 fn is_saleae_analyzer_runtime(path: &Path) -> bool {
-    if path.join("libsaleae_compat.dylib").is_file()
+    path.join("libsaleae_compat.dylib").is_file()
         && path.join("libserial_analyzer.so").is_file()
         && path.join("libswd_analyzer.so").is_file()
-    {
-        return true;
-    }
-    path.join("libAnalyzer.dylib").is_file()
-        && path.join("Analyzers/libserial_analyzer.so").is_file()
-        && path.join("Analyzers/libi2c_analyzer.so").is_file()
-        && path.join("Analyzers/libspi_analyzer.so").is_file()
-        && path.join("Analyzers/libi2s_analyzer.so").is_file()
-        && path.join("Analyzers/libcan_analyzer.so").is_file()
-        && path.join("Analyzers/liblin_analyzer.so").is_file()
-        && path
-            .join("Analyzers/libsimple_parallel_analyzer.so")
-            .is_file()
 }
 
 impl DecoderBackend for SigrokNativeDecoder {
@@ -1397,7 +1356,8 @@ mod tests {
                 .join("Resources")
                 .join("resources")
                 .join("native")
-                .join("saleae-runtime-2.4.43")
+                .join("saleae-analyzer-sidecar")
+                .join("runtime")
         ));
     }
 

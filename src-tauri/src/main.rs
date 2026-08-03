@@ -3,7 +3,6 @@ use std::{
     fs,
     path::Path,
     path::PathBuf,
-    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -595,177 +594,6 @@ fn cancel_capture(app: AppHandle, state: State<'_, AppState>) -> CommandResult<(
     Ok(())
 }
 
-fn locate_saleae_runtime_root() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_GRAPH_RUNTIME_ROOT") {
-        return Some(PathBuf::from(path));
-    }
-    saleae_runtime_root_candidates()
-        .into_iter()
-        .find(|path| is_saleae_graph_runtime_root(path))
-}
-
-fn saleae_runtime_root_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(current) = std::env::current_dir() {
-        push_saleae_runtime_root_candidates(&mut candidates, &current);
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    push_saleae_runtime_root_candidates(&mut candidates, &manifest_dir);
-    if let Some(workspace_root) = manifest_dir.parent() {
-        push_saleae_runtime_root_candidates(&mut candidates, workspace_root);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for ancestor in exe.ancestors().take(8) {
-            push_saleae_runtime_root_candidates(&mut candidates, ancestor);
-        }
-    }
-    candidates.extend([
-        PathBuf::from("/Applications/Saleae Logic.app/Contents/Resources/macos-arm64"),
-        PathBuf::from("/Applications/Logic 2.app/Contents/Resources/macos-arm64"),
-    ]);
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        candidates.push(home.join("Applications/Saleae Logic.app/Contents/Resources/macos-arm64"));
-        candidates.push(home.join("Applications/Logic 2.app/Contents/Resources/macos-arm64"));
-        candidates.push(home.join("Downloads/Saleae Logic.app/Contents/Resources/macos-arm64"));
-        candidates.push(home.join("Downloads/Logic 2.app/Contents/Resources/macos-arm64"));
-    }
-    dedup_pathbufs(candidates)
-}
-
-fn push_saleae_runtime_root_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
-    candidates.push(base.join("vendor").join("saleae-runtime-2.4.43"));
-    candidates.push(
-        base.join("target")
-            .join("native")
-            .join("saleae-runtime-2.4.43"),
-    );
-    candidates.push(
-        base.join("resources")
-            .join("native")
-            .join("saleae-runtime-2.4.43"),
-    );
-    candidates.push(
-        base.join("Resources")
-            .join("resources")
-            .join("native")
-            .join("saleae-runtime-2.4.43"),
-    );
-}
-
-fn is_saleae_graph_runtime_root(path: &Path) -> bool {
-    path.join("libAnalyzer.dylib").is_file()
-        && path.join("libgraph_server_shared.dylib").is_file()
-        && path.join("pythonlibs/lib/python314.zip").is_file()
-        && path
-            .join("pythonlibs/lib/python3.14/site-packages/saleae")
-            .is_dir()
-        && path
-            .join("pythonlibs/lib/python3.14/site-packages/numpy")
-            .is_dir()
-}
-
-fn locate_saleae_graph_sidecar() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("PXLOGIC_SALEAE_GRAPH_SIDECAR") {
-        return Some(PathBuf::from(path));
-    }
-    saleae_graph_sidecar_candidates()
-        .into_iter()
-        .find(|path| path.is_file())
-}
-
-fn saleae_graph_sidecar_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(current) = std::env::current_dir() {
-        push_saleae_graph_sidecar_candidates(&mut candidates, &current);
-    }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    push_saleae_graph_sidecar_candidates(&mut candidates, &manifest_dir);
-    if let Some(workspace_root) = manifest_dir.parent() {
-        push_saleae_graph_sidecar_candidates(&mut candidates, workspace_root);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for ancestor in exe.ancestors().take(8) {
-            push_saleae_graph_sidecar_candidates(&mut candidates, ancestor);
-        }
-    }
-    dedup_pathbufs(candidates)
-}
-
-fn push_saleae_graph_sidecar_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
-    candidates.push(
-        base.join("resources")
-            .join("native")
-            .join("saleae-graph-sidecar")
-            .join("pxlogic-saleae-graph-sidecar"),
-    );
-    candidates.push(
-        base.join("Resources")
-            .join("resources")
-            .join("native")
-            .join("saleae-graph-sidecar")
-            .join("pxlogic-saleae-graph-sidecar"),
-    );
-    candidates.push(
-        base.join("target")
-            .join("native")
-            .join("saleae-graph-sidecar")
-            .join("pxlogic-saleae-graph-sidecar"),
-    );
-}
-
-fn dedup_pathbufs(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut deduped = Vec::new();
-    for path in paths {
-        if !deduped.iter().any(|existing| existing == &path) {
-            deduped.push(path);
-        }
-    }
-    deduped
-}
-
-fn convert_saleae_capture(path: &Path) -> CommandResult<PathBuf> {
-    let sidecar = locate_saleae_graph_sidecar().ok_or_else(|| {
-        "Saleae .sal support requires the native graph sidecar; build native/saleae-graph-sidecar/build.sh first"
-            .to_string()
-    })?;
-    let runtime_root = locate_saleae_runtime_root().ok_or_else(|| {
-        "Saleae .sal support requires the bundled GraphServer runtime; rebuild the app resources"
-            .to_string()
-    })?;
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let output = std::env::temp_dir().join(format!(
-        "pxlogic-saleae-sal-{}-{suffix}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&output).map_err(to_string)?;
-    let result = Command::new(&sidecar)
-        .arg("--runtime-root")
-        .arg(runtime_root)
-        .arg("--convert-sal")
-        .arg(path)
-        .arg(&output)
-        .output()
-        .map_err(|error| format!("failed to start Saleae graph sidecar: {error}"))?;
-    if !result.status.success() {
-        let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
-        let _ = fs::remove_dir_all(&output);
-        return Err(if detail.is_empty() {
-            format!("Saleae .sal conversion failed with {}", result.status)
-        } else {
-            format!("Saleae .sal conversion failed: {detail}")
-        });
-    }
-    if !output.join("manifest.json").is_file() {
-        let _ = fs::remove_dir_all(&output);
-        return Err("Saleae graph sidecar completed without a transition manifest".to_string());
-    }
-    Ok(output)
-}
-
 #[tauri::command]
 fn open_capture(
     session_id: String,
@@ -773,34 +601,6 @@ fn open_capture(
     state: State<'_, AppState>,
 ) -> CommandResult<OpenCaptureResult> {
     let source_path = PathBuf::from(&path);
-    if source_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("sal"))
-    {
-        let converted = convert_saleae_capture(&source_path)?;
-        let result = pxlogic_file::open_saleae_transition_session(converted.join("manifest.json"))
-            .map_err(to_string);
-        let _ = fs::remove_dir_all(&converted);
-        let imported = result?;
-        let capture = imported.capture;
-        let bytes = fs::metadata(&source_path)
-            .map(|metadata| usize::try_from(metadata.len()).unwrap_or(usize::MAX))
-            .unwrap_or_default();
-        let summary = CaptureSummary {
-            metadata: capture.metadata.clone(),
-            bytes,
-        };
-        state
-            .session(&session_id)
-            .replace_sparse_capture(capture)
-            .map_err(to_string)?;
-        return Ok(OpenCaptureResult {
-            summary,
-            saleae_session: Some(imported.session),
-        });
-    }
-
     if source_path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -879,108 +679,14 @@ fn save_capture(
     pxlogic_file::save_pxcap(path, &capture).map_err(to_string)
 }
 
-fn export_saleae_capture(
-    session: &GraphSession,
-    path: &Path,
-    saleae_session: &pxlogic_file::SaleaeSessionMetadata,
-) -> CommandResult<()> {
-    let sidecar = locate_saleae_graph_sidecar().ok_or_else(|| {
-        "Saleae .sal export requires the native graph sidecar; build native/saleae-graph-sidecar/build.sh first"
-            .to_string()
-    })?;
-    let runtime_root = locate_saleae_runtime_root().ok_or_else(|| {
-        "Saleae .sal export requires the bundled GraphServer runtime; rebuild the app resources"
-            .to_string()
-    })?;
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let staging = std::env::temp_dir().join(format!(
-        "pxlogic-saleae-export-{}-{suffix}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&staging).map_err(to_string)?;
-
-    let manifest_result = if let Some(capture) = session.capture() {
-        pxlogic_file::write_saleae_packed_export_manifest_with_session(
-            &staging,
-            &capture,
-            saleae_session,
-        )
-    } else if let Some(capture) = session.sparse_capture() {
-        pxlogic_file::write_saleae_sparse_export_manifest_with_session(
-            &staging,
-            &capture,
-            saleae_session,
-        )
-    } else {
-        let _ = fs::remove_dir_all(&staging);
-        return Err("no capture is loaded".to_string());
-    };
-    let manifest = match manifest_result {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error.to_string());
-        }
-    };
-    let temporary_output = staging.join("capture.sal");
-    let result = Command::new(&sidecar)
-        .arg("--runtime-root")
-        .arg(runtime_root)
-        .arg("--create-sal")
-        .arg(manifest)
-        .arg(&temporary_output)
-        .output()
-        .map_err(|error| format!("failed to start Saleae graph sidecar: {error}"));
-    let result = match result {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-    };
-    if !result.status.success() {
-        let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
-        let _ = fs::remove_dir_all(&staging);
-        return Err(if detail.is_empty() {
-            format!("Saleae .sal export failed with {}", result.status)
-        } else {
-            format!("Saleae .sal export failed: {detail}")
-        });
-    }
-    if !temporary_output.is_file() {
-        let _ = fs::remove_dir_all(&staging);
-        return Err("Saleae graph sidecar completed without a .sal archive".to_string());
-    }
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(to_string)?;
-    }
-    let rename_result = fs::rename(&temporary_output, path).map_err(to_string);
-    let _ = fs::remove_dir_all(&staging);
-    rename_result
-}
-
 #[tauri::command]
 fn export_capture(
     session_id: String,
     path: String,
     format: ExportFormat,
-    saleae_session: Option<pxlogic_file::SaleaeSessionMetadata>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     let session = state.existing_session(&session_id)?;
-    if format == ExportFormat::Sal {
-        return export_saleae_capture(
-            &session,
-            Path::new(&path),
-            &saleae_session.unwrap_or_default(),
-        );
-    }
     let capture = session
         .capture()
         .ok_or_else(|| "this export format requires a packed capture".to_string())?;
@@ -988,7 +694,6 @@ fn export_capture(
         ExportFormat::Pxcap => pxlogic_file::save_pxcap(PathBuf::from(path), &capture),
         ExportFormat::Sr => pxlogic_file::export_sr(PathBuf::from(path), &capture),
         ExportFormat::Vcd => pxlogic_file::export_vcd(PathBuf::from(path), &capture),
-        ExportFormat::Sal => unreachable!(),
     }
     .map_err(to_string)
 }
@@ -1688,20 +1393,8 @@ fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
             false,
         );
         set_bundled_path(
-            "PXLOGIC_SALEAE_GRAPH_SIDECAR",
-            native_dir
-                .join("saleae-graph-sidecar")
-                .join("pxlogic-saleae-graph-sidecar"),
-            false,
-        );
-        set_bundled_path(
             "PXLOGIC_SALEAE_RUNTIME_ROOT",
             native_dir.join("saleae-analyzer-sidecar").join("runtime"),
-            true,
-        );
-        set_bundled_path(
-            "PXLOGIC_SALEAE_GRAPH_RUNTIME_ROOT",
-            native_dir.join("saleae-runtime-2.4.43"),
             true,
         );
     }
