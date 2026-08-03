@@ -475,7 +475,14 @@ jobs:
   release:
     name: Publish release
     # A successful platform package should not be held back by another runner.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+    if: >-
+      ${{
+        always() &&
+        startsWith(github.ref, 'refs/tags/v') &&
+        (needs.build-windows.result == 'success' ||
+         needs.build-linux.result == 'success' ||
+         needs.build-macos.result == 'success')
+      }}
     needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
     permissions:

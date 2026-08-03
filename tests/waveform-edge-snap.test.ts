@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findNearestEdgeSample, resolveWaveformPointerSample } from "../src/lib/waveformEdgeSnap";
+import { findNearestEdgeSample, resolveWaveformPointerSample } from "../src/lib/waveformEdgeSnap.ts";
 
 test("edge snapping respects the pixel threshold", () => {
   assert.equal(findNearestEdgeSample([200, 600], 210, 10, 10, false), 200);

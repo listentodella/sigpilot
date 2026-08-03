@@ -1,5 +1,5 @@
-import type { WaveformTile } from "./api";
-import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "./saleaeGraphLayout";
+import type { WaveformTile } from "./api.ts";
+import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "./saleaeGraphLayout.ts";
 
 export function findNearestEdgeSample(
   edgeSamples: number[],

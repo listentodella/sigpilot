@@ -199,6 +199,10 @@ test("verified sigrok catalog entries still map to existing runnable analyzer de
   assert.equal(spi.type, "SPI");
   assert.equal(spi.nativeRunnerStatus, "verified_sparse_c");
   assert.equal(analyzerCanRunDecoder(spi), true);
+  assert.equal(analyzerDecodeSettings(spi), null);
+
+  spi.spiMosiChannel = 1;
+  spi.spiClockChannel = 2;
   assert.equal(analyzerDecodeSettings(spi)?.protocol, "Spi");
 });
 

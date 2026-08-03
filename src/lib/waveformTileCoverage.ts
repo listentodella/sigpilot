@@ -1,5 +1,5 @@
-import type { WaveformTile } from "./api";
-import { captureDataWindow } from "./captureViewport";
+import type { WaveformTile } from "./api.ts";
+import { captureDataWindow } from "./captureViewport.ts";
 
 export function graphTileCanServeViewport(
   tile: WaveformTile | null,

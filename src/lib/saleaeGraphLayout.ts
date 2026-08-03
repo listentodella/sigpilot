@@ -2,7 +2,7 @@ import {
   SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
   SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
   SALEAE_ROW_V2_SPACING_PX,
-} from "./saleaeChannelLayout";
+} from "./saleaeChannelLayout.ts";
 
 export interface SaleaeGraphChannelLayout {
   height: number;
