@@ -1,3 +1,20 @@
+@font-face {
+  font-family: "Roboto";
+  src: url("./assets/fonts/Roboto-Variable.ttf") format("truetype-variations");
+  font-style: normal;
+  font-weight: 100 900;
+  font-stretch: 75% 100%;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Roboto Mono";
+  src: url("./assets/fonts/RobotoMono-Variable.ttf") format("truetype-variations");
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: block;
+}
+
 :root {
   --white-base: 255, 255, 255;
   --black-base: 0, 0, 0;

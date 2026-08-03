@@ -169,6 +169,7 @@ test("sigrok catalog display names prefer readable short protocol labels", () =>
 
 test("analyzer display radix formats decoded text without losing protocol context", () => {
   assert.equal(formatAnalyzerText("Data 0x5A ACK", "Decimal"), "Data 90 ACK");
+  assert.equal(formatAnalyzerText("Data 0x0 0xE", "Hexadecimal"), "Data 0x00 0x0E");
   assert.equal(formatAnalyzerText("Setup Write to [0x50] + ACK", "Binary"), "Setup Write to [0b01010000] + ACK");
   assert.equal(formatAnalyzerText("MOSI 0xA5 / MISO 0x3C", "Ascii"), "MOSI 0xA5 / MISO '<'");
   assert.equal(formatAnalyzerValue(0x2a, "Hexadecimal"), "0x2A");

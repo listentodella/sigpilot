@@ -1034,7 +1034,7 @@ function parseNumericToken(token: string) {
   if (/^0x/i.test(token)) {
     const digits = token.slice(2);
     const value = Number.parseInt(digits, 16);
-    return Number.isFinite(value) ? { bits: Math.max(4, digits.length * 4), value } : null;
+    return Number.isFinite(value) ? { bits: Math.max(8, digits.length * 4), value } : null;
   }
   if (/^0b/i.test(token)) {
     const digits = token.slice(2);
