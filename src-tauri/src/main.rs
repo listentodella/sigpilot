@@ -1383,21 +1383,22 @@ fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
         true,
     );
 
-    #[cfg(target_os = "macos")]
-    {
-        set_bundled_path(
-            "PXLOGIC_SALEAE_SIDECAR",
-            native_dir
-                .join("saleae-analyzer-sidecar")
-                .join("pxlogic-saleae-analyzer-sidecar"),
-            false,
-        );
-        set_bundled_path(
-            "PXLOGIC_SALEAE_RUNTIME_ROOT",
-            native_dir.join("saleae-analyzer-sidecar").join("runtime"),
-            true,
-        );
-    }
+    #[cfg(windows)]
+    let saleae_executable = "pxlogic-saleae-analyzer-sidecar.exe";
+    #[cfg(not(windows))]
+    let saleae_executable = "pxlogic-saleae-analyzer-sidecar";
+    set_bundled_path(
+        "PXLOGIC_SALEAE_SIDECAR",
+        native_dir
+            .join("saleae-analyzer-sidecar")
+            .join(saleae_executable),
+        false,
+    );
+    set_bundled_path(
+        "PXLOGIC_SALEAE_RUNTIME_ROOT",
+        native_dir.join("saleae-analyzer-sidecar").join("runtime"),
+        true,
+    );
     Ok(())
 }
 

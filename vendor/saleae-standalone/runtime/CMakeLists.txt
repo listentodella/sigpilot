@@ -36,6 +36,10 @@ add_library(saleae_compat SHARED
     cpp/runtime_c_api.cpp
     cpp/simulation_compat.cpp
 )
+set_target_properties(saleae_compat PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 target_compile_definitions(saleae_compat PUBLIC LOGIC2)
 target_include_directories(saleae_compat
     PUBLIC
@@ -45,7 +49,14 @@ target_include_directories(saleae_compat
         "${SALEAE_TESTLIB_ROOT}"
         "${CMAKE_CURRENT_SOURCE_DIR}/cpp"
 )
-set_target_properties(saleae_compat PROPERTIES BUILD_RPATH "@loader_path")
+if(WIN32)
+    set_target_properties(saleae_compat PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+elseif(APPLE)
+    set_target_properties(saleae_compat PROPERTIES BUILD_RPATH "@loader_path")
+else()
+    set_target_properties(saleae_compat PROPERTIES BUILD_RPATH "$ORIGIN")
+endif()
+target_link_libraries(saleae_compat PRIVATE ${CMAKE_DL_LIBS})
 
 add_library(Saleae::AnalyzerSDK ALIAS saleae_compat)
 
@@ -123,10 +134,18 @@ foreach(ANALYZER_ENTRY IN LISTS SALEAE_SELECTED_ANALYZERS)
         "${ANALYZER_DIRECTORY}"
     )
     set_target_properties(${ANALYZER_TARGET} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-        BUILD_RPATH "@loader_path"
-        INSTALL_RPATH "@loader_path"
     )
+    if(APPLE)
+        set_target_properties(${ANALYZER_TARGET} PROPERTIES
+            BUILD_RPATH "@loader_path"
+            INSTALL_RPATH "@loader_path")
+    elseif(UNIX)
+        set_target_properties(${ANALYZER_TARGET} PROPERTIES
+            BUILD_RPATH "$ORIGIN"
+            INSTALL_RPATH "$ORIGIN")
+    endif()
     install(FILES "${SALEAE_ROOT}/analyzers/${ANALYZER_DIRECTORY}/LICENSE"
         DESTINATION "licenses/${ANALYZER_DIRECTORY}"
     )

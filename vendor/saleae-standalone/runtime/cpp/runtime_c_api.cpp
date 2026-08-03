@@ -12,7 +12,11 @@
 #include <TestAnalyzerData.h>
 #include <TestInstance.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 
 #include <exception>
 #include <cstdlib>
@@ -20,6 +24,12 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+
+#ifdef _WIN32
+using PluginHandle = HMODULE;
+#else
+using PluginHandle = void*;
+#endif
 
 struct GeneratedChannel
 {
@@ -35,7 +45,7 @@ struct sr_session
     using DestroyAnalyzerFn = void (*)(Analyzer*);
     using GetAnalyzerNameFn = const char* (*)();
 
-    void* plugin = nullptr;
+    PluginHandle plugin = nullptr;
     Analyzer* analyzer = nullptr;
     DestroyAnalyzerFn destroy_analyzer = nullptr;
     std::string analyzer_name;
@@ -57,7 +67,11 @@ struct sr_session
             destroy_analyzer(analyzer);
         }
         if(plugin)
+#ifdef _WIN32
+            FreeLibrary(plugin);
+#else
             dlclose(plugin);
+#endif
     }
 };
 
@@ -65,12 +79,49 @@ namespace
 {
 
 template <typename Function>
-Function LoadSymbol(void* plugin, const char* name)
+Function LoadSymbol(PluginHandle plugin, const char* name)
 {
+#ifdef _WIN32
+    return reinterpret_cast<Function>(GetProcAddress(plugin, name));
+#else
     dlerror();
     auto* symbol = dlsym(plugin, name);
     return reinterpret_cast<Function>(symbol);
+#endif
 }
+
+#ifdef _WIN32
+std::wstring Utf8ToWide(const char* value)
+{
+    if(!value)
+        return {};
+    const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, nullptr, 0);
+    if(length <= 0)
+        return {};
+    std::wstring result(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, result.data(), length);
+    result.resize(static_cast<size_t>(length - 1));
+    return result;
+}
+
+std::string WindowsErrorMessage()
+{
+    const auto error = GetLastError();
+    char* buffer = nullptr;
+    const auto length = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        error,
+        0,
+        reinterpret_cast<char*>(&buffer),
+        0,
+        nullptr);
+    std::string message = length && buffer ? std::string(buffer, length) : "Windows error " + std::to_string(error);
+    if(buffer)
+        LocalFree(buffer);
+    return message;
+}
+#endif
 
 int Fail(sr_session* session, const std::string& message)
 {
@@ -110,12 +161,24 @@ extern "C" sr_session* sr_session_create(const char* plugin_path)
         return nullptr;
 
     auto session = std::make_unique<sr_session>();
+#ifdef _WIN32
+    const auto wide_path = Utf8ToWide(plugin_path);
+    session->plugin = wide_path.empty()
+        ? nullptr
+        : LoadLibraryExW(wide_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if(!session->plugin)
+    {
+        session->error = WindowsErrorMessage();
+        return session.release();
+    }
+#else
     session->plugin = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
     if(!session->plugin)
     {
         session->error = dlerror();
         return session.release();
     }
+#endif
 
     const auto create = LoadSymbol<sr_session::CreateAnalyzerFn>(session->plugin, "CreateAnalyzer");
     session->destroy_analyzer = LoadSymbol<sr_session::DestroyAnalyzerFn>(session->plugin, "DestroyAnalyzer");

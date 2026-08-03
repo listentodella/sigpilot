@@ -194,14 +194,24 @@ jobs:
           decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
           python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
           python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
+          saleae_sidecar="resources/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar.exe"
+          saleae_runtime="resources/native/saleae-analyzer-sidecar/runtime"
           test -f resources/bitstreams/hspi_ddr.bin
           test -f resources/bitstreams/hspi_ddr_RST.bin
           test -x "$sidecar"
           test -d "$decoder_root"
           test -d "$python_root"
           test -d "$python_home"
+          test -x "$saleae_sidecar"
+          find "$saleae_runtime" -maxdepth 1 -type f -iname '*saleae_compat.dll' | grep -q .
+          find "$saleae_runtime" -maxdepth 1 -type f -iname '*spi_analyzer.dll' | grep -q .
           PYTHONHOME="$python_home" native/sigrok-analyzer-sidecar/smoke-packaged.sh \
             "$sidecar" "$decoder_root" "$python_root"
+          "$saleae_sidecar" --runtime-root "$saleae_runtime" --probe \
+            | jq -e '.available == true and (.protocols | index("SPI") != null)'
+          jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
+            | "$saleae_sidecar" --runtime-root "$saleae_runtime" --decode \
+            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
 
       - name: Build portable Tauri executable
         shell: pwsh
@@ -230,7 +240,9 @@ jobs:
             "resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar.exe",
             "resources/native/sigrok-analyzer-sidecar/decoders/c_decoders",
             "resources/native/sigrok-analyzer-sidecar/decoders/python_decoders",
-            "resources/native/sigrok-analyzer-sidecar/python-runtime"
+            "resources/native/sigrok-analyzer-sidecar/python-runtime",
+            "resources/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar.exe",
+            "resources/native/saleae-analyzer-sidecar/runtime"
           )
           foreach ($relativePath in $requiredPaths) {
             if (-not (Test-Path -LiteralPath (Join-Path $portableRoot $relativePath))) {
@@ -248,6 +260,14 @@ jobs:
               "$sigrok_root/pxlogic-sigrok-sidecar.exe" \
               "$sigrok_root/decoders/c_decoders" \
               "$sigrok_root/decoders/python_decoders"
+          saleae_root="$portable_root/resources/native/saleae-analyzer-sidecar"
+          "$saleae_root/pxlogic-saleae-analyzer-sidecar.exe" \
+            --runtime-root "$saleae_root/runtime" --probe \
+            | jq -e '.available == true and (.protocols | index("SPI") != null)'
+          jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
+            | "$saleae_root/pxlogic-saleae-analyzer-sidecar.exe" \
+                --runtime-root "$saleae_root/runtime" --decode \
+            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
 
       - name: Archive Windows portable bundle
         shell: pwsh
@@ -357,14 +377,24 @@ jobs:
           decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
           python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
           python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
+          saleae_sidecar="resources/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"
+          saleae_runtime="resources/native/saleae-analyzer-sidecar/runtime"
           test -f resources/bitstreams/hspi_ddr.bin
           test -f resources/bitstreams/hspi_ddr_RST.bin
           test -x "$sidecar"
           test -d "$decoder_root"
           test -d "$python_root"
           test -d "$python_home"
+          test -x "$saleae_sidecar"
+          test -f "$saleae_runtime/libsaleae_compat.so"
+          test -f "$saleae_runtime/libspi_analyzer.so"
           PYTHONHOME="$python_home" native/sigrok-analyzer-sidecar/smoke-packaged.sh \
             "$sidecar" "$decoder_root" "$python_root"
+          "$saleae_sidecar" --runtime-root "$saleae_runtime" --probe \
+            | jq -e '.available == true and (.protocols | index("SPI") != null)'
+          jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
+            | "$saleae_sidecar" --runtime-root "$saleae_runtime" --decode \
+            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
 
       - name: Build Tauri packages
         run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --ci
@@ -393,6 +423,14 @@ jobs:
             "$packaged_sidecar" \
             "$packaged_root/decoders/c_decoders" \
             "$packaged_root/decoders/python_decoders"
+          packaged_saleae="$(find squashfs-root -type f -name pxlogic-saleae-analyzer-sidecar -print -quit)"
+          test -n "$packaged_saleae"
+          packaged_saleae_runtime="$(dirname "$packaged_saleae")/runtime"
+          "$packaged_saleae" --runtime-root "$packaged_saleae_runtime" --probe \
+            | jq -e '.available == true and (.protocols | index("SPI") != null)'
+          jq '.cases[0]' "$GITHUB_WORKSPACE/testdata/decoders/spi-conformance-v1.json" \
+            | "$packaged_saleae" --runtime-root "$packaged_saleae_runtime" --decode \
+            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
@@ -473,6 +511,9 @@ jobs:
           test -f "$runtime_root/libspi_analyzer.so"
           "$sidecar" --runtime-root "$runtime_root" --probe \
             | jq -e '.available == true and (.protocols | length) > 0'
+          jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
+            | "$sidecar" --runtime-root "$runtime_root" --decode \
+            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
 
       - name: Name macOS artifact
         run: |

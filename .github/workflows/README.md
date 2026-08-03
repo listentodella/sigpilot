@@ -10,24 +10,19 @@ UI tests, then produces these artifacts:
 Checks, Windows and Linux run on the repository's `self-hosted` `X64` runners.
 macOS continues to use GitHub-hosted Apple Silicon and Intel runners.
 
-Windows and Linux build the vendored PXView sigrok sidecar and its C decoder
-modules on the target runner. The workflow bundles the required shared
-libraries, Python standard library, Python decoder catalog, FPGA bitstreams and
-native C decoder modules. It probes the prepared resources before packaging;
-the prepared Windows/Linux resources execute a real generic C decode, and
-Linux additionally extracts the finished AppImage and repeats that decode from
-inside its payload. Windows repeats the decode from the staged portable bundle
-before creating the ZIP; MSI and NSIS installers are not required by Tauri and
-are intentionally not generated.
+Every platform builds the vendored Saleae standalone sidecar, compatibility
+runtime, and analyzer plugins without requiring Logic 2 or Python. Windows and
+Linux also build the vendored PXView sigrok sidecar and its C/Python decoder
+catalog. The workflow probes prepared resources and executes real decode
+fixtures before packaging. Linux repeats both backends from the extracted
+AppImage, while Windows repeats them from the staged portable bundle. MSI and
+NSIS installers are intentionally not generated.
 
 The cross-platform acceptance scope is USB discovery/capture, `.pxl` and
-`.pxcap` open/save, supported base imports, and the native sigrok runners. The
-eight protocol-specific runners cover UART, I2C, SPI, I2S, CAN, CAN-FD, LIN and
-Simple Parallel; direct digital-input C decoders use the generic sparse runner.
-Saleae GraphServer/analyzer runtimes remain macOS-only and are not required by the
-Windows or Linux jobs. `.sal` import/export is therefore macOS-only.
+`.pxcap` open/save, supported base imports, Saleae Native, and Sigrok Native.
+Saleae GraphServer is not bundled; the standalone runtime supplies the native
+analyzers on all supported platforms.
 
-Pushes and pull requests for `codex/graph-server-32ch`, `main` and `master`
-trigger the workflow. A `v*` tag always reaches the release job after its build
-jobs settle; it publishes every artifact that completed successfully, even when
-another platform build failed.
+Only `v*` tags trigger the workflow. The release job publishes every artifact
+that completed successfully, even when another platform build failed, and does
+not create an empty release when all platform builds are skipped or fail.

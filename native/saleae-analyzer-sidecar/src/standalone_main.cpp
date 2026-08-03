@@ -48,11 +48,34 @@ std::string DecoderId(const fs::path& plugin)
 
 fs::path RuntimeLibrary(const fs::path& root)
 {
-    for(const auto& candidate : {root / "libsaleae_compat.dylib", root / "Analyzers/libsaleae_compat.dylib",
-                                 root / "lib/libsaleae_compat.dylib"})
+#ifdef _WIN32
+    const std::vector<fs::path> candidates = {
+        root / "saleae_compat.dll", root / "libsaleae_compat.dll",
+        root / "Analyzers/saleae_compat.dll", root / "Analyzers/libsaleae_compat.dll",
+        root / "lib/saleae_compat.dll", root / "lib/libsaleae_compat.dll"};
+#elif defined(__APPLE__)
+    const std::vector<fs::path> candidates = {
+        root / "libsaleae_compat.dylib", root / "Analyzers/libsaleae_compat.dylib",
+        root / "lib/libsaleae_compat.dylib"};
+#else
+    const std::vector<fs::path> candidates = {
+        root / "libsaleae_compat.so", root / "Analyzers/libsaleae_compat.so",
+        root / "lib/libsaleae_compat.so"};
+#endif
+    for(const auto& candidate : candidates)
         if(fs::is_regular_file(candidate))
             return candidate;
     throw std::runtime_error("standalone Saleae runtime library was not found under " + root.string());
+}
+
+bool IsAnalyzerPlugin(const fs::path& path)
+{
+    const auto filename = Lower(path.filename().string());
+#ifdef _WIN32
+    return filename.find("_analyzer.dll") != std::string::npos;
+#else
+    return filename.find("_analyzer.so") != std::string::npos;
+#endif
 }
 
 fs::path PluginDirectory(const fs::path& root)
@@ -60,7 +83,7 @@ fs::path PluginDirectory(const fs::path& root)
     for(const auto& candidate : {root, root / "Analyzers", root / "lib"})
         if(fs::is_directory(candidate))
             for(const auto& entry : fs::directory_iterator(candidate))
-                if(entry.is_regular_file() && entry.path().filename().string().find("_analyzer.so") != std::string::npos)
+                if(entry.is_regular_file() && IsAnalyzerPlugin(entry.path()))
                     return candidate;
     throw std::runtime_error("Saleae analyzer plugins were not found under " + root.string());
 }
@@ -70,7 +93,7 @@ std::vector<fs::path> Plugins(const fs::path& root)
     const auto directory = PluginDirectory(root);
     std::vector<fs::path> plugins;
     for(const auto& entry : fs::directory_iterator(directory))
-        if(entry.is_regular_file() && entry.path().filename().string().find("_analyzer.so") != std::string::npos)
+        if(entry.is_regular_file() && IsAnalyzerPlugin(entry.path()))
             plugins.push_back(entry.path());
     std::sort(plugins.begin(), plugins.end());
     return plugins;
@@ -92,7 +115,8 @@ fs::path FindPlugin(const fs::path& root, const std::string& requested)
 
 Session Open(const fs::path& plugin)
 {
-    Session session(sr_session_create(plugin.c_str()));
+    const auto plugin_utf8 = plugin.u8string();
+    Session session(sr_session_create(plugin_utf8.c_str()));
     if(!session)
         throw std::runtime_error("failed to allocate Saleae analyzer session");
     if(std::string(sr_session_analyzer_name(session.get())).empty())

@@ -135,6 +135,10 @@ const LEGACY_RUST_PROTOCOLS: &[&str] = &["UART", "I2C", "SPI"];
 const SIGROK_SIDECAR_EXECUTABLE: &str = "pxlogic-sigrok-sidecar.exe";
 #[cfg(not(windows))]
 const SIGROK_SIDECAR_EXECUTABLE: &str = "pxlogic-sigrok-sidecar";
+#[cfg(windows)]
+const SALEAE_SIDECAR_EXECUTABLE: &str = "pxlogic-saleae-analyzer-sidecar.exe";
+#[cfg(not(windows))]
+const SALEAE_SIDECAR_EXECUTABLE: &str = "pxlogic-saleae-analyzer-sidecar";
 
 /// Stable host-side contract. External implementations may live in a native
 /// sidecar; the input remains the same packed capture representation used by
@@ -644,9 +648,28 @@ fn discover_workspace_sigrok_python_decoder_root() -> Option<PathBuf> {
 }
 
 fn discover_workspace_saleae_sidecar() -> Option<PathBuf> {
-    native_sidecar_search_paths("saleae-analyzer-sidecar", "pxlogic-saleae-analyzer-sidecar")
+    native_sidecar_search_paths("saleae-analyzer-sidecar", SALEAE_SIDECAR_EXECUTABLE)
         .into_iter()
+        .chain(workspace_decoder_search_paths(&format!(
+            "target/native/saleae-analyzer-sidecar-{}/{}",
+            saleae_build_platform_id(),
+            SALEAE_SIDECAR_EXECUTABLE
+        )))
         .find(|path| path.is_file())
+}
+
+fn saleae_build_platform_id() -> String {
+    let platform = match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        other => other,
+    };
+    let architecture = match (platform, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "arm64",
+        (_, architecture) => architecture,
+    };
+    format!("{platform}-{architecture}")
 }
 
 fn native_sidecar_search_paths(subdir: &str, relative: &str) -> Vec<PathBuf> {
@@ -793,6 +816,15 @@ fn push_saleae_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
     candidates.push(
         base.join("target")
             .join("native")
+            .join(format!(
+                "saleae-analyzer-sidecar-{}",
+                saleae_build_platform_id()
+            ))
+            .join("runtime"),
+    );
+    candidates.push(
+        base.join("target")
+            .join("native")
             .join("saleae-analyzer-sidecar")
             .join("runtime"),
     );
@@ -811,10 +843,33 @@ fn push_saleae_runtime_candidates(candidates: &mut Vec<PathBuf>, base: &Path) {
     );
 }
 
+#[cfg(target_os = "macos")]
 fn is_saleae_analyzer_runtime(path: &Path) -> bool {
     path.join("libsaleae_compat.dylib").is_file()
         && path.join("libserial_analyzer.so").is_file()
         && path.join("libswd_analyzer.so").is_file()
+}
+
+#[cfg(target_os = "linux")]
+fn is_saleae_analyzer_runtime(path: &Path) -> bool {
+    path.join("libsaleae_compat.so").is_file()
+        && path.join("libserial_analyzer.so").is_file()
+        && path.join("libswd_analyzer.so").is_file()
+}
+
+#[cfg(windows)]
+fn is_saleae_analyzer_runtime(path: &Path) -> bool {
+    let compat =
+        path.join("libsaleae_compat.dll").is_file() || path.join("saleae_compat.dll").is_file();
+    let serial =
+        path.join("libserial_analyzer.dll").is_file() || path.join("serial_analyzer.dll").is_file();
+    let swd = path.join("libswd_analyzer.dll").is_file() || path.join("swd_analyzer.dll").is_file();
+    compat && serial && swd
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn is_saleae_analyzer_runtime(_path: &Path) -> bool {
+    false
 }
 
 impl DecoderBackend for SigrokNativeDecoder {

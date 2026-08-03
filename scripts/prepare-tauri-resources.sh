@@ -61,6 +61,13 @@ sigrok_executable_name() {
   esac
 }
 
+saleae_executable_name() {
+  case "$HOST_OS" in
+    MINGW*|MSYS*|CYGWIN*) printf 'pxlogic-saleae-analyzer-sidecar.exe\n' ;;
+    *) printf 'pxlogic-saleae-analyzer-sidecar\n' ;;
+  esac
+}
+
 copy_shared_dependencies() {
   local binary="$1"
   local target_dir="$2"
@@ -131,19 +138,26 @@ run_build_script() {
   printf '%s\n' "$output" | tail -n 1
 }
 
-if [[ "$HOST_OS" == "Darwin" ]]; then
-  saleae_analyzer="$(run_build_script "$ROOT_DIR/native/saleae-analyzer-sidecar/build.sh")"
-  saleae_analyzer_dir="$(dirname "$saleae_analyzer")"
-  copy_executable "$saleae_analyzer" \
-    "$RESOURCE_DIR/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"
-  copy_directory "$saleae_analyzer_dir/runtime" \
-    "$RESOURCE_DIR/saleae-analyzer-sidecar/runtime"
-  find "$RESOURCE_DIR/saleae-analyzer-sidecar/runtime" \
-    -type f \( -name '*.dylib' -o -name '*.so' \) -exec chmod 755 {} +
-
-else
-  printf 'Skipping Saleae native sidecars: macOS is required.\n' >&2
-fi
+saleae_analyzer="$(run_build_script "$ROOT_DIR/native/saleae-analyzer-sidecar/build.sh")"
+saleae_analyzer_dir="$(dirname "$saleae_analyzer")"
+saleae_target_name="$(saleae_executable_name)"
+copy_executable "$saleae_analyzer" \
+  "$RESOURCE_DIR/saleae-analyzer-sidecar/$saleae_target_name"
+copy_directory "$saleae_analyzer_dir/runtime" \
+  "$RESOURCE_DIR/saleae-analyzer-sidecar/runtime"
+case "$HOST_OS" in
+  MINGW*|MSYS*|CYGWIN*)
+    for runtime_dll in "$saleae_analyzer_dir"/*.dll; do
+      [[ -f "$runtime_dll" ]] || continue
+      copy_file "$runtime_dll" \
+        "$RESOURCE_DIR/saleae-analyzer-sidecar/$(basename "$runtime_dll")"
+    done
+    ;;
+  *)
+    find "$RESOURCE_DIR/saleae-analyzer-sidecar/runtime" \
+      -type f \( -name '*.dylib' -o -name '*.so' \) -exec chmod 755 {} +
+    ;;
+esac
 
 if sigrok_root="$(sigrok_source_root)"; then
   if [[ "${PXLOGIC_REUSE_SIGROK_BUILD:-0}" == "1" ]]; then
