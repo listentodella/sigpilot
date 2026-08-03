@@ -413,9 +413,11 @@ jobs:
         include:
           - arch: arm64
             target: aarch64-apple-darwin
+            native_arch: arm64
             runner: macos-15
           - arch: x64
             target: x86_64-apple-darwin
+            native_arch: x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     steps:
@@ -453,7 +455,24 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Tauri app bundle
+        env:
+          PXLOGIC_MACOS_ARCH: ${{ matrix.native_arch }}
         run: pnpm tauri build --target ${{ matrix.target }} --bundles app --ci --no-sign
+
+      - name: Verify bundled Saleae decoder
+        run: |
+          set -euo pipefail
+          bundle_root="target/${{ matrix.target }}/release/bundle"
+          app="$(find "$bundle_root/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app"
+          sidecar="$(find "$app/Contents/Resources" -type f \
+            -name pxlogic-saleae-analyzer-sidecar -print -quit)"
+          test -n "$sidecar"
+          runtime_root="$(dirname "$sidecar")/runtime"
+          test -f "$runtime_root/libsaleae_compat.dylib"
+          test -f "$runtime_root/libspi_analyzer.so"
+          "$sidecar" --runtime-root "$runtime_root" --probe \
+            | jq -e '.available == true and (.protocols | length) > 0'
 
       - name: Name macOS artifact
         run: |

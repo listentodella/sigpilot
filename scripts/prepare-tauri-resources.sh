@@ -131,7 +131,7 @@ run_build_script() {
   printf '%s\n' "$output" | tail -n 1
 }
 
-if [[ "$HOST_OS" == "Darwin" && "$HOST_ARCH" == "arm64" ]]; then
+if [[ "$HOST_OS" == "Darwin" ]]; then
   saleae_analyzer="$(run_build_script "$ROOT_DIR/native/saleae-analyzer-sidecar/build.sh")"
   saleae_analyzer_dir="$(dirname "$saleae_analyzer")"
   copy_executable "$saleae_analyzer" \
@@ -142,7 +142,7 @@ if [[ "$HOST_OS" == "Darwin" && "$HOST_ARCH" == "arm64" ]]; then
     -type f \( -name '*.dylib' -o -name '*.so' \) -exec chmod 755 {} +
 
 else
-  printf 'Skipping Saleae native sidecars: macOS arm64 is required.\n' >&2
+  printf 'Skipping Saleae native sidecars: macOS is required.\n' >&2
 fi
 
 if sigrok_root="$(sigrok_source_root)"; then
