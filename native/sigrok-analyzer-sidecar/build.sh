@@ -25,7 +25,9 @@ fi
 if [[ "$(uname -s)" == "Darwin" ]]; then
   export PATH="/opt/homebrew/bin:$PATH"
 fi
-cmake_platform_args=()
+# Positional parameters remain safe to expand when empty under macOS Bash 3.2
+# with `set -u`; an empty array does not.
+set --
 python_fingerprint=""
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
@@ -46,11 +48,10 @@ case "$(uname -s)" in
       rm -f "$BUILD_DIR/CMakeCache.txt"
       rm -rf "$BUILD_DIR/CMakeFiles"
     fi
-    cmake_platform_args+=(
-      "-DPython3_ROOT_DIR=$(cygpath -m "$python_root")"
-      "-DPython3_EXECUTABLE=$(cygpath -m "$python_executable")"
+    set -- "$@" \
+      "-DPython3_ROOT_DIR=$(cygpath -m "$python_root")" \
+      "-DPython3_EXECUTABLE=$(cygpath -m "$python_executable")" \
       "-DPython3_FIND_REGISTRY=NEVER"
-    )
     ;;
 esac
 if [[ -d "$BUILD_DIR/decoders/c_decoders" ]]; then
@@ -60,7 +61,7 @@ fi
 "$CMAKE_BIN" -S "$SIDECAR_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DPXVIEW_ROOT="$PXVIEW_ROOT" \
-  "${cmake_platform_args[@]}"
+  "$@"
 if [[ -n "$python_fingerprint" ]]; then
   printf '%s\n' "$python_fingerprint" > "$BUILD_DIR/.pxlogic-python-toolchain"
 fi
