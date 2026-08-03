@@ -51,8 +51,8 @@ case "$HOST_OS" in
     set -- "$@" '-DCMAKE_CXX_FLAGS=-static-libgcc -static-libstdc++'
     ;;
 esac
-cmake -S "$RUNTIME_SOURCE_DIR" -B "$RUNTIME_BUILD_DIR" -G Ninja "$@"
-cmake --build "$RUNTIME_BUILD_DIR"
+cmake -S "$RUNTIME_SOURCE_DIR" -B "$RUNTIME_BUILD_DIR" -G Ninja "$@" >&2
+cmake --build "$RUNTIME_BUILD_DIR" >&2 || exit $?
 
 if [[ ! -d "$JSON_DIR/.git" ]]; then
   git clone https://github.com/nlohmann/json.git "$JSON_DIR"

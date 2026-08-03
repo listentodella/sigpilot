@@ -7,6 +7,8 @@
 
 #include "MockSettings.h"
 
+#include <stdexcept>
+
 #define D_PTR() \
     auto d = reinterpret_cast<AnalyzerTest::MockSettings*>(mData);
 
@@ -431,5 +433,4 @@ void AnalyzerSettingInterfaceBool::SetCheckBoxText(const char *text)
     D_PTR();
     d->mText = std::string(text);
 }
-
 

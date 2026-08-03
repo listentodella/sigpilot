@@ -131,7 +131,10 @@ copy_python_runtime() {
 run_build_script() {
   local script="$1"
   local output
-  output="$("$script")"
+  if ! output="$("$script")"; then
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+    return 1
+  fi
   if [[ -n "$output" ]]; then
     printf '%s\n' "$output" >&2
   fi

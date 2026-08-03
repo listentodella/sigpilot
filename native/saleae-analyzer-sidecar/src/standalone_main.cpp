@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -226,11 +227,11 @@ json Probe(const fs::path& root, bool include_catalog)
             {"decoder_catalog", catalog}, {"c_decoder_count", plugins.size()}, {"python_decoder_count", 0}};
 }
 
-std::map<unsigned, std::vector<unsigned long long>> ParseEdges(const json& input)
+std::map<unsigned, std::vector<std::uint64_t>> ParseEdges(const json& input)
 {
-    std::map<unsigned, std::vector<unsigned long long>> edges;
+    std::map<unsigned, std::vector<std::uint64_t>> edges;
     for(const auto& edge_set : input.at("edges"))
-        edges[edge_set.at("channel").get<unsigned>()] = edge_set.at("samples").get<std::vector<unsigned long long>>();
+        edges[edge_set.at("channel").get<unsigned>()] = edge_set.at("samples").get<std::vector<std::uint64_t>>();
     return edges;
 }
 
@@ -448,7 +449,7 @@ json Decode(const fs::path& root, const json& input)
         const auto channel = value.get<unsigned>();
         const auto title = SpecializedChannelTitle(protocol, key);
         const auto found = edges.find(channel);
-        const std::vector<unsigned long long> empty;
+        const std::vector<std::uint64_t> empty;
         const auto& transitions = found == edges.end() ? empty : found->second;
         Check(session.get(), sr_session_add_channel(session.get(), title.c_str(), channel,
               channel < initial_levels.size() && initial_levels[channel] != 0, transitions.data(), transitions.size()), "set channel " + title);
