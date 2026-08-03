@@ -40,7 +40,9 @@ set_target_properties(saleae_compat PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-target_compile_definitions(saleae_compat PUBLIC LOGIC2)
+target_compile_definitions(saleae_compat
+    PUBLIC LOGIC2
+    PRIVATE SALEAE_COMPAT_BUILD)
 target_include_directories(saleae_compat
     PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/include"

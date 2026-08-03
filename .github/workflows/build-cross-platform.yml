@@ -3,6 +3,16 @@ name: Build Cross-Platform
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform jobs to run
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - all
 
 concurrency:
   group: desktop-${{ github.workflow }}-${{ github.ref }}
@@ -14,6 +24,7 @@ permissions:
 jobs:
   checks:
     name: Tests and frontend
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' }}
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Checkout repository
@@ -86,6 +97,12 @@ jobs:
   build-windows:
     name: Windows x64
     needs: checks
+    if: >-
+      ${{
+        always() &&
+        (needs.checks.result == 'success' ||
+         (github.event_name == 'workflow_dispatch' && inputs.platform == 'windows'))
+      }}
     runs-on: [self-hosted, Windows, X64]
     env:
       PXLOGIC_SIGROK_BUILD_DIR: C:/pxlogic-native-cache/sigrok-ucrt64
@@ -115,6 +132,7 @@ jobs:
         run: |
           packages=(
             base-devel
+            git
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
@@ -291,6 +309,11 @@ jobs:
   build-linux:
     name: Linux x64
     needs: checks
+    if: >-
+      ${{
+        needs.checks.result == 'success' &&
+        (github.event_name != 'workflow_dispatch' || inputs.platform == 'all')
+      }}
     runs-on: [self-hosted, Linux, X64]
     env:
       PXLOGIC_COPY_NATIVE_DEPS: "1"
@@ -445,6 +468,11 @@ jobs:
   build-macos:
     name: macOS ${{ matrix.arch }}
     needs: checks
+    if: >-
+      ${{
+        needs.checks.result == 'success' &&
+        (github.event_name != 'workflow_dispatch' || inputs.platform == 'all')
+      }}
     strategy:
       fail-fast: false
       matrix:
