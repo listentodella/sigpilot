@@ -74,9 +74,9 @@ export function AnalyzerSettingsDialog({
         uartMsbFirst: false,
         i2cSdaChannel: 1,
         i2cSclChannel: 2,
-        spiMosiChannel: 0,
+        spiMosiChannel: null,
         spiMisoChannel: null,
-        spiClockChannel: 1,
+        spiClockChannel: null,
         spiEnableChannel: null,
         spiEnableActiveLow: true,
         spiClockPolarity: false,
@@ -103,7 +103,7 @@ export function AnalyzerSettingsDialog({
         draft.type === "I2C"
           ? draft.i2cSdaChannel
           : draft.type === "SPI"
-            ? draft.spiMosiChannel ?? draft.spiMisoChannel ?? draft.spiClockChannel
+            ? draft.spiMosiChannel ?? draft.spiMisoChannel ?? draft.spiClockChannel ?? 0
             : draft.type === "I2S"
               ? draft.nativeChannels.sd ?? draft.nativePrimaryChannel
               : draft.type === "LIN"
@@ -275,7 +275,7 @@ export function AnalyzerSettingsDialog({
               <AnalyzerSettingRow label="Clock" required>
                 <ChannelSelect
                   {...channelSelectProps}
-                  onChange={(channel) => setDraft((current) => ({ ...current, spiClockChannel: channel ?? 0 }))}
+                  onChange={(channel) => setDraft((current) => ({ ...current, spiClockChannel: channel }))}
                   value={draft.spiClockChannel}
                 />
               </AnalyzerSettingRow>
@@ -958,7 +958,7 @@ function ChannelSelect({
         type="button"
       >
         {value === null ? (
-          <span className="analyzerChannelOptionText">None</span>
+          <span className="analyzerChannelOptionText">{optional ? "None" : "Select channel"}</span>
         ) : (
           <ChannelOptionContent
             capturedChannelCount={capturedChannelCount}
@@ -1096,6 +1096,7 @@ function validateAnalyzer(analyzer: UiAnalyzerInstance) {
     if (analyzer.spiMosiChannel === null && analyzer.spiMisoChannel === null) {
       return "Select at least one data channel (MOSI or MISO).";
     }
+    if (analyzer.spiClockChannel === null) return "Select Clock.";
     if (analyzer.spiBitsPerTransfer < 1 || analyzer.spiBitsPerTransfer > 64) {
       return "Bits per transfer must be between 1 and 64.";
     }

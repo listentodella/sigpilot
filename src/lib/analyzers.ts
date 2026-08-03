@@ -83,7 +83,7 @@ export interface UiAnalyzerInstance {
   i2cSclChannel: number;
   spiMosiChannel: number | null;
   spiMisoChannel: number | null;
-  spiClockChannel: number;
+  spiClockChannel: number | null;
   spiEnableChannel: number | null;
   spiEnableActiveLow: boolean;
   spiClockPolarity: boolean;
@@ -463,9 +463,9 @@ export function createAnalyzerInstance(
     uartMsbFirst: false,
     i2cSdaChannel: channel,
     i2cSclChannel: nextChannel(1),
-    spiMosiChannel: channel,
+    spiMosiChannel: null,
     spiMisoChannel: null,
-    spiClockChannel: nextChannel(1),
+    spiClockChannel: null,
     spiEnableChannel: null,
     spiEnableActiveLow: true,
     spiClockPolarity: false,
@@ -571,12 +571,14 @@ export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChan
             hasMarkers: false,
             title: "MISO",
           },
-      {
-        channel: analyzer.spiClockChannel,
-        hasBubbles: false,
-        hasMarkers: true,
-        title: "Clock",
-      },
+      analyzer.spiClockChannel === null
+        ? null
+        : {
+            channel: analyzer.spiClockChannel,
+            hasBubbles: false,
+            hasMarkers: true,
+            title: "Clock",
+          },
       analyzer.spiEnableChannel === null
         ? null
         : {
@@ -689,6 +691,7 @@ export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDe
     };
   }
   if (analyzer.type === "SPI") {
+    if (analyzer.spiClockChannel === null) return null;
     return {
       protocol: "Spi",
       settings: {
