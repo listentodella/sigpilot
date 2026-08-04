@@ -55,6 +55,33 @@ struct ControlStatus {
     real_pos: u32,
 }
 
+#[derive(Debug, Default)]
+struct TriggerStatusGate {
+    baseline: Option<ControlStatus>,
+    observed_clear: bool,
+}
+
+impl TriggerStatusGate {
+    fn new(baseline: Option<ControlStatus>) -> Self {
+        Self {
+            baseline,
+            observed_clear: baseline.is_none_or(|status| status.trig_out_validset == 0),
+        }
+    }
+
+    fn accepts(&mut self, status: ControlStatus) -> bool {
+        if status.trig_out_validset == 0 {
+            self.observed_clear = true;
+            return false;
+        }
+        self.observed_clear
+            || self.baseline.is_some_and(|baseline| {
+                baseline.trig_out_validset != status.trig_out_validset
+                    || baseline.real_pos != status.real_pos
+            })
+    }
+}
+
 fn trigger_metadata_from_status(
     settings: &CaptureSettings,
     status: ControlStatus,
@@ -69,11 +96,15 @@ fn trigger_metadata_from_status(
 fn publish_trigger_status(
     settings: &CaptureSettings,
     status: ControlStatus,
+    gate: &mut TriggerStatusGate,
     trigger: &mut Option<CaptureTriggerMetadata>,
     on_trigger: &mut dyn FnMut(&CaptureTriggerMetadata),
     sink: &mut TraceSink<'_>,
 ) {
     if trigger.is_some() {
+        return;
+    }
+    if settings.trigger_enabled && !gate.accepts(status) {
         return;
     }
     let Some(metadata) = trigger_metadata_from_status(settings, status) else {
@@ -559,7 +590,7 @@ impl RusbBackend {
                 effective_settings.trigger_position_percent, capture_profile.trigger_pos
             ),
         );
-        let script = build_capture_register_script_for_channels(
+        let mut script = build_capture_register_script_for_channels(
             transfer_size as u32,
             target_raw_bytes,
             channel_count,
@@ -582,40 +613,99 @@ impl RusbBackend {
             "registers",
             format!("writing {} capture registers", script.len()),
         );
+        let start_write = script.pop().ok_or_else(|| {
+            CoreError::Decode("capture register script is missing the start command".to_string())
+        })?;
+        if start_write.addr != protocol::REG_STREAM_START
+            || start_write.value != protocol::STREAM_START_FLAGS
+        {
+            return Err(CoreError::Decode(
+                "capture register script does not end with the start command".to_string(),
+            ));
+        }
         for write in script {
             Self::write_register_with_trace(&mut handle, write.addr, write.value, sink)?;
         }
+        let trigger_status_baseline = effective_settings
+            .trigger_enabled
+            .then(|| Self::trace_control_status(&mut handle, sink, "armed before start", true))
+            .flatten();
+        let mut trigger_gate = TriggerStatusGate::new(trigger_status_baseline);
+        Self::write_register_with_trace(&mut handle, start_write.addr, start_write.value, sink)?;
         let mut hardware_trigger = None;
         if let Some(status) = Self::trace_control_status(&mut handle, sink, "after start", true) {
             publish_trigger_status(
                 &effective_settings,
                 status,
+                &mut trigger_gate,
                 &mut hardware_trigger,
                 on_trigger,
                 sink,
             );
         }
         let data_endpoint = if matches!(effective_settings.mode, CaptureMode::Buffer) {
-            let settle =
-                buffer_capture_settle_duration(sample_count, effective_settings.sample_rate_hz);
-            trace(
-                sink,
-                "buffer",
-                format!("waiting {} ms before DDR read request", settle.as_millis()),
-            );
-            std::thread::sleep(settle);
-            if hardware_trigger.is_none() {
-                if let Some(status) =
-                    Self::trace_control_status(&mut handle, sink, "after buffer settle", true)
-                {
-                    publish_trigger_status(
-                        &effective_settings,
-                        status,
-                        &mut hardware_trigger,
-                        on_trigger,
-                        sink,
-                    );
+            if effective_settings.trigger_enabled {
+                trace(
+                    sink,
+                    "trigger",
+                    "waiting for the hardware trigger before requesting DDR data",
+                );
+                let mut last_wait_trace = Instant::now();
+                while hardware_trigger.is_none() {
+                    if cancel.load(Ordering::Acquire) {
+                        let _ = Self::write_register(
+                            &mut handle,
+                            protocol::REG_STREAM_START,
+                            protocol::STREAM_STOP_FLAGS,
+                        );
+                        return Err(CoreError::Cancelled);
+                    }
+                    if let Some(status) =
+                        Self::trace_control_status(&mut handle, sink, "waiting for trigger", false)
+                    {
+                        publish_trigger_status(
+                            &effective_settings,
+                            status,
+                            &mut trigger_gate,
+                            &mut hardware_trigger,
+                            on_trigger,
+                            sink,
+                        );
+                    }
+                    if hardware_trigger.is_none() {
+                        if last_wait_trace.elapsed() >= Duration::from_secs(1) {
+                            last_wait_trace = Instant::now();
+                            trace(sink, "trigger", "trigger condition has not been met");
+                        }
+                        std::thread::sleep(TRIGGER_STATUS_POLL_INTERVAL);
+                    }
                 }
+
+                let post_trigger_samples =
+                    sample_count.saturating_sub(u64::from(capture_profile.trigger_pos));
+                let settle = buffer_samples_settle_duration(
+                    post_trigger_samples,
+                    effective_settings.sample_rate_hz,
+                );
+                trace(
+                    sink,
+                    "trigger",
+                    format!(
+                        "trigger received; waiting {:.3} s for {} post-trigger samples",
+                        settle.as_secs_f64(),
+                        post_trigger_samples
+                    ),
+                );
+                sleep_with_capture_cancellation(settle, &cancel, &mut handle)?;
+            } else {
+                let settle =
+                    buffer_samples_settle_duration(sample_count, effective_settings.sample_rate_hz);
+                trace(
+                    sink,
+                    "buffer",
+                    format!("waiting {} ms before DDR read request", settle.as_millis()),
+                );
+                sleep_with_capture_cancellation(settle, &cancel, &mut handle)?;
             }
             let request_bytes = target_raw_bytes
                 .checked_add(transfer_size as u64)
@@ -767,6 +857,7 @@ impl RusbBackend {
                     publish_trigger_status(
                         &effective_settings,
                         status,
+                        &mut trigger_gate,
                         &mut hardware_trigger,
                         on_trigger,
                         sink,
@@ -812,6 +903,7 @@ impl RusbBackend {
                         publish_trigger_status(
                             &effective_settings,
                             status,
+                            &mut trigger_gate,
                             &mut hardware_trigger,
                             on_trigger,
                             sink,
@@ -833,6 +925,7 @@ impl RusbBackend {
                 publish_trigger_status(
                     &effective_settings,
                     status,
+                    &mut trigger_gate,
                     &mut hardware_trigger,
                     on_trigger,
                     sink,
@@ -1495,13 +1588,37 @@ fn publish_cross_stream_samples(
     Ok(())
 }
 
-fn buffer_capture_settle_duration(sample_count: u64, sample_rate_hz: u64) -> Duration {
+fn buffer_samples_settle_duration(sample_count: u64, sample_rate_hz: u64) -> Duration {
     let sample_us = if sample_rate_hz == 0 {
         0
     } else {
         sample_count.saturating_mul(1_000_000) / sample_rate_hz
     };
-    Duration::from_micros((10_000 + sample_us).min(5_000_000))
+    Duration::from_micros(10_000u64.saturating_add(sample_us))
+}
+
+fn sleep_with_capture_cancellation(
+    duration: Duration,
+    cancel: &AtomicBool,
+    handle: &mut DeviceHandle<Context>,
+) -> Result<()> {
+    let deadline = Instant::now().checked_add(duration);
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            let _ = RusbBackend::write_register(
+                handle,
+                protocol::REG_STREAM_START,
+                protocol::STREAM_STOP_FLAGS,
+            );
+            return Err(CoreError::Cancelled);
+        }
+        let Some(remaining) =
+            deadline.and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+        else {
+            return Ok(());
+        };
+        std::thread::sleep(remaining.min(TRIGGER_STATUS_POLL_INTERVAL));
+    }
 }
 
 fn capture_read_poll_timeout() -> Duration {
@@ -1807,6 +1924,35 @@ mod tests {
     }
 
     #[test]
+    fn trigger_gate_rejects_a_stale_status_until_this_capture_changes_state() {
+        let stale = ControlStatus {
+            sync_cur_sample: 12_000,
+            trig_out_validset: 1,
+            real_pos: 8_192,
+        };
+        let mut gate = TriggerStatusGate::new(Some(stale));
+        assert!(!gate.accepts(stale));
+        assert!(!gate.accepts(ControlStatus {
+            sync_cur_sample: stale.sync_cur_sample + 128,
+            ..stale
+        }));
+        assert!(!gate.accepts(ControlStatus {
+            trig_out_validset: 0,
+            ..stale
+        }));
+        assert!(gate.accepts(stale));
+
+        let mut changed_gate = TriggerStatusGate::new(Some(stale));
+        assert!(changed_gate.accepts(ControlStatus {
+            real_pos: 8_256,
+            ..stale
+        }));
+
+        let mut missing_baseline_gate = TriggerStatusGate::new(None);
+        assert!(missing_baseline_gate.accepts(stale));
+    }
+
+    #[test]
     fn loads_bitstreams_from_directory() {
         let dir = env::temp_dir().join(format!("pxlogic-bitstreams-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -1901,5 +2047,17 @@ mod tests {
             ..CaptureSettings::default()
         };
         assert_eq!(capture_stall_timeout(&settings, 16, 256 * 1024), None);
+    }
+
+    #[test]
+    fn buffer_settle_time_tracks_the_requested_sample_window() {
+        assert_eq!(
+            buffer_samples_settle_duration(100_000_000, 10_000_000),
+            Duration::from_millis(10_010)
+        );
+        assert_eq!(
+            buffer_samples_settle_duration(50_000_000, 100_000_000),
+            Duration::from_millis(510)
+        );
     }
 }

@@ -30,9 +30,10 @@ export interface UiAnalogChannelSettings {
 
 export function makeDefaultAnalogChannels(
   existing: Partial<UiAnalogChannelSettings>[] = [],
+  defaultEnabledCount = 4,
 ): UiAnalogChannelSettings[] {
   return Array.from({ length: ANALOG_CHANNEL_COUNT }, (_, index) => ({
-    enabled: existing[index]?.enabled ?? index < 4,
+    enabled: existing[index]?.enabled ?? index < defaultEnabledCount,
     height: Math.max(ANALOG_ROW_MIN_HEIGHT_PX, existing[index]?.height ?? ANALOG_ROW_DEFAULT_HEIGHT_PX),
     label: existing[index]?.label?.trim() || `Analog ${index}`,
     offsetVolts: existing[index]?.offsetVolts ?? 0,

@@ -8,7 +8,6 @@ import {
   ChevronUp,
   Copy,
   Clock3,
-  Download,
   FileDown,
   FolderOpen,
   GripVertical,
@@ -1074,9 +1073,27 @@ function applyTrimmedCapture(
   };
 }
 
-function defaultDeviceSettings(channelCount: number, bufferSizeMb = DEFAULT_BUFFER_SIZE_MB): UiDeviceSettings {
+function isDemoDevice(deviceId: string) {
+  return deviceId.startsWith("fake:");
+}
+
+function analogChannelsForDevice(
+  deviceId: string,
+  existing?: Partial<UiAnalogChannelSettings>[],
+  preserveExisting = false,
+) {
+  const channels = makeDefaultAnalogChannels(existing, isDemoDevice(deviceId) ? 4 : 0);
+  if (preserveExisting || isDemoDevice(deviceId)) return channels;
+  return channels.map((channel) => ({ ...channel, enabled: false }));
+}
+
+function defaultDeviceSettings(
+  channelCount: number,
+  bufferSizeMb = DEFAULT_BUFFER_SIZE_MB,
+  deviceId = DEFAULT_DEVICE_ID,
+): UiDeviceSettings {
   return {
-    analogChannels: makeDefaultAnalogChannels(),
+    analogChannels: analogChannelsForDevice(deviceId),
     analogSampleRateHz: 6_250_000,
     bufferSizeMb,
     captureMode: "FreeRun",
@@ -1203,6 +1220,7 @@ function clampSamplePoint(sample: number, totalSamples: number) {
 
 function makeSession(id: string, name: string, deviceId: string, source?: UiSession): UiSession {
   const settings = source ? { ...source.settings, device_id: deviceId } : defaultSettings(deviceId);
+  const preserveSourceAnalogChannels = source?.selectedDevice === deviceId;
   return {
     id,
     name,
@@ -1212,11 +1230,15 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     deviceSettings: source
       ? {
           ...source.deviceSettings,
-          analogChannels: cloneAnalogChannels(source.deviceSettings.analogChannels),
+          analogChannels: analogChannelsForDevice(
+            deviceId,
+            source.deviceSettings.analogChannels,
+            preserveSourceAnalogChannels,
+          ),
           analogSampleRateHz: source.deviceSettings.analogSampleRateHz ?? 6_250_000,
           digitalChannels: [...source.deviceSettings.digitalChannels],
         }
-      : defaultDeviceSettings(settings.channel_count, settings.buffer_size_mb),
+      : defaultDeviceSettings(settings.channel_count, settings.buffer_size_mb, deviceId),
     channelOrder: channelOrderForCount(32, source?.channelOrder),
     channelLabels: source
       ? channelLabelsForCount(settings.channel_count, source.channelLabels)
@@ -2785,38 +2807,39 @@ export default function App() {
         defaultPath: `${activeSession.name || "capture"}.pxl`,
         filters: [
           { name: "PXLogic Project", extensions: ["pxl"] },
-          { name: "Legacy Raw Capture", extensions: ["pxcap"] },
+          { name: "Sigrok Session", extensions: ["sr"] },
+          { name: "Value Change Dump", extensions: ["vcd"] },
         ],
       });
       if (!path) return;
-      await saveCapture(activeSession.id, path, {
-        name: activeSession.name,
-        notes: activeSession.notes,
-        analyzers: activeSession.analyzers.map(saleaeAnalyzerMetadata),
-      });
-      const savedName = preferences.renameTabToSavedCapture ? captureNameFromSavedPath(path) : null;
+      const requestedExtension = path.split(".").pop()?.toLowerCase();
+      const extension = ["pxl", "sr", "vcd"].includes(requestedExtension ?? "")
+        ? requestedExtension
+        : "pxl";
+      const outputPath = requestedExtension === extension ? path : `${path}.pxl`;
+      if (extension === "sr" || extension === "vcd") {
+        await exportCapture(activeSession.id, outputPath, extension === "sr" ? "Sr" : "Vcd");
+      } else {
+        await saveCapture(activeSession.id, outputPath, {
+          name: activeSession.name,
+          notes: activeSession.notes,
+          analyzers: activeSession.analyzers.map(saleaeAnalyzerMetadata),
+        });
+      }
+      const savedName =
+        extension !== "sr" && extension !== "vcd" && preferences.renameTabToSavedCapture
+          ? captureNameFromSavedPath(outputPath)
+          : null;
       updateSession(activeSession.id, (session) => ({
         ...session,
         name: savedName || session.name,
-        message: "Capture saved",
+        message:
+          extension === "sr"
+            ? "Sigrok session exported"
+            : extension === "vcd"
+              ? "VCD exported"
+              : "Capture saved",
       }));
-    } catch (error) {
-      updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
-    }
-  }
-
-  async function handleExport(format: "Sr" | "Vcd") {
-    if (!activeSession?.summary || activeSession.busy) return;
-    const ext = format === "Sr" ? "sr" : "vcd";
-    const filterName = format === "Sr" ? "Sigrok Session" : "Value Change Dump";
-    try {
-      const path = await saveDialog({
-        defaultPath: `${activeSession.name || "capture"}.${ext}`,
-        filters: [{ name: filterName, extensions: [ext] }],
-      });
-      if (!path) return;
-      await exportCapture(activeSession.id, path, format);
-      updateSession(activeSession.id, (session) => ({ ...session, message: `${ext.toUpperCase()} exported` }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
     }
@@ -2846,6 +2869,11 @@ export default function App() {
           : session.channelLabels,
         deviceSettings: {
           ...session.deviceSettings,
+          analogChannels: analogChannelsForDevice(
+            deviceId,
+            session.deviceSettings.analogChannels,
+            session.selectedDevice === deviceId,
+          ),
           bufferSizeMb,
           digitalChannels,
           pwmEffectiveDutyPercent: null,
@@ -3933,30 +3961,13 @@ export default function App() {
               Open
             </button>
             <button
-              className="tool-button"
+              className="tool-button text-tool"
               title="Save capture"
               onClick={handleSave}
               disabled={!activeSession?.summary || activeSession.busy}
             >
               <Save size={14} />
-            </button>
-            <button
-              className="tool-button text-tool"
-              title="Export SR"
-              onClick={() => handleExport("Sr")}
-              disabled={!activeSession?.summary || activeSession.busy}
-            >
-              <FileDown size={14} />
-              SR
-            </button>
-            <button
-              className="tool-button text-tool"
-              title="Export VCD"
-              onClick={() => handleExport("Vcd")}
-              disabled={!activeSession?.summary || activeSession.busy}
-            >
-              <Download size={14} />
-              VCD
+              Save
             </button>
           </div>
         </header>
