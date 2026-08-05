@@ -16,10 +16,10 @@ use pxlogic_core::{
     build_pxview_pwm0_register_script, generic_logic_capture_capabilities,
     pxlogic_capture_capabilities_from_profile, resolve_pxlogic_device_profile,
     AnalyzerDecodeSettings, CaptureBackend, CaptureMetadata, CaptureProgress, CaptureSettings,
-    CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DeviceInfo, DeviceKind,
-    DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend, HardwareCaptureCapabilities,
-    PwmConfiguration, PwmSettings, PxUsbSpeed, SaleaeNativeDecoder, SigrokDecoderCatalog,
-    SigrokNativeDecoder, SparseCaptureData,
+    CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DemoAnalyzerSettings, DeviceInfo,
+    DeviceKind, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
+    HardwareCaptureCapabilities, PwmConfiguration, PwmSettings, PxUsbSpeed, SaleaeNativeDecoder,
+    SigrokDecoderCatalog, SigrokNativeDecoder, SparseCaptureData,
 };
 use pxlogic_graph::{
     CaptureMemoryUsage, DigitalPointMeasurement, GraphFrameRequest, GraphFrameResponse,
@@ -361,7 +361,7 @@ async fn start_capture(
     state: State<'_, AppState>,
     session_id: String,
     settings: CaptureSettings,
-    demo_analyzers: Option<Vec<AnalyzerDecodeSettings>>,
+    demo_analyzers: Option<Vec<DemoAnalyzerSettings>>,
 ) -> CommandResult<CaptureSummary> {
     state.cancel.store(false, Ordering::Release);
     let cancel = state.cancel.clone();

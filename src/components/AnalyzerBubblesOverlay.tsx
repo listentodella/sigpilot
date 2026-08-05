@@ -1,4 +1,4 @@
-import { CSSProperties, MouseEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AnalyzerBubble, AnalyzerTrackWindow, WaveformTile } from "../lib/api";
 import { analyzerBubbleLayout } from "../lib/analyzerBubbleLayout";
 import {
@@ -12,7 +12,11 @@ import {
 } from "../lib/analyzers";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
-import { visibleAnalyzerMarkerSamples } from "../lib/analyzerMarkers";
+import {
+  visibleAnalyzerMarkerSamples,
+  visibleAnalyzerProtocolMarkers,
+} from "../lib/analyzerMarkers";
+import { traceAnalyzerPerformance } from "../lib/analyzerPerformance";
 
 const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
@@ -50,6 +54,7 @@ interface AnalyzerBubblesOverlayProps {
   tile: WaveformTile | null;
   viewportSamples: number;
   viewportStart: number;
+  viewportInteracting: boolean;
   visibleChannelIndexes: number[];
   onGoToFrame: (analyzerId: string, frameIndex: number) => void;
   onOpenTableFrame: (analyzerId: string, frameIndex: number) => void;
@@ -64,6 +69,7 @@ export function AnalyzerBubblesOverlay({
   tile,
   viewportSamples,
   viewportStart,
+  viewportInteracting,
   visibleChannelIndexes,
   onGoToFrame,
   onOpenTableFrame,
@@ -146,37 +152,50 @@ export function AnalyzerBubblesOverlay({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [bubbleTracks, hoveredTrackKey]);
 
-  useLayoutEffect(() => {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    const width = Math.max(1, overlay.clientWidth);
-    const samples = Math.max(1, viewportSamples);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const started = performance.now();
+      const overlay = overlayRef.current;
+      if (!overlay) return;
+      const width = Math.max(1, overlay.clientWidth);
+      const samples = Math.max(1, viewportSamples);
 
-    bubbleElementsRef.current.forEach(({ endSample, element, labels, multi, resultCount, startSample, textElement }) => {
-      const layout = analyzerBubbleLayout(startSample, endSample, viewportStart, samples, width);
-      const { overflowLeft, overflowRight, visible } = layout;
-      const display = visible ? "flex" : "none";
-      if (element.style.display !== display) element.style.display = display;
-      if (!visible) return;
-      const bubbleWidth = layout.widthPx;
-      const transform = `translate3d(${layout.leftPx}px, 0, 0)`;
-      const widthStyle = `${bubbleWidth}px`;
-      if (element.style.transform !== transform) element.style.transform = transform;
-      if (element.style.width !== widthStyle) element.style.width = widthStyle;
-      element.classList.toggle("overflowLeft", overflowLeft);
-      element.classList.toggle("overflowRight", overflowRight);
+      bubbleElementsRef.current.forEach(({ endSample, element, labels, multi, resultCount, startSample, textElement }) => {
+        const layout = analyzerBubbleLayout(startSample, endSample, viewportStart, samples, width);
+        const { overflowLeft, overflowRight, visible } = layout;
+        const display = visible ? "flex" : "none";
+        if (element.style.display !== display) element.style.display = display;
+        if (!visible) return;
+        const bubbleWidth = layout.widthPx;
+        const transform = `translate3d(${layout.leftPx}px, 0, 0)`;
+        const widthStyle = `${bubbleWidth}px`;
+        if (element.style.transform !== transform) element.style.transform = transform;
+        if (element.style.width !== widthStyle) element.style.width = widthStyle;
+        element.classList.toggle("overflowLeft", overflowLeft);
+        element.classList.toggle("overflowRight", overflowRight);
 
-      const arrowWidth =
-        (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
-        (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
-      const nextText = multi
-        ? multiBubbleTextFromValues(labels, resultCount, bubbleWidth - 28)
-        : bestFrameText(labels, bubbleWidth - arrowWidth - 6);
-      if (textElement && textElement.textContent !== nextText) textElement.textContent = nextText;
+        if (!viewportInteracting) {
+          const arrowWidth =
+            (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
+            (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
+          const nextText = multi
+            ? multiBubbleTextFromValues(labels, resultCount, bubbleWidth - 28)
+            : bestFrameText(labels, bubbleWidth - arrowWidth - 6);
+          if (textElement && textElement.textContent !== nextText) textElement.textContent = nextText;
+        }
+      });
+      traceAnalyzerPerformance(
+        "bubble_dom_update",
+        started,
+        `elements=${bubbleElementsRef.current.size} interacting=${viewportInteracting}`,
+      );
     });
-  }, [overlayWidth, viewportSamples, viewportStart, bubbleTracks]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [overlayWidth, viewportSamples, viewportStart, viewportInteracting, bubbleTracks]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+    const started = performance.now();
     const overlay = overlayRef.current;
     const canvas = overlay?.querySelector<HTMLCanvasElement>(".analyzerMarkersCanvas");
     if (!overlay || !canvas) return;
@@ -205,7 +224,15 @@ export function AnalyzerBubblesOverlay({
 
     const viewStart = viewportStart;
     const viewEnd = viewportStart + Math.max(1, viewportSamples);
+    const nativeMarkerChannels = new Set(
+      analyzers.flatMap((analyzer) =>
+        analyzer.renderedTracks
+          .filter((track) => (track.protocol_markers?.length ?? 0) > 0)
+          .map((track) => `${analyzer.id}:${track.channel}`),
+      ),
+    );
     markerTracks.forEach((track) => {
+      if (nativeMarkerChannels.has(`${track.analyzer.id}:${track.role.channel}`)) return;
       const rowIndex = visibleChannelIndexes.indexOf(track.role.channel);
       if (rowIndex < 0) return;
       const channel = tileChannels.get(track.role.channel);
@@ -228,8 +255,56 @@ export function AnalyzerBubblesOverlay({
         drawAnalyzerMarker(context, left, centerY, track.edgeType);
       }
     });
+    analyzers.forEach((analyzer) => {
+      analyzer.renderedTracks.forEach((track) => {
+        const markers = track.protocol_markers ?? [];
+        if (markers.length === 0) return;
+        const rowIndex = visibleChannelIndexes.indexOf(track.channel);
+        if (rowIndex < 0) return;
+        const channel = tileChannels.get(track.channel);
+        const allEdgeSamples = channel
+          ? [...channel.rising_edges, ...channel.falling_edges].sort((left, right) => left - right)
+          : [];
+        const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
+        const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
+        const centerY = rowTops[rowIndex] + inset + trackHeight / 2;
+        for (const marker of visibleAnalyzerProtocolMarkers(
+          markers,
+          viewStart,
+          viewEnd - viewStart,
+          width,
+        )) {
+          const edgeSamples = protocolMarkerEdgeSamples(
+            analyzer,
+            marker.kind,
+            channel,
+            allEdgeSamples,
+          );
+          const sample = snapProtocolMarkerToEdge(
+            marker.kind,
+            marker.sample,
+            edgeSamples,
+          );
+          const left = crispAnalyzerMarkerX(
+            ((sample - viewStart) / Math.max(1, viewportSamples)) * width,
+          );
+          drawProtocolMarker(
+            context,
+            left,
+            centerY,
+            marker.kind,
+            saleaeLegacyChannelColor(track.channel),
+          );
+        }
+      });
+    });
     context.restore();
+    traceAnalyzerPerformance("marker_canvas_update", started);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [
+    bubbleTracks,
+    analyzers,
     markerTracks,
     overlayWidth,
     rowHeights,
@@ -441,6 +516,154 @@ function drawAnalyzerMarker(
   context.closePath();
   context.fill();
   context.stroke();
+}
+
+function drawProtocolMarker(
+  context: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  kind: import("../lib/api").AnalyzerProtocolMarker["kind"],
+  channelColor: string,
+) {
+  context.save();
+  context.shadowColor = "rgba(0, 0, 0, 0.5)";
+  context.shadowBlur = 1;
+  context.fillStyle =
+    kind === "start"
+      ? "#00A86B"
+      : kind === "stop"
+        ? "#FF8A00"
+        : kind.startsWith("error_")
+          ? "#E34850"
+          : channelColor;
+  context.strokeStyle = context.fillStyle;
+  context.lineWidth = 1.25;
+  context.beginPath();
+  if (kind === "start") {
+    context.arc(centerX, centerY, 3.5, 0, Math.PI * 2);
+    context.fill();
+  } else if (kind === "dot" || kind === "error_dot") {
+    context.arc(centerX, centerY, 2, 0, Math.PI * 2);
+    context.fill();
+  } else if (kind === "stop" || kind === "square" || kind === "error_square") {
+    const side = kind === "stop" ? 7 : 5;
+    context.rect(centerX - side / 2, centerY - side / 2, side, side);
+    context.fill();
+  } else if (kind === "up_arrow" || kind === "down_arrow") {
+    const rising = kind === "up_arrow";
+    context.moveTo(centerX - 4.5, centerY + (rising ? 3 : -3));
+    context.lineTo(centerX, centerY + (rising ? -3 : 3));
+    context.lineTo(centerX + 4.5, centerY + (rising ? 3 : -3));
+    context.closePath();
+    context.fill();
+  } else if (kind === "one" || kind === "zero") {
+    drawRoundedRect(context, centerX - 6.5, centerY - 6.5, 13, 13, 2);
+    context.fillStyle = "#131316";
+    context.fill();
+    context.stroke();
+    context.fillStyle = channelColor;
+    context.font = "600 9px Roboto, system-ui, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(kind === "one" ? "1" : "0", centerX, centerY);
+  } else {
+    context.moveTo(centerX - 3, centerY - 3);
+    context.lineTo(centerX + 3, centerY + 3);
+    context.moveTo(centerX + 3, centerY - 3);
+    context.lineTo(centerX - 3, centerY + 3);
+    context.stroke();
+  }
+  context.restore();
+}
+
+function snapProtocolMarkerToEdge(
+  kind: import("../lib/api").AnalyzerProtocolMarker["kind"],
+  sample: number,
+  edgeSamples: number[],
+) {
+  if (
+    edgeSamples.length === 0 ||
+    !["one", "zero", "up_arrow", "down_arrow"].includes(kind)
+  ) {
+    return sample;
+  }
+  const nearest = nearestSortedSample(edgeSamples, sample);
+  if (nearest === null) return sample;
+  // These markers are emitted by the analyzer at a protocol sampling edge.
+  // Keep them attached even when the sidecar's integer sample and the graph
+  // tile differ by a few samples at very high zoom.
+  return nearest;
+}
+
+function protocolMarkerEdgeSamples(
+  analyzer: UiAnalyzerInstance,
+  kind: import("../lib/api").AnalyzerProtocolMarker["kind"],
+  channel: WaveformTile["channels"][number] | undefined,
+  allEdgeSamples: number[],
+) {
+  if (!channel) return [];
+  const decoderId = analyzer.nativeDecoderId.toLowerCase();
+  const analyzerType = analyzer.type.toLowerCase();
+  if (
+    (kind === "one" || kind === "zero") &&
+    (decoderId === "swd" || analyzerType === "swd")
+  ) {
+    return allEdgeSamples;
+  }
+  if (kind === "up_arrow" || kind === "down_arrow") {
+    const clockProtocol =
+      decoderId === "spi" ||
+      decoderId === "i2s" ||
+      decoderId === "smbus" ||
+      analyzerType === "spi" ||
+      analyzerType === "i2s" ||
+      analyzerType === "smbus";
+    if (!clockProtocol) return [];
+    return kind === "up_arrow" ? channel.rising_edges : channel.falling_edges;
+  }
+  return [];
+}
+
+function nearestSortedSample(samples: number[], target: number) {
+  let low = 0;
+  let high = samples.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (samples[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  const right = samples[low] ?? null;
+  const left = low > 0 ? samples[low - 1] : null;
+  if (left === null) return right;
+  if (right === null) return left;
+  return Math.abs(left - target) <= Math.abs(right - target) ? left : right;
+}
+
+function crispAnalyzerMarkerX(value: number) {
+  return Math.round(value) + 0.5;
+}
+
+function drawRoundedRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const right = x + width;
+  const bottom = y + height;
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.lineTo(right - radius, y);
+  context.quadraticCurveTo(right, y, right, y + radius);
+  context.lineTo(right, bottom - radius);
+  context.quadraticCurveTo(right, bottom, right - radius, bottom);
+  context.lineTo(x + radius, bottom);
+  context.quadraticCurveTo(x, bottom, x, bottom - radius);
+  context.lineTo(x, y + radius);
+  context.quadraticCurveTo(x, y, x + radius, y);
+  context.closePath();
 }
 
 function analyzerMarkerEdgeType(analyzer: UiAnalyzerInstance): "rising" | "falling" {

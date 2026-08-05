@@ -780,6 +780,46 @@ typedef struct {
     sparse_channel *channels;
 } sparse_input;
 
+static uint64_t *decode_delta_varint_base64(const char *encoded, uint64_t sample_count,
+                                             size_t *transition_count)
+{
+    gsize byte_count = 0;
+    guchar *bytes = g_base64_decode(encoded ? encoded : "", &byte_count);
+    if (!bytes && byte_count)
+        fatal("invalid base64 sparse edge payload");
+    uint64_t *transitions = byte_count ? calloc((size_t)byte_count, sizeof(*transitions)) : NULL;
+    if (byte_count && !transitions)
+        fatal("out of memory while decoding sparse edge payload");
+
+    size_t count = 0;
+    uint64_t sample = 0;
+    uint64_t delta = 0;
+    unsigned shift = 0;
+    for (gsize index = 0; index < byte_count; index++) {
+        uint8_t byte = bytes[index];
+        if (shift >= 64 || (shift == 63 && (byte & 0x7e)))
+            fatal("sparse edge delta varint overflow");
+        delta |= (uint64_t)(byte & 0x7f) << shift;
+        if (byte & 0x80) {
+            shift += 7;
+            continue;
+        }
+        if (!delta || sample > UINT64_MAX - delta)
+            fatal("invalid sparse edge delta sequence");
+        sample += delta;
+        if (sample >= sample_count)
+            fatal("sparse transition is outside the capture");
+        transitions[count++] = sample;
+        delta = 0;
+        shift = 0;
+    }
+    if (shift)
+        fatal("truncated sparse edge delta varint");
+    g_free(bytes);
+    *transition_count = count;
+    return transitions;
+}
+
 static sparse_input build_sparse_input(cJSON *request, int channel_count, uint64_t sample_count)
 {
     cJSON *initial_levels = cJSON_GetObjectItem(request, "initial_levels");
@@ -805,9 +845,19 @@ static sparse_input build_sparse_input(cJSON *request, int channel_count, uint64
         cJSON *edge_set = cJSON_GetArrayItem(edges, set_index);
         int channel = json_int(edge_set, "channel", -1);
         cJSON *samples = cJSON_GetObjectItem(edge_set, "samples");
-        if (channel < 0 || channel >= channel_count || !cJSON_IsArray(samples) ||
-            input.channels[channel].transitions)
+        const char *encoding = json_string(edge_set, "encoding", "");
+        cJSON *samples_b64 = cJSON_GetObjectItem(edge_set, "samples_b64");
+        gboolean compact = strcmp(encoding, "delta_varint_base64") == 0;
+        if (channel < 0 || channel >= channel_count ||
+            (!compact && !cJSON_IsArray(samples)) ||
+            (compact && !cJSON_IsString(samples_b64)) || input.channels[channel].transitions)
             fatal("invalid or duplicate sparse edge channel");
+        if (compact) {
+            input.channels[channel].transitions = decode_delta_varint_base64(
+                samples_b64->valuestring, sample_count,
+                &input.channels[channel].transition_count);
+            continue;
+        }
         int edge_count = cJSON_GetArraySize(samples);
         if (edge_count > 0) {
             input.channels[channel].transitions = calloc((size_t)edge_count, sizeof(uint64_t));
@@ -2220,6 +2270,8 @@ static cJSON *probe(const char *decoder_root, const char *python_decoder_root, i
     cJSON_AddStringToObject(root, "decoder_name", "PXView native C decoder pack");
     cJSON_AddStringToObject(root, "decoder_id", "uart_c,i2c_c,spi_c,i2s_c,can_c,can_fd_c,lin_c,parallel_c");
     cJSON_AddNumberToObject(root, "api_version", SRD_C_DECODER_API_VERSION);
+    cJSON *edge_encodings = add_array(root, "edge_encodings");
+    cJSON_AddItemToArray(edge_encodings, cJSON_CreateString("delta_varint_base64"));
     add_optional_string(root, "decoder_root", decoder_root);
     add_optional_string(root, "python_decoder_root", python_decoder_root);
     cJSON_AddBoolToObject(root, "catalog_included", include_catalog);

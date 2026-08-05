@@ -4,6 +4,8 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    thread,
+    time::Instant,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -12,7 +14,8 @@ use pxlogic_core::{
     resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData, CaptureMetadata,
     CaptureTriggerMetadata, DecodedChannelValue, DecodedFrame, DecoderBackend, DecoderBackendKind,
     I2cDecodeSettings, SaleaeNativeDecoder, SigrokNativeDecoder, SparseCaptureData,
-    SparseDigitalChannel, SpiDecodeSettings, UartDecodeSettings,
+    SparseCaptureView, SparseDigitalChannel, SparseDigitalChannelView, SpiDecodeSettings,
+    UartDecodeSettings,
 };
 use pxlogic_waveform::{ChannelTile, DigitalSegment, WaveformBin, WaveformRequest, WaveformTile};
 use serde::{Deserialize, Serialize};
@@ -36,6 +39,21 @@ const NATIVE_FIT_MAX_CHUNKS: usize = 16;
 const NATIVE_FIT_EDGES_PER_CHUNK: usize = 1_024;
 const NATIVE_CONTEXT_EDGES: usize = 256;
 const MAX_ANALYZER_WINDOW_CACHE_ENTRIES: usize = 64;
+const MAX_PARALLEL_ANALYZER_RENDERS: usize = 4;
+
+fn trace_graph_timing(stage: &str, started: Instant, detail: &str) {
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    tracing::debug!(
+        target: "pxlogic::decoder_performance",
+        component = "graph",
+        stage,
+        elapsed_ms,
+        detail
+    );
+    if std::env::var_os("PXLOGIC_DECODER_TIMING").is_some() {
+        eprintln!("[pxlogic-graph] stage={stage} elapsed_ms={elapsed_ms:.3} {detail}");
+    }
+}
 
 pub type Result<T> = std::result::Result<T, GraphError>;
 
@@ -105,9 +123,33 @@ pub struct AnalyzerTrackWindow {
     pub channel: u8,
     pub role: String,
     pub bubbles: Vec<AnalyzerBubble>,
+    pub protocol_markers: Vec<AnalyzerProtocolMarker>,
     pub frames: Vec<DecodedFrame>,
     pub previous_frame: Option<DecodedFrame>,
     pub next_frame: Option<DecodedFrame>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyzerProtocolMarker {
+    pub sample: u64,
+    pub kind: AnalyzerProtocolMarkerKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalyzerProtocolMarkerKind {
+    Dot,
+    ErrorDot,
+    Square,
+    ErrorSquare,
+    UpArrow,
+    DownArrow,
+    X,
+    ErrorX,
+    Start,
+    Stop,
+    One,
+    Zero,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,6 +297,22 @@ impl DigitalGraph {
             index.edges.clone_from(&sparse_channel.transitions);
         }
         Ok(graph)
+    }
+
+    fn sparse_view(&self) -> SparseCaptureView<'_> {
+        SparseCaptureView {
+            metadata: &self.metadata,
+            channels: self
+                .channels
+                .iter()
+                .enumerate()
+                .map(|(channel, index)| SparseDigitalChannelView {
+                    channel: channel as u8,
+                    initial_high: index.initial_high,
+                    transitions: &index.edges,
+                })
+                .collect(),
+        }
     }
 
     fn trim(&mut self, start: u64, end: u64) -> Result<()> {
@@ -679,9 +737,11 @@ impl DigitalGraph {
                     channel_values: vec![DecodedChannelValue {
                         channel: settings.channel,
                         role: "Input".to_string(),
-                        label,
+                        label: label.clone(),
+                        texts: vec![label],
                         value: u64::from(value),
                     }],
+                    protocol_markers: Vec::new(),
                 });
                 let skip_until = sample + (bit_period * 9.0).floor() as u64;
                 edge_index = channel.edges.partition_point(|edge| *edge < skip_until);
@@ -800,9 +860,11 @@ impl DigitalGraph {
                         channel_values: vec![DecodedChannelValue {
                             channel: settings.sda_channel,
                             role: "SDA".to_string(),
-                            label: bubble_label,
+                            label: bubble_label.clone(),
+                            texts: vec![bubble_label],
                             value: u64::from(byte),
                         }],
+                        protocol_markers: Vec::new(),
                     });
                     byte = 0;
                     bit_count = 0;
@@ -929,6 +991,7 @@ impl DigitalGraph {
                         channel,
                         role: "MOSI".to_string(),
                         label: label_for_value(mosi_value, settings.bits_per_transfer),
+                        texts: vec![label_for_value(mosi_value, settings.bits_per_transfer)],
                         value: mosi_value,
                     });
                 }
@@ -937,6 +1000,7 @@ impl DigitalGraph {
                         channel,
                         role: "MISO".to_string(),
                         label: label_for_value(miso_value, settings.bits_per_transfer),
+                        texts: vec![label_for_value(miso_value, settings.bits_per_transfer)],
                         value: miso_value,
                     });
                 }
@@ -964,6 +1028,7 @@ impl DigitalGraph {
                     label,
                     value: settings.mosi_channel.map_or(miso_value, |_| mosi_value),
                     channel_values,
+                    protocol_markers: Vec::new(),
                 });
                 bit_count = 0;
                 mosi_value = 0;
@@ -1375,33 +1440,49 @@ impl GraphSession {
             }
         }
 
+        let decode_indexed = |decoder: &dyn DecoderBackend| {
+            if packed_capture.is_some() {
+                let graph = self.graph.read();
+                let capture = graph
+                    .as_ref()
+                    .ok_or_else(|| {
+                        pxlogic_core::CoreError::Decode("capture graph is empty".to_string())
+                    })?
+                    .sparse_view();
+                decoder.decode_sparse_view(&capture, settings)
+            } else if let Some(capture) = &sparse_capture {
+                decoder.decode_sparse(capture.as_ref(), settings)
+            } else {
+                unreachable!();
+            }
+        };
+        let decode_started = Instant::now();
         let output = match backend {
             DecoderBackendKind::SaleaeNative => {
                 let decoder = SaleaeNativeDecoder::from_env()
                     .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
-                if let Some(capture) = &packed_capture {
-                    decoder.decode(capture.as_ref(), settings)
-                } else if let Some(capture) = &sparse_capture {
-                    decoder.decode_sparse(capture.as_ref(), settings)
-                } else {
-                    unreachable!();
-                }
+                decode_indexed(&decoder)
             }
             DecoderBackendKind::SigrokNative => {
                 let decoder = SigrokNativeDecoder::from_env()
                     .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
-                if let Some(capture) = &packed_capture {
-                    decoder.decode(capture.as_ref(), settings)
-                } else if let Some(capture) = &sparse_capture {
-                    decoder.decode_sparse(capture.as_ref(), settings)
-                } else {
-                    unreachable!();
-                }
+                decode_indexed(&decoder)
             }
             DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust => unreachable!(),
         }
         .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        trace_graph_timing(
+            "backend_decode",
+            decode_started,
+            &format!("backend={backend:?} output_frames={}", output.frames.len()),
+        );
+        let conversion_started = Instant::now();
         let frames = Arc::new(output.into_decoded_frames());
+        trace_graph_timing(
+            "frame_conversion",
+            conversion_started,
+            &format!("backend={backend:?} frames={}", frames.len()),
+        );
         self.analyzer_cache.lock().insert(
             key,
             AnalyzerCacheEntry {
@@ -1435,30 +1516,43 @@ impl GraphSession {
     }
 
     pub fn render_frame(&self, request: &GraphFrameRequest) -> Result<GraphFrameResponse> {
+        let total_started = Instant::now();
+        let tile_started = Instant::now();
         let tile = self
             .graph
             .read()
             .as_ref()
             .ok_or(GraphError::EmptyGraph)?
             .build_tile(&request.waveform)?;
-        let analyzers = request
-            .analyzers
-            .iter()
-            .map(|analyzer| {
-                self.render_analyzer(
-                    analyzer,
-                    request.analyzer_view.as_ref().unwrap_or(&request.waveform),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
+        trace_graph_timing(
+            "waveform_tile",
+            tile_started,
+            &format!("channels={}", tile.channels.len()),
+        );
+        let analyzers_started = Instant::now();
+        let analyzers = self.render_analyzers(
+            &request.analyzers,
+            request.analyzer_view.as_ref().unwrap_or(&request.waveform),
+        )?;
+        trace_graph_timing(
+            "analyzer_render",
+            analyzers_started,
+            &format!("analyzers={}", analyzers.len()),
+        );
 
-        Ok(GraphFrameResponse {
+        let response = GraphFrameResponse {
             frame_id: request.frame_id,
             revision: self.revision(),
             sample_count: self.sample_count(),
             tile,
             analyzers,
-        })
+        };
+        trace_graph_timing(
+            "graph_frame_total",
+            total_started,
+            &format!("frame_id={}", request.frame_id),
+        );
+        Ok(response)
     }
 
     fn render_analyzer(
@@ -1466,17 +1560,103 @@ impl GraphSession {
         request: &AnalyzerRenderRequest,
         waveform: &WaveformRequest,
     ) -> Result<AnalyzerRenderResult> {
+        let decode_started = Instant::now();
         let frames =
             self.decode_frames_with_backend_for_view(&request.settings, request.backend, waveform)?;
+        trace_graph_timing(
+            "analyzer_frames",
+            decode_started,
+            &format!(
+                "analyzer={} backend={:?} frames={}",
+                request.analyzer_id,
+                request.backend,
+                frames.len()
+            ),
+        );
+        let aggregate_started = Instant::now();
         let tracks = request
             .tracks
             .iter()
             .map(|track| render_analyzer_track(&frames, track, waveform))
-            .collect();
+            .collect::<Vec<_>>();
+        trace_graph_timing(
+            "bubble_aggregation",
+            aggregate_started,
+            &format!("analyzer={} tracks={}", request.analyzer_id, tracks.len()),
+        );
         Ok(AnalyzerRenderResult {
             analyzer_id: request.analyzer_id.clone(),
             tracks,
         })
+    }
+
+    fn render_analyzers(
+        &self,
+        requests: &[AnalyzerRenderRequest],
+        waveform: &WaveformRequest,
+    ) -> Result<Vec<AnalyzerRenderResult>> {
+        if requests.len() <= 1 {
+            return requests
+                .iter()
+                .map(|request| self.render_analyzer(request, waveform))
+                .collect();
+        }
+
+        let worker_count = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(2)
+            .min(MAX_PARALLEL_ANALYZER_RENDERS)
+            .min(requests.len());
+        if worker_count <= 1 {
+            return requests
+                .iter()
+                .map(|request| self.render_analyzer(request, waveform))
+                .collect();
+        }
+
+        let chunk_size = requests.len().div_ceil(worker_count);
+        let mut indexed_results: Vec<(usize, AnalyzerRenderResult)> =
+            Vec::with_capacity(requests.len());
+        let mut first_error = None;
+        thread::scope(|scope| {
+            let mut workers = Vec::with_capacity(worker_count);
+            for (chunk_index, chunk) in requests.chunks(chunk_size).enumerate() {
+                let start_index = chunk_index * chunk_size;
+                workers.push(scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .map(|(index, request)| {
+                            self.render_analyzer(request, waveform)
+                                .map(|result| (start_index + index, result))
+                        })
+                        .collect::<Result<Vec<_>>>()
+                }));
+            }
+
+            for worker in workers {
+                match worker.join() {
+                    Ok(Ok(mut results)) => indexed_results.append(&mut results),
+                    Ok(Err(error)) => {
+                        first_error.get_or_insert(error);
+                    }
+                    Err(_) => {
+                        first_error.get_or_insert(GraphError::DecoderBackend(
+                            "analyzer render worker panicked".to_string(),
+                        ));
+                    }
+                }
+            }
+        });
+
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        indexed_results.sort_by_key(|(index, _)| *index);
+        Ok(indexed_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect())
     }
 
     fn decode_sparse_frames_for_view(
@@ -1517,11 +1697,12 @@ impl GraphSession {
             let window_capture = slice_sparse_capture(capture, start, end)?;
             match decoder.decode_sparse(&window_capture, settings) {
                 Ok(output) => {
-                    frames.extend(output.into_decoded_frames().into_iter().map(|mut frame| {
-                        frame.start_sample = frame.start_sample.saturating_add(start);
-                        frame.end_sample = frame.end_sample.saturating_add(start);
-                        frame
-                    }));
+                    frames.extend(
+                        output
+                            .into_decoded_frames()
+                            .into_iter()
+                            .map(|frame| offset_decoded_frame_samples(frame, start)),
+                    );
                 }
                 Err(error) => {
                     first_error.get_or_insert_with(|| error.to_string());
@@ -1570,6 +1751,15 @@ impl GraphSession {
     fn bump_revision(&self) {
         self.revision.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn offset_decoded_frame_samples(mut frame: DecodedFrame, offset: u64) -> DecodedFrame {
+    frame.start_sample = frame.start_sample.saturating_add(offset);
+    frame.end_sample = frame.end_sample.saturating_add(offset);
+    for marker in &mut frame.protocol_markers {
+        marker.sample = marker.sample.saturating_add(offset);
+    }
+    frame
 }
 
 fn trimmed_metadata(metadata: &CaptureMetadata, start: u64, end: u64) -> Result<CaptureMetadata> {
@@ -2134,15 +2324,76 @@ fn render_analyzer_track(
     };
     let next_frame =
         (next_start..frames.len()).find_map(|index| frame_for_track(&frames[index], track));
+    let protocol_markers = protocol_markers_for_track(frames, track, begin, finish);
 
     AnalyzerTrackWindow {
         channel: track.channel,
         role: track.role.clone(),
         bubbles,
+        protocol_markers,
         frames: visible_frames,
         previous_frame,
         next_frame,
     }
+}
+
+fn protocol_markers_for_track(
+    frames: &[DecodedFrame],
+    track: &AnalyzerTrackRequest,
+    begin: usize,
+    end: usize,
+) -> Vec<AnalyzerProtocolMarker> {
+    let mut markers = Vec::new();
+    for frame in &frames[begin..end] {
+        for marker in &frame.protocol_markers {
+            if marker.channel != Some(track.channel) {
+                continue;
+            }
+            let kind = match marker.kind.as_str() {
+                "dot" => AnalyzerProtocolMarkerKind::Dot,
+                "error_dot" => AnalyzerProtocolMarkerKind::ErrorDot,
+                "square" => AnalyzerProtocolMarkerKind::Square,
+                "error_square" => AnalyzerProtocolMarkerKind::ErrorSquare,
+                "up_arrow" => AnalyzerProtocolMarkerKind::UpArrow,
+                "down_arrow" => AnalyzerProtocolMarkerKind::DownArrow,
+                "x" => AnalyzerProtocolMarkerKind::X,
+                "error_x" => AnalyzerProtocolMarkerKind::ErrorX,
+                "start" => AnalyzerProtocolMarkerKind::Start,
+                "stop" => AnalyzerProtocolMarkerKind::Stop,
+                "one" => AnalyzerProtocolMarkerKind::One,
+                "zero" => AnalyzerProtocolMarkerKind::Zero,
+                _ => continue,
+            };
+            markers.push(AnalyzerProtocolMarker {
+                sample: marker.sample,
+                kind,
+            });
+        }
+    }
+    if markers.is_empty() && track.role.eq_ignore_ascii_case("sda") {
+        for frame in &frames[begin..end] {
+            let kind = if frame.frame_type.eq_ignore_ascii_case("start") {
+                AnalyzerProtocolMarkerKind::Start
+            } else if frame.frame_type.eq_ignore_ascii_case("stop") {
+                AnalyzerProtocolMarkerKind::Stop
+            } else {
+                continue;
+            };
+            markers.push(AnalyzerProtocolMarker {
+                sample: frame.start_sample,
+                kind,
+            });
+        }
+    }
+    markers.sort_by_key(|marker| marker.sample);
+    markers.dedup();
+    if markers.len() > MAX_ANALYZER_MARKER_RESULTS {
+        let last = markers.len() - 1;
+        markers = (0..MAX_ANALYZER_MARKER_RESULTS)
+            .map(|index| markers[index * last / (MAX_ANALYZER_MARKER_RESULTS - 1)])
+            .collect();
+    }
+    markers
 }
 
 fn build_pixel_bubbles(
@@ -2198,7 +2449,11 @@ fn build_pixel_bubbles(
                     },
                     start_sample: frame.start_sample,
                     end_sample: frame.end_sample,
-                    display_text: vec![frame.label.to_string()],
+                    display_text: if frame.texts.is_empty() {
+                        vec![frame.label.to_string()]
+                    } else {
+                        frame.texts.to_vec()
+                    },
                     result_count: 1,
                 },
                 last_frame_end_sample: frame.end_sample,
@@ -2297,6 +2552,7 @@ struct DisplayFrame<'a> {
     start_sample: u64,
     end_sample: u64,
     label: &'a str,
+    texts: &'a [String],
 }
 
 fn display_frame_for_track<'a>(
@@ -2309,6 +2565,7 @@ fn display_frame_for_track<'a>(
         start_sample: frame.start_sample,
         end_sample: frame.end_sample,
         label,
+        texts: &channel_value_for_track(frame, track)?.texts,
     })
 }
 
@@ -2861,8 +3118,10 @@ mod tests {
                     channel: 0,
                     role: "Input".to_string(),
                     label: format!("0x{:02X}", frame_id & 0xff),
+                    texts: vec![format!("0x{:02X}", frame_id & 0xff)],
                     value: frame_id & 0xff,
                 }],
+                protocol_markers: Vec::new(),
             })
             .collect::<Vec<_>>();
         let window = render_analyzer_track(
@@ -3026,6 +3285,61 @@ mod tests {
             },
         );
         assert!(!track.bubbles.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_i2c_and_spi_decode_in_parallel_through_shared_edge_index() {
+        let capture = demo_capture(16, 2_500_000);
+        let sample_count = capture.metadata.sample_count;
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let response = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 1,
+                waveform: WaveformRequest {
+                    start_sample: 0,
+                    sample_count,
+                    pixels: 1_200,
+                    channels: vec![1, 2, 3, 4, 5, 6],
+                },
+                analyzer_view: None,
+                analyzers: vec![
+                    AnalyzerRenderRequest {
+                        analyzer_id: "i2c".to_string(),
+                        backend: DecoderBackendKind::SaleaeNative,
+                        settings: AnalyzerDecodeSettings::I2c(I2cDecodeSettings {
+                            sda_channel: 1,
+                            scl_channel: 2,
+                        }),
+                        tracks: vec![AnalyzerTrackRequest {
+                            channel: 1,
+                            role: "SDA".to_string(),
+                        }],
+                    },
+                    AnalyzerRenderRequest {
+                        analyzer_id: "spi".to_string(),
+                        backend: DecoderBackendKind::SaleaeNative,
+                        settings: AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+                            mosi_channel: Some(3),
+                            miso_channel: Some(4),
+                            clock_channel: 5,
+                            enable_channel: Some(6),
+                            ..SpiDecodeSettings::default()
+                        }),
+                        tracks: vec![AnalyzerTrackRequest {
+                            channel: 3,
+                            role: "MOSI".to_string(),
+                        }],
+                    },
+                ],
+            })
+            .unwrap();
+        assert_eq!(response.analyzers.len(), 2);
+        assert!(response.analyzers.iter().all(|analyzer| analyzer
+            .tracks
+            .iter()
+            .any(|track| !track.bubbles.is_empty())));
     }
 
     #[test]
@@ -3206,6 +3520,224 @@ mod tests {
             .build_tile(&request)
             .unwrap();
         assert_eq!(sparse_tile.channels[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn i2c_start_and_stop_frames_render_as_sda_protocol_markers() {
+        let frame = |frame_id, sample, frame_type: &str, channel_values| DecodedFrame {
+            frame_id,
+            start_sample: sample,
+            end_sample: sample + 1,
+            frame_type: frame_type.to_string(),
+            label: frame_type.to_string(),
+            value: 0,
+            channel_values,
+            protocol_markers: Vec::new(),
+        };
+        let frames = vec![
+            frame(0, 100, "start", Vec::new()),
+            frame(
+                1,
+                120,
+                "address",
+                vec![DecodedChannelValue {
+                    channel: 2,
+                    role: "SDA".to_string(),
+                    label: "W[0x20]".to_string(),
+                    texts: vec!["W[0x20]".to_string()],
+                    value: 0x20,
+                }],
+            ),
+            frame(2, 300, "stop", Vec::new()),
+        ];
+        let track = render_analyzer_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 2,
+                role: "SDA".to_string(),
+            },
+            &WaveformRequest {
+                start_sample: 0,
+                sample_count: 400,
+                pixels: 800,
+                channels: vec![2],
+            },
+        );
+
+        assert_eq!(
+            track.protocol_markers,
+            vec![
+                AnalyzerProtocolMarker {
+                    sample: 100,
+                    kind: AnalyzerProtocolMarkerKind::Start,
+                },
+                AnalyzerProtocolMarker {
+                    sample: 300,
+                    kind: AnalyzerProtocolMarkerKind::Stop,
+                },
+            ]
+        );
+        assert_eq!(track.bubbles.len(), 1);
+    }
+
+    #[test]
+    fn dense_protocol_markers_are_bounded_and_preserve_endpoints() {
+        let frames = vec![DecodedFrame {
+            frame_id: 0,
+            start_sample: 0,
+            end_sample: 2_000,
+            frame_type: "marker".to_string(),
+            label: "marker".to_string(),
+            value: 0,
+            channel_values: Vec::new(),
+            protocol_markers: (1..=1_000)
+                .map(|sample| pxlogic_core::DecodedProtocolMarker {
+                    channel: Some(0),
+                    sample,
+                    kind: "dot".to_string(),
+                })
+                .collect(),
+        }];
+        let markers = protocol_markers_for_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 0,
+                role: "Data".to_string(),
+            },
+            0,
+            1,
+        );
+        assert_eq!(markers.len(), MAX_ANALYZER_MARKER_RESULTS);
+        assert_eq!(markers.first().unwrap().sample, 1);
+        assert_eq!(markers.last().unwrap().sample, 1_000);
+    }
+
+    #[test]
+    fn native_analyzer_markers_render_on_their_reported_channel() {
+        let frames = vec![DecodedFrame {
+            frame_id: 0,
+            start_sample: 100,
+            end_sample: 200,
+            frame_type: "data".to_string(),
+            label: "0x12".to_string(),
+            value: 0x12,
+            channel_values: vec![DecodedChannelValue {
+                channel: 1,
+                role: "DATA".to_string(),
+                label: "0x12".to_string(),
+                texts: vec!["0x12".to_string()],
+                value: 0x12,
+            }],
+            protocol_markers: vec![pxlogic_core::DecodedProtocolMarker {
+                channel: Some(0),
+                sample: 150,
+                kind: "up_arrow".to_string(),
+            }],
+        }];
+        let track = render_analyzer_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 0,
+                role: "Clock".to_string(),
+            },
+            &WaveformRequest {
+                start_sample: 0,
+                sample_count: 400,
+                pixels: 800,
+                channels: vec![0],
+            },
+        );
+
+        assert_eq!(
+            track.protocol_markers,
+            vec![AnalyzerProtocolMarker {
+                sample: 150,
+                kind: AnalyzerProtocolMarkerKind::UpArrow,
+            }]
+        );
+        assert!(track.bubbles.is_empty());
+    }
+
+    #[test]
+    fn native_window_offset_moves_protocol_markers_with_frames() {
+        let frame = DecodedFrame {
+            frame_id: 4,
+            start_sample: 10,
+            end_sample: 20,
+            frame_type: "data".to_string(),
+            label: "0x12".to_string(),
+            value: 0x12,
+            channel_values: vec![DecodedChannelValue {
+                channel: 1,
+                role: "DATA".to_string(),
+                label: "0x12".to_string(),
+                texts: vec!["0x12".to_string()],
+                value: 0x12,
+            }],
+            protocol_markers: vec![pxlogic_core::DecodedProtocolMarker {
+                channel: Some(0),
+                sample: 15,
+                kind: "up_arrow".to_string(),
+            }],
+        };
+
+        let shifted = offset_decoded_frame_samples(frame, 1_000);
+
+        assert_eq!(shifted.start_sample, 1_010);
+        assert_eq!(shifted.end_sample, 1_020);
+        assert_eq!(shifted.protocol_markers[0].sample, 1_015);
+    }
+
+    #[test]
+    fn parallel_analyzer_render_preserves_request_order() {
+        let capture = demo_capture(16, 500_000);
+        let session = GraphSession::default();
+        session.replace_capture(capture).unwrap();
+        let view = WaveformRequest {
+            start_sample: 0,
+            sample_count: 500_000,
+            pixels: 1_200,
+            channels: vec![0, 1, 3, 4],
+        };
+        let requests = vec![
+            AnalyzerRenderRequest {
+                analyzer_id: "uart-first".to_string(),
+                backend: DecoderBackendKind::LegacyRust,
+                settings: AnalyzerDecodeSettings::Uart(UartDecodeSettings::default()),
+                tracks: vec![AnalyzerTrackRequest {
+                    channel: 0,
+                    role: "RX".to_string(),
+                }],
+            },
+            AnalyzerRenderRequest {
+                analyzer_id: "i2c-second".to_string(),
+                backend: DecoderBackendKind::LegacyRust,
+                settings: AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
+                tracks: vec![AnalyzerTrackRequest {
+                    channel: 1,
+                    role: "SDA".to_string(),
+                }],
+            },
+            AnalyzerRenderRequest {
+                analyzer_id: "spi-third".to_string(),
+                backend: DecoderBackendKind::LegacyRust,
+                settings: AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
+                tracks: vec![AnalyzerTrackRequest {
+                    channel: 3,
+                    role: "MOSI".to_string(),
+                }],
+            },
+        ];
+
+        let rendered = session.render_analyzers(&requests, &view).unwrap();
+
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|result| result.analyzer_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["uart-first", "i2c-second", "spi-third"]
+        );
     }
 
     #[test]

@@ -346,6 +346,11 @@ export type AnalyzerDecodeSettings =
 
 export type DecoderBackendKind = "auto" | "saleae_native" | "sigrok_native" | "legacy_rust";
 
+export interface DemoAnalyzerSettings {
+  backend: DecoderBackendKind;
+  settings: AnalyzerDecodeSettings;
+}
+
 export interface SaleaeAnalyzerMetadata {
   type: string;
   name: string;
@@ -374,6 +379,7 @@ export interface DecodedChannelValue {
   channel: number;
   role: string;
   label: string;
+  texts?: string[];
   value: number;
 }
 
@@ -385,6 +391,11 @@ export interface DecodedFrame {
   label: string;
   value: number;
   channel_values: DecodedChannelValue[];
+  protocol_markers?: Array<{
+    channel: number | null;
+    sample: number;
+    kind: AnalyzerProtocolMarker["kind"];
+  }>;
 }
 
 export interface AnalyzerBubble {
@@ -428,7 +439,25 @@ export interface AnalyzerRenderRequest {
 
 export interface AnalyzerTrackWindow extends AnalyzerFrameWindow {
   channel: number;
+  protocol_markers: AnalyzerProtocolMarker[];
   role: string;
+}
+
+export interface AnalyzerProtocolMarker {
+  sample: number;
+  kind:
+    | "dot"
+    | "error_dot"
+    | "square"
+    | "error_square"
+    | "up_arrow"
+    | "down_arrow"
+    | "x"
+    | "error_x"
+    | "start"
+    | "stop"
+    | "one"
+    | "zero";
 }
 
 export interface AnalyzerRenderResult {
@@ -877,7 +906,7 @@ export function startCapture(
   sessionId: string,
   settings: CaptureSettings,
   callbacks: CaptureCallbacks = {},
-  demoAnalyzers: AnalyzerDecodeSettings[] = [],
+  demoAnalyzers: DemoAnalyzerSettings[] = [],
 ): Promise<CaptureSummary> {
   if (!isTauriRuntime()) {
     previewCaptureRun?.cancel();
@@ -917,7 +946,10 @@ export function startCapture(
     if (trigger) callbacks.onTrigger?.(trigger);
     previewDemoSignalsBySession.set(
       sessionId,
-      buildPreviewDemoSignals(settings.channel_count, demoAnalyzers),
+      buildPreviewDemoSignals(
+        settings.channel_count,
+        demoAnalyzers.map((analyzer) => analyzer.settings),
+      ),
     );
 
     return new Promise((resolve) => {
@@ -1187,6 +1219,7 @@ function buildPreviewAnalyzerTrackWindow(
         );
   return {
     channel: track.channel,
+    protocol_markers: [],
     role: track.role,
     ...window,
   };

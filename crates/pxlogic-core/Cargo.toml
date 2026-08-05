@@ -9,6 +9,7 @@ default = ["rusb-transport"]
 rusb-transport = ["dep:rusb"]
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 rusb = { workspace = true, optional = true }
 serde.workspace = true

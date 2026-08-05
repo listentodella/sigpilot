@@ -99,6 +99,13 @@ typedef struct sr_simulation_channel_view
     size_t transition_count;
 } sr_simulation_channel_view;
 
+typedef struct sr_marker_view
+{
+    uint64_t sample;
+    uint32_t channel_index;
+    int kind;
+} sr_marker_view;
+
 SALEAE_COMPAT_API sr_session* sr_session_create(const char* plugin_path);
 SALEAE_COMPAT_API void sr_session_destroy(sr_session* session);
 
@@ -134,6 +141,15 @@ SALEAE_COMPAT_API int sr_session_simulation_channel(
     const sr_session* session,
     size_t index,
     sr_simulation_channel_view* output);
+SALEAE_COMPAT_API int sr_session_generate_bubble_text(
+    sr_session* session,
+    size_t legacy_frame_index,
+    uint32_t channel_index,
+    int display_base);
+SALEAE_COMPAT_API size_t sr_session_bubble_text_count(const sr_session* session);
+SALEAE_COMPAT_API const char* sr_session_bubble_text(const sr_session* session, size_t index);
+SALEAE_COMPAT_API size_t sr_session_marker_count(const sr_session* session);
+SALEAE_COMPAT_API int sr_session_marker(const sr_session* session, size_t index, sr_marker_view* output);
 
 SALEAE_COMPAT_API size_t sr_session_frame_count(const sr_session* session);
 SALEAE_COMPAT_API int sr_session_frame(const sr_session* session, size_t index, sr_frame_view* output);

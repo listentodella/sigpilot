@@ -4715,7 +4715,7 @@ button:disabled {
 .activeAnalyzerHeader {
   min-height: 42px;
   display: grid;
-  grid-template-columns: 15px 9px minmax(0, 1fr) 22px;
+  grid-template-columns: 15px 9px minmax(0, 1fr) 42px 22px;
   align-items: center;
   gap: 7px;
   color: var(--on-background-20);
@@ -4782,6 +4782,73 @@ button:disabled {
   height: 18px;
   border-radius: 2px;
   background: var(--selected-highlight);
+}
+
+.analyzerDecodeStatus {
+  min-width: 0;
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--on-background-40);
+}
+
+.analyzerDecodeStatus.busy {
+  color: var(--selected-highlight);
+}
+
+.analyzerDecodeStatus.complete {
+  color: var(--green, #75caca);
+}
+
+.analyzerDecodeProgressBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 4px;
+  border-radius: 16px;
+  background: var(--background-20);
+  color: var(--on-background-0);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.analyzerProgressRing {
+  display: block;
+  width: 12px;
+  height: 12px;
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+
+.analyzerProgressRingTrack,
+.analyzerProgressRingValue {
+  fill: none;
+  stroke-width: 1.8;
+}
+
+.analyzerProgressRingTrack {
+  stroke: var(--background-0);
+}
+
+.analyzerProgressRingValue {
+  stroke: var(--on-background-0);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 160ms ease-out;
+}
+
+.analyzerDecodeCompleteBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 16px;
+  background: var(--background-20);
 }
 
 .dataPaneButtons {
@@ -6261,8 +6328,32 @@ body.timing-marker-col-resize * {
 .analyzerFramesList {
   min-width: 331px;
   min-height: 0;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--grey100) var(--background-20);
+  scrollbar-width: thin;
   background: var(--background-10);
+}
+
+.analyzerFramesList::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.analyzerFramesList::-webkit-scrollbar-track {
+  background: var(--background-20);
+}
+
+.analyzerFramesList::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 2px solid var(--background-20);
+  border-radius: 5px;
+  background: var(--grey100);
+}
+
+.analyzerFramesList::-webkit-scrollbar-thumb:hover {
+  background: var(--on-background-10);
 }
 
 .analyzerVirtualSpacer {

@@ -3,6 +3,7 @@ use std::{
     env,
     error::Error,
     fs,
+    io::{self, BufRead, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,6 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use pxlogic_core::{
     capture::{decode_cross_data_with_map, read_sample_word},
     enabled_channel_mask, resolve_enabled_channels, CaptureBackend, CaptureMode, CaptureProgress,
@@ -49,6 +51,12 @@ struct Options {
     pwm_frequency_hz: f64,
     pwm_duty_percent: f64,
     pwm_only: bool,
+    /// Emit line-delimited JSON events while the USB capture is still running.
+    ///
+    /// This is deliberately kept on the existing `usb_smoke` binary so the
+    /// Electron bridge and the Tauri application use precisely the same USB,
+    /// FPGA setup, lane-transpose, and decoded sample path.
+    live_protocol: bool,
 }
 
 impl Default for Options {
@@ -81,8 +89,17 @@ impl Default for Options {
             pwm_frequency_hz: 1_000.0,
             pwm_duty_percent: 50.0,
             pwm_only: false,
+            live_protocol: false,
         }
     }
+}
+
+fn emit_live_event(value: serde_json::Value) {
+    // `println!` is not guaranteed to flush when stdout is a pipe. The
+    // renderer must receive data while the capture is in progress, so flush
+    // after every event instead of waiting for the helper to exit.
+    println!("{value}");
+    let _ = io::stdout().flush();
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -188,11 +205,35 @@ fn main() -> Result<(), Box<dyn Error>> {
             cancel.store(true, Ordering::Release);
         })
     });
+    if options.live_protocol {
+        // The renderer writes a single `stop` line to stdin when the user
+        // presses Logic's stop button. This sets the same cancellation flag
+        // used by the USB read loop, so the FPGA stream is stopped cleanly
+        // rather than relying on process termination.
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            for line in io::stdin().lock().lines().map_while(Result::ok) {
+                if line.trim().eq_ignore_ascii_case("stop") {
+                    cancel.store(true, Ordering::Release);
+                    break;
+                }
+            }
+        });
+    }
     let mut progress = |event: CaptureProgress| {
         println!(
             "[progress] bytes={}/{} samples={}",
             event.bytes_read, event.bytes_expected, event.samples_read
         );
+        if options.live_protocol {
+            emit_live_event(serde_json::json!({
+                "type": "progress",
+                "bytesRead": event.bytes_read,
+                "bytesExpected": event.bytes_expected,
+                "samplesRead": event.samples_read,
+                "sampleMemoryBytes": event.sample_memory_bytes,
+            }));
+        }
     };
     let settings = CaptureSettings {
         device_id: device_id.to_string(),
@@ -279,6 +320,130 @@ fn main() -> Result<(), Box<dyn Error>> {
         graph.finish_capture(capture.clone())?;
         verify_graph_smoke(graph, &capture)?;
         capture
+    } else if options.live_protocol {
+        // Stream mode is backed by a finite PXLogic buffer. Keep the USB
+        // session alive by re-arming the same stream window until the
+        // renderer writes `stop` to stdin. Every event carries a monotonic
+        // sample offset, so the Electron bridge can treat the windows as one
+        // continuous capture.
+        let mut window_index = 0u64;
+        let mut total_sample_count = 0u64;
+        let mut total_decoded_byte_length = 0u64;
+        let mut total_raw_byte_length = 0u64;
+        let mut session_metadata = None;
+        let mut last_capture = None;
+
+        loop {
+            if cancel.load(Ordering::Acquire) && last_capture.is_some() {
+                break;
+            }
+
+            let sample_offset = total_sample_count;
+            let raw_byte_offset = total_raw_byte_length;
+            let current_window = window_index;
+            let first_window = current_window == 0;
+            let mut started = |metadata: &pxlogic_core::CaptureMetadata| {
+                let event_type = if first_window { "started" } else { "window" };
+                emit_live_event(serde_json::json!({
+                    "type": event_type,
+                    "windowIndex": current_window,
+                    "sampleOffset": sample_offset,
+                    "metadata": metadata,
+                }));
+            };
+            let mut samples = |chunk: &[u8]| {
+                emit_live_event(serde_json::json!({
+                    "type": "samples",
+                    "windowIndex": current_window,
+                    "sampleOffset": sample_offset,
+                    "encoding": "base64",
+                    "data": BASE64.encode(chunk),
+                    "byteLength": chunk.len(),
+                    "sampleCount": chunk.len() / 2,
+                }));
+            };
+            let mut cross_lanes = |enabled_channels: &[u8], chunk: &[u8]| {
+                emit_live_event(serde_json::json!({
+                    "type": "cross",
+                    "windowIndex": current_window,
+                    "sampleOffset": sample_offset,
+                    "rawByteOffset": raw_byte_offset,
+                    "encoding": "base64",
+                    "enabledChannels": enabled_channels,
+                    "data": BASE64.encode(chunk),
+                    "byteLength": chunk.len(),
+                }));
+            };
+            let mut live_progress = |event: CaptureProgress| {
+                println!(
+                    "[progress] window={} bytes={}/{} samples={}",
+                    current_window, event.bytes_read, event.bytes_expected, event.samples_read
+                );
+                emit_live_event(serde_json::json!({
+                    "type": "progress",
+                    "windowIndex": current_window,
+                    "bytesRead": raw_byte_offset.saturating_add(event.bytes_read),
+                    "bytesExpected": raw_byte_offset.saturating_add(event.bytes_expected),
+                    "samplesRead": sample_offset.saturating_add(event.samples_read),
+                    "sampleMemoryBytes": event.sample_memory_bytes,
+                }));
+            };
+            let mut triggered = |trigger: &CaptureTriggerMetadata| {
+                let mut global_trigger = trigger.clone();
+                global_trigger.sample_index =
+                    global_trigger.sample_index.saturating_add(sample_offset);
+                emit_live_event(serde_json::json!({
+                    "type": "trigger",
+                    "windowIndex": current_window,
+                    "trigger": global_trigger,
+                }));
+            };
+
+            let capture = backend.capture_with_trace_streaming(
+                &settings,
+                cancel.as_ref(),
+                &mut live_progress,
+                &mut trace,
+                &mut started,
+                &mut samples,
+                &mut cross_lanes,
+                &mut triggered,
+            )?;
+
+            if session_metadata.is_none() {
+                session_metadata = Some(capture.metadata.clone());
+            }
+            let window_sample_count = capture.metadata.sample_count;
+            let window_decoded_bytes = capture.samples.len() as u64;
+            let window_raw_bytes = window_sample_count
+                .saturating_mul(capture.metadata.enabled_channels.len() as u64)
+                / 8;
+            total_sample_count = total_sample_count.saturating_add(window_sample_count);
+            total_decoded_byte_length =
+                total_decoded_byte_length.saturating_add(window_decoded_bytes);
+            total_raw_byte_length = total_raw_byte_length.saturating_add(window_raw_bytes);
+            last_capture = Some(capture);
+            window_index = window_index.saturating_add(1);
+
+            if cancel.load(Ordering::Acquire) {
+                break;
+            }
+        }
+
+        let mut capture =
+            last_capture.ok_or("PXLogic live capture stopped before any samples arrived")?;
+        if let Some(mut metadata) = session_metadata {
+            metadata.sample_count = total_sample_count;
+            capture.metadata = metadata;
+        }
+        emit_live_event(serde_json::json!({
+            "type": "session",
+            "windowCount": window_index,
+            "sampleCount": total_sample_count,
+            "decodedByteLength": total_decoded_byte_length,
+            "rawByteLength": total_raw_byte_length,
+        }));
+        capture
     } else {
         backend.capture_with_trace(&settings, cancel.as_ref(), &mut progress, &mut trace)?
     };
@@ -294,8 +459,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         capture.metadata.enabled_channels,
         capture.metadata.sample_count,
         capture.metadata.unitsize,
-        capture.samples.len()
+        if options.live_protocol {
+            capture
+                .metadata
+                .sample_count
+                .saturating_mul(u64::from(capture.metadata.unitsize))
+        } else {
+            capture.samples.len() as u64
+        }
     );
+    if options.live_protocol {
+        let finished_metadata = capture.metadata.clone();
+        let finished_decoded_byte_length = finished_metadata
+            .sample_count
+            .saturating_mul(u64::from(finished_metadata.unitsize));
+        emit_live_event(serde_json::json!({
+            "type": "finished",
+            "metadata": finished_metadata,
+            "decodedByteLength": finished_decoded_byte_length,
+        }));
+    }
     if capture.metadata.enabled_channels != requested_enabled_channels {
         return Err(format!(
             "capture enabled-channel mismatch: requested={requested_enabled_channels:?}, metadata={:?}",
@@ -305,16 +488,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if options.compare_mappings {
         compare_cross_mappings(&capture)?;
-    } else {
+    } else if !options.live_protocol {
         print_sample_summary(&capture);
     }
 
-    let output = options.output.unwrap_or_else(default_output_path);
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
+    if !options.live_protocol {
+        let output = options.output.unwrap_or_else(default_output_path);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        pxlogic_file::save_pxcap(&output, &capture)?;
+        println!("saved: {}", output.display());
     }
-    pxlogic_file::save_pxcap(&output, &capture)?;
-    println!("saved: {}", output.display());
 
     Ok(())
 }
@@ -369,6 +554,14 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 options.pwm_duty_percent = next_arg(&mut args, "--pwm-duty")?.parse()?;
             }
             "--pwm-only" => options.pwm_only = true,
+            "--live" => {
+                options.live_protocol = true;
+                options.mode = CaptureMode::Stream;
+                // A live session is ended by the renderer's `stop` command.
+                // This bounded fallback keeps a lost renderer from leaving a
+                // USB stream open indefinitely.
+                options.duration_ms = 60_000;
+            }
             "--out" => options.output = Some(PathBuf::from(next_arg(&mut args, "--out")?)),
             "--list-only" => options.list_only = true,
             "--prepare-only" => options.prepare_only = true,
@@ -442,7 +635,7 @@ fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 

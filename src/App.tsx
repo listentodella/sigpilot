@@ -99,6 +99,7 @@ import {
   analyzerRenderViewportCanServe,
   preserveLiveAnalyzerTracks,
 } from "./lib/analyzerRenderScheduling";
+import { traceAnalyzerPerformance } from "./lib/analyzerPerformance";
 import {
   cancelCapture,
   CaptureMemoryUsage,
@@ -154,6 +155,7 @@ import {
   analyzerChannelRoleLabel,
   analyzerChannelRoles,
   analyzerBubbleRoles,
+  analyzerMarkerRoles,
   analyzerDecodeSettings,
   analyzerDecodeSignature as getAnalyzerDecodeSignature,
   decoderBackendLabel,
@@ -1025,6 +1027,10 @@ function applyTrimmedCapture(
       nextFrame: null,
       renderedTracks: [],
       renderedDecodeSignature: null,
+      renderBusy: false,
+      renderProgress: 0,
+      decodeBusy: false,
+      decodeProgress: 0,
       highlightedFrameIndex: null,
     })),
     channelLabels: labels,
@@ -1275,7 +1281,10 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
           nextFrame: null,
           renderedTracks: [],
           renderedDecodeSignature: null,
+          renderBusy: false,
+          renderProgress: 0,
           decodeBusy: false,
+          decodeProgress: 0,
           highlightedFrameIndex: null,
         }))
       : [],
@@ -1792,6 +1801,10 @@ export default function App() {
               nextFrame: null,
               renderedTracks: [],
               renderedDecodeSignature: null,
+              renderBusy: false,
+              renderProgress: 0,
+              decodeBusy: false,
+              decodeProgress: 0,
               highlightedFrameIndex: null,
             })),
             message: "Capture complete",
@@ -2216,6 +2229,18 @@ export default function App() {
       return;
     }
 
+    // Cached bubbles follow the viewport locally while the pointer/keyboard
+    // interaction is active. Decode and aggregation resume once the viewport
+    // settles, so analyzer IPC cannot compete with animation frames.
+    if (graphViewportInteracting) {
+      analyzerRenderRequestDirtyRef.current = true;
+      if (analyzerRenderRequestTimerRef.current !== null) {
+        window.clearTimeout(analyzerRenderRequestTimerRef.current);
+        analyzerRenderRequestTimerRef.current = null;
+      }
+      return;
+    }
+
     analyzerRenderRequestDirtyRef.current = true;
     if (analyzerRenderRequestInFlightRef.current) {
       analyzerRenderRequestPendingRef.current = true;
@@ -2251,10 +2276,17 @@ export default function App() {
             analyzer_id: analyzer.id,
             backend: analyzer.decoderBackend,
             settings,
-            tracks: analyzerBubbleRoles(analyzer).map((role) => ({
-              channel: role.channel,
-              role: role.title,
-            })),
+            tracks: [...analyzerBubbleRoles(analyzer), ...analyzerMarkerRoles(analyzer)]
+              .filter(
+                (role, index, roles) =>
+                  roles.findIndex(
+                    (candidate) => candidate.channel === role.channel && candidate.title === role.title,
+                  ) === index,
+              )
+              .map((role) => ({
+                channel: role.channel,
+                role: role.title,
+              })),
           },
         ];
       });
@@ -2265,9 +2297,57 @@ export default function App() {
       analyzerRenderRequestLastStartedAtRef.current = performance.now();
       const requestSeq = analyzerRenderRequestSeq.current + 1;
       analyzerRenderRequestSeq.current = requestSeq;
-      const requestAnalyzerSignature = sessionSnapshot.analyzers
-        .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}:${analyzer.displayRadix}`)
-        .join("|");
+      const requestDecodeSignatures = new Map(
+        sessionSnapshot.analyzers.map((analyzer) => [
+          analyzer.id,
+          getAnalyzerDecodeSignature(analyzer),
+        ]),
+      );
+      const pendingRenderAnalyzerIds = new Set(
+        sessionSnapshot.analyzers
+          .filter((analyzer) => {
+            const settings = analyzerDecodeSettings(analyzer);
+            return (
+              settings !== null &&
+              analyzerCanRunDecoder(analyzer) &&
+              analyzer.renderedDecodeSignature !== getAnalyzerDecodeSignature(analyzer)
+            );
+          })
+          .map((analyzer) => analyzer.id),
+      );
+      if (pendingRenderAnalyzerIds.size > 0) {
+        updateSession(sessionSnapshot.id, (session) => ({
+          ...session,
+          analyzers: session.analyzers.map((analyzer) =>
+            pendingRenderAnalyzerIds.has(analyzer.id)
+              ? {
+                  ...analyzer,
+                  renderBusy: true,
+                  renderProgress: Math.max(5, Math.min(94, analyzer.renderProgress)),
+                }
+              : analyzer,
+          ),
+        }));
+      }
+      const renderStartedAt = performance.now();
+      const renderProgressTimer =
+        pendingRenderAnalyzerIds.size > 0
+          ? window.setInterval(() => {
+              const elapsed = performance.now() - renderStartedAt;
+              // The native analyzer is a batch API. Keep the UI moving while
+              // it is working, then only show the checkmark after the result
+              // has been committed.
+              const progress = Math.min(94, 8 + 86 * (1 - Math.exp(-elapsed / 2_400)));
+              updateSession(sessionSnapshot.id, (session) => ({
+                ...session,
+                analyzers: session.analyzers.map((analyzer) =>
+                  pendingRenderAnalyzerIds.has(analyzer.id) && analyzer.renderBusy
+                    ? { ...analyzer, renderProgress: Math.max(analyzer.renderProgress, progress) }
+                    : analyzer,
+                ),
+              }));
+            }, 100)
+          : null;
       void (async () => {
         try {
           const overscan = Math.max(64, Math.ceil(sessionSnapshot.viewportSamples * 0.5));
@@ -2282,11 +2362,6 @@ export default function App() {
             1,
             Math.min(2_600, Math.round(sessionSnapshot.canvasWidth * pixelScale)),
           );
-          const requestViewport = {
-            pixels: renderPixels,
-            sampleCount: requestSamples,
-            startSample: requestStart,
-          };
           const next = await renderGraphFrame(sessionSnapshot.id, {
             frame_id: requestSeq,
             waveform: {
@@ -2303,61 +2378,67 @@ export default function App() {
             },
             analyzers: analyzerRequests,
           });
-          const latestSession = sessionsRef.current.find(
-            (session) => session.id === sessionSnapshot.id,
-          );
-          const latestAnalyzerSignature = latestSession?.analyzers
-            .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}:${analyzer.displayRadix}`)
-            .join("|");
-          const canServeLatestViewport =
-            latestSession?.summary != null &&
-            activeSessionIdRef.current === sessionSnapshot.id &&
-            latestAnalyzerSignature === requestAnalyzerSignature &&
-            analyzerRenderViewportCanServe(
-              requestViewport,
-              {
-                pixels: latestSession.canvasWidth,
-                sampleCount: latestSession.viewportSamples,
-                startSample: latestSession.viewportStart,
-              },
-              latestSession.busy,
-              {
-                startSample: 0,
-                sampleCount: latestSession.summary.metadata.sample_count,
-              },
-            );
           if (
             requestSeq === analyzerRenderRequestSeq.current &&
             next.frame_id === requestSeq &&
-            canServeLatestViewport
+            activeSessionIdRef.current === sessionSnapshot.id
           ) {
+            const commitStarted = performance.now();
             const analyzerResults = new Map(
               next.analyzers.map((result) => [result.analyzer_id, result]),
             );
-            updateSession(sessionSnapshot.id, (session) => ({
-              ...session,
-              analyzers: session.analyzers.map((analyzer) => {
-                const nextTracks = analyzerResults.get(analyzer.id)?.tracks ?? [];
-                const renderedTracks = session.busy
-                  ? preserveLiveAnalyzerTracks(analyzer.renderedTracks, nextTracks)
-                  : nextTracks;
+            const requestedTrackCounts = new Map(
+              analyzerRequests.map((request) => [request.analyzer_id, request.tracks.length]),
+            );
+            updateSession(sessionSnapshot.id, (session) => {
+              const nextAnalyzers = session.analyzers.map((analyzer) => {
+                const result = analyzerResults.get(analyzer.id);
+                if (!result) return analyzer;
+                const requestedTrackCount = requestedTrackCounts.get(analyzer.id) ?? 0;
+                const nextTracks =
+                  result.tracks.length === 0 && requestedTrackCount > 0
+                    ? analyzer.renderedTracks
+                    : result.tracks;
+                const renderedTracks =
+                  session.busy
+                    ? preserveLiveAnalyzerTracks(analyzer.renderedTracks, nextTracks)
+                    : nextTracks;
                 return {
                   ...analyzer,
                   decodedFrames: mergeAnalyzerTrackFrames(analyzer.decodedFrames, nextTracks),
                   renderedTracks,
-                  renderedDecodeSignature: getAnalyzerDecodeSignature(analyzer),
+                  renderedDecodeSignature:
+                    requestDecodeSignatures.get(analyzer.id) ?? analyzer.renderedDecodeSignature,
+                  renderBusy: pendingRenderAnalyzerIds.has(analyzer.id)
+                    ? false
+                    : analyzer.renderBusy,
+                  renderProgress: pendingRenderAnalyzerIds.has(analyzer.id)
+                    ? 100
+                    : analyzer.renderProgress,
                 };
-              }),
-            }));
+              });
+              traceAnalyzerPerformance(
+                "state_commit",
+                commitStarted,
+                `analyzers=${nextAnalyzers.length}`,
+              );
+              return { ...session, analyzers: nextAnalyzers };
+            });
           }
         } catch (error) {
           if (requestSeq === analyzerRenderRequestSeq.current) {
             updateSession(sessionSnapshot.id, (session) => ({
               ...session,
+              analyzers: session.analyzers.map((analyzer) =>
+                pendingRenderAnalyzerIds.has(analyzer.id)
+                  ? { ...analyzer, renderBusy: false, renderProgress: 0 }
+                  : analyzer,
+              ),
               message: String(error),
             }));
           }
         } finally {
+          if (renderProgressTimer !== null) window.clearInterval(renderProgressTimer);
           analyzerRenderRequestInFlightRef.current = false;
           if (
             analyzerRenderRequestPendingRef.current ||
@@ -2531,6 +2612,10 @@ export default function App() {
         nextFrame: null,
         renderedTracks: [],
         renderedDecodeSignature: null,
+        renderBusy: false,
+        renderProgress: 0,
+        decodeBusy: false,
+        decodeProgress: 0,
         highlightedFrameIndex: null,
       })),
       diagnostics: [],
@@ -2544,8 +2629,10 @@ export default function App() {
     try {
       const demoAnalyzers = session.analyzers
         .filter(analyzerCanRunDecoder)
-        .map(analyzerDecodeSettings)
-        .filter((settings): settings is NonNullable<typeof settings> => settings !== null);
+        .flatMap((analyzer) => {
+          const settings = analyzerDecodeSettings(analyzer);
+          return settings === null ? [] : [{ backend: analyzer.decoderBackend, settings }];
+        });
       const next = await startCapture(
         session.id,
         nextSettings,
@@ -2584,6 +2671,10 @@ export default function App() {
             nextFrame: null,
             renderedTracks: [],
             renderedDecodeSignature: null,
+            renderBusy: false,
+            renderProgress: 0,
+            decodeBusy: false,
+            decodeProgress: 0,
             highlightedFrameIndex: null,
           })),
           message: "Capture complete",
@@ -2619,10 +2710,27 @@ export default function App() {
     const requestKey = `${sessionId}:${analyzerId}`;
     const requestSeq = (analyzerRequestSeq.current[requestKey] ?? 0) + 1;
     analyzerRequestSeq.current[requestKey] = requestSeq;
+    const decodeStartedAt = performance.now();
+    const decodeProgressTimer = window.setInterval(() => {
+      const elapsed = performance.now() - decodeStartedAt;
+      const progress = Math.min(94, 6 + 88 * (1 - Math.exp(-elapsed / 2_000)));
+      const current = sessionsRef.current.find((item) => item.id === sessionId);
+      if (!current?.analyzers.some((item) => item.id === analyzerId && item.decodeBusy)) return;
+      updateSession(session.id, (currentSession) => ({
+        ...currentSession,
+        analyzers: currentSession.analyzers.map((item) =>
+          item.id === analyzerId && item.decodeBusy
+            ? { ...item, decodeProgress: Math.max(item.decodeProgress, progress) }
+            : item,
+        ),
+      }));
+    }, 100);
     updateSession(session.id, (current) => ({
       ...current,
       analyzers: current.analyzers.map((item) =>
-        item.id === analyzerId ? { ...item, decodeBusy: true } : item,
+        item.id === analyzerId
+          ? { ...item, decodeBusy: true, decodeProgress: Math.max(5, item.decodeProgress) }
+          : item,
       ),
     }));
     try {
@@ -2641,6 +2749,7 @@ export default function App() {
                 previousFrame: null,
                 nextFrame: null,
                 decodeBusy: false,
+                decodeProgress: 100,
                 highlightedFrameIndex: null,
               }
             : item,
@@ -2649,15 +2758,18 @@ export default function App() {
           ? current.message
           : `Decoded ${frames.length} frame${frames.length === 1 ? "" : "s"} with ${analyzer.name}`,
       }));
+      setAnalyzerRenderRequestEpoch((epoch) => epoch + 1);
     } catch (error) {
       if (requestSeq !== analyzerRequestSeq.current[requestKey]) return;
       updateSession(session.id, (current) => ({
         ...current,
         analyzers: current.analyzers.map((item) =>
-          item.id === analyzerId ? { ...item, decodeBusy: false } : item,
+          item.id === analyzerId ? { ...item, decodeBusy: false, decodeProgress: 0 } : item,
         ),
         message: String(error),
       }));
+    } finally {
+      window.clearInterval(decodeProgressTimer);
     }
   }
 
@@ -2755,6 +2867,10 @@ export default function App() {
           nextFrame: null,
           renderedTracks: [],
           renderedDecodeSignature: null,
+          renderBusy: false,
+          renderProgress: 0,
+          decodeBusy: false,
+          decodeProgress: 0,
           highlightedFrameIndex: null,
         })),
       message:
@@ -4209,6 +4325,7 @@ export default function App() {
                         tile={visibleTile}
                         viewportSamples={activeSession.viewportSamples}
                         viewportStart={activeSession.viewportStart}
+                        viewportInteracting={graphViewportInteracting}
                         visibleChannelIndexes={visibleChannelIndexes}
                       />
                       <CursorOverlay
@@ -8362,54 +8479,91 @@ function AnalyzersPanel({
                 >
                   {session.analyzers.map((analyzer, index) => (
                     <Draggable draggableId={analyzer.id} index={index} key={analyzer.id}>
-                      {(draggableProvided, draggableSnapshot) => (
-                        <div
-                          className={`activeAnalyzerItem ${draggableSnapshot.isDragging ? "dragging" : ""}`}
-                          ref={draggableProvided.innerRef}
-                          {...draggableProvided.draggableProps}
-                          style={{
-                            ...draggableProvided.draggableProps.style,
-                            zIndex: draggableSnapshot.isDragging ? 5000 : undefined,
-                          }}
-                        >
-                          <div className="activeAnalyzerHeader">
-                            <span
-                              aria-label={`Move ${analyzer.name}`}
-                              className="analyzerDragHandle"
-                              title="Drag to reorder"
-                              {...draggableProvided.dragHandleProps}
-                            >
-                              <GripVertical size={13} />
-                            </span>
-                            <span className="analyzerColorIndicator" style={{ background: analyzer.color }} />
-                            <button className="analyzerNameButton" onDoubleClick={() => onEditAnalyzer(analyzer.id)} type="button">
-                              <strong title={analyzer.nativeCatalogDescription ?? analyzer.type}>{analyzer.name}</strong>
-                              <small>
-                                {decoderBackendLabel(analyzer.decoderBackend)} · {analyzerPhysicalChannelSummary(analyzer)}
-                                {analyzer.nativeRunnerStatus === "catalog_only" ? " · Catalog only" : ""}
-                              </small>
-                            </button>
-                            <button
-                              aria-expanded={activeAnalyzerMenu?.analyzerId === analyzer.id}
-                              aria-haspopup="menu"
-                              className={`analyzerKebabButton ${activeAnalyzerMenu?.analyzerId === analyzer.id ? "active" : ""}`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                const rect = event.currentTarget.getBoundingClientRect();
-                                setSelectorOpen(false);
-                                setSelectorAnchorRect(null);
-                                setActiveAnalyzerMenu((current) =>
-                                  current?.analyzerId === analyzer.id ? null : { analyzerId: analyzer.id, anchorRect: rect },
-                                );
-                              }}
-                              title="Analyzer menu"
-                              type="button"
-                            >
-                              <MoreVertical size={15} />
-                            </button>
+                      {(draggableProvided, draggableSnapshot) => {
+                        const analyzerBusy = analyzer.decodeBusy || analyzer.renderBusy;
+                        const analyzerProgress = analyzer.renderBusy
+                          ? analyzer.renderProgress
+                          : analyzer.decodeBusy
+                            ? analyzer.decodeProgress
+                            : Math.max(analyzer.decodeProgress, analyzer.renderProgress);
+                        const analyzerComplete = !analyzerBusy && analyzerProgress >= 100;
+                        return (
+                          <div
+                            className={`activeAnalyzerItem ${draggableSnapshot.isDragging ? "dragging" : ""}`}
+                            ref={draggableProvided.innerRef}
+                            {...draggableProvided.draggableProps}
+                            style={{
+                              ...draggableProvided.draggableProps.style,
+                              zIndex: draggableSnapshot.isDragging ? 5000 : undefined,
+                            }}
+                          >
+                            <div className="activeAnalyzerHeader">
+                              <span
+                                aria-label={`Move ${analyzer.name}`}
+                                className="analyzerDragHandle"
+                                title="Drag to reorder"
+                                {...draggableProvided.dragHandleProps}
+                              >
+                                <GripVertical size={13} />
+                              </span>
+                              <span className="analyzerColorIndicator" style={{ background: analyzer.color }} />
+                              <button className="analyzerNameButton" onDoubleClick={() => onEditAnalyzer(analyzer.id)} type="button">
+                                <strong title={analyzer.nativeCatalogDescription ?? analyzer.type}>{analyzer.name}</strong>
+                                <small>
+                                  {decoderBackendLabel(analyzer.decoderBackend)} · {analyzerPhysicalChannelSummary(analyzer)}
+                                  {analyzer.nativeRunnerStatus === "catalog_only" ? " · Catalog only" : ""}
+                                </small>
+                              </button>
+                              <span
+                                aria-label={
+                                  analyzerBusy
+                                    ? `${Math.round(analyzerProgress)}% decoded`
+                                    : analyzerComplete
+                                      ? "Decoder complete"
+                                      : "Decoder idle"
+                                }
+                                className={`analyzerDecodeStatus ${analyzerBusy ? "busy" : ""} ${analyzerComplete ? "complete" : ""}`}
+                                title={
+                                  analyzerBusy
+                                    ? `Decoding ${Math.round(analyzerProgress)}%`
+                                    : analyzerComplete
+                                      ? "Decoding complete"
+                                      : "Decoder idle"
+                                }
+                              >
+                                {analyzerBusy ? (
+                                  <span className="analyzerDecodeProgressBadge">
+                                    <AnalyzerProgressRing value={analyzerProgress} />
+                                    <span>{Math.round(analyzerProgress)}%</span>
+                                  </span>
+                                ) : analyzerComplete ? (
+                                  <span className="analyzerDecodeCompleteBadge">
+                                    <Check size={13} />
+                                  </span>
+                                ) : null}
+                              </span>
+                              <button
+                                aria-expanded={activeAnalyzerMenu?.analyzerId === analyzer.id}
+                                aria-haspopup="menu"
+                                className={`analyzerKebabButton ${activeAnalyzerMenu?.analyzerId === analyzer.id ? "active" : ""}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  const rect = event.currentTarget.getBoundingClientRect();
+                                  setSelectorOpen(false);
+                                  setSelectorAnchorRect(null);
+                                  setActiveAnalyzerMenu((current) =>
+                                    current?.analyzerId === analyzer.id ? null : { analyzerId: analyzer.id, anchorRect: rect },
+                                  );
+                                }}
+                                title="Analyzer menu"
+                                type="button"
+                              >
+                                <MoreVertical size={15} />
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      }}
                     </Draggable>
                   ))}
                   {droppableProvided.placeholder}
@@ -8630,6 +8784,27 @@ function AnalyzersPanel({
         )}
       </section>
     </div>
+  );
+}
+
+function AnalyzerProgressRing({ value }: { value: number }) {
+  const radius = 5;
+  const circumference = 2 * Math.PI * radius;
+  const progress = Math.max(0, Math.min(100, value));
+  return (
+    <svg aria-hidden="true" className="analyzerProgressRing" viewBox="0 0 12 12">
+      <circle className="analyzerProgressRingTrack" cx="6" cy="6" r={radius} />
+      <circle
+        className="analyzerProgressRingValue"
+        cx="6"
+        cy="6"
+        r={radius}
+        style={{
+          strokeDasharray: circumference,
+          strokeDashoffset: circumference * (1 - progress / 100),
+        }}
+      />
+    </svg>
   );
 }
 

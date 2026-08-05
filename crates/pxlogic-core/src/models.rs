@@ -242,6 +242,23 @@ pub struct SparseCaptureData {
     pub channels: Vec<SparseDigitalChannel>,
 }
 
+/// Borrowed transition-indexed capture used by in-process graph owners.
+///
+/// This lets native decoders consume the graph's existing edge vectors without
+/// rescanning packed samples or cloning transitions for every analyzer.
+#[derive(Debug)]
+pub struct SparseDigitalChannelView<'a> {
+    pub channel: u8,
+    pub initial_high: bool,
+    pub transitions: &'a [u64],
+}
+
+#[derive(Debug)]
+pub struct SparseCaptureView<'a> {
+    pub metadata: &'a CaptureMetadata,
+    pub channels: Vec<SparseDigitalChannelView<'a>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Bitstreams {
     pub reset: Vec<u8>,

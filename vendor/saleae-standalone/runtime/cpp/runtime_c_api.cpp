@@ -53,6 +53,7 @@ struct sr_session
     AnalyzerTest::Instance cancellation_context;
     std::unordered_map<std::string, std::unique_ptr<AnalyzerTest::MockChannelData>> channel_data;
     std::vector<GeneratedChannel> simulation_channels;
+    std::vector<std::string> bubble_text;
     bool settings_committed = false;
     bool ran = false;
 
@@ -555,6 +556,61 @@ extern "C" int sr_session_simulation_channel(
     output->sample_count = channel.sample_count;
     output->transition_samples = channel.transitions.data();
     output->transition_count = channel.transitions.size();
+    return 0;
+}
+
+extern "C" int sr_session_generate_bubble_text(
+    sr_session* session,
+    size_t legacy_frame_index,
+    uint32_t channel_index,
+    int display_base)
+{
+    auto* results = LegacyResults(session);
+    if(!session || !results || legacy_frame_index >= results->TotalFrameCount() ||
+       display_base < Binary || display_base > AsciiHex)
+        return Fail(session, "bubble text request is invalid");
+    try
+    {
+        Channel channel(0, channel_index, DIGITAL_CHANNEL);
+        session->bubble_text.clear();
+        AnalyzerTest::GetResultsFromAnalyzer(session->analyzer)->GenerateBubbleText(
+            legacy_frame_index, channel, static_cast<DisplayBase>(display_base));
+        session->bubble_text.reserve(results->TotalStringCount());
+        for(U32 index = 0; index < results->TotalStringCount(); ++index)
+            session->bubble_text.push_back(results->GetString(index));
+        return 0;
+    }
+    catch(const std::exception& exception)
+    {
+        return Fail(session, exception.what());
+    }
+}
+
+extern "C" size_t sr_session_bubble_text_count(const sr_session* session)
+{
+    return session ? session->bubble_text.size() : 0;
+}
+
+extern "C" const char* sr_session_bubble_text(const sr_session* session, size_t index)
+{
+    return session && index < session->bubble_text.size() ? session->bubble_text[index].c_str() : nullptr;
+}
+
+extern "C" size_t sr_session_marker_count(const sr_session* session)
+{
+    const auto* results = LegacyResults(session);
+    return results ? results->TotalMarkerCount() : 0;
+}
+
+extern "C" int sr_session_marker(const sr_session* session, size_t index, sr_marker_view* output)
+{
+    const auto* results = LegacyResults(session);
+    if(!results || !output || index >= results->TotalMarkerCount())
+        return -1;
+    const auto marker = results->GetMarker(static_cast<U32>(index));
+    output->sample = marker.frame;
+    output->channel_index = marker.channel.mChannelIndex;
+    output->kind = static_cast<int>(marker.type);
     return 0;
 }
 

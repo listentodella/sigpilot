@@ -9,9 +9,8 @@ use chrono::Utc;
 use crate::{
     capture::{
         sample_count_from_duration, sample_count_from_settings, unitsize_for_channel_count,
-        DemoSampleGenerator,
+        DemoAnalyzerSettings, DemoSampleGenerator,
     },
-    decode::AnalyzerDecodeSettings,
     error::{CoreError, Result},
     models::{
         CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings, DeviceInfo,
@@ -30,7 +29,7 @@ impl FakeBackend {
     pub fn capture_streaming_with_analyzers(
         &self,
         settings: &CaptureSettings,
-        analyzers: &[AnalyzerDecodeSettings],
+        analyzers: &[DemoAnalyzerSettings],
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(CaptureProgress),
         started: &mut dyn FnMut(&CaptureMetadata),
@@ -42,7 +41,7 @@ impl FakeBackend {
     fn capture_streaming_generated(
         &self,
         settings: &CaptureSettings,
-        analyzers: &[AnalyzerDecodeSettings],
+        analyzers: &[DemoAnalyzerSettings],
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(CaptureProgress),
         started: &mut dyn FnMut(&CaptureMetadata),

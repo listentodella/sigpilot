@@ -6,19 +6,23 @@
 //! annotations without forcing the UI to know which decoder produced them.
 
 use std::{
-    collections::BTreeSet,
+    borrow::Cow,
+    collections::{BTreeSet, HashMap},
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Mutex, OnceLock},
+    time::Instant,
 };
 
-use serde::{Deserialize, Serialize};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 
 use crate::{
     capture::read_sample_word,
     decode::{AnalyzerDecodeSettings, DecodedChannelValue, UartParity},
     error::{CoreError, Result},
-    models::{CaptureData, SparseCaptureData},
+    models::{CaptureData, SparseCaptureData, SparseCaptureView},
 };
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +135,22 @@ const SIGROK_NATIVE_PROTOCOLS: &[&str] = &[
 ];
 const LEGACY_RUST_PROTOCOLS: &[&str] = &["UART", "I2C", "SPI"];
 
+fn trace_decoder_timing(backend: &str, stage: &str, started: Instant, detail: &str) {
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    tracing::debug!(
+        target: "pxlogic::decoder_performance",
+        backend,
+        stage,
+        elapsed_ms,
+        detail
+    );
+    if std::env::var_os("PXLOGIC_DECODER_TIMING").is_some() {
+        eprintln!(
+            "[pxlogic-decoder] backend={backend} stage={stage} elapsed_ms={elapsed_ms:.3} {detail}"
+        );
+    }
+}
+
 #[cfg(windows)]
 const SIGROK_SIDECAR_EXECUTABLE: &str = "pxlogic-sigrok-sidecar.exe";
 #[cfg(not(windows))]
@@ -164,6 +184,28 @@ pub trait DecoderBackend: Send + Sync {
             "decoder backend does not support sparse captures".to_string(),
         ))
     }
+
+    /// Decode edge vectors borrowed directly from an owning graph. Backends
+    /// that do not override this retain compatibility through one owned copy.
+    fn decode_sparse_view(
+        &self,
+        capture: &SparseCaptureView<'_>,
+        settings: &AnalyzerDecodeSettings,
+    ) -> Result<DecoderOutput> {
+        let capture = SparseCaptureData {
+            metadata: capture.metadata.clone(),
+            channels: capture
+                .channels
+                .iter()
+                .map(|channel| crate::models::SparseDigitalChannel {
+                    channel: channel.channel,
+                    initial_high: channel.initial_high,
+                    transitions: channel.transitions.to_vec(),
+                })
+                .collect(),
+        };
+        self.decode_sparse(&capture, settings)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -172,7 +214,7 @@ pub struct SaleaeNativeDecoder {
     runtime_root: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SaleaeSidecarProbe {
     available: bool,
     protocols: Vec<String>,
@@ -182,6 +224,8 @@ struct SaleaeSidecarProbe {
     plugin_sha256: String,
     abi_match: bool,
     #[serde(default)]
+    edge_encodings: Vec<String>,
+    #[serde(default)]
     decoder_catalog: Vec<SigrokDecoderCatalogItem>,
     #[serde(default)]
     c_decoder_count: usize,
@@ -189,10 +233,49 @@ struct SaleaeSidecarProbe {
     python_decoder_count: usize,
 }
 
-#[derive(Debug, Serialize)]
-struct NativeEdgeSet {
+#[derive(Debug)]
+struct NativeEdgeSet<'a> {
     channel: u8,
-    samples: Vec<u64>,
+    compact: bool,
+    samples: Cow<'a, [u64]>,
+}
+
+impl Serialize for NativeEdgeSet<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !self.compact {
+            let mut state = serializer.serialize_struct("NativeEdgeSet", 2)?;
+            state.serialize_field("channel", &self.channel)?;
+            state.serialize_field("samples", &self.samples)?;
+            return state.end();
+        }
+
+        let mut encoded = Vec::with_capacity(self.samples.len().saturating_mul(2));
+        let mut previous = 0u64;
+        for &sample in self.samples.iter() {
+            let mut delta = sample.saturating_sub(previous);
+            loop {
+                let mut byte = (delta & 0x7f) as u8;
+                delta >>= 7;
+                if delta != 0 {
+                    byte |= 0x80;
+                }
+                encoded.push(byte);
+                if delta == 0 {
+                    break;
+                }
+            }
+            previous = sample;
+        }
+
+        let mut state = serializer.serialize_struct("NativeEdgeSet", 3)?;
+        state.serialize_field("channel", &self.channel)?;
+        state.serialize_field("encoding", "delta_varint_base64")?;
+        state.serialize_field("samples_b64", &BASE64.encode(encoded))?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -220,15 +303,19 @@ struct SpiSidecarOptions {
 }
 
 #[derive(Debug, Serialize)]
-struct NativeSidecarRequest {
+struct NativeSidecarRequest<'a> {
     format: &'static str,
     sample_rate_hz: u64,
     sample_count: u64,
     channel_count: u8,
     initial_levels: Vec<u8>,
-    edges: Vec<NativeEdgeSet>,
+    edges: Vec<NativeEdgeSet<'a>>,
     decoder: NativeSidecarSettings,
 }
+
+type SaleaeProbeCacheKey = (PathBuf, PathBuf, bool);
+static SALEAE_PROBE_CACHE: OnceLock<Mutex<HashMap<SaleaeProbeCacheKey, SaleaeSidecarProbe>>> =
+    OnceLock::new();
 
 #[derive(Debug, Serialize)]
 struct NativeSidecarSettings {
@@ -236,6 +323,26 @@ struct NativeSidecarSettings {
     primary_channel: u8,
     channels: serde_json::Value,
     options: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct SaleaeSimulationRequest {
+    sample_rate_hz: u64,
+    sample_count: u64,
+    decoder: NativeSidecarSettings,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SaleaeSimulationChannel {
+    pub channel: u8,
+    pub initial_high: bool,
+    pub sample_count: u64,
+    pub transitions: Vec<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SaleaeSimulationResponse {
+    channels: Vec<SaleaeSimulationChannel>,
 }
 
 #[derive(Debug, Serialize)]
@@ -313,6 +420,27 @@ impl SaleaeNativeDecoder {
     }
 
     fn probe_with_catalog(&self, include_catalog: bool) -> Result<SaleaeSidecarProbe> {
+        let started = Instant::now();
+        let key = (
+            self.sidecar_path.clone(),
+            self.runtime_root.clone(),
+            include_catalog,
+        );
+        let mut cache = SALEAE_PROBE_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(probe) = cache.get(&key) {
+            trace_decoder_timing("saleae", "probe_cache_hit", started, "");
+            return Ok(probe.clone());
+        }
+        if !include_catalog {
+            let catalog_key = (self.sidecar_path.clone(), self.runtime_root.clone(), true);
+            if let Some(probe) = cache.get(&catalog_key) {
+                trace_decoder_timing("saleae", "probe_catalog_cache_hit", started, "");
+                return Ok(probe.clone());
+            }
+        }
         let mut command = Command::new(&self.sidecar_path);
         command
             .arg("--runtime-root")
@@ -325,12 +453,27 @@ impl SaleaeNativeDecoder {
         if !output.status.success() {
             return Err(sidecar_error("Saleae", "probe", &output.stderr));
         }
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            CoreError::Decode(format!("invalid Saleae sidecar probe response: {error}"))
-        })
+        let probe: SaleaeSidecarProbe =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                CoreError::Decode(format!("invalid Saleae sidecar probe response: {error}"))
+            })?;
+        cache.insert(key, probe.clone());
+        trace_decoder_timing(
+            "saleae",
+            "probe_process",
+            started,
+            if include_catalog {
+                "catalog=true"
+            } else {
+                "catalog=false"
+            },
+        );
+        Ok(probe)
     }
 
     fn decode_request<T: Serialize>(&self, request: &T) -> Result<DecoderOutput> {
+        let total_started = Instant::now();
+        let spawn_started = Instant::now();
         let mut child = Command::new(&self.sidecar_path)
             .arg("--runtime-root")
             .arg(&self.runtime_root)
@@ -339,9 +482,11 @@ impl SaleaeNativeDecoder {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        trace_decoder_timing("saleae", "sidecar_spawn", spawn_started, "");
         let mut stdin = child.stdin.take().ok_or_else(|| {
             CoreError::Decode("Saleae sidecar stdin was not available".to_string())
         })?;
+        let write_started = Instant::now();
         serde_json::to_writer(&mut stdin, request).map_err(|error| {
             CoreError::Decode(format!(
                 "failed to serialize Saleae decode request: {error}"
@@ -349,14 +494,81 @@ impl SaleaeNativeDecoder {
         })?;
         stdin.flush()?;
         drop(stdin);
+        trace_decoder_timing("saleae", "request_json_write", write_started, "");
 
+        let execute_started = Instant::now();
         let output = child.wait_with_output()?;
+        trace_decoder_timing(
+            "saleae",
+            "sidecar_execute",
+            execute_started,
+            &format!("response_bytes={}", output.stdout.len()),
+        );
         if !output.status.success() {
             return Err(sidecar_error("Saleae", "decode", &output.stderr));
         }
-        serde_json::from_slice(&output.stdout).map_err(|error| {
+        let parse_started = Instant::now();
+        let decoded: DecoderOutput = serde_json::from_slice(&output.stdout).map_err(|error| {
             CoreError::Decode(format!("invalid Saleae sidecar decode response: {error}"))
-        })
+        })?;
+        trace_decoder_timing(
+            "saleae",
+            "response_json_parse",
+            parse_started,
+            &format!("frames={}", decoded.frames.len()),
+        );
+        trace_decoder_timing(
+            "saleae",
+            "decode_total",
+            total_started,
+            &format!("frames={}", decoded.frames.len()),
+        );
+        Ok(decoded)
+    }
+
+    pub fn simulate(
+        &self,
+        settings: &AnalyzerDecodeSettings,
+        sample_rate_hz: u64,
+        sample_count: u64,
+    ) -> Result<Vec<SaleaeSimulationChannel>> {
+        let request = SaleaeSimulationRequest {
+            sample_rate_hz,
+            sample_count,
+            decoder: native_sidecar_settings(settings),
+        };
+        let mut child = Command::new(&self.sidecar_path)
+            .arg("--runtime-root")
+            .arg(&self.runtime_root)
+            .arg("--simulate")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        serde_json::to_writer(
+            child.stdin.as_mut().ok_or_else(|| {
+                CoreError::Decode("Saleae simulation sidecar stdin was not available".to_string())
+            })?,
+            &request,
+        )
+        .map_err(|error| {
+            CoreError::Decode(format!(
+                "failed to serialize Saleae simulation request: {error}"
+            ))
+        })?;
+        drop(child.stdin.take());
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err(sidecar_error("Saleae", "simulation", &output.stderr));
+        }
+        let mut response: SaleaeSimulationResponse = serde_json::from_slice(&output.stdout)
+            .map_err(|error| {
+                CoreError::Decode(format!("invalid Saleae simulation response: {error}"))
+            })?;
+        for channel in &mut response.channels {
+            normalize_saleae_simulation_channel(channel);
+        }
+        Ok(response.channels)
     }
 }
 
@@ -404,7 +616,11 @@ impl DecoderBackend for SaleaeNativeDecoder {
                 "Saleae Logic runtime does not match the pinned 2.4.43 ABI".to_string(),
             ));
         }
-        let request = build_native_sidecar_request(capture, settings)?;
+        let request = build_native_sidecar_request(
+            capture,
+            settings,
+            supports_compact_edges(&probe.edge_encodings),
+        )?;
         self.decode_request(&request)
     }
 
@@ -419,8 +635,43 @@ impl DecoderBackend for SaleaeNativeDecoder {
                 "Saleae Logic runtime does not match the pinned 2.4.43 ABI".to_string(),
             ));
         }
-        let request = build_sparse_native_sidecar_request(capture, settings)?;
+        let request = build_sparse_native_sidecar_request(
+            capture,
+            settings,
+            supports_compact_edges(&probe.edge_encodings),
+        )?;
         self.decode_request(&request)
+    }
+
+    fn decode_sparse_view(
+        &self,
+        capture: &SparseCaptureView<'_>,
+        settings: &AnalyzerDecodeSettings,
+    ) -> Result<DecoderOutput> {
+        let probe = self.probe()?;
+        if !probe.available || !probe.abi_match {
+            return Err(CoreError::Decode(
+                "Saleae Logic runtime does not match the pinned 2.4.43 ABI".to_string(),
+            ));
+        }
+        let request = build_sparse_view_native_sidecar_request(
+            capture,
+            settings,
+            supports_compact_edges(&probe.edge_encodings),
+        )?;
+        self.decode_request(&request)
+    }
+}
+
+fn normalize_saleae_simulation_channel(channel: &mut SaleaeSimulationChannel) {
+    channel.transitions.sort_unstable();
+    channel.transitions.dedup();
+    if channel.transitions.first() == Some(&0) {
+        channel.initial_high = !channel.initial_high;
+    }
+    channel.transitions.retain(|sample| *sample > 0);
+    if let Some(last) = channel.transitions.last() {
+        channel.sample_count = channel.sample_count.max(last.saturating_add(1));
     }
 }
 
@@ -430,6 +681,10 @@ pub struct SigrokNativeDecoder {
     decoder_root: PathBuf,
     python_decoder_root: Option<PathBuf>,
 }
+
+type SigrokProbeCacheKey = (PathBuf, PathBuf, Option<PathBuf>, bool);
+static SIGROK_PROBE_CACHE: OnceLock<Mutex<HashMap<SigrokProbeCacheKey, SigrokSidecarProbe>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SigrokDecoderCatalog {
@@ -492,7 +747,7 @@ pub struct SigrokDecoderOption {
     pub values: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 struct SigrokSidecarProbe {
     available: bool,
@@ -501,6 +756,8 @@ struct SigrokSidecarProbe {
     decoder_name: String,
     decoder_id: String,
     api_version: u32,
+    #[serde(default)]
+    edge_encodings: Vec<String>,
     #[serde(default)]
     catalog_included: bool,
     #[serde(default)]
@@ -571,6 +828,33 @@ impl SigrokNativeDecoder {
     }
 
     fn probe_with_catalog(&self, include_catalog: bool) -> Result<SigrokSidecarProbe> {
+        let started = Instant::now();
+        let key = (
+            self.sidecar_path.clone(),
+            self.decoder_root.clone(),
+            self.python_decoder_root.clone(),
+            include_catalog,
+        );
+        let mut cache = SIGROK_PROBE_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(probe) = cache.get(&key) {
+            trace_decoder_timing("sigrok", "probe_cache_hit", started, "");
+            return Ok(probe.clone());
+        }
+        if !include_catalog {
+            let catalog_key = (
+                self.sidecar_path.clone(),
+                self.decoder_root.clone(),
+                self.python_decoder_root.clone(),
+                true,
+            );
+            if let Some(probe) = cache.get(&catalog_key) {
+                trace_decoder_timing("sigrok", "probe_catalog_cache_hit", started, "");
+                return Ok(probe.clone());
+            }
+        }
         let mut command = self.command();
         command.arg("--probe");
         if include_catalog {
@@ -580,12 +864,27 @@ impl SigrokNativeDecoder {
         if !output.status.success() {
             return Err(sidecar_error("Sigrok", "probe", &output.stderr));
         }
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            CoreError::Decode(format!("invalid Sigrok sidecar probe response: {error}"))
-        })
+        let probe: SigrokSidecarProbe =
+            serde_json::from_slice(&output.stdout).map_err(|error| {
+                CoreError::Decode(format!("invalid Sigrok sidecar probe response: {error}"))
+            })?;
+        cache.insert(key, probe.clone());
+        trace_decoder_timing(
+            "sigrok",
+            "probe_process",
+            started,
+            if include_catalog {
+                "catalog=true"
+            } else {
+                "catalog=false"
+            },
+        );
+        Ok(probe)
     }
 
     fn decode_request<T: Serialize>(&self, request: &T) -> Result<DecoderOutput> {
+        let total_started = Instant::now();
+        let spawn_started = Instant::now();
         let mut command = self.command();
         let mut child = command
             .arg("--decode")
@@ -593,9 +892,11 @@ impl SigrokNativeDecoder {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        trace_decoder_timing("sigrok", "sidecar_spawn", spawn_started, "");
         let mut stdin = child.stdin.take().ok_or_else(|| {
             CoreError::Decode("Sigrok sidecar stdin was not available".to_string())
         })?;
+        let write_started = Instant::now();
         serde_json::to_writer(&mut stdin, request).map_err(|error| {
             CoreError::Decode(format!(
                 "failed to serialize Sigrok decode request: {error}"
@@ -603,14 +904,36 @@ impl SigrokNativeDecoder {
         })?;
         stdin.flush()?;
         drop(stdin);
+        trace_decoder_timing("sigrok", "request_json_write", write_started, "");
 
+        let execute_started = Instant::now();
         let output = child.wait_with_output()?;
+        trace_decoder_timing(
+            "sigrok",
+            "sidecar_execute",
+            execute_started,
+            &format!("response_bytes={}", output.stdout.len()),
+        );
         if !output.status.success() {
             return Err(sidecar_error("Sigrok", "decode", &output.stderr));
         }
-        serde_json::from_slice(&output.stdout).map_err(|error| {
+        let parse_started = Instant::now();
+        let decoded: DecoderOutput = serde_json::from_slice(&output.stdout).map_err(|error| {
             CoreError::Decode(format!("invalid Sigrok sidecar decode response: {error}"))
-        })
+        })?;
+        trace_decoder_timing(
+            "sigrok",
+            "response_json_parse",
+            parse_started,
+            &format!("frames={}", decoded.frames.len()),
+        );
+        trace_decoder_timing(
+            "sigrok",
+            "decode_total",
+            total_started,
+            &format!("frames={}", decoded.frames.len()),
+        );
+        Ok(decoded)
     }
 
     fn command(&self) -> Command {
@@ -921,7 +1244,11 @@ impl DecoderBackend for SigrokNativeDecoder {
             ));
         }
         ensure_sigrok_protocol_available(&probe, settings)?;
-        let request = build_native_sidecar_request(capture, settings)?;
+        let request = build_native_sidecar_request(
+            capture,
+            settings,
+            supports_compact_edges(&probe.edge_encodings),
+        )?;
         self.decode_request(&request)
     }
 
@@ -937,7 +1264,31 @@ impl DecoderBackend for SigrokNativeDecoder {
             ));
         }
         ensure_sigrok_protocol_available(&probe, settings)?;
-        let request = build_sparse_native_sidecar_request(capture, settings)?;
+        let request = build_sparse_native_sidecar_request(
+            capture,
+            settings,
+            supports_compact_edges(&probe.edge_encodings),
+        )?;
+        self.decode_request(&request)
+    }
+
+    fn decode_sparse_view(
+        &self,
+        capture: &SparseCaptureView<'_>,
+        settings: &AnalyzerDecodeSettings,
+    ) -> Result<DecoderOutput> {
+        let probe = self.probe()?;
+        if !probe.available || probe.api_version != 4 {
+            return Err(CoreError::Decode(
+                "PXView native C decoder API v4 is not available".to_string(),
+            ));
+        }
+        ensure_sigrok_protocol_available(&probe, settings)?;
+        let request = build_sparse_view_native_sidecar_request(
+            capture,
+            settings,
+            supports_compact_edges(&probe.edge_encodings),
+        )?;
         self.decode_request(&request)
     }
 }
@@ -949,6 +1300,12 @@ fn native_protocol_name(settings: &AnalyzerDecodeSettings) -> &str {
         AnalyzerDecodeSettings::Spi(_) => "SPI",
         AnalyzerDecodeSettings::Native(settings) => &settings.protocol_name,
     }
+}
+
+fn supports_compact_edges(edge_encodings: &[String]) -> bool {
+    edge_encodings
+        .iter()
+        .any(|encoding| encoding == "delta_varint_base64")
 }
 
 fn protocol_names(protocols: &[&str]) -> Vec<String> {
@@ -1019,7 +1376,8 @@ fn configured_native_channels(
 fn packed_transition_sets(
     capture: &CaptureData,
     channels: &BTreeSet<u8>,
-) -> Result<(Vec<u8>, Vec<NativeEdgeSet>)> {
+) -> Result<(Vec<u8>, Vec<NativeEdgeSet<'static>>)> {
+    let started = Instant::now();
     let first_word = capture_word(capture, 0)?;
     let initial_levels = (0..capture.metadata.channel_count)
         .map(|channel| u8::from(first_word & (1u32 << channel) != 0))
@@ -1028,7 +1386,8 @@ fn packed_transition_sets(
         .iter()
         .map(|channel| NativeEdgeSet {
             channel: *channel,
-            samples: Vec::new(),
+            compact: false,
+            samples: Cow::Owned(Vec::new()),
         })
         .collect::<Vec<_>>();
     let mut previous_word = first_word;
@@ -1038,56 +1397,78 @@ fn packed_transition_sets(
         if changed != 0 {
             for edge_set in &mut edges {
                 if changed & (1u32 << edge_set.channel) != 0 {
-                    edge_set.samples.push(sample);
+                    edge_set.samples.to_mut().push(sample);
                 }
             }
         }
         previous_word = word;
     }
+    trace_decoder_timing(
+        "native",
+        "packed_edge_extraction",
+        started,
+        &format!(
+            "samples={} channels={} edges={}",
+            capture.metadata.sample_count,
+            channels.len(),
+            edges.iter().map(|edge| edge.samples.len()).sum::<usize>()
+        ),
+    );
     Ok((initial_levels, edges))
 }
 
-fn sparse_transition_sets(
-    capture: &SparseCaptureData,
+fn sparse_transition_sets<'a, I>(
+    channel_count: u8,
+    sample_count: u64,
+    sparse_channels: I,
     channels: &BTreeSet<u8>,
-) -> Result<(Vec<u8>, Vec<NativeEdgeSet>)> {
-    let mut initial_levels = vec![0u8; usize::from(capture.metadata.channel_count)];
+) -> Result<(Vec<u8>, Vec<NativeEdgeSet<'a>>)>
+where
+    I: IntoIterator<Item = (u8, bool, &'a [u64])>,
+{
+    let started = Instant::now();
+    let mut initial_levels = vec![0u8; usize::from(channel_count)];
     let mut available = BTreeSet::new();
-    for sparse_channel in &capture.channels {
-        if sparse_channel.channel >= capture.metadata.channel_count
-            || !available.insert(sparse_channel.channel)
-            || sparse_channel
-                .transitions
-                .windows(2)
-                .any(|window| window[0] >= window[1])
-            || sparse_channel
-                .transitions
+    let mut edges = Vec::with_capacity(channels.len());
+    for (channel, initial_high, transitions) in sparse_channels {
+        if channel >= channel_count
+            || !available.insert(channel)
+            || transitions.windows(2).any(|window| window[0] >= window[1])
+            || transitions
                 .iter()
-                .any(|sample| *sample == 0 || *sample >= capture.metadata.sample_count)
+                .any(|sample| *sample == 0 || *sample >= sample_count)
         {
             return Err(CoreError::Decode(
                 "invalid sparse transition channel data".to_string(),
             ));
         }
-        initial_levels[usize::from(sparse_channel.channel)] = u8::from(sparse_channel.initial_high);
+        initial_levels[usize::from(channel)] = u8::from(initial_high);
+        if channels.contains(&channel) {
+            edges.push(NativeEdgeSet {
+                channel,
+                compact: false,
+                samples: Cow::Borrowed(transitions),
+            });
+        }
     }
-    let mut edges = Vec::with_capacity(channels.len());
     for channel in channels {
         if !available.contains(channel) {
             return Err(CoreError::Decode(format!(
                 "native decoder channel D{channel} is not present in the sparse capture"
             )));
         }
-        let sparse_channel = capture
-            .channels
-            .iter()
-            .find(|candidate| candidate.channel == *channel)
-            .expect("available sparse channel was just validated");
-        edges.push(NativeEdgeSet {
-            channel: *channel,
-            samples: sparse_channel.transitions.clone(),
-        });
     }
+    edges.sort_by_key(|edge| edge.channel);
+    trace_decoder_timing(
+        "native",
+        "indexed_edge_borrow",
+        started,
+        &format!(
+            "samples={sample_count} channels={} edges={}",
+            channels.len(),
+            edges.iter().map(|edge| edge.samples.len()).sum::<usize>()
+        ),
+    );
     Ok((initial_levels, edges))
 }
 
@@ -1166,14 +1547,18 @@ fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSe
 fn build_native_sidecar_request(
     capture: &CaptureData,
     settings: &AnalyzerDecodeSettings,
-) -> Result<NativeSidecarRequest> {
+    compact_edges: bool,
+) -> Result<NativeSidecarRequest<'static>> {
     if capture.metadata.sample_count == 0 {
         return Err(CoreError::Decode(
             "native decoding requires at least one sample".to_string(),
         ));
     }
     let channels = configured_native_channels(settings, capture.metadata.channel_count)?;
-    let (initial_levels, edges) = packed_transition_sets(capture, &channels)?;
+    let (initial_levels, mut edges) = packed_transition_sets(capture, &channels)?;
+    edges
+        .iter_mut()
+        .for_each(|edge| edge.compact = compact_edges);
     Ok(NativeSidecarRequest {
         format: "pxlogic.decoder.v1",
         sample_rate_hz: capture.metadata.sample_rate_hz,
@@ -1185,17 +1570,66 @@ fn build_native_sidecar_request(
     })
 }
 
-fn build_sparse_native_sidecar_request(
-    capture: &SparseCaptureData,
+fn build_sparse_native_sidecar_request<'a>(
+    capture: &'a SparseCaptureData,
     settings: &AnalyzerDecodeSettings,
-) -> Result<NativeSidecarRequest> {
+    compact_edges: bool,
+) -> Result<NativeSidecarRequest<'a>> {
     if capture.metadata.sample_count == 0 {
         return Err(CoreError::Decode(
             "native decoding requires at least one sample".to_string(),
         ));
     }
     let channels = configured_native_channels(settings, capture.metadata.channel_count)?;
-    let (initial_levels, edges) = sparse_transition_sets(capture, &channels)?;
+    let (initial_levels, mut edges) = sparse_transition_sets(
+        capture.metadata.channel_count,
+        capture.metadata.sample_count,
+        capture.channels.iter().map(|channel| {
+            (
+                channel.channel,
+                channel.initial_high,
+                channel.transitions.as_slice(),
+            )
+        }),
+        &channels,
+    )?;
+    edges
+        .iter_mut()
+        .for_each(|edge| edge.compact = compact_edges);
+    Ok(NativeSidecarRequest {
+        format: "pxlogic.decoder.v1",
+        sample_rate_hz: capture.metadata.sample_rate_hz,
+        sample_count: capture.metadata.sample_count,
+        channel_count: capture.metadata.channel_count,
+        initial_levels,
+        edges,
+        decoder: native_sidecar_settings(settings),
+    })
+}
+
+fn build_sparse_view_native_sidecar_request<'a>(
+    capture: &'a SparseCaptureView<'a>,
+    settings: &AnalyzerDecodeSettings,
+    compact_edges: bool,
+) -> Result<NativeSidecarRequest<'a>> {
+    if capture.metadata.sample_count == 0 {
+        return Err(CoreError::Decode(
+            "native decoding requires at least one sample".to_string(),
+        ));
+    }
+    let channels = configured_native_channels(settings, capture.metadata.channel_count)?;
+    let (initial_levels, mut edges) = sparse_transition_sets(
+        capture.metadata.channel_count,
+        capture.metadata.sample_count,
+        capture
+            .channels
+            .iter()
+            .map(|channel| (channel.channel, channel.initial_high, channel.transitions)),
+        &channels,
+    )?;
+    edges
+        .iter_mut()
+        .for_each(|edge| edge.compact = compact_edges);
     Ok(NativeSidecarRequest {
         format: "pxlogic.decoder.v1",
         sample_rate_hz: capture.metadata.sample_rate_hz,
@@ -1277,14 +1711,43 @@ fn short_hash(hash: &str) -> &str {
 
 impl DecoderOutput {
     pub fn into_decoded_frames(self) -> Vec<crate::decode::DecodedFrame> {
-        self.frames
+        let protocol = self.protocol;
+        let mut markers = self
+            .frames
+            .iter()
+            .flat_map(|frame| frame.markers.iter())
+            .map(|marker| crate::decode::DecodedProtocolMarker {
+                channel: marker.channel,
+                sample: marker.sample,
+                kind: marker.kind.clone(),
+            })
+            .collect::<Vec<_>>();
+        markers.sort_by_key(|marker| marker.sample);
+        markers.dedup();
+        let mut frames = self
+            .frames
             .into_iter()
-            .map(|frame| {
+            .map(|mut frame| {
                 let frame_type = frame.row.clone();
-                let label = frame
-                    .texts
-                    .first()
-                    .cloned()
+                let preferred_label = i2c_display_label(&protocol, &frame);
+                if let Some(label) = &preferred_label {
+                    for value in &mut frame.channel_values {
+                        value.label = label.clone();
+                        value.texts = vec![label.clone()];
+                    }
+                } else {
+                    for value in &mut frame.channel_values {
+                        if value.texts.is_empty() {
+                            value.texts = frame.texts.clone();
+                        }
+                        if let Some(label) = value.texts.last() {
+                            value.label = label.clone();
+                        }
+                    }
+                }
+                let label = preferred_label
+                    .or_else(|| spi_display_label(&protocol, &frame))
+                    .or_else(|| frame.texts.last().cloned())
                     .or_else(|| {
                         frame
                             .channel_values
@@ -1305,9 +1768,112 @@ impl DecoderOutput {
                     label,
                     value,
                     channel_values: frame.channel_values,
+                    protocol_markers: Vec::new(),
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        for marker in markers {
+            let index = frames
+                .partition_point(|frame| frame.start_sample <= marker.sample)
+                .saturating_sub(1)
+                .min(frames.len().saturating_sub(1));
+            if let Some(frame) = frames.get_mut(index) {
+                frame.protocol_markers.push(marker);
+            }
+        }
+        frames
+    }
+}
+
+fn spi_display_label(protocol: &str, frame: &DecoderOutputFrame) -> Option<String> {
+    if !protocol.eq_ignore_ascii_case("spi") || frame.channel_values.is_empty() {
+        return None;
+    }
+    Some(
+        frame
+            .channel_values
+            .iter()
+            .map(|value| format!("{} {}", value.role, value.label))
+            .collect::<Vec<_>>()
+            .join(" / "),
+    )
+}
+
+fn i2c_display_label(protocol: &str, frame: &DecoderOutputFrame) -> Option<String> {
+    if !protocol.eq_ignore_ascii_case("i2c") {
+        return None;
+    }
+    if frame.row.eq_ignore_ascii_case("address") {
+        if let Some(label) = frame
+            .texts
+            .iter()
+            .find(|text| text.starts_with("W[") || text.starts_with("R["))
+        {
+            return Some(label.clone());
+        }
+        let address = decoder_unsigned_field(frame, "address")?;
+        let direction = if decoder_boolean_field(frame, "read").unwrap_or(false) {
+            'R'
+        } else {
+            'W'
+        };
+        return Some(format!("{direction}[0x{address:02X}]"));
+    }
+    if frame.row.eq_ignore_ascii_case("data") {
+        if let Some(label) = frame.texts.iter().find(|text| {
+            text.contains(" + ACK") || text.contains(" + NAK") || text.contains("Missing ACK/NAK")
+        }) {
+            return Some(label.clone());
+        }
+        let data = decoder_unsigned_field(frame, "data")?;
+        let acknowledgement = decoder_boolean_field(frame, "ack")
+            .map(|acknowledged| if acknowledged { "ACK" } else { "NAK" })
+            .or_else(|| {
+                decoder_text_field(frame, "error")
+                    .filter(|error| error.to_ascii_lowercase().contains("ack"))
+                    .map(|_| "Missing ACK/NAK")
+            });
+        return Some(match acknowledgement {
+            Some(acknowledgement) => format!("0x{data:02X} + {acknowledgement}"),
+            None => format!("0x{data:02X}"),
+        });
+    }
+    None
+}
+
+fn decoder_field<'a>(frame: &'a DecoderOutputFrame, name: &str) -> Option<&'a DecoderFieldValue> {
+    frame
+        .fields
+        .iter()
+        .find(|field| field.name.eq_ignore_ascii_case(name))
+        .map(|field| &field.value)
+}
+
+fn decoder_unsigned_field(frame: &DecoderOutputFrame, name: &str) -> Option<u64> {
+    match decoder_field(frame, name)? {
+        DecoderFieldValue::Unsigned(value) => Some(*value),
+        DecoderFieldValue::Signed(value) => u64::try_from(*value).ok(),
+        DecoderFieldValue::Boolean(value) => Some(u64::from(*value)),
+        DecoderFieldValue::Text(_) | DecoderFieldValue::Bytes(_) => None,
+    }
+}
+
+fn decoder_boolean_field(frame: &DecoderOutputFrame, name: &str) -> Option<bool> {
+    match decoder_field(frame, name)? {
+        DecoderFieldValue::Boolean(value) => Some(*value),
+        DecoderFieldValue::Unsigned(value) => Some(*value != 0),
+        DecoderFieldValue::Signed(value) => Some(*value != 0),
+        DecoderFieldValue::Text(_) | DecoderFieldValue::Bytes(_) => None,
+    }
+}
+
+fn decoder_text_field<'a>(frame: &'a DecoderOutputFrame, name: &str) -> Option<&'a str> {
+    match decoder_field(frame, name)? {
+        DecoderFieldValue::Text(value) => Some(value),
+        DecoderFieldValue::Unsigned(_)
+        | DecoderFieldValue::Signed(_)
+        | DecoderFieldValue::Boolean(_)
+        | DecoderFieldValue::Bytes(_) => None,
     }
 }
 
@@ -1383,6 +1949,103 @@ mod tests {
         },
         models::{CaptureMetadata, SparseDigitalChannel},
     };
+
+    #[test]
+    fn i2c_adapter_preserves_direction_and_acknowledgement_labels() {
+        let frames = DecoderOutput {
+            backend: DecoderBackendKind::SaleaeNative,
+            protocol: "I2C".to_string(),
+            frames: vec![
+                i2c_output_frame(
+                    0,
+                    "address",
+                    vec![
+                        decoder_test_field("address", DecoderFieldValue::Unsigned(0x20)),
+                        decoder_test_field("read", DecoderFieldValue::Boolean(false)),
+                        decoder_test_field("ack", DecoderFieldValue::Boolean(true)),
+                    ],
+                    "Data",
+                    0x20,
+                ),
+                i2c_output_frame(
+                    1,
+                    "data",
+                    vec![
+                        decoder_test_field("data", DecoderFieldValue::Unsigned(0x14)),
+                        decoder_test_field("ack", DecoderFieldValue::Boolean(true)),
+                    ],
+                    "Data",
+                    0x14,
+                ),
+                i2c_output_frame(
+                    2,
+                    "address",
+                    vec![
+                        decoder_test_field("address", DecoderFieldValue::Unsigned(0x20)),
+                        decoder_test_field("read", DecoderFieldValue::Boolean(true)),
+                    ],
+                    "Address",
+                    0x20,
+                ),
+                i2c_output_frame(
+                    3,
+                    "data",
+                    vec![
+                        decoder_test_field("data", DecoderFieldValue::Unsigned(0x2d)),
+                        decoder_test_field("ack", DecoderFieldValue::Boolean(false)),
+                    ],
+                    "Data",
+                    0x2d,
+                ),
+            ],
+            diagnostics: Vec::new(),
+        }
+        .into_decoded_frames();
+
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| frame.label.as_str())
+                .collect::<Vec<_>>(),
+            ["W[0x20]", "0x14 + ACK", "R[0x20]", "0x2D + NAK"]
+        );
+        assert_eq!(frames[0].channel_values[0].label, "W[0x20]");
+        assert_eq!(frames[1].channel_values[0].label, "0x14 + ACK");
+        assert_eq!(frames[2].channel_values[0].label, "R[0x20]");
+        assert_eq!(frames[3].channel_values[0].label, "0x2D + NAK");
+    }
+
+    fn decoder_test_field(name: &str, value: DecoderFieldValue) -> DecoderField {
+        DecoderField {
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    fn i2c_output_frame(
+        frame_id: u64,
+        row: &str,
+        fields: Vec<DecoderField>,
+        role: &str,
+        value: u64,
+    ) -> DecoderOutputFrame {
+        DecoderOutputFrame {
+            frame_id,
+            start_sample: frame_id * 10,
+            end_sample: frame_id * 10 + 9,
+            row: row.to_string(),
+            texts: Vec::new(),
+            fields,
+            channel_values: vec![DecodedChannelValue {
+                channel: 0,
+                role: role.to_string(),
+                label: format!("0x{value:02X}"),
+                texts: vec![format!("0x{value:02X}")],
+                value,
+            }],
+            markers: Vec::new(),
+        }
+    }
 
     #[test]
     fn native_sidecar_candidates_include_macos_app_resource_layout() {
@@ -1823,7 +2486,7 @@ mod tests {
 
     #[test]
     fn generic_native_request_preserves_i2s_contract() {
-        let request = build_native_sidecar_request(&i2s_capture(), &i2s_settings()).unwrap();
+        let request = build_native_sidecar_request(&i2s_capture(), &i2s_settings(), true).unwrap();
         let decoder = serde_json::to_value(request.decoder).unwrap();
         assert_eq!(decoder["protocol"], "i2s");
         assert_eq!(decoder["channels"]["sck"], 0);
@@ -1835,7 +2498,8 @@ mod tests {
     #[test]
     fn generic_native_request_preserves_can_contract_without_rust_protocol_logic() {
         let request =
-            build_native_sidecar_request(&can_capture(), &can_settings("can", "CAN")).unwrap();
+            build_native_sidecar_request(&can_capture(), &can_settings("can", "CAN"), true)
+                .unwrap();
         let decoder = serde_json::to_value(request.decoder).unwrap();
         assert_eq!(decoder["protocol"], "can");
         assert_eq!(decoder["channels"]["can_rx"], 0);
@@ -1846,7 +2510,7 @@ mod tests {
 
     #[test]
     fn generic_native_request_preserves_lin_contract_without_rust_protocol_logic() {
-        let request = build_native_sidecar_request(&lin_capture(), &lin_settings()).unwrap();
+        let request = build_native_sidecar_request(&lin_capture(), &lin_settings(), true).unwrap();
         let decoder = serde_json::to_value(request.decoder).unwrap();
         assert_eq!(decoder["protocol"], "lin");
         assert_eq!(decoder["channels"]["rx"], 0);
@@ -1867,7 +2531,7 @@ mod tests {
                 (2, vec![20, 25, 60, 65, 100, 105, 140, 145]),
             ],
         );
-        let request = build_native_sidecar_request(&capture, &parallel_settings()).unwrap();
+        let request = build_native_sidecar_request(&capture, &parallel_settings(), true).unwrap();
         let decoder = serde_json::to_value(request.decoder).unwrap();
         assert_eq!(decoder["protocol"], "parallel");
         assert_eq!(decoder["channels"]["d0"], 0);
@@ -1903,29 +2567,61 @@ mod tests {
         };
 
         let request =
-            build_native_sidecar_request(&capture, &AnalyzerDecodeSettings::Spi(settings)).unwrap();
+            build_native_sidecar_request(&capture, &AnalyzerDecodeSettings::Spi(settings), true)
+                .unwrap();
         assert_eq!(request.initial_levels, vec![0, 0, 0, 1]);
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["edges"][0]["encoding"], "delta_varint_base64");
+        assert!(serialized["edges"][0].get("samples").is_none());
         let edges = request
             .edges
             .into_iter()
             .map(|edge| (edge.channel, edge.samples))
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(edges.get(&0), Some(&vec![1, 5]));
-        assert_eq!(edges.get(&1), Some(&vec![2]));
-        assert_eq!(edges.get(&2), Some(&vec![4]));
-        assert_eq!(edges.get(&3), Some(&vec![3]));
+        assert_eq!(
+            edges.get(&0).map(|samples| samples.as_ref()),
+            Some(&[1, 5][..])
+        );
+        assert_eq!(
+            edges.get(&1).map(|samples| samples.as_ref()),
+            Some(&[2][..])
+        );
+        assert_eq!(
+            edges.get(&2).map(|samples| samples.as_ref()),
+            Some(&[4][..])
+        );
+        assert_eq!(
+            edges.get(&3).map(|samples| samples.as_ref()),
+            Some(&[3][..])
+        );
+
+        let legacy = build_native_sidecar_request(
+            &capture,
+            &AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+                mosi_channel: Some(0),
+                miso_channel: Some(1),
+                clock_channel: 2,
+                enable_channel: Some(3),
+                ..SpiDecodeSettings::default()
+            }),
+            false,
+        )
+        .unwrap();
+        let serialized = serde_json::to_value(legacy).unwrap();
+        assert!(serialized["edges"][0]["samples"].is_array());
+        assert!(serialized["edges"][0].get("samples_b64").is_none());
     }
 
     #[test]
     fn native_requests_cover_uart_and_i2c_without_unrelated_channels() {
         let (uart_capture, uart_settings) = uart_capture_and_settings();
-        let uart = build_native_sidecar_request(&uart_capture, &uart_settings).unwrap();
+        let uart = build_native_sidecar_request(&uart_capture, &uart_settings, true).unwrap();
         assert_eq!(uart.edges.len(), 1);
         assert_eq!(uart.edges[0].channel, 0);
         assert_eq!(uart.decoder.protocol, "uart");
 
         let (i2c_capture, i2c_settings) = i2c_capture_and_settings();
-        let i2c = build_native_sidecar_request(&i2c_capture, &i2c_settings).unwrap();
+        let i2c = build_native_sidecar_request(&i2c_capture, &i2c_settings, true).unwrap();
         assert_eq!(
             i2c.edges
                 .iter()
@@ -1984,7 +2680,7 @@ mod tests {
     #[test]
     fn sparse_sidecar_request_preserves_transition_indexes_beyond_u32() {
         let (capture, settings) = sparse_mode_zero_capture_and_settings();
-        let request = build_sparse_native_sidecar_request(&capture, &settings).unwrap();
+        let request = build_sparse_native_sidecar_request(&capture, &settings, true).unwrap();
         assert_eq!(request.sample_count, 50_000_000_000);
         assert_eq!(request.initial_levels, vec![1, 0, 0, 1]);
         assert_eq!(request.edges[0].samples[0], 49_000_000_015);
@@ -2122,6 +2818,15 @@ mod tests {
         );
         assert_eq!(i2c.frames.first().unwrap().row, "start");
         assert_eq!(i2c.frames.last().unwrap().row, "stop");
+        let decoded = i2c.into_decoded_frames();
+        assert_eq!(
+            decoded
+                .iter()
+                .filter(|frame| frame.frame_type == "address" || frame.frame_type == "data")
+                .map(|frame| frame.label.as_str())
+                .collect::<Vec<_>>(),
+            ["W[0x50]", "0xA5 + ACK"]
+        );
     }
 
     #[test]
@@ -2218,6 +2923,336 @@ mod tests {
         let output = decoder.decode_sparse(&sparse, &lin_settings()).unwrap();
         assert_lin_output(&output);
         assert!(output.frames[0].start_sample > u64::from(u32::MAX));
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_official_generators_round_trip_core_native_protocols() {
+        let decoder = SaleaeNativeDecoder::from_env().unwrap();
+        let settings = [
+            AnalyzerDecodeSettings::Uart(UartDecodeSettings::default()),
+            AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
+            AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
+            native_settings(
+                "can",
+                "CAN",
+                &[("CAN", 0)],
+                &[("Bit Rate (Bits/s)", NativeOptionValue::Integer(1_000_000))],
+            ),
+            native_settings(
+                "lin",
+                "LIN",
+                &[("Serial", 0)],
+                &[
+                    ("LIN Version", NativeOptionValue::Integer(2)),
+                    ("Bit Rate (Bits/s)", NativeOptionValue::Integer(20_000)),
+                ],
+            ),
+            native_settings(
+                "i2s",
+                "I2S/PCM",
+                &[("CLOCK channel", 0), ("FRAME", 1), ("DATA", 2)],
+                &[(
+                    "Audio Bit Depth (bits/sample)",
+                    NativeOptionValue::Integer(16),
+                )],
+            ),
+            native_settings(
+                "simple_parallel",
+                "Parallel",
+                &[("Clock", 0), ("D0", 1), ("D1", 2)],
+                &[("Clock State", NativeOptionValue::Integer(0))],
+            ),
+            native_settings("swd", "SWD", &[("SWDIO", 0), ("SWCLK", 1)], &[]),
+        ];
+
+        for settings in settings {
+            let generated = decoder.simulate(&settings, 10_000_000, 2_000_000).unwrap();
+            assert!(
+                !generated.is_empty(),
+                "{} generated no channels",
+                native_protocol_name(&settings)
+            );
+            assert!(generated
+                .iter()
+                .any(|channel| !channel.transitions.is_empty()));
+            let sample_count = generated
+                .iter()
+                .map(|channel| channel.sample_count)
+                .max()
+                .unwrap();
+            let channel_count = generated
+                .iter()
+                .map(|channel| channel.channel)
+                .max()
+                .unwrap()
+                + 1;
+            let capture = SparseCaptureData {
+                metadata: CaptureMetadata {
+                    version: 1,
+                    source_device: "saleae-official-simulation".to_string(),
+                    sample_rate_hz: 10_000_000,
+                    channel_count,
+                    enabled_channels: (0..channel_count).collect(),
+                    unitsize: 1,
+                    sample_count,
+                    captured_at: Utc::now(),
+                    labels: (0..channel_count)
+                        .map(|channel| format!("D{channel}"))
+                        .collect(),
+                    trigger: None,
+                },
+                channels: generated
+                    .into_iter()
+                    .map(|channel| SparseDigitalChannel {
+                        channel: channel.channel,
+                        initial_high: channel.initial_high,
+                        transitions: channel.transitions,
+                    })
+                    .collect(),
+            };
+            let output = decoder.decode_sparse(&capture, &settings).unwrap();
+            assert!(
+                !output.frames.is_empty(),
+                "{} did not decode its generated waveform",
+                native_protocol_name(&settings)
+            );
+            assert!(output.frames.iter().any(|frame| !frame.texts.is_empty()));
+            assert!(output.frames.iter().any(|frame| !frame.markers.is_empty()));
+            assert!(output
+                .frames
+                .iter()
+                .flat_map(|frame| frame.channel_values.iter())
+                .all(|value| !value.texts.is_empty()));
+            let bubble_text = output
+                .frames
+                .iter()
+                .flat_map(|frame| frame.texts.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let expected = match native_protocol_name(&settings) {
+                "UART" => "0x",
+                "I2C" => "ACK",
+                "SPI" => "0x",
+                "CAN" => "Identifier",
+                "LIN" => "Header Break",
+                "I2S/PCM" => "Ch ",
+                "Parallel" => "0x",
+                "SWD" => "",
+                protocol => panic!("unexpected protocol {protocol}"),
+            };
+            assert!(
+                bubble_text.contains(expected),
+                "{} bubble text was {bubble_text}",
+                native_protocol_name(&settings)
+            );
+            if native_protocol_name(&settings) == "SWD" {
+                let bubble_channels = output
+                    .frames
+                    .iter()
+                    .flat_map(|frame| frame.channel_values.iter().map(|value| value.channel))
+                    .collect::<BTreeSet<_>>();
+                assert!(bubble_channels.contains(&0) && bubble_channels.contains(&1));
+                assert!(output
+                    .frames
+                    .iter()
+                    .flat_map(|frame| &frame.markers)
+                    .any(|marker| marker.kind == "one" || marker.kind == "zero"));
+            }
+        }
+    }
+
+    #[test]
+    fn saleae_simulation_normalization_preserves_zero_sample_transition() {
+        let mut channel = SaleaeSimulationChannel {
+            channel: 0,
+            initial_high: true,
+            sample_count: 8,
+            transitions: vec![4, 0, 4, 2],
+        };
+
+        normalize_saleae_simulation_channel(&mut channel);
+
+        assert!(!channel.initial_high);
+        assert_eq!(channel.transitions, vec![2, 4]);
+        assert_eq!(channel.sample_count, 8);
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_official_generators_round_trip_entire_catalog() {
+        let decoder = SaleaeNativeDecoder::from_env().unwrap();
+        let catalog = decoder.decoder_catalog().unwrap();
+        let saleae_items = catalog
+            .decoders
+            .iter()
+            .filter(|item| item.kind.as_deref() == Some("saleae"))
+            .collect::<Vec<_>>();
+        assert!(saleae_items.len() >= 20);
+
+        let mut unsupported_generators = Vec::new();
+        for item in saleae_items {
+            let settings = catalog_item_native_settings(item);
+            let generated = decoder.simulate(&settings, 10_000_000, 2_000_000).unwrap();
+            if generated.is_empty() {
+                unsupported_generators.push(
+                    item.id
+                        .clone()
+                        .unwrap_or_else(|| native_protocol_name(&settings).to_string()),
+                );
+                continue;
+            }
+            assert!(
+                generated
+                    .iter()
+                    .any(|channel| !channel.transitions.is_empty()),
+                "{} generated only static simulation channels",
+                native_protocol_name(&settings)
+            );
+            let sample_count = generated
+                .iter()
+                .map(|channel| channel.sample_count)
+                .max()
+                .unwrap();
+            let channel_count = generated
+                .iter()
+                .map(|channel| channel.channel)
+                .max()
+                .unwrap()
+                + 1;
+            let capture = SparseCaptureData {
+                metadata: CaptureMetadata {
+                    version: 1,
+                    source_device: "saleae-catalog-official-simulation".to_string(),
+                    sample_rate_hz: 10_000_000,
+                    channel_count,
+                    enabled_channels: (0..channel_count).collect(),
+                    unitsize: 1,
+                    sample_count,
+                    captured_at: Utc::now(),
+                    labels: (0..channel_count)
+                        .map(|channel| format!("D{channel}"))
+                        .collect(),
+                    trigger: None,
+                },
+                channels: generated
+                    .into_iter()
+                    .map(|channel| SparseDigitalChannel {
+                        channel: channel.channel,
+                        initial_high: channel.initial_high,
+                        transitions: channel.transitions,
+                    })
+                    .collect(),
+            };
+            let output = decoder.decode_sparse(&capture, &settings).unwrap();
+            assert!(
+                !output.frames.is_empty(),
+                "{} did not decode its generated waveform",
+                native_protocol_name(&settings)
+            );
+        }
+
+        assert_eq!(unsupported_generators, vec!["mcs04"]);
+    }
+
+    fn native_settings(
+        decoder_id: &str,
+        protocol_name: &str,
+        channels: &[(&str, u8)],
+        options: &[(&str, NativeOptionValue)],
+    ) -> AnalyzerDecodeSettings {
+        AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+            decoder_id: decoder_id.to_string(),
+            protocol_name: protocol_name.to_string(),
+            channels: channels
+                .iter()
+                .map(|(name, channel)| ((*name).to_string(), Some(*channel)))
+                .collect(),
+            options: options
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), value.clone()))
+                .collect(),
+            primary_channel: channels[0].1,
+        })
+    }
+
+    fn catalog_item_native_settings(item: &SigrokDecoderCatalogItem) -> AnalyzerDecodeSettings {
+        let decoder_id = item.id.clone().expect("saleae catalog items have ids");
+        let protocol_name = item
+            .name
+            .clone()
+            .or_else(|| item.longname.clone())
+            .unwrap_or_else(|| decoder_id.clone());
+        let mut sorted_channels = item
+            .channels
+            .iter()
+            .chain(item.optional_channels.iter())
+            .collect::<Vec<_>>();
+        sorted_channels.sort_by_key(|channel| channel.order);
+        let channels = sorted_channels
+            .iter()
+            .enumerate()
+            .map(|(index, channel)| {
+                (
+                    catalog_channel_key(channel, index),
+                    Some(u8::try_from(index).expect("saleae catalog channel fits in u8")),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let options = item
+            .options
+            .iter()
+            .enumerate()
+            .filter_map(|(index, option)| {
+                let value = native_option_from_json(&option.default)
+                    .or_else(|| option.values.iter().find_map(native_option_from_json))?;
+                Some((catalog_option_key(option, index), value))
+            })
+            .collect();
+        AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+            decoder_id,
+            protocol_name,
+            primary_channel: channels.values().flatten().copied().next().unwrap_or(0),
+            channels,
+            options,
+        })
+    }
+
+    fn catalog_channel_key(channel: &SigrokDecoderChannel, fallback_index: usize) -> String {
+        channel
+            .id
+            .as_deref()
+            .or(channel.name.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("ch{fallback_index}"))
+    }
+
+    fn catalog_option_key(option: &SigrokDecoderOption, fallback_index: usize) -> String {
+        option
+            .id
+            .as_deref()
+            .or(option.idn.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("option{fallback_index}"))
+    }
+
+    fn native_option_from_json(value: &serde_json::Value) -> Option<NativeOptionValue> {
+        match value {
+            serde_json::Value::Bool(value) => Some(NativeOptionValue::Boolean(*value)),
+            serde_json::Value::Number(value) => value
+                .as_i64()
+                .map(NativeOptionValue::Integer)
+                .or_else(|| {
+                    value
+                        .as_u64()
+                        .and_then(|value| i64::try_from(value).ok())
+                        .map(NativeOptionValue::Integer)
+                })
+                .or_else(|| value.as_f64().map(NativeOptionValue::Float)),
+            serde_json::Value::String(value) => Some(NativeOptionValue::Text(value.clone())),
+            _ => None,
+        }
     }
 
     #[test]

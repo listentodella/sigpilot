@@ -1,7 +1,9 @@
 use chrono::Utc;
+use serde::Deserialize;
 
 use crate::{
     decode::{AnalyzerDecodeSettings, I2cDecodeSettings, SpiDecodeSettings, UartDecodeSettings},
+    decoder_backend::DecoderBackendKind,
     error::{CoreError, Result},
     models::{
         CaptureData, CaptureMetadata, CaptureMode, CaptureSettings, CaptureTriggerKind,
@@ -9,6 +11,12 @@ use crate::{
     },
     protocol,
 };
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DemoAnalyzerSettings {
+    pub backend: DecoderBackendKind,
+    pub settings: AnalyzerDecodeSettings,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpioTiming {
@@ -812,19 +820,19 @@ impl DemoSampleGenerator {
         Self::with_signals(
             settings,
             unitsize,
-            legacy_demo_signals(settings.channel_count),
+            legacy_demo_signals(settings.channel_count, settings.sample_rate_hz),
         )
     }
 
     pub(crate) fn with_analyzers(
         settings: &CaptureSettings,
         unitsize: u8,
-        analyzers: &[AnalyzerDecodeSettings],
+        analyzers: &[DemoAnalyzerSettings],
     ) -> Result<Self> {
         Self::with_signals(
             settings,
             unitsize,
-            demo_signals_for_analyzers(settings.channel_count, analyzers),
+            demo_signals_for_analyzers(settings.channel_count, settings.sample_rate_hz, analyzers)?,
         )
     }
 
@@ -862,7 +870,7 @@ impl DemoSampleGenerator {
                     continue;
                 }
                 let channel_index = usize::from(channel);
-                let high = match &self.signals[channel_index] {
+                let high = match &mut self.signals[channel_index] {
                     DemoChannelSignal::Pulse => self.channels[channel_index].level_at(sample_index),
                     DemoChannelSignal::Uart(settings) => {
                         demo_uart_level(sample_index, self.settings.sample_rate_hz, settings)
@@ -874,6 +882,7 @@ impl DemoSampleGenerator {
                     DemoChannelSignal::Spi { settings, role } => {
                         demo_spi_level(sample_index, self.settings.sample_rate_hz, settings, *role)
                     }
+                    DemoChannelSignal::SaleaeSimulation(signal) => signal.level_at(sample_index),
                 };
                 if high {
                     word |= 1u32 << channel;
@@ -898,6 +907,49 @@ enum DemoChannelSignal {
         settings: SpiDecodeSettings,
         role: DemoSpiRole,
     },
+    SaleaeSimulation(SaleaeDemoSimulation),
+}
+
+#[derive(Debug, Clone)]
+struct SaleaeDemoSimulation {
+    initial_high: bool,
+    period_samples: u64,
+    transitions: Vec<u64>,
+    active_period: Option<u64>,
+    next_transition: usize,
+    high: bool,
+}
+
+impl SaleaeDemoSimulation {
+    fn new(initial_high: bool, period_samples: u64, transitions: Vec<u64>) -> Self {
+        Self {
+            initial_high,
+            period_samples: period_samples.max(1),
+            transitions,
+            active_period: None,
+            next_transition: 0,
+            high: initial_high,
+        }
+    }
+
+    fn level_at(&mut self, sample_index: u64) -> bool {
+        let period = sample_index / self.period_samples;
+        let sample = sample_index % self.period_samples;
+        if self.active_period != Some(period) {
+            self.active_period = Some(period);
+            self.next_transition = 0;
+            self.high = self.initial_high;
+        }
+        while self
+            .transitions
+            .get(self.next_transition)
+            .is_some_and(|transition| *transition <= sample)
+        {
+            self.high = !self.high;
+            self.next_transition += 1;
+        }
+        self.high
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -914,9 +966,10 @@ enum DemoSpiRole {
     Enable,
 }
 
-fn legacy_demo_signals(channel_count: u8) -> Vec<DemoChannelSignal> {
-    demo_signals_for_analyzers(
+fn legacy_demo_signals(channel_count: u8, sample_rate_hz: u64) -> Vec<DemoChannelSignal> {
+    legacy_demo_signals_for_analyzers(
         channel_count,
+        sample_rate_hz,
         &[
             AnalyzerDecodeSettings::Uart(UartDecodeSettings::default()),
             AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
@@ -927,6 +980,99 @@ fn legacy_demo_signals(channel_count: u8) -> Vec<DemoChannelSignal> {
 
 fn demo_signals_for_analyzers(
     channel_count: u8,
+    sample_rate_hz: u64,
+    analyzers: &[DemoAnalyzerSettings],
+) -> Result<Vec<DemoChannelSignal>> {
+    let saleae_decoder = analyzers
+        .iter()
+        .any(|analyzer| analyzer.backend == DecoderBackendKind::SaleaeNative)
+        .then(crate::decoder_backend::SaleaeNativeDecoder::from_env)
+        .transpose()
+        .map_err(|error| {
+            CoreError::Decode(format!(
+                "Saleae Native demo generator is unavailable: {error}"
+            ))
+        })?;
+    let mut signals = vec![DemoChannelSignal::Pulse; usize::from(channel_count)];
+
+    for analyzer in analyzers {
+        if analyzer.backend == DecoderBackendKind::SaleaeNative {
+            let protocol = demo_protocol_name(&analyzer.settings);
+            let simulation_samples = sample_rate_hz.clamp(100_000, 10_000_000);
+            let channels = saleae_decoder
+                .as_ref()
+                .expect("Saleae decoder is initialized when a Saleae analyzer is present")
+                .simulate(&analyzer.settings, sample_rate_hz, simulation_samples)
+                .map_err(|error| {
+                    CoreError::Decode(format!(
+                        "Saleae Native demo generator failed for {protocol}: {error}"
+                    ))
+                })?;
+            if channels.is_empty() {
+                return Err(CoreError::Decode(format!(
+                    "Saleae Native analyzer {protocol} does not provide GenerateSimulationData"
+                )));
+            }
+            for channel in channels {
+                replace_demo_channel(
+                    &mut signals,
+                    channel_count,
+                    channel.channel,
+                    DemoChannelSignal::SaleaeSimulation(SaleaeDemoSimulation::new(
+                        channel.initial_high,
+                        channel.sample_count,
+                        channel.transitions,
+                    )),
+                    protocol,
+                )?;
+            }
+            continue;
+        }
+
+        let generated = legacy_demo_signals_for_analyzers(
+            channel_count,
+            sample_rate_hz,
+            &[analyzer.settings.clone()],
+        );
+        for channel in demo_channels_for_settings(&analyzer.settings) {
+            replace_demo_channel(
+                &mut signals,
+                channel_count,
+                channel,
+                generated[usize::from(channel)].clone(),
+                demo_protocol_name(&analyzer.settings),
+            )?;
+        }
+    }
+
+    Ok(signals)
+}
+
+fn demo_channels_for_settings(settings: &AnalyzerDecodeSettings) -> Vec<u8> {
+    let mut channels = match settings {
+        AnalyzerDecodeSettings::Uart(settings) => vec![settings.channel],
+        AnalyzerDecodeSettings::I2c(settings) => vec![settings.sda_channel, settings.scl_channel],
+        AnalyzerDecodeSettings::Spi(settings) => [
+            settings.mosi_channel,
+            settings.miso_channel,
+            Some(settings.clock_channel),
+            settings.enable_channel,
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        AnalyzerDecodeSettings::Native(settings) => {
+            settings.channels.values().flatten().copied().collect()
+        }
+    };
+    channels.sort_unstable();
+    channels.dedup();
+    channels
+}
+
+fn legacy_demo_signals_for_analyzers(
+    channel_count: u8,
+    _sample_rate_hz: u64,
     analyzers: &[AnalyzerDecodeSettings],
 ) -> Vec<DemoChannelSignal> {
     let mut signals = vec![DemoChannelSignal::Pulse; usize::from(channel_count)];
@@ -1037,6 +1183,34 @@ fn demo_signals_for_analyzers(
         }
     }
     signals
+}
+
+fn demo_protocol_name(settings: &AnalyzerDecodeSettings) -> &str {
+    match settings {
+        AnalyzerDecodeSettings::Uart(_) => "UART",
+        AnalyzerDecodeSettings::I2c(_) => "I2C",
+        AnalyzerDecodeSettings::Spi(_) => "SPI",
+        AnalyzerDecodeSettings::Native(settings) => &settings.protocol_name,
+    }
+}
+
+fn replace_demo_channel(
+    signals: &mut [DemoChannelSignal],
+    channel_count: u8,
+    channel: u8,
+    signal: DemoChannelSignal,
+    protocol: &str,
+) -> Result<()> {
+    if channel >= channel_count {
+        return Err(CoreError::Decode(format!(
+            "{protocol} Demo references D{channel}, but this capture exposes D0..D{}",
+            channel_count.saturating_sub(1)
+        )));
+    }
+    if let Some(target) = signals.get_mut(usize::from(channel)) {
+        *target = signal;
+    }
+    Ok(())
 }
 
 fn can_claim_demo_channels(channels: &[u8], claimed: &[bool]) -> bool {
@@ -1691,5 +1865,79 @@ mod tests {
         assert!(run_lengths
             .iter()
             .all(|length| (1..=32_768).contains(length)));
+    }
+
+    #[test]
+    #[ignore = "requires the bundled Saleae standalone sidecar"]
+    fn saleae_native_demo_uses_official_swd_waveform_and_decodes_it() {
+        use std::collections::BTreeMap;
+
+        use crate::{
+            decode::NativeDecodeSettings,
+            decoder_backend::{DecoderBackend, SaleaeNativeDecoder},
+        };
+
+        let analyzer = DemoAnalyzerSettings {
+            backend: DecoderBackendKind::SaleaeNative,
+            settings: AnalyzerDecodeSettings::Native(NativeDecodeSettings {
+                decoder_id: "swd".to_string(),
+                protocol_name: "SWD".to_string(),
+                channels: BTreeMap::from([
+                    ("SWDIO".to_string(), Some(3)),
+                    ("SWCLK".to_string(), Some(4)),
+                ]),
+                options: BTreeMap::new(),
+                primary_channel: 3,
+            }),
+        };
+        let settings = CaptureSettings {
+            device_id: "fake:pxlogic-demo".to_string(),
+            sample_rate_hz: 25_000_000,
+            channel_count: 8,
+            enabled_channels: (0..8).collect(),
+            ..CaptureSettings::default()
+        };
+        let sample_count = 500_000;
+        let signals = demo_signals_for_analyzers(
+            settings.channel_count,
+            settings.sample_rate_hz,
+            &[analyzer.clone()],
+        )
+        .unwrap();
+        let DemoChannelSignal::SaleaeSimulation(clock) = &signals[4] else {
+            panic!("D4 must use the official SWD simulation clock");
+        };
+        assert!(clock.transitions.len() > 10_000);
+        assert_eq!(clock.transitions[0], 250_007);
+        assert_eq!(clock.transitions[1] - clock.transitions[0], 10);
+        assert_eq!(clock.transitions[2] - clock.transitions[1], 15);
+
+        let mut generator = DemoSampleGenerator::with_signals(&settings, 1, signals).unwrap();
+        let capture = CaptureData {
+            metadata: CaptureMetadata {
+                version: 1,
+                source_device: settings.device_id.clone(),
+                sample_rate_hz: settings.sample_rate_hz,
+                channel_count: settings.channel_count,
+                enabled_channels: settings.enabled_channels.clone(),
+                unitsize: 1,
+                sample_count,
+                captured_at: Utc::now(),
+                labels: (0..settings.channel_count)
+                    .map(|channel| format!("D{channel}"))
+                    .collect(),
+                trigger: None,
+            },
+            samples: generator.generate(sample_count),
+        };
+        let output = SaleaeNativeDecoder::from_env()
+            .unwrap()
+            .decode(&capture, &analyzer.settings)
+            .unwrap();
+        assert!(!output.frames.is_empty());
+        assert!(output
+            .frames
+            .iter()
+            .any(|frame| !frame.channel_values.is_empty()));
     }
 }

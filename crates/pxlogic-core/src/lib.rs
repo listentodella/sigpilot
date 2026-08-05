@@ -19,12 +19,14 @@ pub use capture::{
     generate_sample_words, generate_sample_words_with_count, gpio_timing_for_samplerate,
     pxview_capture_transfer_size, pxview_cross_raw_byte_count, pxview_trigger_position,
     resolve_enabled_channels, sample_count_from_duration, sample_count_from_settings,
-    supported_samplerates, unitsize_for_channel_count, CaptureProfile, RegisterWrite,
+    supported_samplerates, unitsize_for_channel_count, CaptureProfile, DemoAnalyzerSettings,
+    RegisterWrite,
 };
 pub use decode::{
     decode_analyzer, decode_i2c, decode_spi, decode_uart, AnalyzerDecodeSettings,
-    DecodedChannelValue, DecodedFrame, I2cDecodeSettings, NativeDecodeSettings, NativeOptionValue,
-    SpiDecodeSettings, UartDecodeSettings, UartParity, UartStopBits,
+    DecodedChannelValue, DecodedFrame, DecodedProtocolMarker, I2cDecodeSettings,
+    NativeDecodeSettings, NativeOptionValue, SpiDecodeSettings, UartDecodeSettings, UartParity,
+    UartStopBits,
 };
 pub use decoder_backend::{
     DecoderAnnotation, DecoderAnnotationKind, DecoderBackend, DecoderBackendInfo,
@@ -39,8 +41,8 @@ pub use models::{
     Bitstreams, CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings,
     CaptureTriggerKind, CaptureTriggerMetadata, DeviceInfo, DeviceKind, DiagnosticEvent,
     DiagnosticLevel, ExportFormat, ExternalTriggerMode, HardwareCaptureCapabilities,
-    HardwareChannelModeInfo, PwmConfiguration, PwmSettings, SparseCaptureData,
-    SparseDigitalChannel, WaveformSource,
+    HardwareChannelModeInfo, PwmConfiguration, PwmSettings, SparseCaptureData, SparseCaptureView,
+    SparseDigitalChannel, SparseDigitalChannelView, WaveformSource,
 };
 pub use pxview_profile::{
     generic_logic_capture_capabilities, pxlogic_capture_capabilities_from_profile,

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -224,27 +225,97 @@ json Probe(const fs::path& root, bool include_catalog)
             {"isolation", "sidecar"}, {"analyzer_name", analyzer_names.str()},
             {"runtime_sha256", "standalone-source"}, {"plugin_sha256", "standalone-source"},
             {"abi_match", true}, {"catalog_included", include_catalog},
+            {"edge_encodings", json::array({"delta_varint_base64"})},
             {"decoder_catalog", catalog}, {"c_decoder_count", plugins.size()}, {"python_decoder_count", 0}};
 }
 
 std::map<unsigned, std::vector<std::uint64_t>> ParseEdges(const json& input)
 {
+    const auto decode_base64 = [](const std::string& encoded) {
+        const auto value = [](unsigned char character) -> int {
+            if(character >= 'A' && character <= 'Z') return character - 'A';
+            if(character >= 'a' && character <= 'z') return character - 'a' + 26;
+            if(character >= '0' && character <= '9') return character - '0' + 52;
+            if(character == '+') return 62;
+            if(character == '/') return 63;
+            return -1;
+        };
+        std::vector<std::uint8_t> bytes;
+        bytes.reserve(encoded.size() * 3 / 4);
+        std::uint32_t accumulator = 0;
+        unsigned bits = 0;
+        for(const unsigned char character : encoded)
+        {
+            if(character == '=') break;
+            const int digit = value(character);
+            if(digit < 0) throw std::runtime_error("invalid base64 edge payload");
+            accumulator = (accumulator << 6) | static_cast<unsigned>(digit);
+            bits += 6;
+            if(bits >= 8)
+            {
+                bits -= 8;
+                bytes.push_back(static_cast<std::uint8_t>((accumulator >> bits) & 0xff));
+            }
+        }
+        return bytes;
+    };
+    const auto decode_deltas = [&](const std::string& encoded) {
+        const auto bytes = decode_base64(encoded);
+        std::vector<std::uint64_t> samples;
+        samples.reserve(bytes.size());
+        std::uint64_t sample = 0;
+        std::uint64_t delta = 0;
+        unsigned shift = 0;
+        for(const auto byte : bytes)
+        {
+            if(shift >= 64 || (shift == 63 && (byte & 0x7e)))
+                throw std::runtime_error("edge delta varint overflow");
+            delta |= static_cast<std::uint64_t>(byte & 0x7f) << shift;
+            if(byte & 0x80)
+            {
+                shift += 7;
+                continue;
+            }
+            if(delta == 0 || sample > std::numeric_limits<std::uint64_t>::max() - delta)
+                throw std::runtime_error("invalid edge delta sequence");
+            sample += delta;
+            samples.push_back(sample);
+            delta = 0;
+            shift = 0;
+        }
+        if(shift != 0) throw std::runtime_error("truncated edge delta varint");
+        return samples;
+    };
+
     std::map<unsigned, std::vector<std::uint64_t>> edges;
     for(const auto& edge_set : input.at("edges"))
-        edges[edge_set.at("channel").get<unsigned>()] = edge_set.at("samples").get<std::vector<std::uint64_t>>();
+    {
+        const auto channel = edge_set.at("channel").get<unsigned>();
+        if(edge_set.value("encoding", "") == "delta_varint_base64")
+            edges[channel] = decode_deltas(edge_set.at("samples_b64").get<std::string>());
+        else
+            edges[channel] = edge_set.at("samples").get<std::vector<std::uint64_t>>();
+    }
     return edges;
 }
 
 std::string SpecializedChannelTitle(const std::string& protocol, const std::string& key)
 {
     const auto id = Lower(protocol);
+    const auto role = Lower(key);
     if(id == "uart" || id == "serial" || id == "async_serial") return "Input Channel";
-    if(id == "i2c") return key == "sda" ? "SDA" : "SCL";
-    if(id == "spi") return key == "clk" ? "Clock" : key == "cs" ? "Enable" : key == "mosi" ? "MOSI" : "MISO";
-    if(id == "i2s" || id == "i2s_pcm") return key == "sck" ? "CLOCK channel" : key == "ws" ? "FRAME" : "DATA";
+    if(id == "i2c") return role == "sda" ? "SDA" : "SCL";
+    if(id == "spi") return role == "clk" || role == "clock" ? "Clock" : role == "cs" || role == "enable" ? "Enable" : role == "mosi" ? "MOSI" : "MISO";
+    if(id == "i2s" || id == "i2s_pcm")
+    {
+        return role == "sck" || role == "clock" || role == "clock channel" ? "CLOCK channel" :
+               role == "ws" || role == "frame" ? "FRAME" : "DATA";
+    }
     if(id == "can") return "CAN";
     if(id == "lin") return "Serial";
-    if(id == "parallel" || id == "simple_parallel") return key == "clk" ? "Clock" : std::string("D") + key.substr(1);
+    if(id == "parallel" || id == "simple_parallel")
+        return role == "clk" || role == "clock" ? "Clock" :
+               (key.size() > 1 && (key[0] == 'd' || key[0] == 'D') ? std::string("D") + key.substr(1) : key);
     return key;
 }
 
@@ -396,9 +467,9 @@ unsigned ChannelForField(
     unsigned primary_channel)
 {
     const auto configured = [&](const char* name) -> std::optional<unsigned> {
-        const auto found = channels.find(name);
-        if(found == channels.end() || found->is_null()) return std::nullopt;
-        return found->get<unsigned>();
+        for(const auto& [key, value] : channels.items())
+            if(Lower(key) == Lower(name) && !value.is_null()) return value.get<unsigned>();
+        return std::nullopt;
     };
     const auto id = Lower(protocol);
     const auto field = Lower(key);
@@ -410,9 +481,21 @@ unsigned ChannelForField(
     if(id == "i2c") return configured("sda").value_or(primary_channel);
     if(id == "uart" || id == "serial" || id == "async_serial")
         return configured("rx").value_or(primary_channel);
-    if(id == "i2s" || id == "i2s_pcm") return configured("sd").value_or(primary_channel);
-    if(id == "can") return configured("can_rx").value_or(primary_channel);
-    if(id == "lin") return configured("rx").value_or(primary_channel);
+    if(id == "i2s" || id == "i2s_pcm")
+    {
+        if(const auto channel = configured("sd")) return *channel;
+        return configured("data").value_or(primary_channel);
+    }
+    if(id == "can")
+    {
+        if(const auto channel = configured("can_rx")) return *channel;
+        return configured("can").value_or(primary_channel);
+    }
+    if(id == "lin")
+    {
+        if(const auto channel = configured("rx")) return *channel;
+        return configured("serial").value_or(primary_channel);
+    }
     return primary_channel;
 }
 
@@ -431,6 +514,66 @@ bool ExposeField(const std::string& protocol, const std::string& row, const std:
         return field == "protected_id" || field == "data" || field == "checksum";
     }
     return true;
+}
+
+const char* MarkerKind(int kind)
+{
+    static const char* kinds[] = {
+        "dot", "error_dot", "square", "error_square", "up_arrow", "down_arrow",
+        "x", "error_x", "start", "stop", "one", "zero"};
+    return kind >= 0 && kind < static_cast<int>(sizeof(kinds) / sizeof(kinds[0])) ? kinds[kind] : "dot";
+}
+
+std::vector<std::string> BubbleText(sr_session* session, size_t frame, unsigned channel)
+{
+    if(sr_session_generate_bubble_text(session, frame, channel, 2) != 0)
+        return {};
+    std::vector<std::string> texts;
+    for(size_t index = 0; index < sr_session_bubble_text_count(session); ++index)
+        if(const auto* text = sr_session_bubble_text(session, index); text && *text)
+            texts.emplace_back(text);
+    return texts;
+}
+
+std::optional<size_t> MatchingLegacyFrame(
+    sr_session* session,
+    const sr_frame_view& frame,
+    size_t& cursor)
+{
+    const auto count = sr_session_legacy_frame_count(session);
+    while(cursor < count)
+    {
+        sr_legacy_frame_view legacy{};
+        if(sr_session_legacy_frame(session, cursor, &legacy) != 0)
+        {
+            ++cursor;
+            continue;
+        }
+        const auto start = static_cast<std::uint64_t>(std::max<std::int64_t>(legacy.start_sample, 0));
+        const auto end = static_cast<std::uint64_t>(std::max<std::int64_t>(legacy.end_sample, 0));
+        if(start == frame.start_sample && (end == frame.end_sample || end + 1 == frame.end_sample))
+            return cursor++;
+        if(start >= frame.start_sample)
+            break;
+        ++cursor;
+    }
+    return std::nullopt;
+}
+
+json Markers(sr_session* session)
+{
+    json markers = json::array();
+    for(size_t index = 0; index < sr_session_marker_count(session); ++index)
+    {
+        sr_marker_view marker{};
+        if(sr_session_marker(session, index, &marker) == 0)
+        {
+            if(marker.channel_index > 255) continue;
+            markers.push_back({{"row", "marker"}, {"channel", marker.channel_index},
+                               {"sample", marker.sample}, {"kind", MarkerKind(marker.kind)}});
+        }
+    }
+    return markers;
 }
 
 json Decode(const fs::path& root, const json& input)
@@ -466,6 +609,7 @@ json Decode(const fs::path& root, const json& input)
     const auto structured_count = sr_session_frame_count(session.get());
     if(structured_count)
     {
+        size_t legacy_cursor = 0;
         for(size_t index = 0; index < structured_count; ++index)
         {
             sr_frame_view frame{};
@@ -474,13 +618,16 @@ json Decode(const fs::path& root, const json& input)
             std::vector<std::string> texts;
             json channel_values = json::array();
             const std::string row = frame.type ? frame.type : sr_session_analyzer_name(session.get());
+            const auto legacy_match = MatchingLegacyFrame(session.get(), frame, legacy_cursor);
+            if(legacy_match)
+                texts = BubbleText(session.get(), *legacy_match, primary_channel);
             for(size_t field_index = 0; field_index < frame.field_count; ++field_index)
             {
                 sr_field_view field{};
                 if(sr_session_frame_field(session.get(), index, field_index, &field) != 0) continue;
                 fields.push_back({{"name", field.key ? field.key : "value"}, {"value", FieldValue(field)}});
                 const auto text = FieldText(field);
-                if(!text.empty()) texts.push_back(text);
+                if(texts.empty() && !text.empty()) texts.push_back(text);
                 if(const auto numeric = NumericField(field); numeric && ExposeField(protocol, row, field.key ? field.key : "value"))
                 {
                     const auto role = RoleForField(protocol, field.key ? field.key : "value");
@@ -503,6 +650,32 @@ json Decode(const fs::path& root, const json& input)
                 channel_values.push_back({{"channel", primary_channel}, {"role", "LIN"},
                                           {"label", row}, {"value", value}});
             }
+            if(Lower(protocol) == "swd" && legacy_match && !channel_values.empty())
+            {
+                const auto value = channel_values.front().at("value");
+                json swd_values = json::array();
+                for(const auto& [role, configured_channel] : decoder.at("channels").items())
+                {
+                    if(configured_channel.is_null()) continue;
+                    const auto channel = configured_channel.get<unsigned>();
+                    const auto candidates = BubbleText(session.get(), *legacy_match, channel);
+                    swd_values.push_back({{"channel", channel}, {"role", role},
+                                          {"label", candidates.empty() ? row : candidates.back()},
+                                          {"texts", candidates}, {"value", value}});
+                }
+                channel_values = std::move(swd_values);
+            }
+            if(legacy_match)
+            {
+                for(auto& value : channel_values)
+                {
+                    const auto candidates = BubbleText(
+                        session.get(), *legacy_match, value.at("channel").get<unsigned>());
+                    value["texts"] = candidates.empty()
+                        ? json::array({value.at("label")})
+                        : json(candidates);
+                }
+            }
             frames.push_back({{"frame_id", index}, {"start_sample", frame.start_sample}, {"end_sample", frame.end_sample},
                               {"row", frame.type ? frame.type : sr_session_analyzer_name(session.get())}, {"texts", texts},
                               {"fields", fields}, {"channel_values", channel_values}, {"markers", json::array()}});
@@ -515,21 +688,79 @@ json Decode(const fs::path& root, const json& input)
         {
             sr_legacy_frame_view frame{};
             if(sr_session_legacy_frame(session.get(), index, &frame) != 0) continue;
+            auto texts = BubbleText(session.get(), index, primary_channel);
             std::ostringstream label;
             label << "0x" << std::hex << frame.data1;
+            if(texts.empty()) texts.push_back(label.str());
+            json legacy_channel_values = json::array();
+            if(Lower(protocol) == "swd")
+            {
+                for(const auto& [role, configured_channel] : decoder.at("channels").items())
+                {
+                    if(configured_channel.is_null()) continue;
+                    const auto channel = configured_channel.get<unsigned>();
+                    const auto candidates = BubbleText(session.get(), index, channel);
+                    legacy_channel_values.push_back({{"channel", channel}, {"role", role},
+                        {"label", candidates.empty() ? label.str() : candidates.back()},
+                        {"texts", candidates.empty() ? json::array({label.str()}) : json(candidates)},
+                        {"value", frame.data1}});
+                }
+            }
+            else
+            {
+                legacy_channel_values.push_back({{"channel", primary_channel}, {"role", "Data"},
+                    {"label", label.str()}, {"texts", texts}, {"value", frame.data1}});
+            }
             frames.push_back({{"frame_id", index}, {"start_sample", std::max<long long>(frame.start_sample, 0)},
                               {"end_sample", std::max<long long>(frame.end_sample, 0)}, {"row", "frame_" + std::to_string(frame.type)},
-                              {"texts", json::array({label.str()})}, {"fields", json::array({
+                              {"texts", texts}, {"fields", json::array({
                                 {{"name", "data1"}, {"value", json{{"Unsigned", frame.data1}}}},
                                 {{"name", "data2"}, {"value", json{{"Unsigned", frame.data2}}}},
                                 {{"name", "flags"}, {"value", json{{"Unsigned", frame.flags}}}}
-                              })}, {"channel_values", json::array({{{"channel", primary_channel}, {"role", "Data"},
-                                {"label", label.str()}, {"value", frame.data1}}})}, {"markers", json::array()}});
+                              })}, {"channel_values", legacy_channel_values}, {"markers", json::array()}});
         }
     }
+    const auto markers = Markers(session.get());
+    if(!frames.empty()) frames.front()["markers"] = markers;
     return {{"backend", "saleae_native"}, {"protocol", sr_session_analyzer_name(session.get())},
             {"frames", frames}, {"diagnostics", json::array({{{"level", "info"},
              {"message", "Saleae standalone sparse analyzer completed"}}})}};
+}
+
+json Simulate(const fs::path& root, const json& input)
+{
+    const auto& decoder = input.at("decoder");
+    const auto protocol = decoder.at("protocol").get<std::string>();
+    auto session = Open(FindPlugin(root, protocol));
+    const auto sample_rate = input.at("sample_rate_hz").get<unsigned>();
+    for(const auto& [key, value] : decoder.at("channels").items())
+    {
+        if(value.is_null()) continue;
+        const auto title = SpecializedChannelTitle(protocol, key);
+        Check(session.get(), sr_session_add_channel(session.get(), title.c_str(), value.get<unsigned>(),
+              0, nullptr, 0), "set channel " + title);
+    }
+    for(const auto& [key, value] : decoder.at("options").items())
+    {
+        if(const auto specialized = SpecializedOption(protocol, key, value)) ApplyOption(session.get(), specialized->first, specialized->second);
+        else ApplyOption(session.get(), key, value);
+    }
+    Check(session.get(), sr_session_set_sample_rate(session.get(), sample_rate), "set sample rate");
+    Check(session.get(), sr_session_commit_settings(session.get()), "commit settings");
+    Check(session.get(), sr_session_generate_simulation(
+        session.get(), input.at("sample_count").get<unsigned long long>(), sample_rate), "generate simulation");
+    json channels = json::array();
+    for(size_t index = 0; index < sr_session_simulation_channel_count(session.get()); ++index)
+    {
+        sr_simulation_channel_view channel{};
+        if(sr_session_simulation_channel(session.get(), index, &channel) != 0) continue;
+        if(channel.channel_index > 255) continue;
+        channels.push_back({{"channel", channel.channel_index}, {"initial_high", channel.initial_high != 0},
+                            {"sample_count", channel.sample_count},
+                            {"transitions", std::vector<std::uint64_t>(
+                                channel.transition_samples, channel.transition_samples + channel.transition_count)}});
+    }
+    return {{"protocol", sr_session_analyzer_name(session.get())}, {"channels", channels}};
 }
 
 } // namespace
@@ -542,6 +773,7 @@ int main(int argc, char** argv)
         bool probe = false;
         bool catalog = false;
         bool decode = false;
+        bool simulate = false;
         for(int index = 1; index < argc; ++index)
         {
             const std::string argument = argv[index];
@@ -549,11 +781,13 @@ int main(int argc, char** argv)
             else if(argument == "--probe") probe = true;
             else if(argument == "--catalog") catalog = true;
             else if(argument == "--decode") decode = true;
+            else if(argument == "--simulate") simulate = true;
         }
         if(runtime_root.empty()) throw std::runtime_error("--runtime-root is required");
         if(probe) std::cout << Probe(runtime_root, catalog).dump() << '\n';
         else if(decode) { json input; std::cin >> input; std::cout << Decode(runtime_root, input).dump() << '\n'; }
-        else throw std::runtime_error("choose --probe or --decode");
+        else if(simulate) { json input; std::cin >> input; std::cout << Simulate(runtime_root, input).dump() << '\n'; }
+        else throw std::runtime_error("choose --probe, --decode, or --simulate");
         return 0;
     }
     catch(const std::exception& error)

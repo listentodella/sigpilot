@@ -2473,6 +2473,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 name = "pxlogic-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "rusb",
  "serde",
@@ -2530,6 +2531,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

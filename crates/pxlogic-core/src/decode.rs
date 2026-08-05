@@ -194,7 +194,16 @@ pub struct DecodedChannelValue {
     pub channel: u8,
     pub role: String,
     pub label: String,
+    #[serde(default)]
+    pub texts: Vec<String>,
     pub value: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecodedProtocolMarker {
+    pub channel: Option<u8>,
+    pub sample: u64,
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,6 +215,8 @@ pub struct DecodedFrame {
     pub label: String,
     pub value: u64,
     pub channel_values: Vec<DecodedChannelValue>,
+    #[serde(default)]
+    pub protocol_markers: Vec<DecodedProtocolMarker>,
 }
 
 struct FrameCollector {
@@ -332,8 +343,10 @@ pub fn decode_uart(
                         channel: settings.channel,
                         role: "Input".to_string(),
                         label: label_for_value(u64::from(value), 8),
+                        texts: vec![label_for_value(u64::from(value), 8)],
                         value: u64::from(value),
                     }],
+                    protocol_markers: Vec::new(),
                 });
                 sample += ((bit_period * 9.0).floor() as u64).max(1);
                 continue;
@@ -433,9 +446,11 @@ pub fn decode_i2c(
                     channel_values: vec![DecodedChannelValue {
                         channel: settings.sda_channel,
                         role: "SDA".to_string(),
-                        label: bubble_label,
+                        label: bubble_label.clone(),
+                        texts: vec![bubble_label],
                         value: u64::from(byte),
                     }],
+                    protocol_markers: Vec::new(),
                 });
                 byte = 0;
                 bit_count = 0;
@@ -544,6 +559,7 @@ pub fn decode_spi(
                         channel,
                         role: "MOSI".to_string(),
                         label: label_for_value(mosi_value, settings.bits_per_transfer),
+                        texts: vec![label_for_value(mosi_value, settings.bits_per_transfer)],
                         value: mosi_value,
                     });
                 }
@@ -552,6 +568,7 @@ pub fn decode_spi(
                         channel,
                         role: "MISO".to_string(),
                         label: label_for_value(miso_value, settings.bits_per_transfer),
+                        texts: vec![label_for_value(miso_value, settings.bits_per_transfer)],
                         value: miso_value,
                     });
                 }
@@ -579,6 +596,7 @@ pub fn decode_spi(
                     label,
                     value: settings.mosi_channel.map_or(miso_value, |_| mosi_value),
                     channel_values,
+                    protocol_markers: Vec::new(),
                 });
                 bit_count = 0;
                 mosi_value = 0;

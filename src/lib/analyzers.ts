@@ -111,7 +111,10 @@ export interface UiAnalyzerInstance {
   nextFrame: DecodedFrame | null;
   renderedTracks: AnalyzerTrackWindow[];
   renderedDecodeSignature: string | null;
+  renderBusy: boolean;
+  renderProgress: number;
   decodeBusy: boolean;
+  decodeProgress: number;
   highlightedFrameIndex: number | null;
 }
 
@@ -493,7 +496,10 @@ export function createAnalyzerInstance(
     nextFrame: null,
     renderedTracks: [],
     renderedDecodeSignature: null,
+    renderBusy: false,
+    renderProgress: 0,
     decodeBusy: false,
+    decodeProgress: 0,
     highlightedFrameIndex: null,
   };
 }
@@ -599,9 +605,15 @@ export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChan
         if (typeof assigned !== "number") return null;
         const channelKind = `${channel.id} ${channel.name} ${channel.typeName ?? ""}`.toLowerCase();
         const hasMarkers = channelKind.includes("clock") || channelKind.includes("clk");
+        const isI2s = analyzer.nativeDecoderId === "i2s" || analyzer.nativeDecoderId === "i2s_pcm";
+        const isSwd = analyzer.nativeDecoderId === "swd";
         return {
           channel: assigned,
-          hasBubbles: assigned === analyzer.nativePrimaryChannel || !hasMarkers,
+          hasBubbles: isSwd
+            ? true
+            : isI2s
+              ? channelKind.includes("data")
+              : assigned === analyzer.nativePrimaryChannel || !hasMarkers,
           hasMarkers,
           title: channel.name,
         };
@@ -880,42 +892,112 @@ export function mergeAnalyzerTrackFrames(
   decodedFrames: DecodedFrame[],
   tracks: AnalyzerTrackWindow[],
 ) {
-  const frames = new Map<string, DecodedFrame>();
-  const mergeFrame = (frame: DecodedFrame) => {
-    const key = `${frame.frame_id}:${frame.start_sample}:${frame.end_sample}`;
-    const existing = frames.get(key);
-    if (!existing) {
-      frames.set(key, { ...frame, channel_values: [...frame.channel_values] });
+  const incoming = new Map<string, DecodedFrame>();
+  const collectIncoming = (frame: DecodedFrame) => {
+    const key = analyzerFrameKey(frame);
+    const existing = incoming.get(key);
+    incoming.set(key, existing ? mergeDecodedAnalyzerFrame(existing, frame) : frame);
+  };
+  tracks.forEach((track) => {
+    track.frames.forEach(collectIncoming);
+    if (track.previous_frame) collectIncoming(track.previous_frame);
+    if (track.next_frame) collectIncoming(track.next_frame);
+  });
+  if (incoming.size === 0) return decodedFrames;
+
+  let nextFrames: DecodedFrame[] | null = null;
+  const additions: DecodedFrame[] = [];
+  incoming.forEach((frame) => {
+    const index = findAnalyzerFrameIndex(decodedFrames, frame);
+    if (index < 0) {
+      additions.push({ ...frame, channel_values: [...frame.channel_values] });
       return;
     }
-    const channelValues = [...existing.channel_values];
-    frame.channel_values.forEach((value) => {
-      const index = channelValues.findIndex(
-        (candidate) => candidate.channel === value.channel && candidate.role === value.role,
-      );
-      if (index >= 0) channelValues[index] = value;
-      else channelValues.push(value);
-    });
-    frames.set(key, {
-      ...existing,
-      frame_type: existing.frame_type || frame.frame_type,
-      channel_values: channelValues,
-      label:
-        channelValues.length > 1
-          ? channelValues.map((value) => `${value.role} ${value.label}`).join(" / ")
-          : existing.label || frame.label,
-    });
-  };
-
-  decodedFrames.forEach(mergeFrame);
-  tracks.forEach((track) => {
-    track.frames.forEach(mergeFrame);
-    if (track.previous_frame) mergeFrame(track.previous_frame);
-    if (track.next_frame) mergeFrame(track.next_frame);
+    const merged = mergeDecodedAnalyzerFrame(decodedFrames[index], frame);
+    if (decodedAnalyzerFramesEqual(decodedFrames[index], merged)) return;
+    if (!nextFrames) nextFrames = [...decodedFrames];
+    nextFrames[index] = merged;
   });
-  return [...frames.values()].sort(
-    (left, right) => left.start_sample - right.start_sample || left.frame_id - right.frame_id,
-  );
+
+  if (additions.length === 0) return nextFrames ?? decodedFrames;
+  additions.sort(compareAnalyzerFrameOrder);
+  const existing = nextFrames ?? decodedFrames;
+  const merged: DecodedFrame[] = [];
+  let existingIndex = 0;
+  let additionIndex = 0;
+  while (existingIndex < existing.length || additionIndex < additions.length) {
+    if (
+      additionIndex >= additions.length ||
+      (existingIndex < existing.length &&
+        compareAnalyzerFrameOrder(existing[existingIndex], additions[additionIndex]) <= 0)
+    ) {
+      merged.push(existing[existingIndex++]);
+    } else {
+      merged.push(additions[additionIndex++]);
+    }
+  }
+  return merged;
+}
+
+function analyzerFrameKey(frame: DecodedFrame) {
+  return `${frame.frame_id}:${frame.start_sample}:${frame.end_sample}`;
+}
+
+function compareAnalyzerFrameOrder(left: DecodedFrame, right: DecodedFrame) {
+  return left.start_sample - right.start_sample || left.frame_id - right.frame_id;
+}
+
+function findAnalyzerFrameIndex(frames: DecodedFrame[], target: DecodedFrame) {
+  let low = 0;
+  let high = frames.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compareAnalyzerFrameOrder(frames[middle], target) < 0) low = middle + 1;
+    else high = middle;
+  }
+  for (let index = low; index < frames.length; index += 1) {
+    if (compareAnalyzerFrameOrder(frames[index], target) !== 0) break;
+    if (frames[index].end_sample === target.end_sample) return index;
+  }
+  return -1;
+}
+
+function mergeDecodedAnalyzerFrame(existing: DecodedFrame, incoming: DecodedFrame) {
+  const channelValues = [...existing.channel_values];
+  incoming.channel_values.forEach((value) => {
+    const index = channelValues.findIndex(
+      (candidate) => candidate.channel === value.channel && candidate.role === value.role,
+    );
+    if (index >= 0) channelValues[index] = value;
+    else channelValues.push(value);
+  });
+  return {
+    ...existing,
+    frame_type: existing.frame_type || incoming.frame_type,
+    protocol_markers: existing.protocol_markers ?? incoming.protocol_markers,
+    channel_values: channelValues,
+    label:
+      channelValues.length > 1
+        ? channelValues.map((value) => `${value.role} ${value.label}`).join(" / ")
+        : existing.label || incoming.label,
+  };
+}
+
+function decodedAnalyzerFramesEqual(left: DecodedFrame, right: DecodedFrame) {
+  if (
+    left.frame_type !== right.frame_type ||
+    left.label !== right.label ||
+    left.channel_values.length !== right.channel_values.length
+  ) return false;
+  return left.channel_values.every((value, index) => {
+    const candidate = right.channel_values[index];
+    return candidate != null &&
+      value.channel === candidate.channel &&
+      value.role === candidate.role &&
+      value.label === candidate.label &&
+      value.value === candidate.value &&
+      JSON.stringify(value.texts ?? []) === JSON.stringify(candidate.texts ?? []);
+  });
 }
 
 export function decoderBackendLabel(backend: DecoderBackendKind) {
