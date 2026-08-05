@@ -3,9 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const net = require('node:net');
 const {
   ClientFrameRelay,
   removeCompressionOffer,
+  startWebSocketProxy,
 } = require('../lib/websocket-proxy.cjs');
 
 class FakeSocket extends EventEmitter {
@@ -52,4 +54,35 @@ test('observes a Logic request before forwarding its frame', async () => {
   await relay.finish();
   assert.equal(observed, true);
   assert.deepEqual(upstream.frames, [frame]);
+});
+
+test('allocates a public port automatically', async () => {
+  const proxy = await startWebSocketProxy({
+    port: 0,
+    backendPort: 1,
+    observeText: async () => {},
+  });
+  assert.equal(Number.isInteger(proxy.port), true);
+  assert.equal(proxy.port > 0, true);
+  await proxy.close();
+});
+
+test('falls back when the requested public port is occupied', async () => {
+  const occupied = net.createServer();
+  await new Promise((resolve, reject) => {
+    occupied.once('error', reject);
+    occupied.listen(0, '127.0.0.1', resolve);
+  });
+  const address = occupied.address();
+  const occupiedPort = typeof address === 'object' && address ? address.port : undefined;
+  const proxy = await startWebSocketProxy({
+    port: occupiedPort,
+    backendPort: 1,
+    observeText: async () => {},
+  });
+  assert.notEqual(proxy.port, occupiedPort);
+  await proxy.close();
+  await new Promise((resolve, reject) => {
+    occupied.close(error => error ? reject(error) : resolve());
+  });
 });

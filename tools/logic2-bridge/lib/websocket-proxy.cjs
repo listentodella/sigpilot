@@ -213,29 +213,49 @@ function startWebSocketProxy({ port, backendPort, observeText }) {
   });
 
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
-      server.removeListener('error', reject);
-      let closePromise;
-      resolve({
-        server,
-        close() {
-          if (closePromise) return closePromise;
-          closePromise = (async () => {
-            for (const { client, upstream } of connections) {
-              client.destroy();
-              upstream.destroy();
-            }
-            connections.clear();
-            if (!server.listening) return;
-            await new Promise((resolveClose, rejectClose) => {
-              server.close(error => error ? rejectClose(error) : resolveClose());
-            });
-          })();
-          return closePromise;
-        },
+    let retriedWithAutomaticPort = false;
+    const listen = requestedPort => {
+      const onError = error => {
+        if (error.code === 'EADDRINUSE' && requestedPort !== 0 && !retriedWithAutomaticPort) {
+          retriedWithAutomaticPort = true;
+          listen(0);
+          return;
+        }
+        reject(error);
+      };
+      server.once('error', onError);
+      server.listen(requestedPort, '127.0.0.1', () => {
+        server.removeListener('error', onError);
+        const address = server.address();
+        const actualPort = typeof address === 'object' && address ? address.port : undefined;
+        if (!actualPort) {
+          server.close();
+          reject(new Error('Could not determine the Graph WebSocket port'));
+          return;
+        }
+        let closePromise;
+        resolve({
+          server,
+          port: actualPort,
+          close() {
+            if (closePromise) return closePromise;
+            closePromise = (async () => {
+              for (const { client, upstream } of connections) {
+                client.destroy();
+                upstream.destroy();
+              }
+              connections.clear();
+              if (!server.listening) return;
+              await new Promise((resolveClose, rejectClose) => {
+                server.close(error => error ? rejectClose(error) : resolveClose());
+              });
+            })();
+            return closePromise;
+          },
+        });
       });
-    });
+    };
+    listen(port);
   });
 }
 

@@ -4,10 +4,11 @@ This tool feeds live PXLogic samples into an unmodified official Saleae Logic
 application. It keeps Logic 2's GraphServer, renderer, digital trigger, glitch
 filter, analyzers, measurements, markers, and `.sal` session handling intact.
 
-The bridge is intentionally outside `saleae-priv` and has no npm dependencies.
-It reuses the PXLogic `usb_smoke` binary, bitstreams, and firmware from this
-repository, and loads `libgraph_server_shared.dylib` and `pythonlibs` directly
-from the official Logic app.
+The bridge is intentionally outside `saleae-priv`. The desktop client contains
+its own Electron/Node runtime, the PXLogic `usb_smoke` binary, bitstreams,
+firmware, and the version-locked native host. It loads
+`libgraph_server_shared.dylib` and `pythonlibs` directly from the user's
+official Logic app.
 
 ## Support boundary
 
@@ -33,18 +34,11 @@ those details and a real capture have been verified.
 ## Prerequisites
 
 - macOS arm64
-- Node.js 18 or newer (no third-party Node packages)
 - The official Logic app, version `2.4.46`
-- A built PXLogic helper:
 
-  ```sh
-  cargo build --release --bin usb_smoke
-  ```
-
-- Xcode Command Line Tools (`xcrun clang`) for the first native-host build
-
-No `npm install` is required. The native host is compiled into `tools/logic2-bridge/build`
-on first run and the official app supplies the GraphServer runtime.
+The packaged desktop client does not require Node.js, npm, Rust, Cargo, or the
+Xcode Command Line Tools on the user's machine. Those tools are build-time
+dependencies only.
 
 ## Continuous integration
 
@@ -53,8 +47,10 @@ builds the PXLogic `usb_smoke` helper on GitHub-hosted Windows, Linux, macOS
 Intel, and macOS Apple Silicon runners. The helper jobs publish prerequisite
 artifacts with the hardware resources for platform-porting and diagnostics.
 They are not complete Logic bridges. The workflow also builds a runnable
-`pxlogic-logic2-bridge-macos-arm64` artifact containing:
+`pxlogic-logic2-bridge-client-macos-arm64` artifact containing a DMG and ZIP.
+The application bundle contains:
 
+- the desktop launcher and its private Electron/Node runtime;
 - the bridge source and prebuilt native GraphServer host;
 - the release `usb_smoke` capture helper;
 - the PXLogic FPGA bitstreams and MCU firmware used by that helper.
@@ -64,9 +60,34 @@ GraphServer and the Python runtime from the user's official Logic 2.4.46 app.
 Windows and Linux artifacts will be added only after their native GraphServer
 hooks have independent fingerprints and live-capture validation.
 
-## Start
+## Desktop client
 
-From the PXLogic repository:
+Open the DMG, move `PXLogic Bridge.app` to Applications, and launch it normally.
+The client searches `/Applications`, `~/Applications`, and Spotlight for Saleae
+Logic. It displays the detected version, accepts a manually entered or selected
+`.app` path, remembers the settings, and remains available from the macOS menu
+bar while its window is hidden.
+
+Click `Start Logic 2` after a compatible Logic `2.4.46` installation is shown.
+The client launches Logic with the required `--useExistingGraph` and
+`--graphPort` arguments. In Logic 2 select the Demo Logic Pro 16 device as the
+session device.
+
+Automatic port mode asks macOS for a free loopback TCP port, then passes the
+actual value to Logic 2. The port is not fixed by Logic. In fixed mode the
+selected value is preferred; if it is occupied, the bridge falls back to an
+available port and reports the actual endpoint in the client.
+
+CI builds are unsigned unless Apple signing credentials are provided. For an
+unsigned downloaded build, macOS may require the first launch through Finder's
+`Open` context-menu action. Public distribution without that prompt requires
+Developer ID signing and Apple notarization.
+
+## Command-line development
+
+The bridge core has no third-party Node package dependencies. From a source
+checkout with Node.js 18 or newer, a built PXLogic helper, and Xcode Command
+Line Tools, it can still be started directly:
 
 ```sh
 node tools/logic2-bridge/index.cjs \
@@ -74,11 +95,11 @@ node tools/logic2-bridge/index.cjs \
   --screen-quadrant 3
 ```
 
-The launcher starts a private GraphServer, exposes the Logic-facing endpoint
-at `ws://127.0.0.1:12472/saleae`, then launches the official app with
-`--useExistingGraph`. In Logic 2 select the Demo Logic Pro 16 device as the
-session device. When capture starts, the bridge follows the channel, sample
-rate, and voltage settings sent by Logic 2 and starts PXLogic automatically.
+The launcher starts a private GraphServer, exposes an automatically allocated
+Logic-facing endpoint, then launches the official app with `--useExistingGraph`.
+When capture starts, the bridge follows the channel, sample rate, and voltage
+settings sent by Logic 2 and starts PXLogic automatically. Use `--port 12472`
+to request a fixed port or `--port auto` explicitly.
 
 For the local app used during development:
 

@@ -20,7 +20,7 @@ const SUPPORTED_LOGIC_VERSION = '2.4.46';
 function parseArguments(argv) {
   const result = {
     appPath: process.env.SALEAE_LOGIC_APP,
-    port: 12472,
+    port: 0,
     backendPort: undefined,
     pxlogicHelper: process.env.PXLOGIC_USB_SMOKE ||
       path.join(pxlogicRoot, 'target', 'release', 'usb_smoke'),
@@ -42,7 +42,10 @@ function parseArguments(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--app') result.appPath = path.resolve(argv[++index]);
-    else if (argument === '--port') result.port = Number(argv[++index]);
+    else if (argument === '--port') {
+      const value = argv[++index];
+      result.port = value === 'auto' ? 0 : Number(value);
+    }
     else if (argument === '--backend-port') result.backendPort = Number(argv[++index]);
     else if (argument === '--pxlogic-helper') result.pxlogicHelper = path.resolve(argv[++index]);
     else if (argument === '--pxlogic-device') result.pxlogicDevice = argv[++index];
@@ -63,7 +66,8 @@ function parseArguments(argv) {
   }
 
   for (const [name, port] of [['port', result.port], ['backend port', result.backendPort]]) {
-    if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    const minimum = name === 'port' ? 0 : 1;
+    if (port !== undefined && (!Number.isInteger(port) || port < minimum || port > 65535)) {
       throw new Error(`Invalid ${name}: ${port}`);
     }
   }
@@ -96,7 +100,7 @@ Usage:
 
 Options:
   --app PATH                 Official Saleae Logic app; auto-detected when installed
-  --port PORT                Logic-facing Graph WebSocket port (default: 12472)
+  --port PORT|auto           Logic-facing Graph WebSocket port (default: auto)
   --backend-port PORT        Private GraphServer port (default: automatic)
   --pxlogic-helper FILE      PXLogic usb_smoke executable
   --pxlogic-device ID        Select one PXLogic USB device
@@ -194,9 +198,13 @@ function ensureNativeHost() {
   const outputDirectory = path.join(bridgeRoot, 'build');
   const executable = path.join(outputDirectory, 'graph-host');
   fs.mkdirSync(outputDirectory, { recursive: true });
+  const sourceExists = fs.existsSync(source);
   const needsBuild = !fs.existsSync(executable) ||
-    fs.statSync(source).mtimeMs > fs.statSync(executable).mtimeMs;
+    (sourceExists && fs.statSync(source).mtimeMs > fs.statSync(executable).mtimeMs);
   if (needsBuild) {
+    if (!sourceExists) {
+      throw new Error(`Prebuilt native GraphServer host was not found: ${executable}`);
+    }
     console.log('[logic2-bridge] compiling version-locked native GraphServer host');
     const result = spawnSync(
       'xcrun',
@@ -225,6 +233,12 @@ function findAvailableTcpPort() {
       });
     });
   });
+}
+
+function logicProcessEnvironment(environment = process.env) {
+  const result = { ...environment };
+  delete result.ELECTRON_RUN_AS_NODE;
+  return result;
 }
 
 function waitForNativeGraph(host, timeoutMs = 15000) {
@@ -345,9 +359,14 @@ async function main() {
       backendPort: actualBackendPort,
       observeText: message => controller.observeRequest(message),
     });
-    console.log(`[logic2-bridge] Graph WebSocket ready: ws://127.0.0.1:${options.port}/saleae`);
+    if (options.port !== 0 && proxy.port !== options.port) {
+      console.log(
+        `[logic2-bridge] requested port ${options.port} was unavailable; using ${proxy.port}`,
+      );
+    }
+    console.log(`[logic2-bridge] Graph WebSocket ready: ws://127.0.0.1:${proxy.port}/saleae`);
 
-    const logicArguments = ['--useExistingGraph', '--graphPort', String(options.port)];
+    const logicArguments = ['--useExistingGraph', '--graphPort', String(proxy.port)];
     if (options.screenQuadrant !== undefined) {
       logicArguments.push('--screenQuadrant', String(options.screenQuadrant));
     }
@@ -356,7 +375,7 @@ async function main() {
     }
     logic = spawn(runtime.executable, logicArguments, {
       cwd: stateRoot,
-      env: process.env,
+      env: logicProcessEnvironment(),
       stdio: 'inherit',
     });
     const exit = await waitForExit(logic);
@@ -378,6 +397,7 @@ async function main() {
 module.exports = {
   SUPPORTED_LOGIC_VERSION,
   installedAppCandidates,
+  logicProcessEnvironment,
   parseArguments,
   readAppVersion,
   resolveAppPath,
