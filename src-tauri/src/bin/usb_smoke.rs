@@ -57,6 +57,9 @@ struct Options {
     /// Electron bridge and the Tauri application use precisely the same USB,
     /// FPGA setup, lane-transpose, and decoded sample path.
     live_protocol: bool,
+    /// In live mode, emit packed LA_CROSS_DATA events without also serializing
+    /// the much larger time-major preview stream.
+    live_cross_only: bool,
 }
 
 impl Default for Options {
@@ -90,6 +93,7 @@ impl Default for Options {
             pwm_duty_percent: 50.0,
             pwm_only: false,
             live_protocol: false,
+            live_cross_only: false,
         }
     }
 }
@@ -352,6 +356,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }));
             };
             let mut samples = |chunk: &[u8]| {
+                if options.live_cross_only {
+                    return;
+                }
                 emit_live_event(serde_json::json!({
                     "type": "samples",
                     "windowIndex": current_window,
@@ -562,6 +569,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 // USB stream open indefinitely.
                 options.duration_ms = 60_000;
             }
+            "--live-cross-only" => options.live_cross_only = true,
             "--out" => options.output = Some(PathBuf::from(next_arg(&mut args, "--out")?)),
             "--list-only" => options.list_only = true,
             "--prepare-only" => options.prepare_only = true,
@@ -635,7 +643,7 @@ fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 
