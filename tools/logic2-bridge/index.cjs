@@ -470,7 +470,11 @@ async function main() {
     options.scanSaleaeDevices ? '1' : '0',
     ...nativeHookArguments(runtime),
   ], {
-    cwd: stateRoot,
+    // GraphServer resolves several Windows resources relative to the official
+    // Logic installation. Running the host from the bridge state directory
+    // lets the DLL load, but can leave CreateGraphServer blocked while it
+    // searches for its bundled runtime files.
+    cwd: process.platform === 'win32' ? runtime.appPath : stateRoot,
     env: process.env,
     stdio: ['pipe', 'pipe', 'inherit'],
   });
