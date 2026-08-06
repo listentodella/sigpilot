@@ -135,9 +135,10 @@ function startBridge(rawSettings) {
   const logic = inspectLogicApp(settings.logicAppPath);
   if (!logic.supported) throw new Error(logic.error || 'Logic 2 安装无效');
 
-  const entry = path.join(bridgeRoot(), 'index.cjs');
   const args = [
-    entry,
+    // Keep the entry relative to cwd.  Electron's Windows RunAsNode parser
+    // can split an absolute `C:\\...` script path at the drive colon.
+    'index.cjs',
     '--app', settings.logicAppPath,
     '--port', settings.portMode === 'auto' ? 'auto' : String(settings.preferredPort),
     '--screen-quadrant', String(settings.screenQuadrant),

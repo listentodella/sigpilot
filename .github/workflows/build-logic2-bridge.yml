@@ -596,8 +596,8 @@ jobs:
               throw "Windows portable payload is missing: $path"
             }
           }
-          $help = & node (Join-Path $bridge 'index.cjs') --help
-          if ($LASTEXITCODE -ne 0 -or $help -notmatch 'No npm install is required') {
+          $helpText = (& node (Join-Path $bridge 'index.cjs') --help | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $helpText -notmatch 'No npm install is required') {
             throw 'Packaged bridge entry did not pass its help probe'
           }
           $headers = & dumpbin.exe /headers (Join-Path $bridge 'build/graph-host.exe')

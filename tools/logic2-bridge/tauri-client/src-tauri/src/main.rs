@@ -1566,7 +1566,6 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
             .unwrap_or_else(|| "Logic 2 安装无效".to_string()));
     }
     let bridge_root = validate_bridge_payload(app)?;
-    let entry = bridge_root.join("index.cjs");
     let executable = logic_executable(&app_path);
     let runtime_app_path = app_path.to_string_lossy().into_owned();
     let port = if settings.port_mode == "fixed" {
@@ -1575,8 +1574,12 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         "auto".to_string()
     };
     let mut command = Command::new(&executable);
+    // Electron's Windows RunAsNode command-line handling can split an
+    // absolute `C:\\...` script argument at the drive colon and then ask
+    // Node to load `C:`.  The working directory is the validated bridge
+    // root, so a relative entry is equivalent and avoids that parser path.
     command
-        .arg(&entry)
+        .arg("index.cjs")
         .args(["--app", &runtime_app_path])
         .args(["--port", &port])
         .args(["--screen-quadrant", &settings.screen_quadrant.to_string()])
