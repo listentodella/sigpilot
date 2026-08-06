@@ -12,6 +12,12 @@ on:
       - "resources/bitstreams/**"
       - "resources/firmware/**"
   workflow_dispatch:
+    inputs:
+      analyze_official_packages:
+        description: Download official Logic 2.4.46 packages and fingerprint GraphServer
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: logic2-bridge-${{ github.workflow }}-${{ github.ref }}
@@ -140,9 +146,151 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  tauri-client-check:
+    name: Tauri client check (${{ matrix.os_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_name: Linux x64
+            runner: ubuntu-latest
+          - os_name: Windows x64
+            runner: windows-latest
+          - os_name: macOS arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            librsvg2-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri client dependencies
+        run: npm --prefix tools/logic2-bridge/tauri-client ci
+
+      - name: Check shared renderer and bridge
+        run: |
+          npm --prefix tools/logic2-bridge run check
+          npm --prefix tools/logic2-bridge/client run check
+
+      - name: Test Tauri client
+        run: npm --prefix tools/logic2-bridge/tauri-client test
+
+  linux-native-host-check:
+    name: Linux GraphServer host compile check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Compile Linux native host
+        run: |
+          mkdir -p /tmp/pxlogic-bridge-build
+          cc -std=c11 -O2 -Wall -Wextra \
+            tools/logic2-bridge/native/graph-host.c \
+            -o /tmp/pxlogic-bridge-build/graph-host \
+            -ldl -pthread
+          file /tmp/pxlogic-bridge-build/graph-host | grep -E 'ELF 64-bit|x86-64'
+
+      - name: Verify Linux profile record
+        run: |
+          node - <<'NODE'
+          const manifest = require('./tools/logic2-bridge/compatibility/profiles.json');
+          const profile = manifest.profiles.find(item => item.platform === 'linux');
+          if (!profile || profile.hook.status !== 'pending-live-validation') {
+            throw new Error('Linux profile must remain explicitly pending live validation');
+          }
+          console.log(profile.id, profile.hook.onDataBufferOffset);
+          NODE
+
+  analyze-official-packages:
+    name: Fingerprint official GraphServer (${{ matrix.os_name }})
+    if: github.event_name == 'workflow_dispatch' && inputs.analyze_official_packages == true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_name: Linux x64
+            runner: ubuntu-latest
+            package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-linux-x64.AppImage
+            artifact: linux-x64
+          - os_name: Windows x64
+            runner: windows-latest
+            package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-windows-x64.exe
+            artifact: windows-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Download and extract Linux GraphServer
+        if: runner.os == 'Linux'
+        run: |
+          curl -L --fail --retry 3 \
+            "${{ matrix.package_url }}" \
+            -o Logic-2.4.46-linux-x64.AppImage
+          chmod +x Logic-2.4.46-linux-x64.AppImage
+          ./Logic-2.4.46-linux-x64.AppImage --appimage-extract >/dev/null
+          graph=$(find squashfs-root -type f -name 'libgraph_server_shared.so' -print -quit)
+          test -n "$graph"
+          node tools/logic2-bridge/scripts/fingerprint-binary.cjs "$graph" \
+            | tee graph-fingerprint-${{ matrix.artifact }}.json
+
+      - name: Download and extract Windows GraphServer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ matrix.package_url }}" -OutFile Logic-2.4.46-windows-x64.exe
+          New-Item -ItemType Directory -Force -Path extracted | Out-Null
+          Start-Process -FilePath .\Logic-2.4.46-windows-x64.exe `
+            -ArgumentList '/extract', (Join-Path (Get-Location) 'extracted') `
+            -Wait -NoNewWindow
+          $msi = Get-ChildItem -Path extracted -Recurse -File -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw 'Logic MSI was not produced by /extract' }
+          $expanded = Join-Path (Get-Location) 'expanded'
+          New-Item -ItemType Directory -Force -Path $expanded | Out-Null
+          Start-Process -FilePath msiexec.exe `
+            -ArgumentList '/a', $msi.FullName, '/qn', "TARGETDIR=$expanded" `
+            -Wait -NoNewWindow
+          $graph = Get-ChildItem -Path $expanded -Recurse -File -Filter libgraph_server_shared.dll | Select-Object -First 1
+          if (-not $graph) { throw 'GraphServer DLL was not found after /extract' }
+          node tools/logic2-bridge/scripts/fingerprint-binary.cjs $graph.FullName `
+            | Tee-Object graph-fingerprint-${{ matrix.artifact }}.json
+
+      - name: Upload fingerprint report
+        uses: actions/upload-artifact@v7
+        with:
+          name: logic2-4-46-graphserver-fingerprint-${{ matrix.artifact }}
+          path: graph-fingerprint-${{ matrix.artifact }}.json
+          if-no-files-found: error
+          retention-days: 14
+
   build-macos-arm64:
-    name: Desktop client (macOS arm64)
-    needs: [portable-layer, capture-helper]
+    name: Desktop client (macOS arm64, Tauri)
+    needs: [portable-layer, capture-helper, tauri-client-check, linux-native-host-check]
     runs-on: macos-15
     steps:
       - name: Checkout repository
@@ -184,38 +332,50 @@ jobs:
             tools/logic2-bridge/native/graph-host.c \
             -o tools/logic2-bridge/build/graph-host
 
-      - name: Install desktop client build dependencies
-        run: npm --prefix tools/logic2-bridge/client ci
+      - name: Install Tauri client build dependencies
+        run: npm --prefix tools/logic2-bridge/tauri-client ci
 
-      - name: Build desktop client
-        run: npm --prefix tools/logic2-bridge/client run dist:mac
+      - name: Prepare native payload
+        working-directory: tools/logic2-bridge/tauri-client
+        run: npm run prepare:payload
+
+      - name: Build desktop app bundle
+        working-directory: tools/logic2-bridge/tauri-client
+        run: |
+          npx tauri build --target aarch64-apple-darwin --bundles app
 
       - name: Verify application bundle
         run: |
           set -euo pipefail
-          app_root="tools/logic2-bridge/client/dist/mac-arm64/PXLogic Bridge.app"
-          app_executable="$app_root/Contents/MacOS/PXLogic Bridge"
+          app_root="target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app"
+          app_executable="$app_root/Contents/MacOS/pxlogic-logic2-bridge-client"
           resources="$app_root/Contents/Resources"
           bridge_entry="$resources/tools/logic2-bridge/index.cjs"
-          ELECTRON_RUN_AS_NODE=1 "$app_executable" "$bridge_entry" --help \
+          node "$bridge_entry" --help \
             | grep -q "No npm install is required"
           file "$app_executable" | grep -q "arm64"
           file "$resources/tools/logic2-bridge/build/graph-host" \
             | grep -q "arm64"
+          test -f "$resources/tools/logic2-bridge/compatibility/profiles.json"
           file "$resources/target/release/usb_smoke" \
             | grep -q "arm64"
           test -f "$resources/resources/bitstreams/hspi_ddr.bin"
           test -f "$resources/resources/bitstreams/hspi_ddr_RST.bin"
           test -f "$resources/resources/firmware/SCI_LOGIC.bin"
-          test -f tools/logic2-bridge/client/dist/PXLogic-Bridge-*-macos-arm64.dmg
-          test -f tools/logic2-bridge/client/dist/PXLogic-Bridge-*-macos-arm64.zip
+
+      - name: Build DMG installer
+        working-directory: tools/logic2-bridge/tauri-client
+        run: |
+          npx tauri build --target aarch64-apple-darwin --bundles dmg
+
+      - name: Verify DMG installer
+        run: test -f "target/aarch64-apple-darwin/release/bundle/dmg/PXLogic Bridge_0.3.0_aarch64.dmg"
 
       - name: Upload desktop client
         uses: actions/upload-artifact@v7
         with:
           name: pxlogic-logic2-bridge-client-macos-arm64
           path: |
-            tools/logic2-bridge/client/dist/PXLogic-Bridge-*-macos-arm64.dmg
-            tools/logic2-bridge/client/dist/PXLogic-Bridge-*-macos-arm64.zip
+            target/aarch64-apple-darwin/release/bundle/dmg/PXLogic Bridge_0.3.0_aarch64.dmg
           if-no-files-found: error
           retention-days: 30

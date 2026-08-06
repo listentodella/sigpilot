@@ -199,7 +199,7 @@ select:focus {
 
 .validation-row {
   display: grid;
-  grid-template-columns: auto auto 1fr;
+  grid-template-columns: auto auto auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   min-height: 26px;
@@ -210,6 +210,12 @@ select:focus {
 
 .validation-row strong {
   color: #33363b;
+}
+
+#graph-fingerprint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .compatibility {

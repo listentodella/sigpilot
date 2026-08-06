@@ -10,6 +10,7 @@ const {
   PxlogicCaptureController,
   createLineReader,
 } = require('./lib/capture-controller.cjs');
+const { matchCompatibilityProfile } = require('./lib/compatibility.cjs');
 const { normalizeEnabledChannels } = require('./lib/logic-format.cjs');
 const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
@@ -174,12 +175,6 @@ function readAppVersion(appPath) {
 function resolveRuntime(options) {
   const appPath = resolveAppPath(options.appPath);
   const version = readAppVersion(appPath);
-  if (version !== SUPPORTED_LOGIC_VERSION) {
-    throw new Error(
-      `Unsupported Logic version ${version}. This hook currently supports only ` +
-      `${SUPPORTED_LOGIC_VERSION}; refusing to patch an unknown GraphServer build.`,
-    );
-  }
   const runtimeRoot = path.join(appPath, 'Contents', 'Resources', 'macos-arm64');
   const executable = path.join(appPath, 'Contents', 'MacOS', 'Logic');
   const sharedLibrary = path.join(runtimeRoot, 'libgraph_server_shared.dylib');
@@ -187,7 +182,32 @@ function resolveRuntime(options) {
   requirePath(executable, 'Logic executable', 'file');
   requirePath(sharedLibrary, 'GraphServer library', 'file');
   requirePath(pythonHome, 'Logic Python runtime', 'directory');
-  return { appPath, version, runtimeRoot, executable, sharedLibrary, pythonHome };
+  if (version !== SUPPORTED_LOGIC_VERSION) {
+    throw new Error(
+      `Unsupported Logic version ${version}. This hook currently supports only ` +
+      `${SUPPORTED_LOGIC_VERSION}; refusing to patch an unknown GraphServer build.`,
+    );
+  }
+  const compatibility = matchCompatibilityProfile({
+    logicVersion: version,
+    platform: process.platform,
+    architecture: process.arch,
+    graphPath: sharedLibrary,
+  });
+  if (!compatibility.profile) {
+    const identity = compatibility.fingerprint.identity || 'unknown';
+    throw new Error(
+      `Unsupported GraphServer identity ${compatibility.fingerprint.identityKind || 'unknown'} ` +
+      `${identity} (sha256 ${compatibility.fingerprint.sha256}); refusing to patch an unverified build.`,
+    );
+  }
+  if (!compatibility.supported) {
+    throw new Error(
+      `GraphServer profile ${compatibility.profile.id} is not live-validated: ` +
+      `${compatibility.profile.hook.validation}`,
+    );
+  }
+  return { appPath, version, runtimeRoot, executable, sharedLibrary, pythonHome, compatibility };
 }
 
 function ensureNativeHost() {
@@ -295,6 +315,7 @@ async function main() {
   requirePath(options.firmware, 'PXLogic MCU firmware', 'file');
   const nativeHost = ensureNativeHost();
   console.log(`[logic2-bridge] official Logic ${runtime.version}: ${runtime.appPath}`);
+  console.log(`[logic2-bridge] GraphServer profile: ${runtime.compatibility.profile.id}`);
   console.log(`[logic2-bridge] PXLogic helper: ${options.pxlogicHelper}`);
   if (options.dryRun) {
     console.log('[logic2-bridge] validation successful');

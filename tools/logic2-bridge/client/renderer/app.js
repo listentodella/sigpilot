@@ -1,6 +1,26 @@
 'use strict';
 
-const api = window.pxlogicBridge;
+function createTauriApi() {
+  const tauri = window.__TAURI__;
+  if (!tauri?.core?.invoke || !tauri?.event?.listen) return null;
+  const invoke = tauri.core.invoke;
+  const listen = tauri.event.listen;
+  return {
+    initialState: () => invoke('client_initial_state'),
+    saveSettings: settings => invoke('client_save_settings', { settings }),
+    scanLogicApps: savedPath => invoke('logic_scan', { savedPath }),
+    inspectLogicApp: appPath => invoke('logic_inspect', { appPath }),
+    browseLogicApp: () => invoke('logic_browse'),
+    start: settings => invoke('bridge_start', { settings }),
+    stop: () => invoke('bridge_stop'),
+    openLogs: () => invoke('logs_open'),
+    onState: callback => void listen('bridge-state', event => callback(event.payload)),
+    onLog: callback => void listen('bridge-log', event => callback(event.payload)),
+  };
+}
+
+const api = window.pxlogicBridge || createTauriApi();
+if (!api) throw new Error('PXLogic Bridge desktop API is unavailable');
 const elements = {
   status: document.querySelector('#status'),
   statusLabel: document.querySelector('#status-label'),
@@ -8,6 +28,7 @@ const elements = {
   logicPath: document.querySelector('#logic-path'),
   logicApps: document.querySelector('#logic-apps'),
   logicVersion: document.querySelector('#logic-version'),
+  graphFingerprint: document.querySelector('#graph-fingerprint'),
   compatibility: document.querySelector('#logic-compatibility'),
   rescanButton: document.querySelector('#rescan-button'),
   browseButton: document.querySelector('#browse-button'),
@@ -65,14 +86,20 @@ function setPortMode(mode) {
 
 function renderInspection(inspection) {
   currentInspection = inspection;
-  elements.logicVersion.textContent = inspection?.version || '--';
+  const runtime = inspection?.nodeVersion ? ` · Node ${inspection.nodeVersion}` : '';
+  elements.logicVersion.textContent = inspection?.version ? `${inspection.version}${runtime}` : '--';
+  const graphIdentity = inspection?.graphIdentity || '';
+  elements.graphFingerprint.textContent = graphIdentity || '--';
+  elements.graphFingerprint.title = inspection?.graphSha256
+    ? `${inspection.profileId}\n${graphIdentity}\nsha256 ${inspection.graphSha256}`
+    : '';
   elements.compatibility.className = 'compatibility';
   if (!inspection?.path) {
     elements.logicSummary.textContent = '未找到 Logic 2';
     elements.compatibility.textContent = '未检测';
   } else if (inspection.supported) {
-    elements.logicSummary.textContent = '已检测到兼容安装';
-    elements.compatibility.textContent = '兼容';
+    elements.logicSummary.textContent = `已匹配 ${inspection.profileId}`;
+    elements.compatibility.textContent = '已验证';
     elements.compatibility.classList.add('compatible');
   } else {
     elements.logicSummary.textContent = inspection.error || '安装不可用';
@@ -108,7 +135,7 @@ function readSettings() {
 }
 
 function persistSettings() {
-  void api.saveSettings(readSettings()).catch(error => appendLog(`[client] ${error.message}`));
+  void api.saveSettings(readSettings()).catch(error => appendLog(`[client] ${errorMessage(error)}`));
 }
 
 function appendLog(line) {
@@ -118,6 +145,10 @@ function appendLog(line) {
   const lines = `${existing}${line}`.split('\n').slice(-120);
   elements.logOutput.textContent = lines.join('\n');
   elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
+}
+
+function errorMessage(error) {
+  return error?.message || String(error);
 }
 
 elements.logicPath.addEventListener('change', () => {
@@ -166,8 +197,9 @@ elements.startButton.addEventListener('click', async () => {
       renderState(state);
     }
   } catch (error) {
-    appendLog(`[client] ${error.message}`);
-    elements.footerMessage.textContent = error.message;
+    const message = errorMessage(error);
+    appendLog(`[client] ${message}`);
+    elements.footerMessage.textContent = message;
   }
 });
 
@@ -190,6 +222,6 @@ async function initialize() {
 }
 
 initialize().catch(error => {
-  appendLog(`[client] ${error.message}`);
+  appendLog(`[client] ${errorMessage(error)}`);
   renderInspection(null);
 });

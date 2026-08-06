@@ -39,6 +39,10 @@
         "to": "tools/logic2-bridge/lib"
       },
       {
+        "from": "../compatibility",
+        "to": "tools/logic2-bridge/compatibility"
+      },
+      {
         "from": "../build/graph-host",
         "to": "tools/logic2-bridge/build/graph-host"
       },

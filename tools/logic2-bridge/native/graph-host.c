@@ -1,8 +1,14 @@
+#define _GNU_SOURCE
+
 #include <dlfcn.h>
 #include <errno.h>
+#if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <mach-o/loader.h>
+#elif defined(__linux__)
+#include <elf.h>
+#endif
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -26,7 +32,7 @@ typedef struct {
   uint64_t size;
 } SaleaeBuffer;
 
-// DeviceId occupies x1/x2 in the private ABI, and Buffer is indirect in x3.
+// DeviceId occupies two integer argument slots, followed by an indirect Buffer.
 typedef void (*OnDataBufferFn)(void *, uint64_t, uint64_t, SaleaeBuffer *);
 
 typedef struct {
@@ -50,8 +56,6 @@ static _Atomic uint64_t dropped_byte_count = 0;
 static _Atomic uint64_t underflow_count = 0;
 
 enum {
-  LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET = 0x1df994,
-  ARM64_ABSOLUTE_BRANCH_SIZE = 16,
   INJECTION_RING_CAPACITY = 128u * 1024u * 1024u,
   INJECTION_WAIT_MILLISECONDS = 10000,
   INJECTION_FRAME_HEADER_BYTES = 12,
@@ -61,21 +65,47 @@ enum {
   INJECTION_FRAME_END = 3,
 };
 
-static const uint8_t logic_2_4_46_graph_uuid[16] = {
+#if defined(__APPLE__) && defined(__aarch64__)
+enum {
+  LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET = 0x1df994,
+  HOOK_PROLOGUE_SIZE = 16,
+  ABSOLUTE_BRANCH_SIZE = 16,
+};
+#elif defined(__linux__) && defined(__x86_64__)
+enum {
+  LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET = 0x1df3d10,
+  HOOK_PROLOGUE_SIZE = 17,
+  ABSOLUTE_BRANCH_SIZE = 12,
+};
+#endif
+
+#if defined(__APPLE__) && defined(__aarch64__)
+static const uint8_t logic_2_4_46_graph_identity[16] = {
     0x0d, 0xf1, 0x76, 0x31, 0x8e, 0x04, 0x35, 0x01,
     0xa7, 0xb5, 0x49, 0xa6, 0x2e, 0x23, 0x3f, 0xb0,
 };
 
-static const uint8_t logic_2_4_46_on_data_buffer_prologue[ARM64_ABSOLUTE_BRANCH_SIZE] = {
+static const uint8_t logic_2_4_46_on_data_buffer_prologue[HOOK_PROLOGUE_SIZE] = {
     0xff, 0x83, 0x03, 0xd1, 0xf6, 0x57, 0x0b, 0xa9,
     0xf4, 0x4f, 0x0c, 0xa9, 0xfd, 0x7b, 0x0d, 0xa9,
 };
+#elif defined(__linux__) && defined(__x86_64__)
+static const uint8_t logic_2_4_46_graph_identity[8] = {
+    0xf8, 0x2e, 0x86, 0x83, 0xc4, 0x7f, 0xcd, 0x77,
+};
+
+static const uint8_t logic_2_4_46_on_data_buffer_prologue[HOOK_PROLOGUE_SIZE] = {
+    0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+    0x53, 0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00,
+};
+#endif
 
 static void handle_signal(int signal_number) {
   (void)signal_number;
   stop_requested = 1;
 }
 
+#if defined(__APPLE__) && defined(__aarch64__)
 static void format_uuid(const uint8_t uuid[16], char output[37]) {
   (void)snprintf(output, 37,
                  "%02X%02X%02X%02X-%02X%02X-%02X%02X-"
@@ -86,10 +116,6 @@ static void format_uuid(const uint8_t uuid[16], char output[37]) {
 }
 
 static bool verify_graph_uuid(const void *image_base) {
-#if !defined(__APPLE__) || !defined(__aarch64__)
-  (void)image_base;
-  return false;
-#else
   const struct mach_header_64 *header = (const struct mach_header_64 *)image_base;
   if (header == NULL || header->magic != MH_MAGIC_64) {
     fprintf(stderr, "[logic2-bridge:inject] GraphServer is not a 64-bit Mach-O image\n");
@@ -104,8 +130,8 @@ static bool verify_graph_uuid(const void *image_base) {
     if (command->cmdsize < sizeof(struct load_command) || command->cmdsize > remaining) break;
     if (command->cmd == LC_UUID && command->cmdsize >= sizeof(struct uuid_command)) {
       const struct uuid_command *uuid_command = (const struct uuid_command *)command;
-      if (memcmp(uuid_command->uuid, logic_2_4_46_graph_uuid,
-                 sizeof(logic_2_4_46_graph_uuid)) != 0) {
+      if (memcmp(uuid_command->uuid, logic_2_4_46_graph_identity,
+                 sizeof(logic_2_4_46_graph_identity)) != 0) {
         char actual[37];
         format_uuid(uuid_command->uuid, actual);
         fprintf(stderr, "[logic2-bridge:inject] unsupported GraphServer LC_UUID: %s\n", actual);
@@ -121,8 +147,56 @@ static bool verify_graph_uuid(const void *image_base) {
   }
   fprintf(stderr, "[logic2-bridge:inject] GraphServer LC_UUID was not found\n");
   return false;
-#endif
 }
+#endif
+
+#if defined(__linux__) && defined(__x86_64__)
+static bool verify_graph_build_id(const void *image_base) {
+  const Elf64_Ehdr *header = (const Elf64_Ehdr *)image_base;
+  if (header == NULL || memcmp(header->e_ident, ELFMAG, SELFMAG) != 0 ||
+      header->e_ident[EI_CLASS] != ELFCLASS64 ||
+      header->e_ident[EI_DATA] != ELFDATA2LSB) {
+    fprintf(stderr, "[logic2-bridge:inject] GraphServer is not a little-endian ELF64 image\n");
+    return false;
+  }
+
+  const uint8_t *base = (const uint8_t *)image_base;
+  const Elf64_Phdr *programs = (const Elf64_Phdr *)(base + header->e_phoff);
+  for (Elf64_Half index = 0; index < header->e_phnum; index += 1) {
+    const Elf64_Phdr *program = &programs[index];
+    if (program->p_type != PT_NOTE) continue;
+    const uint8_t *note = base + program->p_vaddr;
+    const uint8_t *end = note + program->p_memsz;
+    while ((size_t)(end - note) >= sizeof(Elf64_Nhdr)) {
+      const Elf64_Nhdr *header_note = (const Elf64_Nhdr *)note;
+      const uint8_t *name = note + sizeof(Elf64_Nhdr);
+      const uint8_t *description = name + ((header_note->n_namesz + 3u) & ~3u);
+      const uint8_t *next = description + ((header_note->n_descsz + 3u) & ~3u);
+      if (next > end) break;
+      if (header_note->n_type == NT_GNU_BUILD_ID && header_note->n_namesz >= 3 &&
+          memcmp(name, "GNU", 3) == 0 &&
+          header_note->n_descsz == sizeof(logic_2_4_46_graph_identity)) {
+        if (memcmp(description, logic_2_4_46_graph_identity,
+                   sizeof(logic_2_4_46_graph_identity)) != 0) {
+          fprintf(stderr, "[logic2-bridge:inject] unsupported GraphServer ELF Build ID: ");
+          for (size_t byte = 0; byte < header_note->n_descsz; byte += 1) {
+            fprintf(stderr, "%02x", description[byte]);
+          }
+          fputc('\n', stderr);
+          return false;
+        }
+        fprintf(stderr,
+                "[logic2-bridge:inject] verified Logic 2.4.46 GraphServer "
+                "ELF Build ID f82e8683c47fcd77\n");
+        return true;
+      }
+      note = next;
+    }
+  }
+  fprintf(stderr, "[logic2-bridge:inject] GraphServer ELF Build ID was not found\n");
+  return false;
+}
+#endif
 
 static bool initialize_injection_ring(void) {
   injection_ring.data = malloc(INJECTION_RING_CAPACITY);
@@ -362,7 +436,8 @@ static void *load_symbol(void *library, const char *name) {
   return symbol;
 }
 
-static void write_arm64_absolute_branch(uint8_t *destination, const void *target) {
+#if defined(__APPLE__) && defined(__aarch64__)
+static void write_absolute_branch(uint8_t *destination, const void *target) {
   const uint32_t load_target = 0x58000050;  // ldr x16, #8
   const uint32_t branch_target = 0xd61f0200;  // br x16
   memcpy(destination, &load_target, sizeof(load_target));
@@ -375,6 +450,23 @@ static bool set_code_page_protection(void *address, vm_prot_t protection) {
   const vm_address_t page = (vm_address_t)address & ~(page_size - 1);
   return vm_protect(mach_task_self(), page, page_size, false, protection) == KERN_SUCCESS;
 }
+#elif defined(__linux__) && defined(__x86_64__)
+static void write_absolute_branch(uint8_t *destination, const void *target) {
+  const uint64_t address = (uint64_t)(uintptr_t)target;
+  destination[0] = 0x48;  // movabs rax, imm64
+  destination[1] = 0xb8;
+  memcpy(destination + 2, &address, sizeof(address));
+  destination[10] = 0xff;  // jmp rax
+  destination[11] = 0xe0;
+}
+
+static bool set_code_page_protection(void *address, size_t length, int protection) {
+  const size_t page_size = (size_t)getpagesize();
+  const uintptr_t begin = (uintptr_t)address & ~(page_size - 1u);
+  const uintptr_t end = ((uintptr_t)address + length + page_size - 1u) & ~(page_size - 1u);
+  return mprotect((void *)begin, end - begin, protection) == 0;
+}
+#endif
 
 __attribute__((noinline)) static void inject_capture_data(
     void *node, uint64_t device_id_low, uint64_t device_id_high, SaleaeBuffer *buffer) {
@@ -417,11 +509,7 @@ __attribute__((noinline)) static void inject_capture_data(
 }
 
 static bool install_injection_hook(void *exported_graph_symbol) {
-#if !defined(__APPLE__) || !defined(__aarch64__)
-  (void)exported_graph_symbol;
-  fprintf(stderr, "[logic2-bridge:inject] only macOS arm64 is supported\n");
-  return false;
-#else
+#if defined(__APPLE__) && defined(__aarch64__)
   Dl_info image_info;
   if (dladdr(exported_graph_symbol, &image_info) == 0 || image_info.dli_fbase == NULL) {
     fprintf(stderr, "[logic2-bridge:inject] could not locate GraphServer image base\n");
@@ -439,16 +527,16 @@ static bool install_injection_hook(void *exported_graph_symbol) {
     return false;
   }
 
-  const size_t trampoline_size = ARM64_ABSOLUTE_BRANCH_SIZE * 2;
+  const size_t trampoline_size = HOOK_PROLOGUE_SIZE + ABSOLUTE_BRANCH_SIZE;
   uint8_t *trampoline = mmap(NULL, trampoline_size, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANON, -1, 0);
   if (trampoline == MAP_FAILED) {
     perror("[logic2-bridge:inject] mmap trampoline");
     return false;
   }
-  memcpy(trampoline, target, ARM64_ABSOLUTE_BRANCH_SIZE);
-  write_arm64_absolute_branch(trampoline + ARM64_ABSOLUTE_BRANCH_SIZE,
-                              target + ARM64_ABSOLUTE_BRANCH_SIZE);
+  memcpy(trampoline, target, HOOK_PROLOGUE_SIZE);
+  write_absolute_branch(trampoline + HOOK_PROLOGUE_SIZE,
+                        target + HOOK_PROLOGUE_SIZE);
   sys_icache_invalidate(trampoline, trampoline_size);
   if (mprotect(trampoline, trampoline_size, PROT_READ | PROT_EXEC) != 0) {
     perror("[logic2-bridge:inject] mprotect trampoline");
@@ -463,14 +551,74 @@ static bool install_injection_hook(void *exported_graph_symbol) {
     original_on_data_buffer = NULL;
     return false;
   }
-  write_arm64_absolute_branch(target, (const void *)&inject_capture_data);
-  sys_icache_invalidate(target, ARM64_ABSOLUTE_BRANCH_SIZE);
+  write_absolute_branch(target, (const void *)&inject_capture_data);
+  sys_icache_invalidate(target, HOOK_PROLOGUE_SIZE);
   if (!set_code_page_protection(target, VM_PROT_READ | VM_PROT_EXECUTE)) {
     fprintf(stderr, "[logic2-bridge:inject] warning: could not restore code protection\n");
   }
   fprintf(stderr, "[logic2-bridge:inject] installed Logic 2.4.46 PXLogic hook at %p\n",
           (void *)target);
   return true;
+#elif defined(__linux__) && defined(__x86_64__)
+  Dl_info image_info;
+  if (dladdr(exported_graph_symbol, &image_info) == 0 || image_info.dli_fbase == NULL) {
+    fprintf(stderr, "[logic2-bridge:inject] could not locate GraphServer image base\n");
+    return false;
+  }
+  if (!verify_graph_build_id(image_info.dli_fbase)) return false;
+
+  uint8_t *target = (uint8_t *)image_info.dli_fbase + LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET;
+  if (memcmp(target, logic_2_4_46_on_data_buffer_prologue,
+             sizeof(logic_2_4_46_on_data_buffer_prologue)) != 0) {
+    fprintf(stderr,
+            "[logic2-bridge:inject] unsupported GraphServer: OnDataBuffer "
+            "prologue mismatch at +0x%x\n",
+            LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET);
+    return false;
+  }
+
+  const size_t trampoline_size = HOOK_PROLOGUE_SIZE + ABSOLUTE_BRANCH_SIZE;
+  uint8_t *trampoline = mmap(NULL, trampoline_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (trampoline == MAP_FAILED) {
+    perror("[logic2-bridge:inject] mmap trampoline");
+    return false;
+  }
+  memcpy(trampoline, target, HOOK_PROLOGUE_SIZE);
+  write_absolute_branch(trampoline + HOOK_PROLOGUE_SIZE,
+                        target + HOOK_PROLOGUE_SIZE);
+  __builtin___clear_cache((char *)trampoline, (char *)trampoline + trampoline_size);
+  if (mprotect(trampoline, trampoline_size, PROT_READ | PROT_EXEC) != 0) {
+    perror("[logic2-bridge:inject] mprotect trampoline");
+    munmap(trampoline, trampoline_size);
+    return false;
+  }
+  original_on_data_buffer = (OnDataBufferFn)trampoline;
+
+  if (!set_code_page_protection(target, HOOK_PROLOGUE_SIZE,
+                                PROT_READ | PROT_WRITE | PROT_EXEC)) {
+    perror("[logic2-bridge:inject] mprotect GraphServer code");
+    munmap(trampoline, trampoline_size);
+    original_on_data_buffer = NULL;
+    return false;
+  }
+  write_absolute_branch(target, (const void *)&inject_capture_data);
+  memset(target + ABSOLUTE_BRANCH_SIZE, 0x90,
+         HOOK_PROLOGUE_SIZE - ABSOLUTE_BRANCH_SIZE);
+  __builtin___clear_cache((char *)target, (char *)target + HOOK_PROLOGUE_SIZE);
+  if (!set_code_page_protection(target, HOOK_PROLOGUE_SIZE, PROT_READ | PROT_EXEC)) {
+    fprintf(stderr, "[logic2-bridge:inject] warning: could not restore code protection\n");
+  }
+  fprintf(stderr,
+          "[logic2-bridge:inject] installed unvalidated Linux Logic 2.4.46 "
+          "PXLogic hook at %p\n",
+          (void *)target);
+  return true;
+#else
+  (void)exported_graph_symbol;
+  fprintf(stderr,
+          "[logic2-bridge:inject] GraphServer injection is unavailable on this platform\n");
+  return false;
 #endif
 }
 

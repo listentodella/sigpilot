@@ -13,16 +13,17 @@ official Logic app.
 ## Support boundary
 
 The native callback hook is currently verified for the official macOS arm64
-Logic `2.4.46` GraphServer. The hook checks the GraphServer Mach-O UUID and
-function prologue before patching; an unknown version is refused instead of
-being patched optimistically. Supporting another Logic version requires a new
-verified hook record and a separate validation run.
+Logic `2.4.46` GraphServer. The hook checks the GraphServer Mach-O UUID,
+function prologue, and SHA-256 before patching; an unknown build is refused
+instead of being patched optimistically. Supporting another Logic version
+requires a new verified hook record and a separate validation run.
 
 | Layer | macOS arm64 | macOS x64 | Windows x64 | Linux x64 |
 | --- | --- | --- | --- | --- |
 | WebSocket proxy and data conversion | Tested | Tested in CI | Tested in CI | Tested in CI |
 | PXLogic `usb_smoke` helper | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace |
-| Logic 2.4.46 GraphServer injection | Verified | Not implemented | Not implemented | Not implemented |
+| Logic 2.4.46 GraphServer identity | UUID + SHA verified | Profile pending | Build ID + SHA recorded | Profile pending |
+| Logic 2.4.46 GraphServer injection | Verified | Not implemented | Reverse-engineered, pending live validation | Not implemented |
 | Complete live bridge | **Supported** | Not supported | Not supported | Not supported |
 
 Building the portable JavaScript and PXLogic USB layers on another operating
@@ -40,6 +41,21 @@ The packaged desktop client does not require Node.js, npm, Rust, Cargo, or the
 Xcode Command Line Tools on the user's machine. Those tools are build-time
 dependencies only.
 
+### GraphServer profiles
+
+`compatibility/profiles.json` is the compatibility manifest. It records the
+platform-native identity, SHA-256, callback offset, and function prologue for
+each inspected build. The identity is platform-specific: macOS uses Mach-O
+`LC_UUID`, Linux uses the ELF GNU Build ID, and Windows uses PE/CodeView
+identity when present (falling back to the PE timestamp for diagnostics).
+These identifiers are not expected to be equal across platforms, even when
+the Logic application version is the same.
+
+The profile is selected from the GraphServer binary in the user-selected
+installation at startup. A version string alone never authorizes patching.
+The manifest can detect a changed binary, but it cannot invent a safe callback
+offset for an unknown future build.
+
 ## Continuous integration
 
 `.github/workflows/build-logic2-bridge.yml` checks the portable bridge layer and
@@ -47,10 +63,11 @@ builds the PXLogic `usb_smoke` helper on GitHub-hosted Windows, Linux, macOS
 Intel, and macOS Apple Silicon runners. The helper jobs publish prerequisite
 artifacts with the hardware resources for platform-porting and diagnostics.
 They are not complete Logic bridges. The workflow also builds a runnable
-`pxlogic-logic2-bridge-client-macos-arm64` artifact containing a DMG and ZIP.
+`pxlogic-logic2-bridge-client-macos-arm64` artifact containing a Tauri DMG.
 The application bundle contains:
 
-- the desktop launcher and its private Electron/Node runtime;
+- the lightweight Tauri desktop launcher (it reuses the selected Logic app's
+  Node/Electron runtime for the bridge);
 - the bridge source and prebuilt native GraphServer host;
 - the release `usb_smoke` capture helper;
 - the PXLogic FPGA bitstreams and MCU firmware used by that helper.
@@ -59,6 +76,12 @@ The archive deliberately does not contain Saleae binaries. At runtime it loads
 GraphServer and the Python runtime from the user's official Logic 2.4.46 app.
 Windows and Linux artifacts will be added only after their native GraphServer
 hooks have independent fingerprints and live-capture validation.
+
+The workflow has a manual `analyze_official_packages` input. When enabled,
+GitHub downloads the official Logic 2.4.46 Linux AppImage and Windows
+installer, extracts `libgraph_server_shared`, and uploads JSON fingerprint
+reports. The reports contain no Saleae binaries and are retained only as
+short-lived CI artifacts.
 
 ## Desktop client
 
