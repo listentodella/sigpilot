@@ -232,6 +232,11 @@ select:focus {
   background: #dcefe3;
 }
 
+.compatibility.experimental {
+  color: #805c12;
+  background: #f5e8c7;
+}
+
 .compatibility.incompatible {
   color: #a03b2d;
   background: #f6e1dd;

@@ -11,21 +11,20 @@ the user's official Logic installation instead of packaging a second runtime.
 
 ## Support boundary
 
-The native callback hook is currently verified for the official macOS arm64
-Logic `2.4.46` GraphServer. The hook checks the GraphServer Mach-O UUID,
-function prologue, and SHA-256 before patching; an unknown build is refused
-instead of being patched optimistically. Supporting another Logic version
-requires a new verified profile and a separate validation run, but no native
-host source change when the existing platform ABI and patch strategy still
-apply.
+The native callback hook is verified for the official macOS arm64 Logic `2.4.46`
+GraphServer. Windows x64 `2.4.46` is now an explicit experimental validation
+target: its PE CodeView identity, callback RVA, prologue, and Microsoft x64
+aggregate-argument layout are checked, but it must still complete a real PXLogic
+capture before the profile is promoted to `verified`. An unknown build is
+refused instead of being patched optimistically.
 
 | Layer | macOS arm64 | macOS x64 | Windows x64 | Linux x64 |
 | --- | --- | --- | --- | --- |
 | WebSocket proxy and data conversion | Tested | Tested in CI | Tested in CI | Tested in CI |
 | PXLogic `usb_smoke` helper | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace |
-| Logic 2.4.46 GraphServer identity | UUID + SHA verified | Profile pending | CodeView + SHA recorded | Build ID + SHA recorded |
-| Logic 2.4.46 GraphServer injection | Verified | Not implemented | Not implemented | Reverse-engineered, pending live validation |
-| Complete live bridge | **Supported** | Not supported | Not supported | Not supported |
+| Logic 2.4.46 GraphServer identity | UUID + SHA verified | Profile pending | CodeView + SHA verified | Build ID + SHA recorded |
+| Logic 2.4.46 GraphServer injection | Verified | Not implemented | Experimental host, pending capture | Reverse-engineered, pending capture |
+| Complete live bridge | **Supported** | Not supported | Validation build | Not supported |
 
 Building the portable JavaScript and PXLogic USB layers on another operating
 system does not make its native injection path compatible. Each Logic build has
@@ -52,22 +51,25 @@ identity when present (falling back to the PE timestamp for diagnostics).
 These identifiers are not expected to be equal across platforms, even when
 the Logic application version is the same.
 
-The profile is selected at startup from the Logic version and the GraphServer
-binary in the user-selected installation. The client extracts the native
-identity and SHA-256 directly; the native host then receives the selected
-identity, callback offset, and prologue as runtime data. A version string or a
-dynamically extracted UUID/Build ID/CodeView identity alone never authorizes
-patching. The manifest can detect a changed binary, but it cannot invent a safe
-callback offset or prove the ABI for an unknown future build.
+The profile is selected at startup from the GraphServer binary in the
+user-selected installation. The client extracts the native identity and
+SHA-256 directly from that binary; the native host then receives the selected
+identity, callback offset, and prologue as runtime data. The outer Logic version
+is retained as metadata but is not a hard match: if a later Logic release ships
+the byte-for-byte identical GraphServer, the existing profile can be reused.
+A dynamically extracted UUID/Build ID/CodeView identity alone never authorizes
+patching. A changed binary still requires a new callback offset, prologue, and
+ABI review; the Windows package exposes this only through the explicit
+experimental validation path.
 
 ## Continuous integration
 
 `.github/workflows/build-logic2-bridge.yml` checks the portable bridge layer and
-builds diagnostic Linux AppImage/DEB and Windows NSIS/MSI packages on
+builds a Linux AppImage plus executable tarball and a Windows portable ZIP on
 self-hosted x64 runners. Pushes run those two self-hosted builds by default;
 `workflow_dispatch` can select `windows`, `linux`, `self-hosted`, `macos`, or
 `all`. macOS checks and the runnable
-`pxlogic-logic2-bridge-client-macos-arm64` Tauri DMG are manual so an unavailable
+`pxlogic-logic2-bridge-client-macos-arm64` Tauri app archive is manual so an unavailable
 GitHub-hosted runner cannot block Windows or Linux artifacts.
 The application bundle contains:
 
@@ -79,9 +81,9 @@ The application bundle contains:
 
 The packages deliberately do not contain Saleae binaries. At runtime they load
 GraphServer and the Python runtime from the user's selected official Logic
-installation. The Windows package does not yet contain a native GraphServer
-host, and the Linux hook remains pending live validation, so those artifacts
-are diagnostic builds rather than supported live bridges.
+installation. The Windows portable package contains the experimental
+`graph-host.exe`; its UI clearly labels the profile as experimental until a
+PXLogic capture is confirmed. The Linux hook remains pending live validation.
 
 The workflow has a manual `analyze_official_packages` input. When enabled,
 GitHub downloads the official Logic 2.4.46 Linux AppImage and Windows
@@ -95,7 +97,15 @@ artifacts.
 
 ## Desktop client
 
-Open the DMG, move `PXLogic Bridge.app` to Applications, and launch it normally.
+On macOS, unzip `pxlogic-logic2-bridge-macos-arm64.zip`, move `PXLogic Bridge.app`
+to Applications, and launch it normally. On Windows, unzip
+`pxlogic-logic2-bridge-windows-x64.zip` and double-click `PXLogic Bridge.exe`.
+On Linux, make the AppImage executable and launch it, or extract the tarball
+which preserves the executable bit.
+
+The client fingerprints the GraphServer inside the user-selected installation
+at runtime, so the package does not contain a hardcoded Saleae DLL.
+
 The client searches `/Applications`, `~/Applications`, and Spotlight for Saleae
 Logic. It displays the detected version, accepts a manually entered or selected
 `.app` path, remembers the settings, and remains available from the macOS menu

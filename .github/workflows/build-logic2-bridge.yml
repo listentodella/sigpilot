@@ -350,21 +350,21 @@ jobs:
           test -f "$resources/resources/bitstreams/hspi_ddr_RST.bin"
           test -f "$resources/resources/firmware/SCI_LOGIC.bin"
 
-      - name: Build DMG installer
-        working-directory: tools/logic2-bridge/tauri-client
+      - name: Archive portable application
         run: |
-          npx tauri build --target aarch64-apple-darwin \
-            --config src-tauri/tauri.macos.conf.json --bundles dmg
-
-      - name: Verify DMG installer
-        run: test -f "target/aarch64-apple-darwin/release/bundle/dmg/PXLogic Bridge_0.3.0_aarch64.dmg"
+          set -euo pipefail
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "target/aarch64-apple-darwin/release/bundle/macos/PXLogic Bridge.app" \
+            "dist/pxlogic-logic2-bridge-macos-arm64.zip"
+          unzip -t "dist/pxlogic-logic2-bridge-macos-arm64.zip"
 
       - name: Upload desktop client
         uses: actions/upload-artifact@v7
         with:
           name: pxlogic-logic2-bridge-client-macos-arm64
           path: |
-            target/aarch64-apple-darwin/release/bundle/dmg/PXLogic Bridge_0.3.0_aarch64.dmg
+            dist/pxlogic-logic2-bridge-macos-arm64.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -449,29 +449,35 @@ jobs:
           TAURI_TARGET: x86_64-unknown-linux-gnu
         run: npm run prepare:payload
 
-      - name: Build Linux installers
+      - name: Build Linux portable application
         working-directory: tools/logic2-bridge/tauri-client
         run: |
           npx tauri build --target x86_64-unknown-linux-gnu \
-            --config src-tauri/tauri.linux.conf.json
+            --config src-tauri/tauri.linux.conf.json --bundles appimage
 
-      - name: Verify Linux installers
+      - name: Stage and verify Linux portable application
         run: |
           set -euo pipefail
           file tools/logic2-bridge/build/payload/graph-host | grep -E 'ELF 64-bit|x86-64'
           file tools/logic2-bridge/build/payload/usb_smoke | grep -E 'ELF 64-bit|x86-64'
-          find target/x86_64-unknown-linux-gnu/release/bundle/appimage \
-            -maxdepth 1 -type f -name '*.AppImage' -print -quit | grep -q .
-          find target/x86_64-unknown-linux-gnu/release/bundle/deb \
-            -maxdepth 1 -type f -name '*.deb' -print -quit | grep -q .
+          source_appimage="$(find target/x86_64-unknown-linux-gnu/release/bundle/appimage \
+            -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          test -n "$source_appimage"
+          mkdir -p dist
+          install -m 755 "$source_appimage" "dist/PXLogic-Bridge-linux-x86_64.AppImage"
+          tar -C dist -czf "dist/pxlogic-logic2-bridge-linux-x64.tar.gz" \
+            "PXLogic-Bridge-linux-x86_64.AppImage"
+          test -x "dist/PXLogic-Bridge-linux-x86_64.AppImage"
+          tar -tzf "dist/pxlogic-logic2-bridge-linux-x64.tar.gz" \
+            | grep -q '^PXLogic-Bridge-linux-x86_64.AppImage$'
 
       - name: Upload Linux diagnostic client
         uses: actions/upload-artifact@v7
         with:
-          name: pxlogic-logic2-bridge-client-linux-x64-diagnostic
+          name: pxlogic-logic2-bridge-client-linux-x64-portable
           path: |
-            target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
-            target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            dist/PXLogic-Bridge-linux-x86_64.AppImage
+            dist/pxlogic-logic2-bridge-linux-x64.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -508,6 +514,11 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Configure MSVC build tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -533,29 +544,74 @@ jobs:
           TAURI_TARGET: x86_64-pc-windows-msvc
         run: npm run prepare:payload
 
-      - name: Build Windows installers
+      - name: Build Windows portable launcher
         working-directory: tools/logic2-bridge/tauri-client
         run: |
-          npx tauri build --target x86_64-pc-windows-msvc `
+          npx tauri build --no-bundle --target x86_64-pc-windows-msvc `
             --config src-tauri/tauri.windows.conf.json
 
-      - name: Verify Windows installers
+      - name: Stage and verify Windows portable application
         shell: pwsh
         run: |
-          if (-not (Test-Path tools/logic2-bridge/build/payload/usb_smoke.exe)) {
-            throw 'Windows PXLogic helper payload is missing'
-          }
-          $nsis = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis -File -Filter *.exe
-          $msi = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/msi -File -Filter *.msi
-          if (-not $nsis) { throw 'NSIS installer was not produced' }
-          if (-not $msi) { throw 'MSI installer was not produced' }
+          $stage = 'dist/pxlogic-logic2-bridge-windows-x64'
+          $bridge = Join-Path $stage 'tools/logic2-bridge'
+          New-Item -ItemType Directory -Force -Path `
+            $stage, `
+            (Join-Path $bridge 'lib'), `
+            (Join-Path $bridge 'compatibility'), `
+            (Join-Path $bridge 'build'), `
+            (Join-Path $stage 'target/release'), `
+            (Join-Path $stage 'resources/bitstreams'), `
+            (Join-Path $stage 'resources/firmware') | Out-Null
 
-      - name: Upload Windows diagnostic client
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/pxlogic-logic2-bridge-client.exe' `
+            (Join-Path $stage 'PXLogic Bridge.exe')
+          Copy-Item 'tools/logic2-bridge/index.cjs' $bridge
+          Copy-Item 'tools/logic2-bridge/lib/*' (Join-Path $bridge 'lib') -Recurse
+          Copy-Item 'tools/logic2-bridge/compatibility/*' `
+            (Join-Path $bridge 'compatibility') -Recurse
+          Copy-Item 'tools/logic2-bridge/build/payload/graph-host.exe' `
+            (Join-Path $bridge 'build/graph-host.exe')
+          Copy-Item 'tools/logic2-bridge/build/payload/usb_smoke.exe' `
+            (Join-Path $stage 'target/release/usb_smoke.exe')
+          Copy-Item 'resources/bitstreams/hspi_ddr.bin' `
+            (Join-Path $stage 'resources/bitstreams/hspi_ddr.bin')
+          Copy-Item 'resources/bitstreams/hspi_ddr_RST.bin' `
+            (Join-Path $stage 'resources/bitstreams/hspi_ddr_RST.bin')
+          Copy-Item 'resources/bitstreams/LICENSE.txt' `
+            (Join-Path $stage 'resources/bitstreams/LICENSE.txt')
+          Copy-Item 'resources/firmware/SCI_LOGIC.bin' `
+            (Join-Path $stage 'resources/firmware/SCI_LOGIC.bin')
+
+          $required = @(
+            (Join-Path $stage 'PXLogic Bridge.exe'),
+            (Join-Path $bridge 'index.cjs'),
+            (Join-Path $bridge 'build/graph-host.exe'),
+            (Join-Path $stage 'target/release/usb_smoke.exe'),
+            (Join-Path $stage 'resources/bitstreams/hspi_ddr.bin'),
+            (Join-Path $stage 'resources/firmware/SCI_LOGIC.bin')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Windows portable payload is missing: $path"
+            }
+          }
+          $help = & node (Join-Path $bridge 'index.cjs') --help
+          if ($LASTEXITCODE -ne 0 -or $help -notmatch 'No npm install is required') {
+            throw 'Packaged bridge entry did not pass its help probe'
+          }
+          $headers = & dumpbin.exe /headers (Join-Path $bridge 'build/graph-host.exe')
+          if ($LASTEXITCODE -ne 0 -or $headers -notmatch '8664 machine') {
+            throw 'Packaged graph-host.exe is not an x64 PE executable'
+          }
+          Compress-Archive -Path (Join-Path $stage '*') `
+            -DestinationPath 'dist/pxlogic-logic2-bridge-windows-x64.zip' -Force
+
+      - name: Upload Windows portable client
         uses: actions/upload-artifact@v7
         with:
-          name: pxlogic-logic2-bridge-client-windows-x64-diagnostic
+          name: pxlogic-logic2-bridge-client-windows-x64-portable
           path: |
-            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            dist/pxlogic-logic2-bridge-windows-x64.zip
           if-no-files-found: error
           retention-days: 7

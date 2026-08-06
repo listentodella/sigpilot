@@ -15,6 +15,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "linux")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -64,6 +66,7 @@ struct LogicInspection {
     path: String,
     version: Option<String>,
     supported: bool,
+    runnable: bool,
     error: Option<String>,
     node_version: Option<String>,
     electron_version: Option<String>,
@@ -82,6 +85,7 @@ impl LogicInspection {
             path: path.display().to_string(),
             version,
             supported: false,
+            runnable: false,
             error: Some(error.into()),
             node_version: None,
             electron_version: None,
@@ -107,7 +111,6 @@ struct CompatibilityManifest {
 #[serde(rename_all = "camelCase")]
 struct CompatibilityProfile {
     id: String,
-    logic_version: String,
     platform: String,
     architecture: String,
     graph: CompatibilityGraph,
@@ -258,6 +261,93 @@ fn logic_executable(app_path: &Path) -> PathBuf {
     app_path.join("Contents/MacOS/Logic")
 }
 
+#[cfg(target_os = "linux")]
+fn is_appimage(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"))
+}
+
+#[cfg(target_os = "linux")]
+fn appimage_cache_root() -> Result<PathBuf, String> {
+    let root = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+        })
+        .ok_or_else(|| "无法确定 Linux 缓存目录".to_string())?;
+    Ok(root.join("pxlogic/logic2-bridge/appimages"))
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_logic_installation(app_path: &Path) -> Result<PathBuf, String> {
+    if !is_appimage(app_path) {
+        return Ok(app_path.to_path_buf());
+    }
+    let metadata = fs::metadata(app_path)
+        .map_err(|error| format!("无法读取 AppImage {}: {error}", app_path.display()))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let key = format!(
+        "{:x}",
+        Sha256::digest(format!("{}:{}:{}", app_path.display(), metadata.len(), modified))
+    );
+    let cache_root = appimage_cache_root()?;
+    let cached = cache_root.join(format!("{key}-{}-{modified}", metadata.len()));
+    let app_dir = cached.join("squashfs-root");
+    if app_dir.is_dir() {
+        return Ok(app_dir);
+    }
+    fs::create_dir_all(&cache_root)
+        .map_err(|error| format!("无法创建 AppImage 缓存目录: {error}"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temporary = cache_root.join(format!(".extract-{}-{nonce}", std::process::id()));
+    fs::create_dir_all(&temporary)
+        .map_err(|error| format!("无法创建 AppImage 临时目录: {error}"))?;
+    let result = Command::new(app_path)
+        .arg("--appimage-extract")
+        .current_dir(&temporary)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("无法执行 AppImage 提取: {error}"))?;
+    if !result.status.success() {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(format!(
+            "AppImage 提取失败（{}）: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
+    let extracted = temporary.join("squashfs-root");
+    if !extracted.is_dir() {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err("AppImage 提取结果缺少 squashfs-root".to_string());
+    }
+    if cached.exists() {
+        fs::remove_dir_all(&temporary)
+            .map_err(|error| format!("无法清理重复 AppImage 提取结果: {error}"))?;
+        return Ok(app_dir);
+    }
+    fs::rename(&temporary, &cached)
+        .map_err(|error| format!("无法保存 AppImage 缓存: {error}"))?;
+    Ok(app_dir)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn resolve_logic_installation(app_path: &Path) -> Result<PathBuf, String> {
+    Ok(app_path.to_path_buf())
+}
+
 #[cfg(not(target_os = "macos"))]
 fn logic_executable(app_path: &Path) -> PathBuf {
     if app_path.is_file() {
@@ -323,6 +413,13 @@ fn compatibility_architecture() -> &'static str {
         "aarch64" => "arm64",
         architecture => architecture,
     }
+}
+
+fn profile_runnable(status: &str, platform: &str, architecture: &str) -> bool {
+    status == "verified"
+        || (status == "pending-live-validation"
+            && platform == "win32"
+            && architecture == "x64")
 }
 
 fn installation_roots(installation_path: &Path) -> Vec<PathBuf> {
@@ -743,7 +840,7 @@ fn graph_fingerprint(data: &[u8], path: PathBuf) -> GraphInspection {
 
 fn inspect_graph_compatibility(
     app_path: &Path,
-    logic_version: &str,
+    _logic_version: &str,
 ) -> Result<GraphInspection, String> {
     let graph_path = find_graph_binary(app_path)?;
     let data = fs::read(&graph_path)
@@ -754,8 +851,7 @@ fn inspect_graph_compatibility(
         .profiles
         .into_iter()
         .filter(|profile| {
-            profile.logic_version == logic_version
-                && profile.platform == compatibility_platform()
+            profile.platform == compatibility_platform()
                 && profile.architecture == compatibility_architecture()
         })
         .collect();
@@ -845,51 +941,73 @@ fn probe_logic_node(executable: &Path, timeout: Duration) -> Result<NodeVersions
 }
 
 fn inspect_logic_path(app_path: &Path) -> LogicInspection {
-    let version = match read_logic_version(app_path) {
+    let runtime_path = match resolve_logic_installation(app_path) {
+        Ok(path) => path,
+        Err(error) => return LogicInspection::failure(app_path, None, error),
+    };
+    let version = match read_logic_version(&runtime_path) {
         Ok(version) => version,
         Err(error) => return LogicInspection::failure(app_path, None, error),
     };
-    let graph = match inspect_graph_compatibility(app_path, &version) {
+    let graph = match inspect_graph_compatibility(&runtime_path, &version) {
         Ok(graph) => graph,
         Err(error) => return LogicInspection::failure(app_path, Some(version), error),
     };
-    let incompatibility = match graph.profile.as_ref() {
-        None => Some(format!(
-            "Logic {version} GraphServer 尚无已验证 profile: {} {} (sha256 {})",
-            graph.identity_kind, graph.identity, graph.sha256
-        )),
-        Some(profile) if profile.hook.status != "verified" => Some(format!(
-            "GraphServer profile {} 尚未完成真机验证: {}",
-            profile.id, profile.hook.validation
-        )),
-        Some(_) => None,
-    };
-    if let Some(error) = incompatibility {
+    let Some(profile) = graph.profile.as_ref() else {
         return LogicInspection {
             path: app_path.display().to_string(),
             version: Some(version),
             supported: false,
-            error: Some(error),
+            runnable: false,
+            error: Some(format!(
+                "Logic GraphServer 尚无匹配 profile: {} {} (sha256 {})",
+                graph.identity_kind, graph.identity, graph.sha256
+            )),
             node_version: None,
             electron_version: None,
-            profile_id: graph.profile.as_ref().map(|profile| profile.id.clone()),
+            profile_id: None,
             graph_path: Some(graph.path.display().to_string()),
             graph_format: Some(graph.format),
             graph_identity_kind: Some(graph.identity_kind),
             graph_identity: Some(graph.identity),
             graph_sha256: Some(graph.sha256),
-            hook_status: graph
-                .profile
-                .as_ref()
-                .map(|profile| profile.hook.status.clone()),
+            hook_status: None,
+        };
+    };
+    let supported = profile.hook.status == "verified";
+    let runnable = profile_runnable(
+        &profile.hook.status,
+        compatibility_platform(),
+        compatibility_architecture(),
+    );
+    if !runnable {
+        return LogicInspection {
+            path: app_path.display().to_string(),
+            version: Some(version),
+            supported: false,
+            runnable: false,
+            error: Some(format!(
+                "GraphServer profile {} 尚未完成真机验证: {}",
+                profile.id, profile.hook.validation
+            )),
+            node_version: None,
+            electron_version: None,
+            profile_id: Some(profile.id.clone()),
+            graph_path: Some(graph.path.display().to_string()),
+            graph_format: Some(graph.format),
+            graph_identity_kind: Some(graph.identity_kind),
+            graph_identity: Some(graph.identity),
+            graph_sha256: Some(graph.sha256),
+            hook_status: Some(profile.hook.status.clone()),
         };
     }
-    let executable = logic_executable(app_path);
+    let executable = logic_executable(&runtime_path);
     if !executable.is_file() {
         return LogicInspection {
             path: app_path.display().to_string(),
             version: Some(version),
             supported: false,
+            runnable: false,
             error: Some(format!("Logic 可执行文件不存在: {}", executable.display())),
             node_version: None,
             electron_version: None,
@@ -905,13 +1023,19 @@ fn inspect_logic_path(app_path: &Path) -> LogicInspection {
                 .map(|profile| profile.hook.status.clone()),
         };
     }
-    let profile = graph.profile.as_ref().expect("verified profile must exist");
+    let validation_notice = (!supported).then(|| {
+        format!(
+            "实验性 Windows profile，等待本机 PXLogic 捕获验证: {}",
+            profile.hook.validation
+        )
+    });
     match probe_logic_node(&executable, Duration::from_secs(4)) {
         Ok(versions) => LogicInspection {
             path: app_path.display().to_string(),
             version: Some(version),
-            supported: true,
-            error: None,
+            supported,
+            runnable,
+            error: validation_notice,
             node_version: Some(versions.node),
             electron_version: Some(versions.electron),
             profile_id: Some(profile.id.clone()),
@@ -926,6 +1050,7 @@ fn inspect_logic_path(app_path: &Path) -> LogicInspection {
             path: app_path.display().to_string(),
             version: Some(version),
             supported: false,
+            runnable: false,
             error: Some(error),
             node_version: None,
             electron_version: None,
@@ -1025,7 +1150,7 @@ fn scan_logic_paths(saved_path: Option<&str>) -> Vec<LogicInspection> {
         }
         applications.push(inspect_logic_path(&candidate));
     }
-    applications.sort_by_key(|inspection| !inspection.supported);
+    applications.sort_by_key(|inspection| !inspection.runnable);
     applications
 }
 
@@ -1051,6 +1176,11 @@ fn bridge_root(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn validate_bridge_payload(app: &AppHandle) -> Result<PathBuf, String> {
     let root = bridge_root(app)?;
+    let native_host = if cfg!(target_os = "windows") {
+        root.join("build/graph-host.exe")
+    } else {
+        root.join("build/graph-host")
+    };
     let required = [
         root.join("index.cjs"),
         root.join("lib/capture-controller.cjs"),
@@ -1058,7 +1188,7 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<PathBuf, String> {
         root.join("lib/logic-format.cjs"),
         root.join("lib/websocket-proxy.cjs"),
         root.join("compatibility/profiles.json"),
-        root.join("build/graph-host"),
+        native_host,
     ];
     for path in required {
         if !path.is_file() {
@@ -1203,7 +1333,24 @@ fn terminate_process(pid: u32, force: bool) -> Result<(), String> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn terminate_process(pid: u32, force: bool) -> Result<(), String> {
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T"]);
+    if force {
+        command.arg("/F");
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("无法启动 taskkill: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn terminate_process(_pid: u32, _force: bool) -> Result<(), String> {
     Err("当前平台尚未实现 bridge 进程组终止".to_string())
 }
@@ -1289,7 +1436,7 @@ async fn client_initial_state(app: AppHandle) -> Result<InitialState, String> {
     if settings.logic_app_path.is_empty() {
         if let Some(preferred) = applications
             .iter()
-            .find(|application| application.supported)
+            .find(|application| application.runnable)
             .or_else(|| applications.first())
         {
             settings.logic_app_path = preferred.path.clone();
@@ -1342,6 +1489,16 @@ async fn logic_inspect(app_path: String) -> Result<LogicInspection, String> {
 #[tauri::command]
 async fn logic_browse(app: AppHandle) -> Result<Option<LogicInspection>, String> {
     let selected = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
+        {
+            return app
+                .dialog()
+                .file()
+                .set_title("选择 Saleae Logic 2 AppImage")
+                .add_filter("Linux AppImage", &["AppImage", "appimage"])
+                .blocking_pick_file();
+        }
+        #[cfg(not(target_os = "linux"))]
         app.dialog()
             .file()
             .set_title("选择 Saleae Logic 2")
@@ -1400,9 +1557,10 @@ async fn bridge_start(app: AppHandle, settings: ClientSettings) -> Result<Bridge
 
 fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<BridgeState, String> {
     let settings = store_settings(app, settings)?;
-    let app_path = PathBuf::from(&settings.logic_app_path);
-    let inspection = inspect_logic_path(&app_path);
-    if !inspection.supported {
+    let selected_app_path = PathBuf::from(&settings.logic_app_path);
+    let app_path = resolve_logic_installation(&selected_app_path)?;
+    let inspection = inspect_logic_path(&selected_app_path);
+    if !inspection.runnable {
         return Err(inspection
             .error
             .unwrap_or_else(|| "Logic 2 安装无效".to_string()));
@@ -1410,6 +1568,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     let bridge_root = validate_bridge_payload(app)?;
     let entry = bridge_root.join("index.cjs");
     let executable = logic_executable(&app_path);
+    let runtime_app_path = app_path.to_string_lossy().into_owned();
     let port = if settings.port_mode == "fixed" {
         settings.preferred_port.to_string()
     } else {
@@ -1418,7 +1577,7 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
     let mut command = Command::new(&executable);
     command
         .arg(&entry)
-        .args(["--app", &settings.logic_app_path])
+        .args(["--app", &runtime_app_path])
         .args(["--port", &port])
         .args(["--screen-quadrant", &settings.screen_quadrant.to_string()])
         .current_dir(&bridge_root)
@@ -1426,6 +1585,9 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if inspection.hook_status.as_deref() == Some("pending-live-validation") {
+        command.arg("--allow-pending-profile");
+    }
     configure_child_process(&mut command);
     let mut child = command
         .spawn()
@@ -1703,5 +1865,13 @@ mod tests {
             .profiles
             .iter()
             .any(|profile| profile.id == "logic-2.4.46-macos-arm64-0df17631"));
+    }
+
+    #[test]
+    fn only_allows_pending_profile_for_the_windows_validation_target() {
+        assert!(profile_runnable("verified", "darwin", "arm64"));
+        assert!(profile_runnable("pending-live-validation", "win32", "x64"));
+        assert!(!profile_runnable("pending-live-validation", "linux", "x64"));
+        assert!(!profile_runnable("pending-live-validation", "win32", "arm64"));
     }
 }

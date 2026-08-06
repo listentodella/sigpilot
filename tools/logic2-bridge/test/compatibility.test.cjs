@@ -2,8 +2,13 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const {
   loadCompatibilityProfiles,
+  matchCompatibilityProfile,
   parseBinaryIdentity,
   platformForBinaryFormat,
 } = require('../lib/compatibility.cjs');
@@ -84,6 +89,55 @@ test('parses a PE CodeView GUID and age', () => {
     identity: '12345678-9ABC-BEEF-0011-223344556677-7',
     timestamp: 0,
   });
+});
+
+test('reuses an exact GraphServer binary profile across outer Logic versions', t => {
+  const buffer = Buffer.alloc(0x280);
+  buffer.write('MZ', 0, 'ascii');
+  buffer.writeUInt32LE(0x40, 0x3c);
+  buffer.write('PE\0\0', 0x40, 'ascii');
+  buffer.writeUInt16LE(0x8664, 0x44);
+  buffer.writeUInt16LE(1, 0x46);
+  buffer.writeUInt16LE(0xf0, 0x54);
+  buffer.writeUInt16LE(0x20b, 0x58);
+  buffer.writeUInt32LE(0x1000, 0x58 + 112 + 6 * 8);
+  buffer.writeUInt32LE(28, 0x58 + 112 + 6 * 8 + 4);
+  const section = 0x58 + 0xf0;
+  buffer.writeUInt32LE(0x1000, section + 12);
+  buffer.writeUInt32LE(0x1000, section + 16);
+  buffer.writeUInt32LE(0x200, section + 20);
+  buffer.writeUInt32LE(2, 0x200 + 12);
+  buffer.writeUInt32LE(24, 0x200 + 16);
+  buffer.writeUInt32LE(0x240, 0x200 + 24);
+  buffer.write('RSDS', 0x240, 'ascii');
+  Buffer.from('78563412bc9aefbe0011223344556677', 'hex').copy(buffer, 0x244);
+  buffer.writeUInt32LE(7, 0x254);
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'logic2-profile-test-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const graphPath = path.join(directory, 'graph_server_shared.dll');
+  fs.writeFileSync(graphPath, buffer);
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  const result = matchCompatibilityProfile({
+    logicVersion: '2.9.99',
+    platform: 'win32',
+    architecture: 'x64',
+    graphPath,
+    profiles: [{
+      id: 'same-graph-different-app-version',
+      logicVersion: '2.4.46',
+      platform: 'win32',
+      architecture: 'x64',
+      graph: {
+        identityKind: 'pe-codeview-guid-age',
+        identity: '12345678-9ABC-BEEF-0011-223344556677-7',
+        sha256,
+      },
+      hook: { status: 'verified' },
+    }],
+  });
+  assert.equal(result.profile?.id, 'same-graph-different-app-version');
+  assert.equal(result.supported, true);
 });
 
 test('keeps only exact GraphServer identities in the profile manifest', () => {

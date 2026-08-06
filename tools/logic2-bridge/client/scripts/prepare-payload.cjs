@@ -41,8 +41,8 @@ const targetSettings = {
   },
   'x86_64-pc-windows-msvc': {
     helper: 'usb_smoke.exe',
-    nativeHost: null,
-    hostCompiler: null,
+    nativeHost: 'graph-host.exe',
+    hostCompiler: 'cl',
     hostArgs: [],
     architecture: 'x64',
   },
@@ -94,21 +94,38 @@ if (!fs.existsSync(helperSource)) {
   throw new Error(`PXLogic helper was not built: ${helperSource}`);
 }
 fs.copyFileSync(helperSource, helperDestination);
+if (process.platform !== 'win32') fs.chmodSync(helperDestination, 0o755);
 
 if (targetSettings.hostCompiler) {
-  const hostArgs = [
-    ...targetSettings.hostArgs,
-    '-std=c11',
-    '-O2',
-    '-Wall',
-    '-Wextra',
-    nativeSource,
-    '-o',
-    nativeDestination,
-  ];
+  const hostArgs = target.startsWith('x86_64-pc-windows')
+    ? [
+      '/nologo',
+      '/std:c11',
+      '/O2',
+      '/W4',
+      '/D_CRT_SECURE_NO_WARNINGS',
+      nativeSource,
+      `/Fe:${nativeDestination}`,
+      `/Fo:${path.join(payloadRoot, 'graph-host.obj')}`,
+    ]
+    : [
+      ...targetSettings.hostArgs,
+      '-std=c11',
+      '-O2',
+      '-Wall',
+      '-Wextra',
+      nativeSource,
+      '-o',
+      nativeDestination,
+    ];
   if (target.startsWith('x86_64-unknown-linux')) hostArgs.push('-ldl', '-pthread');
   run(targetSettings.hostCompiler, hostArgs);
+  fs.rmSync(path.join(payloadRoot, 'graph-host.obj'), { force: true });
+  if (process.platform !== 'win32') fs.chmodSync(nativeDestination, 0o755);
   fs.copyFileSync(nativeDestination, path.join(bridgeRoot, 'build', targetSettings.nativeHost));
+  if (process.platform !== 'win32') {
+    fs.chmodSync(path.join(bridgeRoot, 'build', targetSettings.nativeHost), 0o755);
+  }
 }
 
 const helperHelp = spawnSync(helperDestination, ['--help'], { encoding: 'utf8' });

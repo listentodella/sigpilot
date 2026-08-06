@@ -58,7 +58,7 @@
         "status": "pending-live-validation",
         "onDataBufferOffset": "0x50b750",
         "prologueHex": "488bc448895810488970204c89401855",
-        "validation": "PE identity recorded; OnDataBuffer candidate converged from signature-string references and the PE runtime-function table; Windows host and hardware capture are not live-validated"
+        "validation": "PE identity and OnDataBuffer candidate converged from signature-string references and the PE runtime-function table; Microsoft x64 indirect aggregate ABI and Windows patch path are implemented, but PXLogic hardware capture is not live-validated"
       }
     }
   ]

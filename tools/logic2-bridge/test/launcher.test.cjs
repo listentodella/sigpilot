@@ -18,6 +18,11 @@ test('accepts a preferred public port', () => {
   assert.throws(() => parseArguments(['--port', '65536']), /Invalid port/);
 });
 
+test('requires an explicit opt-in for pending live-validation profiles', () => {
+  assert.equal(parseArguments(['--allow-pending-profile']).allowPendingProfile, true);
+  assert.equal(parseArguments([]).allowPendingProfile, false);
+});
+
 test('does not force the official Electron app into Node mode', () => {
   const environment = logicProcessEnvironment({
     ELECTRON_RUN_AS_NODE: '1',

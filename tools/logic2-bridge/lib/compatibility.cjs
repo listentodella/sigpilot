@@ -369,7 +369,6 @@ function matchCompatibilityProfile({
 }) {
   const fingerprint = inspectGraphBinary(graphPath);
   const candidates = profiles.filter(profile =>
-    profile.logicVersion === logicVersion &&
     profile.platform === platform &&
     profile.architecture === architecture,
   );

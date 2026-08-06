@@ -1,6 +1,14 @@
 #define _GNU_SOURCE
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <errno.h>
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
@@ -9,7 +17,9 @@
 #elif defined(__linux__)
 #include <elf.h>
 #endif
+#if !defined(_WIN32)
 #include <pthread.h>
+#endif
 #include <signal.h>
 #include <stdbool.h>
 #include <stdatomic.h>
@@ -17,10 +27,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <strings.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+#define bridge_strcasecmp _stricmp
+#define BRIDGE_NOINLINE __declspec(noinline)
+#else
+#define bridge_strcasecmp strcasecmp
+#define BRIDGE_NOINLINE __attribute__((noinline))
+#endif
 
 typedef void *(*CreateGraphServerFn)(uint32_t *, uint32_t, bool, bool, const char *);
 typedef void (*DestroyGraphServerFn)(void *);
@@ -33,16 +53,26 @@ typedef struct {
   uint64_t size;
 } SaleaeBuffer;
 
-// DeviceId occupies two integer argument slots, followed by an indirect Buffer.
+#if defined(_WIN32) && defined(_M_X64)
+// Microsoft x64 passes both non-trivial aggregates indirectly: RDX=DeviceId,
+// R8=Buffer. This layout is verified against the 2.4.46 PE function body.
+typedef void (*OnDataBufferFn)(void *, void *, SaleaeBuffer *);
+typedef CRITICAL_SECTION BridgeMutex;
+typedef CONDITION_VARIABLE BridgeCondition;
+#else
+// AArch64/SysV pass DeviceId in two integer slots, followed by an indirect Buffer.
 typedef void (*OnDataBufferFn)(void *, uint64_t, uint64_t, SaleaeBuffer *);
+typedef pthread_mutex_t BridgeMutex;
+typedef pthread_cond_t BridgeCondition;
+#endif
 
 typedef struct {
   uint8_t *data;
   size_t capacity;
   size_t read_offset;
   size_t size;
-  pthread_mutex_t mutex;
-  pthread_cond_t data_available;
+  BridgeMutex mutex;
+  BridgeCondition data_available;
 } ByteRing;
 
 static volatile sig_atomic_t stop_requested = 0;
@@ -88,6 +118,10 @@ enum {
 enum {
   ABSOLUTE_BRANCH_SIZE = 12,
 };
+#elif defined(_WIN32) && defined(_M_X64)
+enum {
+  ABSOLUTE_BRANCH_SIZE = 12,
+};
 #else
 enum {
   ABSOLUTE_BRANCH_SIZE = 0,
@@ -97,6 +131,30 @@ enum {
 static void handle_signal(int signal_number) {
   (void)signal_number;
   stop_requested = 1;
+}
+
+static void bridge_mutex_lock(BridgeMutex *mutex) {
+#if defined(_WIN32)
+  EnterCriticalSection(mutex);
+#else
+  (void)pthread_mutex_lock(mutex);
+#endif
+}
+
+static void bridge_mutex_unlock(BridgeMutex *mutex) {
+#if defined(_WIN32)
+  LeaveCriticalSection(mutex);
+#else
+  (void)pthread_mutex_unlock(mutex);
+#endif
+}
+
+static void bridge_condition_broadcast(BridgeCondition *condition) {
+#if defined(_WIN32)
+  WakeAllConditionVariable(condition);
+#else
+  (void)pthread_cond_broadcast(condition);
+#endif
 }
 
 static int hex_digit(char value) {
@@ -169,7 +227,7 @@ static bool verify_graph_uuid(const void *image_base) {
       const struct uuid_command *uuid_command = (const struct uuid_command *)command;
       char actual[37];
       format_uuid(uuid_command->uuid, actual);
-      if (strcasecmp(actual, hook_configuration.graph_identity) != 0) {
+      if (bridge_strcasecmp(actual, hook_configuration.graph_identity) != 0) {
         fprintf(stderr,
                 "[logic2-bridge:inject] GraphServer identity mismatch: "
                 "expected %s, found %s\n",
@@ -224,7 +282,7 @@ static bool verify_graph_build_id(const void *image_base) {
           (void)snprintf(actual + byte * 2, 3, "%02x", description[byte]);
         }
         actual[header_note->n_descsz * 2] = '\0';
-        if (strcasecmp(actual, hook_configuration.graph_identity) != 0) {
+        if (bridge_strcasecmp(actual, hook_configuration.graph_identity) != 0) {
           fprintf(stderr,
                   "[logic2-bridge:inject] GraphServer identity mismatch: "
                   "expected %s, found %s\n",
@@ -244,6 +302,75 @@ static bool verify_graph_build_id(const void *image_base) {
 }
 #endif
 
+#if defined(_WIN32) && defined(_M_X64)
+static bool verify_graph_codeview_identity(const void *image_base) {
+  const uint8_t *base = (const uint8_t *)image_base;
+  const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+  if (dos == NULL || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+    fprintf(stderr, "[logic2-bridge:inject] GraphServer is not a PE image\n");
+    return false;
+  }
+
+  const IMAGE_NT_HEADERS64 *nt =
+      (const IMAGE_NT_HEADERS64 *)(base + (size_t)dos->e_lfanew);
+  if (nt->Signature != IMAGE_NT_SIGNATURE ||
+      nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+      nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
+    fprintf(stderr, "[logic2-bridge:inject] GraphServer is not an x64 PE image\n");
+    return false;
+  }
+
+  const size_t image_size = nt->OptionalHeader.SizeOfImage;
+  const IMAGE_DATA_DIRECTORY directory =
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG];
+  if (directory.VirtualAddress == 0 || directory.Size < sizeof(IMAGE_DEBUG_DIRECTORY) ||
+      (size_t)directory.VirtualAddress + directory.Size > image_size) {
+    fprintf(stderr, "[logic2-bridge:inject] GraphServer PE debug directory was not found\n");
+    return false;
+  }
+
+  const IMAGE_DEBUG_DIRECTORY *entries =
+      (const IMAGE_DEBUG_DIRECTORY *)(base + directory.VirtualAddress);
+  const size_t entry_count = directory.Size / sizeof(*entries);
+  for (size_t index = 0; index < entry_count; index += 1) {
+    const IMAGE_DEBUG_DIRECTORY *entry = &entries[index];
+    if (entry->Type != IMAGE_DEBUG_TYPE_CODEVIEW || entry->SizeOfData < 24 ||
+        entry->AddressOfRawData == 0 ||
+        (size_t)entry->AddressOfRawData + entry->SizeOfData > image_size) {
+      continue;
+    }
+    const uint8_t *codeview = base + entry->AddressOfRawData;
+    if (memcmp(codeview, "RSDS", 4) != 0) continue;
+
+    GUID guid;
+    uint32_t age;
+    memcpy(&guid, codeview + 4, sizeof(guid));
+    memcpy(&age, codeview + 20, sizeof(age));
+    char actual[48];
+    (void)snprintf(actual, sizeof(actual),
+                   "%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X-%lu",
+                   (unsigned long)guid.Data1, guid.Data2, guid.Data3,
+                   guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+                   guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7],
+                   (unsigned long)age);
+    if (bridge_strcasecmp(actual, hook_configuration.graph_identity) != 0) {
+      fprintf(stderr,
+              "[logic2-bridge:inject] GraphServer identity mismatch: "
+              "expected %s, found %s\n",
+              hook_configuration.graph_identity, actual);
+      return false;
+    }
+    fprintf(stderr,
+            "[logic2-bridge:inject] verified GraphServer profile %s (%s)\n",
+            hook_configuration.profile_id, actual);
+    return true;
+  }
+
+  fprintf(stderr, "[logic2-bridge:inject] GraphServer CodeView identity was not found\n");
+  return false;
+}
+#endif
+
 static bool initialize_injection_ring(void) {
   injection_ring.data = malloc(INJECTION_RING_CAPACITY);
   if (injection_ring.data == NULL) {
@@ -251,6 +378,10 @@ static bool initialize_injection_ring(void) {
     return false;
   }
   injection_ring.capacity = INJECTION_RING_CAPACITY;
+#if defined(_WIN32)
+  InitializeCriticalSection(&injection_ring.mutex);
+  InitializeConditionVariable(&injection_ring.data_available);
+#else
   if (pthread_mutex_init(&injection_ring.mutex, NULL) != 0 ||
       pthread_cond_init(&injection_ring.data_available, NULL) != 0) {
     fprintf(stderr, "[logic2-bridge:inject] could not initialize ring synchronization\n");
@@ -258,11 +389,12 @@ static bool initialize_injection_ring(void) {
     injection_ring = (ByteRing){0};
     return false;
   }
+#endif
   return true;
 }
 
 static void configure_injection_ring(size_t stripe_bytes) {
-  pthread_mutex_lock(&injection_ring.mutex);
+  bridge_mutex_lock(&injection_ring.mutex);
   injection_ring.read_offset = 0;
   injection_ring.size = 0;
   atomic_store_explicit(&injection_stripe_bytes, stripe_bytes, memory_order_release);
@@ -271,21 +403,21 @@ static void configure_injection_ring(size_t stripe_bytes) {
   atomic_store_explicit(&injected_byte_count, 0, memory_order_relaxed);
   atomic_store_explicit(&dropped_byte_count, 0, memory_order_relaxed);
   atomic_store_explicit(&underflow_count, 0, memory_order_relaxed);
-  pthread_cond_broadcast(&injection_ring.data_available);
-  pthread_mutex_unlock(&injection_ring.mutex);
+  bridge_condition_broadcast(&injection_ring.data_available);
+  bridge_mutex_unlock(&injection_ring.mutex);
   fprintf(stderr, "[logic2-bridge:inject] configured stripe=%zu bytes\n", stripe_bytes);
 }
 
 static void end_injection_capture(void) {
   atomic_store_explicit(&capture_input_ended, true, memory_order_release);
-  pthread_mutex_lock(&injection_ring.mutex);
-  pthread_cond_broadcast(&injection_ring.data_available);
-  pthread_mutex_unlock(&injection_ring.mutex);
+  bridge_mutex_lock(&injection_ring.mutex);
+  bridge_condition_broadcast(&injection_ring.data_available);
+  bridge_mutex_unlock(&injection_ring.mutex);
 }
 
 static void write_injection_ring(const uint8_t *source, size_t length) {
   if (length == 0) return;
-  pthread_mutex_lock(&injection_ring.mutex);
+  bridge_mutex_lock(&injection_ring.mutex);
 
   size_t stripe_bytes = atomic_load_explicit(&injection_stripe_bytes, memory_order_acquire);
   size_t aligned_length = length / stripe_bytes * stripe_bytes;
@@ -297,7 +429,7 @@ static void write_injection_ring(const uint8_t *source, size_t length) {
     length = aligned_length;
   }
   if (length == 0) {
-    pthread_mutex_unlock(&injection_ring.mutex);
+    bridge_mutex_unlock(&injection_ring.mutex);
     return;
   }
 
@@ -327,11 +459,12 @@ static void write_injection_ring(const uint8_t *source, size_t length) {
   memcpy(injection_ring.data + write_offset, source, first);
   memcpy(injection_ring.data, source + first, length - first);
   injection_ring.size += length;
-  pthread_cond_broadcast(&injection_ring.data_available);
-  pthread_mutex_unlock(&injection_ring.mutex);
+  bridge_condition_broadcast(&injection_ring.data_available);
+  bridge_mutex_unlock(&injection_ring.mutex);
 }
 
 static size_t read_injection_ring(uint8_t *destination, size_t length) {
+#if !defined(_WIN32)
   struct timespec deadline;
   clock_gettime(CLOCK_REALTIME, &deadline);
   deadline.tv_sec += INJECTION_WAIT_MILLISECONDS / 1000;
@@ -340,16 +473,26 @@ static size_t read_injection_ring(uint8_t *destination, size_t length) {
     deadline.tv_sec += 1;
     deadline.tv_nsec -= 1000000000L;
   }
+#endif
 
-  pthread_mutex_lock(&injection_ring.mutex);
+  bridge_mutex_lock(&injection_ring.mutex);
   while (injection_ring.size < length &&
          !atomic_load_explicit(&producer_eof, memory_order_acquire) &&
          !atomic_load_explicit(&capture_input_ended, memory_order_acquire) &&
          !stop_requested) {
+#if defined(_WIN32)
+    if (!SleepConditionVariableCS(&injection_ring.data_available,
+                                  &injection_ring.mutex,
+                                  INJECTION_WAIT_MILLISECONDS) &&
+        GetLastError() == ERROR_TIMEOUT) {
+      break;
+    }
+#else
     if (pthread_cond_timedwait(&injection_ring.data_available,
                                &injection_ring.mutex, &deadline) != 0) {
       break;
     }
+#endif
   }
 
   size_t copied = length < injection_ring.size ? length : injection_ring.size;
@@ -364,14 +507,14 @@ static size_t read_injection_ring(uint8_t *destination, size_t length) {
   injection_ring.read_offset =
       (injection_ring.read_offset + copied) % injection_ring.capacity;
   injection_ring.size -= copied;
-  pthread_mutex_unlock(&injection_ring.mutex);
+  bridge_mutex_unlock(&injection_ring.mutex);
   return copied;
 }
 
 static size_t injection_ring_size(void) {
-  pthread_mutex_lock(&injection_ring.mutex);
+  bridge_mutex_lock(&injection_ring.mutex);
   size_t size = injection_ring.size;
-  pthread_mutex_unlock(&injection_ring.mutex);
+  bridge_mutex_unlock(&injection_ring.mutex);
   return size;
 }
 
@@ -379,7 +522,12 @@ static bool read_injection_bytes(uint8_t *destination, size_t length, bool *clea
   size_t offset = 0;
   *clean_eof = false;
   while (offset < length) {
+#if defined(_WIN32)
+    int count = _read(_fileno(stdin), destination + offset,
+                      (unsigned int)(length - offset));
+#else
     ssize_t count = read(STDIN_FILENO, destination + offset, length - offset);
+#endif
     if (count > 0) {
       offset += (size_t)count;
       continue;
@@ -397,7 +545,11 @@ static uint32_t read_u32_le(const uint8_t *data) {
          ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
 }
 
+#if defined(_WIN32)
+static unsigned __stdcall read_injection_stdin(void *unused) {
+#else
 static void *read_injection_stdin(void *unused) {
+#endif
   (void)unused;
   uint8_t header[INJECTION_FRAME_HEADER_BYTES];
   uint8_t *payload = NULL;
@@ -456,10 +608,23 @@ static void *read_injection_stdin(void *unused) {
   free(payload);
   atomic_store_explicit(&producer_eof, true, memory_order_release);
   end_injection_capture();
+#if defined(_WIN32)
+  return 0;
+#else
   return NULL;
+#endif
 }
 
 static bool start_injection_stdin_reader(void) {
+#if defined(_WIN32)
+  uintptr_t thread = _beginthreadex(NULL, 0, read_injection_stdin, NULL, 0, NULL);
+  if (thread == 0) {
+    perror("[logic2-bridge:inject] could not start stdin reader");
+    return false;
+  }
+  CloseHandle((HANDLE)thread);
+  return true;
+#else
   pthread_t thread;
   int result = pthread_create(&thread, NULL, read_injection_stdin, NULL);
   if (result != 0) {
@@ -469,9 +634,19 @@ static bool start_injection_stdin_reader(void) {
   }
   (void)pthread_detach(thread);
   return true;
+#endif
 }
 
 static void *load_symbol(void *library, const char *name) {
+#if defined(_WIN32)
+  FARPROC symbol = GetProcAddress((HMODULE)library, name);
+  if (symbol == NULL) {
+    fprintf(stderr, "[logic2-bridge:native] missing %s (error %lu)\n",
+            name, (unsigned long)GetLastError());
+    exit(1);
+  }
+  return (void *)symbol;
+#else
   dlerror();
   void *symbol = dlsym(library, name);
   const char *error = dlerror();
@@ -480,6 +655,7 @@ static void *load_symbol(void *library, const char *name) {
     exit(1);
   }
   return symbol;
+#endif
 }
 
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -498,7 +674,8 @@ static bool set_code_page_protection(void *address, size_t length, vm_prot_t pro
       ((vm_address_t)address + length + page_size - 1) & ~(page_size - 1);
   return vm_protect(mach_task_self(), page, end - page, false, protection) == KERN_SUCCESS;
 }
-#elif defined(__linux__) && defined(__x86_64__)
+#elif (defined(__linux__) && defined(__x86_64__)) || \
+    (defined(_WIN32) && defined(_M_X64))
 static void write_absolute_branch(uint8_t *destination, const void *target) {
   const uint64_t address = (uint64_t)(uintptr_t)target;
   destination[0] = 0x48;  // movabs rax, imm64
@@ -508,6 +685,12 @@ static void write_absolute_branch(uint8_t *destination, const void *target) {
   destination[11] = 0xe0;
 }
 
+#if defined(_WIN32)
+static bool set_code_page_protection(void *address, size_t length,
+                                     DWORD protection, DWORD *previous) {
+  return VirtualProtect(address, length, protection, previous) != 0;
+}
+#else
 static bool set_code_page_protection(void *address, size_t length, int protection) {
   const size_t page_size = (size_t)getpagesize();
   const uintptr_t begin = (uintptr_t)address & ~(page_size - 1u);
@@ -515,9 +698,9 @@ static bool set_code_page_protection(void *address, size_t length, int protectio
   return mprotect((void *)begin, end - begin, protection) == 0;
 }
 #endif
+#endif
 
-__attribute__((noinline)) static void inject_capture_data(
-    void *node, uint64_t device_id_low, uint64_t device_id_high, SaleaeBuffer *buffer) {
+static void inject_capture_buffer(SaleaeBuffer *buffer) {
   if (buffer != NULL && buffer->data != NULL && buffer->size > 0 &&
       buffer->size <= 64u * 1024u * 1024u) {
     size_t stripe_bytes = atomic_load_explicit(&injection_stripe_bytes, memory_order_acquire);
@@ -553,8 +736,22 @@ __attribute__((noinline)) static void inject_capture_data(
                   &dropped_byte_count, memory_order_relaxed));
     }
   }
+}
+
+#if defined(_WIN32) && defined(_M_X64)
+BRIDGE_NOINLINE static void inject_capture_data(
+    void *node, void *device_id, SaleaeBuffer *buffer) {
+  inject_capture_buffer(buffer);
+  original_on_data_buffer(node, device_id, buffer);
+}
+#else
+BRIDGE_NOINLINE static void inject_capture_data(
+    void *node, uint64_t device_id_low, uint64_t device_id_high,
+    SaleaeBuffer *buffer) {
+  inject_capture_buffer(buffer);
   original_on_data_buffer(node, device_id_low, device_id_high, buffer);
 }
+#endif
 
 static bool install_injection_hook(void *exported_graph_symbol) {
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -669,6 +866,83 @@ static bool install_injection_hook(void *exported_graph_symbol) {
           "[logic2-bridge:inject] installed profile %s PXLogic hook at %p\n",
           hook_configuration.profile_id, (void *)target);
   return true;
+#elif defined(_WIN32) && defined(_M_X64)
+  HMODULE image_base = NULL;
+  if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)exported_graph_symbol, &image_base) ||
+      image_base == NULL) {
+    fprintf(stderr,
+            "[logic2-bridge:inject] could not locate GraphServer image base "
+            "(error %lu)\n",
+            (unsigned long)GetLastError());
+    return false;
+  }
+  if (!verify_graph_codeview_identity(image_base)) return false;
+
+  uint8_t *target =
+      (uint8_t *)image_base + hook_configuration.on_data_buffer_offset;
+  if (memcmp(target, hook_configuration.prologue,
+             hook_configuration.prologue_size) != 0) {
+    fprintf(stderr,
+            "[logic2-bridge:inject] unsupported GraphServer: OnDataBuffer "
+            "prologue mismatch at +0x%llx\n",
+            (unsigned long long)hook_configuration.on_data_buffer_offset);
+    return false;
+  }
+
+  const size_t trampoline_size =
+      hook_configuration.prologue_size + ABSOLUTE_BRANCH_SIZE;
+  uint8_t *trampoline =
+      VirtualAlloc(NULL, trampoline_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  if (trampoline == NULL) {
+    fprintf(stderr, "[logic2-bridge:inject] VirtualAlloc trampoline failed (error %lu)\n",
+            (unsigned long)GetLastError());
+    return false;
+  }
+  memcpy(trampoline, target, hook_configuration.prologue_size);
+  write_absolute_branch(trampoline + hook_configuration.prologue_size,
+                        target + hook_configuration.prologue_size);
+  DWORD previous_trampoline_protection = 0;
+  if (!set_code_page_protection(trampoline, trampoline_size, PAGE_EXECUTE_READ,
+                                &previous_trampoline_protection)) {
+    fprintf(stderr,
+            "[logic2-bridge:inject] VirtualProtect trampoline failed (error %lu)\n",
+            (unsigned long)GetLastError());
+    VirtualFree(trampoline, 0, MEM_RELEASE);
+    return false;
+  }
+  FlushInstructionCache(GetCurrentProcess(), trampoline, trampoline_size);
+  original_on_data_buffer = (OnDataBufferFn)trampoline;
+
+  DWORD previous_target_protection = 0;
+  if (!set_code_page_protection(target, hook_configuration.prologue_size,
+                                PAGE_EXECUTE_READWRITE,
+                                &previous_target_protection)) {
+    fprintf(stderr,
+            "[logic2-bridge:inject] VirtualProtect GraphServer code failed "
+            "(error %lu)\n",
+            (unsigned long)GetLastError());
+    VirtualFree(trampoline, 0, MEM_RELEASE);
+    original_on_data_buffer = NULL;
+    return false;
+  }
+  write_absolute_branch(target, (const void *)&inject_capture_data);
+  memset(target + ABSOLUTE_BRANCH_SIZE, 0x90,
+         hook_configuration.prologue_size - ABSOLUTE_BRANCH_SIZE);
+  FlushInstructionCache(GetCurrentProcess(), target,
+                        hook_configuration.prologue_size);
+  DWORD discarded_protection = 0;
+  if (!set_code_page_protection(target, hook_configuration.prologue_size,
+                                previous_target_protection,
+                                &discarded_protection)) {
+    fprintf(stderr,
+            "[logic2-bridge:inject] warning: could not restore code protection\n");
+  }
+  fprintf(stderr,
+          "[logic2-bridge:inject] installed experimental profile %s PXLogic hook at %p\n",
+          hook_configuration.profile_id, (void *)target);
+  return true;
 #else
   (void)exported_graph_symbol;
   fprintf(stderr,
@@ -688,6 +962,39 @@ static uint32_t parse_port(const char *value) {
   return (uint32_t)parsed;
 }
 
+static void *load_graph_library(const char *path) {
+#if defined(_WIN32)
+  HMODULE library = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+  if (library == NULL) {
+    fprintf(stderr, "[logic2-bridge:native] LoadLibraryEx failed (error %lu): %s\n",
+            (unsigned long)GetLastError(), path);
+  }
+  return (void *)library;
+#else
+  void *library = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
+  if (library == NULL) {
+    fprintf(stderr, "[logic2-bridge:native] dlopen failed: %s\n", dlerror());
+  }
+  return library;
+#endif
+}
+
+static void unload_graph_library(void *library) {
+#if defined(_WIN32)
+  (void)FreeLibrary((HMODULE)library);
+#else
+  (void)dlclose(library);
+#endif
+}
+
+static void bridge_sleep_one_second(void) {
+#if defined(_WIN32)
+  Sleep(1000);
+#else
+  sleep(1);
+#endif
+}
+
 int main(int argc, char **argv) {
   if (argc != 11) {
     fprintf(stderr,
@@ -698,15 +1005,27 @@ int main(int argc, char **argv) {
     return 2;
   }
   setvbuf(stdout, NULL, _IONBF, 0);
+#if defined(_WIN32)
+  if (_setmode(_fileno(stdin), _O_BINARY) == -1) {
+    perror("[logic2-bridge:native] set stdin binary mode");
+    return 1;
+  }
+#endif
   if (!configure_hook(argv[7], argv[8], argv[9], argv[10])) return 2;
+#if defined(_WIN32)
+  if (_putenv_s("SALEAE_PYTHONHOME", argv[2]) != 0) {
+    perror("[logic2-bridge:native] set SALEAE_PYTHONHOME");
+    return 1;
+  }
+#else
   if (setenv("SALEAE_PYTHONHOME", argv[2], 1) != 0) {
     perror("[logic2-bridge:native] setenv SALEAE_PYTHONHOME");
     return 1;
   }
+#endif
 
-  void *library = dlopen(argv[1], RTLD_LAZY | RTLD_GLOBAL);
+  void *library = load_graph_library(argv[1]);
   if (library == NULL) {
-    fprintf(stderr, "[logic2-bridge:native] dlopen failed: %s\n", dlerror());
     return 1;
   }
   CreateGraphServerFn create_graph_server =
@@ -719,7 +1038,7 @@ int main(int argc, char **argv) {
 
   if (!initialize_injection_ring() || !start_injection_stdin_reader() ||
       !install_injection_hook((void *)create_graph_server)) {
-    dlclose(library);
+    unload_graph_library(library);
     return 1;
   }
 
@@ -733,18 +1052,18 @@ int main(int argc, char **argv) {
   void *server = create_graph_server(&port, 100, false, scan_devices, argv[4]);
   if (server == NULL) {
     fprintf(stderr, "[logic2-bridge:native] CreateGraphServer returned NULL\n");
-    dlclose(library);
+    unload_graph_library(library);
     return 1;
   }
   printf("GRAPH_WS_READY ws://127.0.0.1:%u/saleae\n", port);
 
   signal(SIGINT, handle_signal);
   signal(SIGTERM, handle_signal);
-  while (!stop_requested) sleep(1);
+  while (!stop_requested) bridge_sleep_one_second();
 
   printf("[logic2-bridge:native] stopping\n");
   destroy_graph_server(server);
   (void)flush_log();
-  dlclose(library);
+  unload_graph_library(library);
   return 0;
 }

@@ -27,7 +27,12 @@ function parseArguments(argv) {
     port: 0,
     backendPort: undefined,
     pxlogicHelper: process.env.PXLOGIC_USB_SMOKE ||
-      path.join(pxlogicRoot, 'target', 'release', 'usb_smoke'),
+      path.join(
+        pxlogicRoot,
+        'target',
+        'release',
+        process.platform === 'win32' ? 'usb_smoke.exe' : 'usb_smoke',
+      ),
     pxlogicDevice: undefined,
     bitstreams: process.env.PXLOGIC_BITSTREAM_DIR ||
       path.join(pxlogicRoot, 'resources', 'bitstreams'),
@@ -40,6 +45,7 @@ function parseArguments(argv) {
     scanSaleaeDevices: false,
     screenQuadrant: undefined,
     remoteDebuggingPort: undefined,
+    allowPendingProfile: false,
     dryRun: false,
   };
 
@@ -64,7 +70,8 @@ function parseArguments(argv) {
     else if (argument === '--screen-quadrant') result.screenQuadrant = Number(argv[++index]);
     else if (argument === '--remote-debugging-port') {
       result.remoteDebuggingPort = Number(argv[++index]);
-    } else if (argument === '--dry-run') result.dryRun = true;
+    } else if (argument === '--allow-pending-profile') result.allowPendingProfile = true;
+    else if (argument === '--dry-run') result.dryRun = true;
     else if (argument === '--help' || argument === '-h') result.help = true;
     else throw new Error(`Unknown argument: ${argument}`);
   }
@@ -117,6 +124,7 @@ Options:
   --scan-saleae-devices      Also let GraphServer scan physical Saleae devices
   --screen-quadrant N        Place Logic in screen quadrant 1-4
   --remote-debugging-port N  Enable Chromium remote debugging for this Logic process
+  --allow-pending-profile    Run an exact-match experimental profile for live validation
   --dry-run                  Validate paths, version, and native host build without launching
   --help                     Show this help
 
@@ -220,10 +228,19 @@ function resolveRuntime(options) {
       `${identity} (sha256 ${compatibility.fingerprint.sha256}); refusing to patch an unverified build.`,
     );
   }
-  if (!compatibility.supported) {
+  const pendingValidation =
+    compatibility.profile.hook.status === 'pending-live-validation';
+  if (!compatibility.supported && !(options.allowPendingProfile && pendingValidation)) {
     throw new Error(
       `GraphServer profile ${compatibility.profile.id} is not live-validated: ` +
-      `${compatibility.profile.hook.validation}`,
+      `${compatibility.profile.hook.validation}. ` +
+      'Use --allow-pending-profile only for a controlled hardware validation run.',
+    );
+  }
+  if (pendingValidation) {
+    console.warn(
+      `[logic2-bridge] EXPERIMENTAL GraphServer profile ${compatibility.profile.id}: ` +
+      compatibility.profile.hook.validation,
     );
   }
   const hook = compatibility.profile.hook;
@@ -249,15 +266,25 @@ function nativeHookArguments(runtime) {
 function ensureNativeHost() {
   const supportedNativeHost =
     (process.platform === 'darwin' && process.arch === 'arm64') ||
-    (process.platform === 'linux' && process.arch === 'x64');
+    (process.platform === 'linux' && process.arch === 'x64') ||
+    (process.platform === 'win32' && process.arch === 'x64');
   if (!supportedNativeHost) {
     throw new Error('PXLogic GraphServer injection host is not implemented for this platform');
   }
   const source = path.join(bridgeRoot, 'native', 'graph-host.c');
   const outputDirectory = path.join(bridgeRoot, 'build');
-  const executable = path.join(outputDirectory, 'graph-host');
+  const executable = path.join(
+    outputDirectory,
+    process.platform === 'win32' ? 'graph-host.exe' : 'graph-host',
+  );
   fs.mkdirSync(outputDirectory, { recursive: true });
   const sourceExists = fs.existsSync(source);
+  if (process.platform === 'win32') {
+    if (!fs.existsSync(executable)) {
+      throw new Error(`Prebuilt native GraphServer host was not found: ${executable}`);
+    }
+    return executable;
+  }
   const needsBuild = !fs.existsSync(executable) ||
     (sourceExists && fs.statSync(source).mtimeMs > fs.statSync(executable).mtimeMs);
   if (needsBuild) {

@@ -60,7 +60,13 @@ function renderState(state) {
   elements.endpointLabel.textContent = state.actualPort
     ? `WebSocket 127.0.0.1:${state.actualPort}`
     : 'WebSocket --';
-  elements.startButton.textContent = isActive() ? '停止 Bridge' : '启动 Logic 2';
+  elements.startButton.textContent = isActive()
+    ? '停止 Bridge'
+    : currentInspection?.supported
+      ? '启动 Logic 2'
+      : currentInspection?.runnable
+        ? '启动实验验证'
+        : '启动 Logic 2';
   elements.startButton.classList.toggle('stop', isActive());
   const disableSettings = isActive();
   elements.logicPath.disabled = disableSettings;
@@ -71,7 +77,7 @@ function renderState(state) {
   elements.preferredPort.disabled = disableSettings || portMode !== 'fixed';
   elements.screenQuadrant.disabled = disableSettings;
   elements.startButton.disabled = state.phase === 'starting' || state.phase === 'stopping' ||
-    (!disableSettings && !currentInspection?.supported);
+    (!disableSettings && !currentInspection?.runnable);
 }
 
 function setPortMode(mode) {
@@ -103,6 +109,10 @@ function renderInspection(inspection) {
     elements.logicSummary.textContent = `已匹配 ${inspection.profileId}`;
     elements.compatibility.textContent = '已验证';
     elements.compatibility.classList.add('compatible');
+  } else if (inspection.runnable) {
+    elements.logicSummary.textContent = inspection.error || `实验性 ${inspection.profileId}`;
+    elements.compatibility.textContent = '实验性';
+    elements.compatibility.classList.add('experimental');
   } else {
     elements.logicSummary.textContent = inspection.error || '安装不可用';
     elements.compatibility.textContent = inspection.graphIdentity
@@ -174,7 +184,7 @@ elements.rescanButton.addEventListener('click', async () => {
   elements.rescanButton.disabled = true;
   const applications = await api.scanLogicApps(elements.logicPath.value.trim());
   renderApplications(applications);
-  const preferred = applications.find(item => item.supported) || applications[0];
+  const preferred = applications.find(item => item.runnable) || applications[0];
   if (preferred) {
     elements.logicPath.value = preferred.path;
     renderInspection(preferred);
