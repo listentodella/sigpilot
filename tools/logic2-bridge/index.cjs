@@ -357,6 +357,14 @@ function logicProcessEnvironment(environment = process.env) {
   return result;
 }
 
+function nativeGraphStartupTimeoutMs(environment = process.env) {
+  const configured = Number(environment.PXLOGIC_GRAPH_START_TIMEOUT_MS);
+  if (Number.isInteger(configured) && configured >= 1000 && configured <= 300000) {
+    return configured;
+  }
+  return process.platform === 'win32' ? 60000 : 15000;
+}
+
 function waitForNativeGraph(host, expectedPort, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -384,7 +392,7 @@ function waitForNativeGraph(host, expectedPort, timeoutMs = 15000) {
       });
       socket.once('error', () => {
         socket.destroy();
-        if (!settled) probeTimer = setTimeout(probe, 100);
+        if (!settled) probeTimer = setTimeout(probe, 250);
       });
     };
     timeout = setTimeout(() => {
@@ -490,7 +498,16 @@ async function main() {
   process.once('SIGTERM', () => void stop('SIGTERM'));
 
   try {
-    const actualBackendPort = await waitForNativeGraph(host, backendPort);
+    const startupTimeoutMs = nativeGraphStartupTimeoutMs();
+    console.log(
+      `[logic2-bridge] waiting up to ${startupTimeoutMs} ms for native GraphServer ` +
+      `on port ${backendPort}`,
+    );
+    const actualBackendPort = await waitForNativeGraph(
+      host,
+      backendPort,
+      startupTimeoutMs,
+    );
     controller = new PxlogicCaptureController(options, host);
     proxy = await startWebSocketProxy({
       port: options.port,
@@ -535,6 +552,7 @@ async function main() {
 module.exports = {
   installedAppCandidates,
   logicProcessEnvironment,
+  nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,
   readAppVersion,

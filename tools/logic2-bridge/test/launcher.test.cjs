@@ -7,6 +7,7 @@ const net = require('node:net');
 const { PassThrough } = require('node:stream');
 const {
   logicProcessEnvironment,
+  nativeGraphStartupTimeoutMs,
   nativeHookArguments,
   parseArguments,
   resolveRuntimeVersion,
@@ -41,6 +42,18 @@ test('does not force the official Electron app into Node mode', () => {
     PATH: '/usr/bin',
   });
   assert.deepEqual(environment, { PATH: '/usr/bin' });
+});
+
+test('accepts a bounded native GraphServer startup timeout override', () => {
+  assert.equal(nativeGraphStartupTimeoutMs({ PXLOGIC_GRAPH_START_TIMEOUT_MS: '45000' }), 45000);
+  assert.equal(
+    nativeGraphStartupTimeoutMs({ PXLOGIC_GRAPH_START_TIMEOUT_MS: 'invalid' }),
+    process.platform === 'win32' ? 60000 : 15000,
+  );
+  assert.equal(
+    nativeGraphStartupTimeoutMs({ PXLOGIC_GRAPH_START_TIMEOUT_MS: '999999' }),
+    process.platform === 'win32' ? 60000 : 15000,
+  );
 });
 
 test('passes a matched profile to the data-driven native host', () => {
