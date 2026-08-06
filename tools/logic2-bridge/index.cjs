@@ -357,36 +357,58 @@ function logicProcessEnvironment(environment = process.env) {
   return result;
 }
 
-function waitForNativeGraph(host, timeoutMs = 15000) {
+function waitForNativeGraph(host, expectedPort, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timeout = setTimeout(() => {
-      if (!settled) reject(new Error('Timed out waiting for the native GraphServer'));
+    let probeTimer;
+    let timeout;
+    const finish = (error, port) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(probeTimer);
+      if (error) reject(error);
+      else resolve(port);
+    };
+    const probe = () => {
+      if (settled) return;
+      const socket = net.createConnection({ host: '127.0.0.1', port: expectedPort });
+      socket.unref();
+      socket.once('connect', () => {
+        socket.destroy();
+        console.log(
+          `[logic2-bridge] native GraphServer is listening on port ${expectedPort} ` +
+          'before CreateGraphServer returned',
+        );
+        finish(null, expectedPort);
+      });
+      socket.once('error', () => {
+        socket.destroy();
+        if (!settled) probeTimer = setTimeout(probe, 100);
+      });
+    };
+    timeout = setTimeout(() => {
+      finish(new Error(
+        `Timed out waiting for the native GraphServer on port ${expectedPort}`,
+      ));
     }, timeoutMs);
     createLineReader(host.stdout, line => {
       const match = line.match(/^GRAPH_WS_READY ws:\/\/127\.0\.0\.1:(\d+)\/saleae$/);
-      if (match && !settled) {
-        settled = true;
-        clearTimeout(timeout);
-        resolve(Number(match[1]));
+      if (match) {
+        finish(null, Number(match[1]));
       } else {
         console.log(line);
       }
     });
     host.once('exit', (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(new Error(
+      finish(new Error(
         `Native GraphServer exited before ready (${signal || `code ${code}`})`,
       ));
     });
     host.once('error', error => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(error);
+      finish(error);
     });
+    probe();
   });
 }
 
@@ -468,7 +490,7 @@ async function main() {
   process.once('SIGTERM', () => void stop('SIGTERM'));
 
   try {
-    const actualBackendPort = await waitForNativeGraph(host);
+    const actualBackendPort = await waitForNativeGraph(host, backendPort);
     controller = new PxlogicCaptureController(options, host);
     proxy = await startWebSocketProxy({
       port: options.port,
@@ -519,6 +541,7 @@ module.exports = {
   resolveAppPath,
   resolveRuntime,
   resolveRuntimeVersion,
+  waitForNativeGraph,
 };
 
 if (require.main === module) {

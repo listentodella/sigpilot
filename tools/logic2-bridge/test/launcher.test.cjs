@@ -2,11 +2,15 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
+const net = require('node:net');
+const { PassThrough } = require('node:stream');
 const {
   logicProcessEnvironment,
   nativeHookArguments,
   parseArguments,
   resolveRuntimeVersion,
+  waitForNativeGraph,
 } = require('../index.cjs');
 
 test('uses an automatically allocated public port by default', () => {
@@ -52,4 +56,20 @@ test('passes a matched profile to the data-driven native host', () => {
       },
     },
   }), ['logic-test', 'ABCDEF01', '0x1234', '554889e5']);
+});
+
+test('accepts a listening GraphServer when CreateGraphServer has not returned', async t => {
+  const server = net.createServer(socket => socket.destroy());
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  t.after(() => server.close());
+  const address = server.address();
+  assert.equal(typeof address, 'object');
+
+  const host = new EventEmitter();
+  host.stdout = new PassThrough();
+  const port = await waitForNativeGraph(host, address.port, 1000);
+  assert.equal(port, address.port);
 });

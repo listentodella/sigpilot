@@ -1174,13 +1174,33 @@ fn bridge_root(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
-fn validate_bridge_payload(app: &AppHandle) -> Result<PathBuf, String> {
+struct BridgePayload {
+    bridge_root: PathBuf,
+    helper: PathBuf,
+    bitstreams: PathBuf,
+    firmware: PathBuf,
+}
+
+fn validate_bridge_payload(app: &AppHandle) -> Result<BridgePayload, String> {
     let root = bridge_root(app)?;
+    let payload_root = root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("Bridge 资源目录结构无效: {}", root.display()))?;
     let native_host = if cfg!(target_os = "windows") {
         root.join("build/graph-host.exe")
     } else {
         root.join("build/graph-host")
     };
+    let helper = payload_root
+        .join("target/release")
+        .join(if cfg!(target_os = "windows") {
+            "usb_smoke.exe"
+        } else {
+            "usb_smoke"
+        });
+    let bitstreams = payload_root.join("resources/bitstreams");
+    let firmware = payload_root.join("resources/firmware/SCI_LOGIC.bin");
     let required = [
         root.join("index.cjs"),
         root.join("lib/capture-controller.cjs"),
@@ -1189,13 +1209,25 @@ fn validate_bridge_payload(app: &AppHandle) -> Result<PathBuf, String> {
         root.join("lib/websocket-proxy.cjs"),
         root.join("compatibility/profiles.json"),
         native_host,
+        helper.clone(),
+        bitstreams.join("hspi_ddr.bin"),
+        bitstreams.join("hspi_ddr_RST.bin"),
+        firmware.clone(),
     ];
     for path in required {
         if !path.is_file() {
-            return Err(format!("Bridge 资源不存在: {}", path.display()));
+            return Err(format!(
+                "Bridge 便携包不完整，缺少: {}。请解压并运行完整的平台便携包，不能直接运行 target\\...\\release 下的构建中间文件。",
+                path.display()
+            ));
         }
     }
-    Ok(root)
+    Ok(BridgePayload {
+        bridge_root: root,
+        helper,
+        bitstreams,
+        firmware,
+    })
 }
 
 fn update_bridge_state(app: &AppHandle, next: BridgeState) {
@@ -1565,9 +1597,12 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
             .error
             .unwrap_or_else(|| "Logic 2 安装无效".to_string()));
     }
-    let bridge_root = validate_bridge_payload(app)?;
+    let payload = validate_bridge_payload(app)?;
     let executable = logic_executable(&app_path);
     let runtime_app_path = app_path.to_string_lossy().into_owned();
+    let helper = payload.helper.to_string_lossy().into_owned();
+    let bitstreams = payload.bitstreams.to_string_lossy().into_owned();
+    let firmware = payload.firmware.to_string_lossy().into_owned();
     let port = if settings.port_mode == "fixed" {
         settings.preferred_port.to_string()
     } else {
@@ -1582,8 +1617,11 @@ fn start_bridge_inner(app: &AppHandle, settings: ClientSettings) -> Result<Bridg
         .arg("index.cjs")
         .args(["--app", &runtime_app_path])
         .args(["--port", &port])
+        .args(["--pxlogic-helper", &helper])
+        .args(["--bitstreams", &bitstreams])
+        .args(["--firmware", &firmware])
         .args(["--screen-quadrant", &settings.screen_quadrant.to_string()])
-        .current_dir(&bridge_root)
+        .current_dir(&payload.bridge_root)
         .env("ELECTRON_RUN_AS_NODE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
