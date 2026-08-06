@@ -90,6 +90,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Prefer Git Bash on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $gitBash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $gitBash -PathType Leaf)) {
+            throw "Git Bash was not found at $gitBash"
+          }
+          Split-Path -Parent $gitBash | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Install Linux USB build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -174,6 +184,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Prefer Git Bash on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $gitBash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $gitBash -PathType Leaf)) {
+            throw "Git Bash was not found at $gitBash"
+          }
+          Split-Path -Parent $gitBash | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
@@ -410,7 +430,7 @@ jobs:
 
   build-linux-x64:
     name: Desktop client (Linux x64, diagnostic)
-    needs: [portable-layer, capture-helper, tauri-client-check, linux-native-host-check]
+    needs: [linux-native-host-check]
     runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Checkout repository
@@ -461,6 +481,13 @@ jobs:
       - name: Install Tauri client build dependencies
         run: npm --prefix tools/logic2-bridge/tauri-client ci
 
+      - name: Test Linux bridge layers
+        run: |
+          npm --prefix tools/logic2-bridge run check
+          npm --prefix tools/logic2-bridge/client run check
+          npm --prefix tools/logic2-bridge test
+          npm --prefix tools/logic2-bridge/tauri-client test
+
       - name: Prepare Linux native payload
         working-directory: tools/logic2-bridge/tauri-client
         env:
@@ -496,11 +523,19 @@ jobs:
 
   build-windows-x64:
     name: Desktop client (Windows x64, diagnostic)
-    needs: [portable-layer, capture-helper, tauri-client-check, linux-native-host-check]
     runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Prefer Git Bash
+        shell: pwsh
+        run: |
+          $gitBash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $gitBash -PathType Leaf)) {
+            throw "Git Bash was not found at $gitBash"
+          }
+          Split-Path -Parent $gitBash | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -521,6 +556,13 @@ jobs:
 
       - name: Install Tauri client build dependencies
         run: npm --prefix tools/logic2-bridge/tauri-client ci
+
+      - name: Test Windows bridge layers
+        run: |
+          npm --prefix tools/logic2-bridge run check
+          npm --prefix tools/logic2-bridge/client run check
+          npm --prefix tools/logic2-bridge test
+          npm --prefix tools/logic2-bridge/tauri-client test
 
       - name: Prepare Windows native payload
         working-directory: tools/logic2-bridge/tauri-client
