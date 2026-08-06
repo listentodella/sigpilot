@@ -20,15 +20,21 @@ on:
         type: choice
         options:
           - self-hosted
+          - analysis-only
           - windows
           - linux
           - macos
           - all
       analyze_official_packages:
-        description: Download official Logic 2.4.46 packages and fingerprint GraphServer
+        description: Download official Logic packages and fingerprint GraphServer
         required: false
         default: false
         type: boolean
+      logic_version:
+        description: Official Logic version used by package fingerprint jobs
+        required: false
+        default: "2.4.46"
+        type: string
 
 concurrency:
   group: logic2-bridge-${{ github.workflow }}-${{ github.ref }}
@@ -215,12 +221,10 @@ jobs:
           - os_name: Linux x64
             runner: [self-hosted, Linux, X64]
             package_type: appimage
-            package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-linux-x64.AppImage
             artifact: linux-x64
           - os_name: Windows x64
             runner: [self-hosted, Windows, X64]
             package_type: advanced-installer
-            package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-windows-x64.exe
             artifact: windows-x64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -234,35 +238,89 @@ jobs:
 
       - name: Download and extract Linux GraphServer
         if: matrix.package_type == 'appimage'
+        env:
+          LOGIC_VERSION: ${{ inputs.logic_version }}
         run: |
+          package="Logic-${LOGIC_VERSION}-linux-x64.AppImage"
           curl -L --fail --retry 3 \
-            "${{ matrix.package_url }}" \
-            -o Logic-2.4.46-linux-x64.AppImage
-          chmod +x Logic-2.4.46-linux-x64.AppImage
-          ./Logic-2.4.46-linux-x64.AppImage --appimage-extract >/dev/null
+            "https://downloads2.saleae.com/logic2/${package}" \
+            -o "$package"
+          chmod +x "$package"
+          "./$package" --appimage-extract >/dev/null
           graph=$(find squashfs-root -type f -name 'libgraph_server_shared.so' -print -quit)
           test -n "$graph"
-          node tools/logic2-bridge/scripts/fingerprint-binary.cjs "$graph" \
+          node tools/logic2-bridge/scripts/fingerprint-installation.cjs squashfs-root \
+            --platform linux --architecture x64 \
             | tee graph-fingerprint-${{ matrix.artifact }}.json
 
       - name: Download and extract Windows GraphServer
         if: matrix.package_type == 'advanced-installer'
         shell: pwsh
+        env:
+          LOGIC_VERSION: ${{ inputs.logic_version }}
         run: |
-          & curl.exe -L --fail --retry 3 "${{ matrix.package_url }}" -o Logic-2.4.46-windows-x64.exe
+          $package = "Logic-$env:LOGIC_VERSION-windows-x64.exe"
+          & curl.exe -L --fail --retry 3 `
+            "https://downloads2.saleae.com/logic2/$package" -o $package
           if ($LASTEXITCODE -ne 0) { throw 'Logic 2 download failed' }
-          node tools/logic2-bridge/scripts/extract-advanced-installer-cab.cjs Logic-2.4.46-windows-x64.exe Logic-2.4.46-windows-x64.cab
-          New-Item -ItemType Directory -Path windows-graph | Out-Null
-          & expand.exe Logic-2.4.46-windows-x64.cab -F:graph_server_shared.dll_1 windows-graph
+          $cab = "Logic-$env:LOGIC_VERSION-windows-x64.cab"
+          node tools/logic2-bridge/scripts/extract-advanced-installer-cab.cjs $package $cab
+          New-Item -ItemType Directory -Force -Path `
+            'windows-logic/resources/windows-x64' | Out-Null
+          & expand.exe $cab -F:graph_server_shared.dll_1 windows-logic/resources/windows-x64
           if ($LASTEXITCODE -ne 0) { throw 'GraphServer CAB extraction failed' }
-          $graph = 'windows-graph/graph_server_shared.dll_1'
-          node tools/logic2-bridge/scripts/fingerprint-binary.cjs $graph | Tee-Object -FilePath graph-fingerprint-${{ matrix.artifact }}.json
+          & expand.exe $cab -F:app.asar windows-logic/resources
+          if ($LASTEXITCODE -ne 0) { throw 'Logic app.asar extraction failed' }
+          $extractedGraph = 'windows-logic/resources/windows-x64/graph_server_shared.dll_1'
+          $graph = 'windows-logic/resources/windows-x64/graph_server_shared.dll'
+          Move-Item -LiteralPath $extractedGraph -Destination $graph
+          node tools/logic2-bridge/scripts/fingerprint-installation.cjs windows-logic `
+            --platform win32 --architecture x64 `
+            | Tee-Object -FilePath graph-fingerprint-${{ matrix.artifact }}.json
           node tools/logic2-bridge/scripts/locate-windows-on-data-buffer.cjs $graph | Tee-Object -FilePath graph-hook-${{ matrix.artifact }}.json
 
+      - name: Add fingerprint report to summary
+        shell: bash
+        run: |
+          {
+            echo '### Logic ${{ inputs.logic_version }} ${{ matrix.os_name }} GraphServer'
+            echo '```json'
+            cat graph-fingerprint-${{ matrix.artifact }}.json
+            if [[ -f graph-hook-${{ matrix.artifact }}.json ]]; then
+              cat graph-hook-${{ matrix.artifact }}.json
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate fingerprint report
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.logic_version }}
+          EXPECTED_PLATFORM: ${{ matrix.package_type == 'appimage' && 'linux' || 'win32' }}
+        run: |
+          node - "$EXPECTED_VERSION" "$EXPECTED_PLATFORM" "${{ matrix.artifact }}" <<'NODE'
+          const fs = require('node:fs');
+          const [expectedVersion, expectedPlatform, artifact] = process.argv.slice(2);
+          const report = JSON.parse(fs.readFileSync(`graph-fingerprint-${artifact}.json`, 'utf8'));
+          if (report.logicVersion !== expectedVersion) {
+            throw new Error(`Logic version mismatch: expected ${expectedVersion}, found ${report.logicVersion}`);
+          }
+          if (report.platform !== expectedPlatform || report.architecture !== 'x64') {
+            throw new Error(`Unexpected GraphServer target: ${report.platform}/${report.architecture}`);
+          }
+          if (!report.fingerprint?.identity || !report.fingerprint?.sha256 ||
+              !report.fingerprint?.identityKind) {
+            throw new Error('GraphServer fingerprint is incomplete');
+          }
+          console.log(`${report.logicVersion} ${report.platform}/${report.architecture} ` +
+            `${report.fingerprint.identityKind} ${report.fingerprint.identity}`);
+          NODE
+
       - name: Upload fingerprint report
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: logic2-4-46-graphserver-fingerprint-${{ matrix.artifact }}
+          name: logic2-${{ inputs.logic_version }}-graphserver-fingerprint-${{ matrix.artifact }}
           path: |
             graph-fingerprint-${{ matrix.artifact }}.json
             graph-hook-${{ matrix.artifact }}.json

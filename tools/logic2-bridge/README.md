@@ -85,15 +85,17 @@ installation. The Windows portable package contains the experimental
 `graph-host.exe`; its UI clearly labels the profile as experimental until a
 PXLogic capture is confirmed. The Linux hook remains pending live validation.
 
-The workflow has a manual `analyze_official_packages` input. When enabled,
-GitHub downloads the official Logic 2.4.46 Linux AppImage and Windows
-installer, extracts the platform GraphServer, and uploads JSON fingerprint
-reports. The Windows job also derives an `OnDataBuffer` candidate and prologue
+The workflow has manual `analyze_official_packages` and `logic_version` inputs.
+When enabled, GitHub downloads that official Logic version's Linux AppImage and
+Windows installer, extracts the complete version metadata plus the platform
+GraphServer, and writes JSON fingerprint reports to the workflow summary. The
+`analysis-only` platform option skips all Bridge package builds for this task.
+The Windows job also derives an `OnDataBuffer` candidate and prologue
 from signature-string references and the PE runtime-function table. Its
 extractor reverses the Advanced Installer first-sector XOR and uses Windows'
 built-in CAB extractor; it does not execute or silently install the package.
-The reports contain no Saleae binaries and are retained only as short-lived CI
-artifacts.
+The reports contain no Saleae binaries; artifact upload is best-effort because
+the job summary remains available when the repository artifact quota is full.
 
 ## Desktop client
 
