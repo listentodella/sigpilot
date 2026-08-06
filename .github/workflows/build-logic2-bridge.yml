@@ -600,8 +600,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $helpText -notmatch 'No npm install is required') {
             throw 'Packaged bridge entry did not pass its help probe'
           }
-          $headers = & dumpbin.exe /headers (Join-Path $bridge 'build/graph-host.exe')
-          if ($LASTEXITCODE -ne 0 -or $headers -notmatch '8664 machine') {
+          $headersText = (& dumpbin.exe /headers `
+            (Join-Path $bridge 'build/graph-host.exe') | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $headersText -notmatch '8664 machine') {
             throw 'Packaged graph-host.exe is not an x64 PE executable'
           }
           Compress-Archive -Path (Join-Path $stage '*') `
