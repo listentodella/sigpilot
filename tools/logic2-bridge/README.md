@@ -63,12 +63,12 @@ callback offset or prove the ABI for an unknown future build.
 ## Continuous integration
 
 `.github/workflows/build-logic2-bridge.yml` checks the portable bridge layer and
-builds the PXLogic `usb_smoke` helper on self-hosted Windows x64 and Linux x64
-runners plus GitHub-hosted macOS Intel and Apple Silicon runners. The helper
-jobs publish prerequisite artifacts with the hardware resources for
-platform-porting and diagnostics. They are not complete Logic bridges. The
-workflow builds a runnable `pxlogic-logic2-bridge-client-macos-arm64` Tauri DMG
-and diagnostic Linux AppImage/DEB and Windows NSIS/MSI packages.
+builds diagnostic Linux AppImage/DEB and Windows NSIS/MSI packages on
+self-hosted x64 runners. Pushes run those two self-hosted builds by default;
+`workflow_dispatch` can select `windows`, `linux`, `self-hosted`, `macos`, or
+`all`. macOS checks and the runnable
+`pxlogic-logic2-bridge-client-macos-arm64` Tauri DMG are manual so an unavailable
+GitHub-hosted runner cannot block Windows or Linux artifacts.
 The application bundle contains:
 
 - the lightweight Tauri desktop launcher (it reuses the selected Logic app's
