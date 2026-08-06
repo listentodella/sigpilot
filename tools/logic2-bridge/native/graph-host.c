@@ -2,10 +2,13 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #include <fcntl.h>
 #include <io.h>
 #include <process.h>
+#pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "Ole32.lib")
 #else
 #include <dlfcn.h>
 #endif
@@ -964,6 +967,30 @@ static uint32_t parse_port(const char *value) {
 
 static void *load_graph_library(const char *path) {
 #if defined(_WIN32)
+  // GraphServer imports Analyzer.dll, python314.dll, and several private
+  // runtime DLLs from the selected Logic resource directory. Electron sets a
+  // matching DLL search context before loading the graph addon; the portable
+  // native host must establish it explicitly.
+  char directory[MAX_PATH];
+  DWORD directory_length = GetFullPathNameA(path, MAX_PATH, directory, NULL);
+  if (directory_length == 0 || directory_length >= MAX_PATH) {
+    fprintf(stderr,
+            "[logic2-bridge:native] could not resolve GraphServer path (error %lu)\n",
+            (unsigned long)GetLastError());
+  } else {
+    char *separator = strrchr(directory, '\\');
+    if (separator == NULL) separator = strrchr(directory, '/');
+    if (separator != NULL) {
+      *separator = '\0';
+      if (!SetDllDirectoryA(directory)) {
+        fprintf(stderr,
+                "[logic2-bridge:native] SetDllDirectory failed for %s (error %lu)\n",
+                directory, (unsigned long)GetLastError());
+      } else {
+        fprintf(stderr, "[logic2-bridge:native] DLL search directory: %s\n", directory);
+      }
+    }
+  }
   HMODULE library = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
   if (library == NULL) {
     fprintf(stderr, "[logic2-bridge:native] LoadLibraryEx failed (error %lu): %s\n",
@@ -1010,6 +1037,21 @@ int main(int argc, char **argv) {
     perror("[logic2-bridge:native] set stdin binary mode");
     return 1;
   }
+  int winsock_status = WSAStartup(MAKEWORD(2, 2), &(WSADATA){0});
+  if (winsock_status != 0) {
+    fprintf(stderr,
+            "[logic2-bridge:native] WSAStartup failed (error %d)\n",
+            winsock_status);
+    return 1;
+  }
+  HRESULT com_status = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  if (FAILED(com_status) && com_status != RPC_E_CHANGED_MODE) {
+    fprintf(stderr,
+            "[logic2-bridge:native] CoInitializeEx failed (HRESULT 0x%08lx)\n",
+            (unsigned long)com_status);
+    WSACleanup();
+    return 1;
+  }
 #endif
   if (!configure_hook(argv[7], argv[8], argv[9], argv[10])) return 2;
 #if defined(_WIN32)
@@ -1044,6 +1086,23 @@ int main(int argc, char **argv) {
   uint32_t port = parse_port(argv[5]);
   bool scan_devices = strcmp(argv[6], "1") == 0;
   set_log_file_name(argv[3]);
+  fprintf(stderr, "[logic2-bridge:native] Python home: %s\n", argv[2]);
+#if defined(_WIN32)
+  DWORD python_attributes = GetFileAttributesA(argv[2]);
+  fprintf(stderr,
+          "[logic2-bridge:native] Python home %s: %s\n",
+          argv[2],
+          python_attributes == INVALID_FILE_ATTRIBUTES ?
+              "missing" : ((python_attributes & FILE_ATTRIBUTE_DIRECTORY) ?
+              "directory" : "file"));
+  HMODULE analyzer = GetModuleHandleA("Analyzer.dll");
+  HMODULE python = GetModuleHandleA("python314.dll");
+  fprintf(stderr,
+          "[logic2-bridge:native] dependencies before CreateGraphServer: "
+          "Analyzer.dll=%s python314.dll=%s\n",
+          analyzer != NULL ? "loaded" : "not loaded",
+          python != NULL ? "loaded" : "not loaded");
+#endif
   printf("[logic2-bridge:native] loading %s\n", argv[1]);
   printf("[logic2-bridge:native] physical Saleae scan: %s\n",
          scan_devices ? "enabled" : "disabled");
@@ -1073,5 +1132,9 @@ int main(int argc, char **argv) {
   destroy_graph_server(server);
   (void)flush_log();
   unload_graph_library(library);
+#if defined(_WIN32)
+  CoUninitialize();
+  WSACleanup();
+#endif
   return 0;
 }
