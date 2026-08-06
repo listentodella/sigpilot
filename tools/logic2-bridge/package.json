@@ -5,7 +5,7 @@
   "description": "PXLogic live capture bridge for an unmodified official Saleae Logic app",
   "scripts": {
     "start": "node index.cjs",
-    "check": "node --check index.cjs && node --check lib/capture-controller.cjs && node --check lib/compatibility.cjs && node --check lib/logic-format.cjs && node --check lib/websocket-proxy.cjs && node --check scripts/fingerprint-binary.cjs && node --check scripts/fingerprint-installation.cjs",
+    "check": "node --check index.cjs && node --check lib/capture-controller.cjs && node --check lib/compatibility.cjs && node --check lib/logic-format.cjs && node --check lib/websocket-proxy.cjs && node --check scripts/extract-advanced-installer-cab.cjs && node --check scripts/fingerprint-binary.cjs && node --check scripts/fingerprint-installation.cjs",
     "test": "node --test test/*.test.cjs"
   }
 }

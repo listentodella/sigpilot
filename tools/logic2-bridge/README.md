@@ -22,8 +22,8 @@ requires a new verified hook record and a separate validation run.
 | --- | --- | --- | --- | --- |
 | WebSocket proxy and data conversion | Tested | Tested in CI | Tested in CI | Tested in CI |
 | PXLogic `usb_smoke` helper | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace | Supported by the PXLogic workspace |
-| Logic 2.4.46 GraphServer identity | UUID + SHA verified | Profile pending | Build ID + SHA recorded | Profile pending |
-| Logic 2.4.46 GraphServer injection | Verified | Not implemented | Reverse-engineered, pending live validation | Not implemented |
+| Logic 2.4.46 GraphServer identity | UUID + SHA verified | Profile pending | CodeView + SHA recorded | Build ID + SHA recorded |
+| Logic 2.4.46 GraphServer injection | Verified | Not implemented | Not implemented | Reverse-engineered, pending live validation |
 | Complete live bridge | **Supported** | Not supported | Not supported | Not supported |
 
 Building the portable JavaScript and PXLogic USB layers on another operating
@@ -79,9 +79,11 @@ hooks have independent fingerprints and live-capture validation.
 
 The workflow has a manual `analyze_official_packages` input. When enabled,
 GitHub downloads the official Logic 2.4.46 Linux AppImage and Windows
-installer, extracts `libgraph_server_shared`, and uploads JSON fingerprint
-reports. The reports contain no Saleae binaries and are retained only as
-short-lived CI artifacts.
+installer, extracts the platform GraphServer, and uploads JSON fingerprint
+reports. The Windows extractor reverses the Advanced Installer first-sector
+XOR and then uses `7z` to unpack the embedded CAB; it does not execute or
+silently install the package. The reports contain no Saleae binaries and are
+retained only as short-lived CI artifacts.
 
 ## Desktop client
 

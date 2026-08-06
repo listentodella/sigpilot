@@ -80,11 +80,18 @@ test('parses a PE CodeView GUID and age', () => {
 
 test('keeps only exact GraphServer identities in the profile manifest', () => {
   const profiles = loadCompatibilityProfiles();
-  assert.equal(profiles.length, 2);
-  assert.equal(profiles[0].hook.status, 'verified');
-  assert.equal(profiles[1].hook.status, 'pending-live-validation');
+  assert.deepEqual(
+    profiles.map(profile => [profile.platform, profile.hook.status]),
+    [
+      ['darwin', 'verified'],
+      ['linux', 'pending-live-validation'],
+      ['win32', 'pending-live-validation'],
+    ],
+  );
   for (const profile of profiles) {
     assert.match(profile.graph.sha256, /^[0-9a-f]{64}$/);
-    assert.match(profile.hook.prologueHex, /^[0-9a-f]+$/);
+    if (profile.hook.prologueHex !== undefined) {
+      assert.match(profile.hook.prologueHex, /^[0-9a-f]+$/);
+    }
   }
 });

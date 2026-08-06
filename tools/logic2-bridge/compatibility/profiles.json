@@ -40,6 +40,24 @@
         "prologueHex": "554157415641554154534881ecc8000000",
         "validation": "ELF identity, SysV ABI, callback body, and prologue reverse-engineered; hardware capture not yet verified"
       }
+    },
+    {
+      "id": "logic-2.4.46-windows-x64-888ecceb",
+      "logicVersion": "2.4.46",
+      "platform": "win32",
+      "architecture": "x64",
+      "runtimeLayout": "windows-installation",
+      "graph": {
+        "relativePath": "resources/windows-x64/graph_server_shared.dll",
+        "format": "pe",
+        "identityKind": "pe-codeview-guid-age",
+        "identity": "888ECCEB-C0E8-4943-8F4F-0F6F529F2ACA-1",
+        "sha256": "66b0562e5eb56c0fddaebecd4848a421df6affcdf0a641245ccecffe76054db2"
+      },
+      "hook": {
+        "status": "pending-live-validation",
+        "validation": "PE identity extracted from the official Logic 2.4.46 installer; Windows injection is not implemented or live-validated"
+      }
     }
   ]
 }

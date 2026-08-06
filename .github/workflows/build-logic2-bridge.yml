@@ -235,10 +235,12 @@ jobs:
         include:
           - os_name: Linux x64
             runner: ubuntu-latest
+            package_type: appimage
             package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-linux-x64.AppImage
             artifact: linux-x64
           - os_name: Windows x64
-            runner: windows-latest
+            runner: ubuntu-latest
+            package_type: advanced-installer
             package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-windows-x64.exe
             artifact: windows-x64
     runs-on: ${{ matrix.runner }}
@@ -251,8 +253,14 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install Windows package extraction dependency
+        if: matrix.package_type == 'advanced-installer'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+
       - name: Download and extract Linux GraphServer
-        if: runner.os == 'Linux'
+        if: matrix.package_type == 'appimage'
         run: |
           curl -L --fail --retry 3 \
             "${{ matrix.package_url }}" \
@@ -265,12 +273,19 @@ jobs:
             | tee graph-fingerprint-${{ matrix.artifact }}.json
 
       - name: Download and extract Windows GraphServer
-        if: runner.os == 'Windows'
-        shell: pwsh
+        if: matrix.package_type == 'advanced-installer'
         run: |
-          tools/logic2-bridge/scripts/fingerprint-official-windows.ps1 `
-            -PackageUrl "${{ matrix.package_url }}" `
-            -OutputPath "graph-fingerprint-${{ matrix.artifact }}.json"
+          curl -L --fail --retry 3 \
+            "${{ matrix.package_url }}" \
+            -o Logic-2.4.46-windows-x64.exe
+          node tools/logic2-bridge/scripts/extract-advanced-installer-cab.cjs \
+            Logic-2.4.46-windows-x64.exe Logic-2.4.46-windows-x64.cab
+          mkdir windows-graph
+          7z e Logic-2.4.46-windows-x64.cab \
+            graph_server_shared.dll_1 -owindows-graph -y
+          node tools/logic2-bridge/scripts/fingerprint-binary.cjs \
+            windows-graph/graph_server_shared.dll_1 \
+            | tee graph-fingerprint-${{ matrix.artifact }}.json
 
       - name: Upload fingerprint report
         uses: actions/upload-artifact@v7
