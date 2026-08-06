@@ -10,7 +10,11 @@ const {
   PxlogicCaptureController,
   createLineReader,
 } = require('./lib/capture-controller.cjs');
-const { matchCompatibilityProfile } = require('./lib/compatibility.cjs');
+const {
+  findGraphServerBinary,
+  matchCompatibilityProfile,
+  readLogicVersionFromInstallation,
+} = require('./lib/compatibility.cjs');
 const { normalizeEnabledChannels } = require('./lib/logic-format.cjs');
 const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
@@ -94,7 +98,7 @@ function parseArguments(argv) {
 }
 
 function printHelp() {
-  console.log(`PXLogic bridge for the official Saleae Logic 2.4.46 macOS arm64 app
+  console.log(`PXLogic bridge for the official Saleae Logic application
 
 Usage:
   node tools/logic2-bridge/index.cjs --app "/path/to/Logic.app" [options]
@@ -160,6 +164,11 @@ function resolveAppPath(explicitPath) {
 }
 
 function readAppVersion(appPath) {
+  if (process.platform !== 'darwin') {
+    const version = readLogicVersionFromInstallation(appPath);
+    if (!version) throw new Error(`Could not read Logic version from ${appPath}`);
+    return version;
+  }
   const plist = path.join(appPath, 'Contents', 'Info.plist');
   const result = spawnSync(
     '/usr/libexec/PlistBuddy',
@@ -172,12 +181,28 @@ function readAppVersion(appPath) {
   return result.stdout.trim();
 }
 
+function logicExecutable(appPath) {
+  if (process.platform === 'darwin') return path.join(appPath, 'Contents', 'MacOS', 'Logic');
+  if (fs.existsSync(appPath) && fs.statSync(appPath).isFile()) return appPath;
+  const candidates = process.platform === 'win32'
+    ? [path.join(appPath, 'Logic.exe'), path.join(appPath, 'Logic')]
+    : [
+      path.join(appPath, 'usr', 'lib', 'logic', 'Logic'),
+      path.join(appPath, 'usr', 'lib', 'logic', 'Logic.bin'),
+      path.join(appPath, 'Logic'),
+    ];
+  return candidates.find(candidate => fs.existsSync(candidate)) || candidates[0];
+}
+
 function resolveRuntime(options) {
   const appPath = resolveAppPath(options.appPath);
   const version = readAppVersion(appPath);
-  const runtimeRoot = path.join(appPath, 'Contents', 'Resources', 'macos-arm64');
-  const executable = path.join(appPath, 'Contents', 'MacOS', 'Logic');
-  const sharedLibrary = path.join(runtimeRoot, 'libgraph_server_shared.dylib');
+  const executable = logicExecutable(appPath);
+  const sharedLibrary = findGraphServerBinary(appPath);
+  if (!sharedLibrary) {
+    throw new Error(`GraphServer binary was not found below ${appPath}`);
+  }
+  const runtimeRoot = path.dirname(sharedLibrary);
   const pythonHome = path.join(runtimeRoot, 'pythonlibs');
   requirePath(executable, 'Logic executable', 'file');
   requirePath(sharedLibrary, 'GraphServer library', 'file');
@@ -211,8 +236,11 @@ function resolveRuntime(options) {
 }
 
 function ensureNativeHost() {
-  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
-    throw new Error('PXLogic Logic 2 bridge currently requires macOS arm64');
+  const supportedNativeHost =
+    (process.platform === 'darwin' && process.arch === 'arm64') ||
+    (process.platform === 'linux' && process.arch === 'x64');
+  if (!supportedNativeHost) {
+    throw new Error('PXLogic GraphServer injection host is not implemented for this platform');
   }
   const source = path.join(bridgeRoot, 'native', 'graph-host.c');
   const outputDirectory = path.join(bridgeRoot, 'build');
@@ -226,9 +254,15 @@ function ensureNativeHost() {
       throw new Error(`Prebuilt native GraphServer host was not found: ${executable}`);
     }
     console.log('[logic2-bridge] compiling version-locked native GraphServer host');
+    const compiler = process.platform === 'darwin' ? 'xcrun' : 'cc';
+    const compilerArgs = process.platform === 'darwin'
+      ? ['clang']
+      : [];
+    compilerArgs.push('-std=c11', '-O2', '-Wall', '-Wextra', source, '-o', executable);
+    if (process.platform === 'linux') compilerArgs.push('-ldl', '-pthread');
     const result = spawnSync(
-      'xcrun',
-      ['clang', '-std=c11', '-O2', '-Wall', '-Wextra', source, '-o', executable],
+      compiler,
+      compilerArgs,
       { cwd: bridgeRoot, encoding: 'utf8' },
     );
     if (result.status !== 0) {
@@ -322,13 +356,11 @@ async function main() {
     return;
   }
 
-  const stateRoot = path.join(
-    os.homedir(),
-    'Library',
-    'Application Support',
-    'PXLogic',
-    'logic2-bridge',
-  );
+  const stateRoot = process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'PXLogic', 'logic2-bridge')
+    : process.platform === 'win32'
+      ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'PXLogic', 'logic2-bridge')
+      : path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'), 'pxlogic', 'logic2-bridge');
   const calibrationRoot = path.join(stateRoot, 'mso-calibration');
   const logPath = path.join(stateRoot, 'graphio.log');
   fs.mkdirSync(calibrationRoot, { recursive: true });

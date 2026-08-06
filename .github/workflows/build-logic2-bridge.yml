@@ -135,6 +135,7 @@ jobs:
 
       - name: Upload helper and hardware resources
         uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: pxlogic-bridge-prerequisites-${{ matrix.artifact }}
           path: |
@@ -192,6 +193,10 @@ jobs:
           npm --prefix tools/logic2-bridge/client run check
 
       - name: Test Tauri client
+        env:
+          # The check job validates Rust/renderer code only. Native helper and
+          # GraphServer payloads are produced by the platform build job.
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
         run: npm --prefix tools/logic2-bridge/tauri-client test
 
   linux-native-host-check:
@@ -263,25 +268,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "${{ matrix.package_url }}" -OutFile Logic-2.4.46-windows-x64.exe
-          New-Item -ItemType Directory -Force -Path extracted | Out-Null
-          Start-Process -FilePath .\Logic-2.4.46-windows-x64.exe `
-            -ArgumentList '/extract', (Join-Path (Get-Location) 'extracted') `
-            -Wait -NoNewWindow
-          $msi = Get-ChildItem -Path extracted -Recurse -File -Filter *.msi | Select-Object -First 1
-          if (-not $msi) { throw 'Logic MSI was not produced by /extract' }
-          $expanded = Join-Path (Get-Location) 'expanded'
-          New-Item -ItemType Directory -Force -Path $expanded | Out-Null
-          Start-Process -FilePath msiexec.exe `
-            -ArgumentList '/a', $msi.FullName, '/qn', "TARGETDIR=$expanded" `
-            -Wait -NoNewWindow
-          $graph = Get-ChildItem -Path $expanded -Recurse -File -Filter libgraph_server_shared.dll | Select-Object -First 1
-          if (-not $graph) { throw 'GraphServer DLL was not found after /extract' }
-          node tools/logic2-bridge/scripts/fingerprint-binary.cjs $graph.FullName `
-            | Tee-Object graph-fingerprint-${{ matrix.artifact }}.json
+          tools/logic2-bridge/scripts/fingerprint-official-windows.ps1 `
+            -PackageUrl "${{ matrix.package_url }}" `
+            -OutputPath "graph-fingerprint-${{ matrix.artifact }}.json"
 
       - name: Upload fingerprint report
         uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: logic2-4-46-graphserver-fingerprint-${{ matrix.artifact }}
           path: graph-fingerprint-${{ matrix.artifact }}.json
@@ -342,7 +335,8 @@ jobs:
       - name: Build desktop app bundle
         working-directory: tools/logic2-bridge/tauri-client
         run: |
-          npx tauri build --target aarch64-apple-darwin --bundles app
+          npx tauri build --target aarch64-apple-darwin `
+            --config src-tauri/tauri.macos.conf.json --bundles app
 
       - name: Verify application bundle
         run: |
@@ -366,16 +360,155 @@ jobs:
       - name: Build DMG installer
         working-directory: tools/logic2-bridge/tauri-client
         run: |
-          npx tauri build --target aarch64-apple-darwin --bundles dmg
+          npx tauri build --target aarch64-apple-darwin `
+            --config src-tauri/tauri.macos.conf.json --bundles dmg
 
       - name: Verify DMG installer
         run: test -f "target/aarch64-apple-darwin/release/bundle/dmg/PXLogic Bridge_0.3.0_aarch64.dmg"
 
       - name: Upload desktop client
         uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: pxlogic-logic2-bridge-client-macos-arm64
           path: |
             target/aarch64-apple-darwin/release/bundle/dmg/PXLogic Bridge_0.3.0_aarch64.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+  build-linux-x64:
+    name: Desktop client (Linux x64, diagnostic)
+    needs: [portable-layer, capture-helper, tauri-client-check, linux-native-host-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libudev-dev \
+            libusb-1.0-0-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            librsvg2-dev \
+            pkg-config
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+          cache-targets: false
+          shared-key: logic2-bridge-linux-x64
+
+      - name: Install Tauri client build dependencies
+        run: npm --prefix tools/logic2-bridge/tauri-client ci
+
+      - name: Prepare Linux native payload
+        working-directory: tools/logic2-bridge/tauri-client
+        env:
+          TAURI_TARGET: x86_64-unknown-linux-gnu
+        run: npm run prepare:payload
+
+      - name: Build Linux installers
+        working-directory: tools/logic2-bridge/tauri-client
+        run: |
+          npx tauri build --target x86_64-unknown-linux-gnu \
+            --config src-tauri/tauri.linux.conf.json
+
+      - name: Verify Linux installers
+        run: |
+          set -euo pipefail
+          file tools/logic2-bridge/build/payload/graph-host | grep -E 'ELF 64-bit|x86-64'
+          file tools/logic2-bridge/build/payload/usb_smoke | grep -E 'ELF 64-bit|x86-64'
+          find target/x86_64-unknown-linux-gnu/release/bundle/appimage \
+            -maxdepth 1 -type f -name '*.AppImage' -print -quit | grep -q .
+          find target/x86_64-unknown-linux-gnu/release/bundle/deb \
+            -maxdepth 1 -type f -name '*.deb' -print -quit | grep -q .
+
+      - name: Upload Linux diagnostic client
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: pxlogic-logic2-bridge-client-linux-x64-diagnostic
+          path: |
+            target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+  build-windows-x64:
+    name: Desktop client (Windows x64, diagnostic)
+    needs: [portable-layer, capture-helper, tauri-client-check, linux-native-host-check]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ".->target"
+          cache-targets: false
+          shared-key: logic2-bridge-windows-x64
+
+      - name: Install Tauri client build dependencies
+        run: npm --prefix tools/logic2-bridge/tauri-client ci
+
+      - name: Prepare Windows native payload
+        working-directory: tools/logic2-bridge/tauri-client
+        env:
+          TAURI_TARGET: x86_64-pc-windows-msvc
+        run: npm run prepare:payload
+
+      - name: Build Windows installers
+        working-directory: tools/logic2-bridge/tauri-client
+        run: |
+          npx tauri build --target x86_64-pc-windows-msvc `
+            --config src-tauri/tauri.windows.conf.json
+
+      - name: Verify Windows installers
+        shell: pwsh
+        run: |
+          if (-not (Test-Path tools/logic2-bridge/build/payload/usb_smoke.exe)) {
+            throw 'Windows PXLogic helper payload is missing'
+          }
+          $nsis = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis -File -Filter *.exe
+          $msi = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/msi -File -Filter *.msi
+          if (-not $nsis) { throw 'NSIS installer was not produced' }
+          if (-not $msi) { throw 'MSI installer was not produced' }
+
+      - name: Upload Windows diagnostic client
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: pxlogic-logic2-bridge-client-windows-x64-diagnostic
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
           if-no-files-found: error
           retention-days: 30

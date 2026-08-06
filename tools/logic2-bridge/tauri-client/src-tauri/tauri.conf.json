@@ -26,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": ["app"],
     "category": "Utility",
     "shortDescription": "PXLogic live capture bridge for Saleae Logic 2",
     "icon": [
@@ -38,8 +38,6 @@
       "../../index.cjs": "tools/logic2-bridge/index.cjs",
       "../../lib": "tools/logic2-bridge/lib",
       "../../compatibility": "tools/logic2-bridge/compatibility",
-      "../../build/graph-host": "tools/logic2-bridge/build/graph-host",
-      "../../../../target/aarch64-apple-darwin/release/usb_smoke": "target/release/usb_smoke",
       "../../../../resources/bitstreams/hspi_ddr.bin": "resources/bitstreams/hspi_ddr.bin",
       "../../../../resources/bitstreams/hspi_ddr_RST.bin": "resources/bitstreams/hspi_ddr_RST.bin",
       "../../../../resources/bitstreams/LICENSE.txt": "resources/bitstreams/LICENSE.txt",

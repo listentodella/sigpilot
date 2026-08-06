@@ -22,7 +22,6 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt;
 
-const SUPPORTED_LOGIC_VERSION: &str = "2.4.46";
 const MAX_LOG_LINES: usize = 500;
 const NODE_PROBE_MARKER: &str = "PXLOGIC_NODE_OK:";
 
@@ -69,6 +68,9 @@ struct LogicInspection {
     node_version: Option<String>,
     electron_version: Option<String>,
     profile_id: Option<String>,
+    graph_path: Option<String>,
+    graph_format: Option<String>,
+    graph_identity_kind: Option<String>,
     graph_identity: Option<String>,
     graph_sha256: Option<String>,
     hook_status: Option<String>,
@@ -84,6 +86,9 @@ impl LogicInspection {
             node_version: None,
             electron_version: None,
             profile_id: None,
+            graph_path: None,
+            graph_format: None,
+            graph_identity_kind: None,
             graph_identity: None,
             graph_sha256: None,
             hook_status: None,
@@ -112,7 +117,6 @@ struct CompatibilityProfile {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompatibilityGraph {
-    relative_path: String,
     identity_kind: String,
     identity: String,
     sha256: String,
@@ -124,10 +128,13 @@ struct CompatibilityHook {
     validation: String,
 }
 
-struct GraphCompatibility {
-    profile: CompatibilityProfile,
+struct GraphInspection {
+    path: PathBuf,
+    format: String,
+    identity_kind: String,
     identity: String,
     sha256: String,
+    profile: Option<CompatibilityProfile>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -253,7 +260,21 @@ fn logic_executable(app_path: &Path) -> PathBuf {
 
 #[cfg(not(target_os = "macos"))]
 fn logic_executable(app_path: &Path) -> PathBuf {
-    app_path.to_path_buf()
+    if app_path.is_file() {
+        return app_path.to_path_buf();
+    }
+    #[cfg(target_os = "windows")]
+    let candidates = [app_path.join("Logic.exe"), app_path.join("Logic")];
+    #[cfg(target_os = "linux")]
+    let candidates = [
+        app_path.join("usr/lib/logic/Logic"),
+        app_path.join("usr/lib/logic/Logic.bin"),
+        app_path.join("Logic"),
+    ];
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| app_path.to_path_buf())
 }
 
 #[cfg(target_os = "macos")]
@@ -270,13 +291,28 @@ fn read_logic_version(app_path: &Path) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn read_logic_version(_app_path: &Path) -> Result<String, String> {
-    Err("当前 GraphServer 注入宿主仅支持 macOS Apple Silicon".to_string())
+fn read_logic_version(app_path: &Path) -> Result<String, String> {
+    for asar_path in find_asar_paths(app_path) {
+        if let Ok(Some(package_json)) = read_asar_entry(&asar_path, "package.json") {
+            if let Ok(package) = serde_json::from_slice::<serde_json::Value>(&package_json) {
+                if let Some(version) = package.get("version").and_then(|value| value.as_str()) {
+                    if !version.trim().is_empty() {
+                        return Ok(version.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    Err(format!(
+        "无法从 {} 的 app.asar/package.json 读取 Logic 版本",
+        app_path.display()
+    ))
 }
 
 fn compatibility_platform() -> &'static str {
     match std::env::consts::OS {
         "macos" => "darwin",
+        "windows" => "win32",
         platform => platform,
     }
 }
@@ -287,6 +323,191 @@ fn compatibility_architecture() -> &'static str {
         "aarch64" => "arm64",
         architecture => architecture,
     }
+}
+
+fn installation_roots(installation_path: &Path) -> Vec<PathBuf> {
+    let root = if installation_path.is_file() {
+        installation_path
+            .parent()
+            .unwrap_or(installation_path)
+            .to_path_buf()
+    } else {
+        installation_path.to_path_buf()
+    };
+    let mut roots = Vec::new();
+    let mut current = root;
+    for _ in 0..4 {
+        roots.push(current.clone());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    roots
+}
+
+#[cfg(not(target_os = "macos"))]
+fn find_asar_paths(installation_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for root in installation_roots(installation_path).into_iter().take(2) {
+        paths.extend([
+            root.join("Contents/Resources/app.asar"),
+            root.join("resources/app.asar"),
+            root.join("usr/lib/logic/resources/app.asar"),
+            root.join("app.asar"),
+        ]);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_asar_entry(asar_path: &Path, entry_path: &str) -> Result<Option<Vec<u8>>, String> {
+    let data = fs::read(asar_path)
+        .map_err(|error| format!("无法读取 ASAR {}: {error}", asar_path.display()))?;
+    if data.len() < 16 {
+        return Err(format!("ASAR 头部过短: {}", asar_path.display()));
+    }
+    let header_size = usize::try_from(
+        read_u32_le(&data, 4).ok_or_else(|| format!("ASAR 头部无效: {}", asar_path.display()))?,
+    )
+    .map_err(|_| format!("ASAR 头部过大: {}", asar_path.display()))?;
+    let json_size = usize::try_from(
+        read_u32_le(&data, 12)
+            .ok_or_else(|| format!("ASAR JSON 头部无效: {}", asar_path.display()))?,
+    )
+    .map_err(|_| format!("ASAR JSON 头部过大: {}", asar_path.display()))?;
+    let json_start = 16usize;
+    let json_end = json_start
+        .checked_add(json_size)
+        .ok_or_else(|| format!("ASAR JSON 边界溢出: {}", asar_path.display()))?;
+    if json_end > data.len() || 8usize.saturating_add(header_size) > data.len() {
+        return Err(format!("ASAR JSON 边界无效: {}", asar_path.display()));
+    }
+    let header: serde_json::Value = serde_json::from_slice(&data[json_start..json_end])
+        .map_err(|error| format!("ASAR JSON 无效 {}: {error}", asar_path.display()))?;
+    let mut node = &header;
+    for segment in entry_path.split('/').filter(|segment| !segment.is_empty()) {
+        node = match node.get("files").and_then(|files| files.get(segment)) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+    }
+    let Some(size) = node.get("size").and_then(serde_json::Value::as_u64) else {
+        return Ok(None);
+    };
+    let Some(offset) = node
+        .get("offset")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return Ok(None);
+    };
+    let size =
+        usize::try_from(size).map_err(|_| format!("ASAR 文件过大: {}", asar_path.display()))?;
+    let start = 8usize
+        .checked_add(header_size)
+        .and_then(|value| value.checked_add(offset))
+        .ok_or_else(|| format!("ASAR 文件偏移溢出: {}", asar_path.display()))?;
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| format!("ASAR 文件边界溢出: {}", asar_path.display()))?;
+    if end > data.len() {
+        return Err(format!("ASAR 文件边界无效: {}", asar_path.display()));
+    }
+    Ok(Some(data[start..end].to_vec()))
+}
+
+fn graph_server_names() -> [&'static str; 4] {
+    [
+        "libgraph_server_shared.dylib",
+        "libgraph_server_shared.so",
+        "libgraph_server_shared.dll",
+        "graph_server_shared.dll",
+    ]
+}
+
+fn find_graph_binary(installation_path: &Path) -> Result<PathBuf, String> {
+    let relative_paths = [
+        "Contents/Resources/macos-arm64/libgraph_server_shared.dylib",
+        "Contents/Resources/macos-x64/libgraph_server_shared.dylib",
+        "resources/linux-x64/libgraph_server_shared.so",
+        "usr/lib/logic/resources/linux-x64/libgraph_server_shared.so",
+        "resources/win32-x64/libgraph_server_shared.dll",
+        "resources/windows-x64/libgraph_server_shared.dll",
+        "resources/win-x64/libgraph_server_shared.dll",
+        "resources/win32-x64/graph_server_shared.dll",
+        "resources/windows-x64/graph_server_shared.dll",
+        "resources/win-x64/graph_server_shared.dll",
+    ];
+    let roots = installation_roots(installation_path);
+    for root in &roots {
+        if graph_server_names().contains(
+            &root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default(),
+        ) {
+            return Ok(root.clone());
+        }
+        for relative in relative_paths {
+            let candidate = root.join(relative);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    let root = roots
+        .first()
+        .ok_or_else(|| format!("无法确定安装目录: {}", installation_path.display()))?;
+    let mut queue = vec![(root.clone(), 0usize)];
+    let mut visited = HashSet::new();
+    while let Some((directory, depth)) = queue.pop() {
+        let canonical = fs::canonicalize(&directory).unwrap_or(directory.clone());
+        if !visited.insert(canonical) {
+            continue;
+        }
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_file()
+                && graph_server_names().contains(&entry.file_name().to_str().unwrap_or_default())
+            {
+                return Ok(candidate);
+            }
+            if file_type.is_dir() && depth < 8 {
+                let name = entry.file_name();
+                if !matches!(
+                    name.to_str(),
+                    Some(
+                        "Analyzers"
+                            | "app.asar.unpacked"
+                            | "node_modules"
+                            | "pythonlibs"
+                            | "locales"
+                    )
+                ) {
+                    queue.push((candidate, depth + 1));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "未找到 GraphServer 二进制: {}",
+        installation_path.display()
+    ))
 }
 
 fn compatibility_manifest() -> Result<CompatibilityManifest, String> {
@@ -397,18 +618,137 @@ fn parse_elf_build_id(data: &[u8]) -> Option<String> {
     None
 }
 
-fn graph_identity(data: &[u8], identity_kind: &str) -> Option<String> {
-    match identity_kind {
-        "macho-lc-uuid" => parse_macho_uuid(data),
-        "elf-gnu-build-id" => parse_elf_build_id(data),
-        _ => None,
+fn pe_rva_to_offset(
+    data: &[u8],
+    section_offset: usize,
+    section_count: usize,
+    rva: u32,
+) -> Option<usize> {
+    for index in 0..section_count {
+        let offset = section_offset.checked_add(index.checked_mul(40)?)?;
+        let virtual_size = read_u32_le(data, offset + 8)?;
+        let virtual_address = read_u32_le(data, offset + 12)?;
+        let raw_size = read_u32_le(data, offset + 16)?;
+        let raw_offset = read_u32_le(data, offset + 20)?;
+        let span = virtual_size.max(raw_size);
+        if rva >= virtual_address && rva < virtual_address.saturating_add(span) {
+            return usize::try_from(raw_offset.checked_add(rva - virtual_address)?).ok();
+        }
+    }
+    None
+}
+
+fn format_pe_guid(data: &[u8]) -> Option<String> {
+    if data.len() < 16 {
+        return None;
+    }
+    Some(
+        format!(
+            "{:08x}-{:04x}-{:04x}-{}-{}",
+            u32::from_le_bytes(data[0..4].try_into().ok()?),
+            u16::from_le_bytes(data[4..6].try_into().ok()?),
+            u16::from_le_bytes(data[6..8].try_into().ok()?),
+            data[8..10]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            data[10..16]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        )
+        .to_uppercase(),
+    )
+}
+
+fn parse_pe_identity(data: &[u8]) -> Option<(String, String)> {
+    if data.get(0..2)? != b"MZ" {
+        return None;
+    }
+    let pe_offset = usize::try_from(read_u32_le(data, 0x3c)?).ok()?;
+    if data.get(pe_offset..pe_offset + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let machine = read_u16_le(data, pe_offset + 4)?;
+    let section_count = read_u16_le(data, pe_offset + 6)? as usize;
+    let timestamp = read_u32_le(data, pe_offset + 8)?;
+    let optional_size = read_u16_le(data, pe_offset + 20)? as usize;
+    let optional_offset = pe_offset.checked_add(24)?;
+    let section_offset = optional_offset.checked_add(optional_size)?;
+    let magic = read_u16_le(data, optional_offset)?;
+    let directories_offset = optional_offset.checked_add(if magic == 0x20b { 112 } else { 96 })?;
+    let debug_directory = directories_offset.checked_add(6 * 8)?;
+    if let (Some(debug_rva), Some(debug_size)) = (
+        read_u32_le(data, debug_directory),
+        read_u32_le(data, debug_directory + 4),
+    ) {
+        if let Some(debug_offset) = pe_rva_to_offset(data, section_offset, section_count, debug_rva)
+        {
+            let debug_end = debug_offset
+                .saturating_add(debug_size as usize)
+                .min(data.len());
+            let mut offset = debug_offset;
+            while offset.checked_add(28)? <= debug_end {
+                if read_u32_le(data, offset + 12)? == 2 {
+                    let data_size = read_u32_le(data, offset + 16)? as usize;
+                    let data_offset = usize::try_from(read_u32_le(data, offset + 24)?).ok()?;
+                    if data_size >= 24
+                        && data_offset.checked_add(data_size)? <= data.len()
+                        && data.get(data_offset..data_offset + 4)? == b"RSDS"
+                    {
+                        let guid = format_pe_guid(data.get(data_offset + 4..data_offset + 20)?)?;
+                        let age = read_u32_le(data, data_offset + 20)?;
+                        return Some(("pe-codeview-guid-age".to_string(), format!("{guid}-{age}")));
+                    }
+                }
+                offset += 28;
+            }
+        }
+    }
+    let _architecture = machine;
+    Some(("pe-timestamp".to_string(), format!("{timestamp:08x}")))
+}
+
+fn graph_fingerprint(data: &[u8], path: PathBuf) -> GraphInspection {
+    let (format, identity_kind, identity) = if parse_macho_uuid(data).is_some() {
+        (
+            "mach-o".to_string(),
+            "macho-lc-uuid".to_string(),
+            parse_macho_uuid(data).unwrap_or_else(|| "unknown".to_string()),
+        )
+    } else if parse_elf_build_id(data).is_some() {
+        (
+            "elf".to_string(),
+            "elf-gnu-build-id".to_string(),
+            parse_elf_build_id(data).unwrap_or_else(|| "unknown".to_string()),
+        )
+    } else if let Some((identity_kind, identity)) = parse_pe_identity(data) {
+        ("pe".to_string(), identity_kind, identity)
+    } else {
+        (
+            "unknown".to_string(),
+            "unknown".to_string(),
+            "unknown".to_string(),
+        )
+    };
+    GraphInspection {
+        path,
+        format,
+        identity_kind,
+        identity,
+        sha256: format!("{:x}", Sha256::digest(data)),
+        profile: None,
     }
 }
 
 fn inspect_graph_compatibility(
     app_path: &Path,
     logic_version: &str,
-) -> Result<GraphCompatibility, String> {
+) -> Result<GraphInspection, String> {
+    let graph_path = find_graph_binary(app_path)?;
+    let data = fs::read(&graph_path)
+        .map_err(|error| format!("无法读取 GraphServer {}: {error}", graph_path.display()))?;
+    let mut inspection = graph_fingerprint(&data, graph_path);
     let manifest = compatibility_manifest()?;
     let candidates: Vec<_> = manifest
         .profiles
@@ -419,44 +759,18 @@ fn inspect_graph_compatibility(
                 && profile.architecture == compatibility_architecture()
         })
         .collect();
-    if candidates.is_empty() {
-        return Err(format!(
-            "Logic {logic_version} 没有 {} {} 兼容 profile",
-            compatibility_platform(),
-            compatibility_architecture()
-        ));
-    }
-
-    let mut observed = None;
-    for profile in candidates {
-        let graph_path = app_path.join(&profile.graph.relative_path);
-        let data = fs::read(&graph_path)
-            .map_err(|error| format!("无法读取 GraphServer {}: {error}", graph_path.display()))?;
-        let sha256 = format!("{:x}", Sha256::digest(&data));
-        let identity = graph_identity(&data, &profile.graph.identity_kind)
-            .unwrap_or_else(|| "unknown".to_string());
-        if sha256.eq_ignore_ascii_case(&profile.graph.sha256)
-            && identity.eq_ignore_ascii_case(&profile.graph.identity)
-        {
-            if profile.hook.status != "verified" {
-                return Err(format!(
-                    "GraphServer profile {} 尚未完成真机验证: {}",
-                    profile.id, profile.hook.validation
-                ));
-            }
-            return Ok(GraphCompatibility {
-                profile,
-                identity,
-                sha256,
-            });
-        }
-        observed = Some((identity, sha256));
-    }
-    let (identity, sha256) =
-        observed.unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-    Err(format!(
-        "GraphServer 构建不受支持: identity {identity}, sha256 {sha256}"
-    ))
+    inspection.profile = candidates.into_iter().find(|profile| {
+        profile.graph.identity_kind == inspection.identity_kind
+            && profile
+                .graph
+                .identity
+                .eq_ignore_ascii_case(&inspection.identity)
+            && profile
+                .graph
+                .sha256
+                .eq_ignore_ascii_case(&inspection.sha256)
+    });
+    Ok(inspection)
 }
 
 fn collect_child_output(child: &mut Child) -> (String, String) {
@@ -535,25 +849,63 @@ fn inspect_logic_path(app_path: &Path) -> LogicInspection {
         Ok(version) => version,
         Err(error) => return LogicInspection::failure(app_path, None, error),
     };
-    if version != SUPPORTED_LOGIC_VERSION {
-        return LogicInspection::failure(
-            app_path,
-            Some(version),
-            format!("当前 bridge 支持 Logic {SUPPORTED_LOGIC_VERSION}"),
-        );
-    }
     let graph = match inspect_graph_compatibility(app_path, &version) {
         Ok(graph) => graph,
         Err(error) => return LogicInspection::failure(app_path, Some(version), error),
     };
+    let incompatibility = match graph.profile.as_ref() {
+        None => Some(format!(
+            "Logic {version} GraphServer 尚无已验证 profile: {} {} (sha256 {})",
+            graph.identity_kind, graph.identity, graph.sha256
+        )),
+        Some(profile) if profile.hook.status != "verified" => Some(format!(
+            "GraphServer profile {} 尚未完成真机验证: {}",
+            profile.id, profile.hook.validation
+        )),
+        Some(_) => None,
+    };
+    if let Some(error) = incompatibility {
+        return LogicInspection {
+            path: app_path.display().to_string(),
+            version: Some(version),
+            supported: false,
+            error: Some(error),
+            node_version: None,
+            electron_version: None,
+            profile_id: graph.profile.as_ref().map(|profile| profile.id.clone()),
+            graph_path: Some(graph.path.display().to_string()),
+            graph_format: Some(graph.format),
+            graph_identity_kind: Some(graph.identity_kind),
+            graph_identity: Some(graph.identity),
+            graph_sha256: Some(graph.sha256),
+            hook_status: graph
+                .profile
+                .as_ref()
+                .map(|profile| profile.hook.status.clone()),
+        };
+    }
     let executable = logic_executable(app_path);
     if !executable.is_file() {
-        return LogicInspection::failure(
-            app_path,
-            Some(version),
-            format!("Logic 可执行文件不存在: {}", executable.display()),
-        );
+        return LogicInspection {
+            path: app_path.display().to_string(),
+            version: Some(version),
+            supported: false,
+            error: Some(format!("Logic 可执行文件不存在: {}", executable.display())),
+            node_version: None,
+            electron_version: None,
+            profile_id: graph.profile.as_ref().map(|profile| profile.id.clone()),
+            graph_path: Some(graph.path.display().to_string()),
+            graph_format: Some(graph.format),
+            graph_identity_kind: Some(graph.identity_kind),
+            graph_identity: Some(graph.identity),
+            graph_sha256: Some(graph.sha256),
+            hook_status: graph
+                .profile
+                .as_ref()
+                .map(|profile| profile.hook.status.clone()),
+        };
     }
+    let profile = graph.profile.as_ref().expect("verified profile must exist");
     match probe_logic_node(&executable, Duration::from_secs(4)) {
         Ok(versions) => LogicInspection {
             path: app_path.display().to_string(),
@@ -562,12 +914,29 @@ fn inspect_logic_path(app_path: &Path) -> LogicInspection {
             error: None,
             node_version: Some(versions.node),
             electron_version: Some(versions.electron),
-            profile_id: Some(graph.profile.id),
+            profile_id: Some(profile.id.clone()),
+            graph_path: Some(graph.path.display().to_string()),
+            graph_format: Some(graph.format),
+            graph_identity_kind: Some(graph.identity_kind),
             graph_identity: Some(graph.identity),
             graph_sha256: Some(graph.sha256),
-            hook_status: Some(graph.profile.hook.status),
+            hook_status: Some(profile.hook.status.clone()),
         },
-        Err(error) => LogicInspection::failure(app_path, Some(version), error),
+        Err(error) => LogicInspection {
+            path: app_path.display().to_string(),
+            version: Some(version),
+            supported: false,
+            error: Some(error),
+            node_version: None,
+            electron_version: None,
+            profile_id: Some(profile.id.clone()),
+            graph_path: Some(graph.path.display().to_string()),
+            graph_format: Some(graph.format),
+            graph_identity_kind: Some(graph.identity_kind),
+            graph_identity: Some(graph.identity),
+            graph_sha256: Some(graph.sha256),
+            hook_status: Some(profile.hook.status.clone()),
+        },
     }
 }
 
@@ -600,7 +969,44 @@ fn installed_logic_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn installed_logic_candidates() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        roots.push(PathBuf::from(program_files));
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(PathBuf::from(local_app_data));
+    }
+    roots
+        .into_iter()
+        .flat_map(|root| {
+            ["Saleae Logic", "Logic 2", "Logic"]
+                .into_iter()
+                .map(move |name| root.join(name))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn installed_logic_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/opt/Saleae Logic"),
+        PathBuf::from("/opt/Logic"),
+        PathBuf::from("/usr/lib/logic"),
+        PathBuf::from("/usr/local/lib/logic"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        candidates.extend([
+            home.join(".local/share/Logic"),
+            home.join(".local/share/Saleae Logic"),
+        ]);
+    }
+    candidates
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn installed_logic_candidates() -> Vec<PathBuf> {
     Vec::new()
 }
@@ -1079,7 +1485,24 @@ fn bridge_log_directory() -> Result<PathBuf, String> {
         let home = std::env::var_os("HOME").ok_or_else(|| "无法确定用户目录".to_string())?;
         Ok(PathBuf::from(home).join("Library/Application Support/PXLogic/logic2-bridge"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let root = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok_or_else(|| "无法确定 LOCALAPPDATA".to_string())?;
+        Ok(root.join("PXLogic/logic2-bridge"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let root = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+            })
+            .ok_or_else(|| "无法确定 Linux 状态目录".to_string())?;
+        Ok(root.join("pxlogic/logic2-bridge"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Err("当前平台尚未实现日志目录定位".to_string())
     }
@@ -1233,6 +1656,42 @@ mod tests {
         assert_eq!(
             parse_macho_uuid(&data).as_deref(),
             Some("0DF17631-8E04-3501-A7B5-49A62E233FB0")
+        );
+    }
+
+    #[test]
+    fn parses_pe_codeview_identity() {
+        let mut data = vec![0u8; 0x280];
+        data[0..2].copy_from_slice(b"MZ");
+        data[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        data[0x40..0x44].copy_from_slice(b"PE\0\0");
+        data[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
+        data[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
+        data[0x54..0x56].copy_from_slice(&0xf0u16.to_le_bytes());
+        data[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
+        let directory = 0x58 + 112 + 6 * 8;
+        data[directory..directory + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+        data[directory + 4..directory + 8].copy_from_slice(&28u32.to_le_bytes());
+        let section = 0x58 + 0xf0;
+        data[section + 12..section + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+        data[section + 16..section + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+        data[section + 20..section + 24].copy_from_slice(&0x200u32.to_le_bytes());
+        let debug = 0x200;
+        data[debug + 12..debug + 16].copy_from_slice(&2u32.to_le_bytes());
+        data[debug + 16..debug + 20].copy_from_slice(&24u32.to_le_bytes());
+        data[debug + 24..debug + 28].copy_from_slice(&0x240u32.to_le_bytes());
+        data[0x240..0x244].copy_from_slice(b"RSDS");
+        data[0x244..0x254].copy_from_slice(&[
+            0x78, 0x56, 0x34, 0x12, 0xbc, 0x9a, 0xef, 0xbe, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77,
+        ]);
+        data[0x254..0x258].copy_from_slice(&7u32.to_le_bytes());
+        assert_eq!(
+            parse_pe_identity(&data),
+            Some((
+                "pe-codeview-guid-age".to_string(),
+                "12345678-9ABC-BEEF-0011-223344556677-7".to_string()
+            ))
         );
     }
 

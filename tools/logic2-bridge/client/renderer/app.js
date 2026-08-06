@@ -91,7 +91,9 @@ function renderInspection(inspection) {
   const graphIdentity = inspection?.graphIdentity || '';
   elements.graphFingerprint.textContent = graphIdentity || '--';
   elements.graphFingerprint.title = inspection?.graphSha256
-    ? `${inspection.profileId}\n${graphIdentity}\nsha256 ${inspection.graphSha256}`
+    ? `${inspection.profileId || '未匹配 profile'}\n` +
+      `${inspection.graphIdentityKind || 'unknown'} ${graphIdentity}\n` +
+      `${inspection.graphPath || ''}\nsha256 ${inspection.graphSha256}`
     : '';
   elements.compatibility.className = 'compatibility';
   if (!inspection?.path) {

@@ -194,6 +194,157 @@ function inspectGraphBinary(graphPath) {
   };
 }
 
+const GRAPH_SERVER_FILENAMES = new Set([
+  'libgraph_server_shared.dylib',
+  'libgraph_server_shared.so',
+  'libgraph_server_shared.dll',
+  'graph_server_shared.dll',
+]);
+
+function installationRoots(installationPath) {
+  const absolute = path.resolve(installationPath);
+  let root = absolute;
+  try {
+    if (fs.statSync(absolute).isFile()) root = path.dirname(absolute);
+  } catch {
+    root = path.dirname(absolute);
+  }
+  const roots = [];
+  let current = root;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    roots.push(current);
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return [...new Set(roots)];
+}
+
+function knownGraphPaths(root) {
+  return [
+    'Contents/Resources/macos-arm64/libgraph_server_shared.dylib',
+    'Contents/Resources/macos-x64/libgraph_server_shared.dylib',
+    'resources/linux-x64/libgraph_server_shared.so',
+    'usr/lib/logic/resources/linux-x64/libgraph_server_shared.so',
+    'resources/win32-x64/libgraph_server_shared.dll',
+    'resources/windows-x64/libgraph_server_shared.dll',
+    'resources/win-x64/libgraph_server_shared.dll',
+    'resources/win32-x64/graph_server_shared.dll',
+    'resources/windows-x64/graph_server_shared.dll',
+    'resources/win-x64/graph_server_shared.dll',
+  ].map(relative => path.join(root, relative));
+}
+
+function findGraphServerBinary(installationPath) {
+  const roots = installationRoots(installationPath);
+  for (const root of roots) {
+    if (GRAPH_SERVER_FILENAMES.has(path.basename(root))) return root;
+    for (const candidate of knownGraphPaths(root)) {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+    }
+  }
+
+  // Package layouts have changed between Logic releases. Keep the fallback
+  // bounded and skip large application data trees rather than scanning a home
+  // directory when the caller selected an executable inside it.
+  const skipDirectories = new Set([
+    'Analyzers',
+    'app.asar.unpacked',
+    'node_modules',
+    'pythonlibs',
+    'locales',
+  ]);
+  for (const root of roots.slice(0, 1)) {
+    const queue = [{ directory: root, depth: 0 }];
+    const visited = new Set();
+    while (queue.length > 0) {
+      const current = queue.shift();
+      let realPath;
+      try {
+        realPath = fs.realpathSync(current.directory);
+      } catch {
+        continue;
+      }
+      if (visited.has(realPath)) continue;
+      visited.add(realPath);
+      let entries;
+      try {
+        entries = fs.readdirSync(current.directory, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const candidate = path.join(current.directory, entry.name);
+        if (entry.isFile() && GRAPH_SERVER_FILENAMES.has(entry.name)) return candidate;
+        if (entry.isDirectory() && current.depth < 8 && !skipDirectories.has(entry.name)) {
+          queue.push({ directory: candidate, depth: current.depth + 1 });
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function asarEntryBuffer(asarPath, entryPath) {
+  const data = fs.readFileSync(asarPath);
+  if (data.length < 16) throw new Error(`Invalid ASAR header: ${asarPath}`);
+  const headerSize = data.readUInt32LE(4);
+  const jsonSize = data.readUInt32LE(12);
+  const jsonStart = 16;
+  const jsonEnd = jsonStart + jsonSize;
+  if (jsonEnd > data.length || 8 + headerSize > data.length) {
+    throw new Error(`Invalid ASAR header bounds: ${asarPath}`);
+  }
+  const header = JSON.parse(data.subarray(jsonStart, jsonEnd).toString('utf8'));
+  let node = header;
+  for (const segment of entryPath.split('/').filter(Boolean)) {
+    node = node?.files?.[segment];
+  }
+  if (!node || node.files || node.size === undefined || node.offset === undefined) {
+    return null;
+  }
+  const offset = Number(node.offset);
+  const size = Number(node.size);
+  const start = 8 + headerSize + offset;
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(size) ||
+      start < 0 || start + size > data.length) {
+    throw new Error(`Invalid ASAR entry bounds: ${asarPath}:${entryPath}`);
+  }
+  return data.subarray(start, start + size);
+}
+
+function findAsarPaths(installationPath) {
+  const paths = [];
+  for (const root of installationRoots(installationPath).slice(0, 2)) {
+    paths.push(
+      path.join(root, 'Contents/Resources/app.asar'),
+      path.join(root, 'resources/app.asar'),
+      path.join(root, 'usr/lib/logic/resources/app.asar'),
+      path.join(root, 'app.asar'),
+    );
+  }
+  return [...new Set(paths)];
+}
+
+function readLogicVersionFromInstallation(installationPath) {
+  for (const asarPath of findAsarPaths(installationPath)) {
+    if (!fs.existsSync(asarPath)) continue;
+    try {
+      const packageJson = asarEntryBuffer(asarPath, 'package.json');
+      const packageInfo = packageJson && JSON.parse(packageJson.toString('utf8'));
+      if (typeof packageInfo?.version === 'string' && packageInfo.version.trim()) {
+        return packageInfo.version.trim();
+      }
+    } catch {
+      // Continue with another layout candidate. The fingerprint remains useful
+      // even when a vendor-modified ASAR has no readable package metadata.
+    }
+  }
+  const basename = path.basename(path.resolve(installationPath));
+  const match = basename.match(/(?:logic|saleae)[-_ ]?(\d+\.\d+\.\d+)/i);
+  return match ? match[1] : null;
+}
+
 function loadCompatibilityProfiles(profilesPath = DEFAULT_PROFILES_PATH) {
   const manifest = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
   if (manifest.schemaVersion !== 1 || !Array.isArray(manifest.profiles)) {
@@ -230,7 +381,10 @@ function matchCompatibilityProfile({
 
 module.exports = {
   DEFAULT_PROFILES_PATH,
+  asarEntryBuffer,
+  findGraphServerBinary,
   inspectGraphBinary,
+  readLogicVersionFromInstallation,
   loadCompatibilityProfiles,
   matchCompatibilityProfile,
   parseBinaryIdentity,

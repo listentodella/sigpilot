@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "targets": ["nsis", "msi"],
+    "resources": {
+      "../../build/payload/usb_smoke.exe": "target/release/usb_smoke.exe"
+    }
+  }
+}
