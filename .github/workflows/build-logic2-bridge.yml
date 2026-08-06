@@ -482,6 +482,8 @@ jobs:
         run: npm --prefix tools/logic2-bridge/tauri-client ci
 
       - name: Test Linux bridge layers
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
         run: |
           npm --prefix tools/logic2-bridge run check
           npm --prefix tools/logic2-bridge/client run check
@@ -558,6 +560,8 @@ jobs:
         run: npm --prefix tools/logic2-bridge/tauri-client ci
 
       - name: Test Windows bridge layers
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
         run: |
           npm --prefix tools/logic2-bridge run check
           npm --prefix tools/logic2-bridge/client run check
