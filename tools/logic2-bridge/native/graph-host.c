@@ -1036,8 +1036,7 @@ int main(int argc, char **argv) {
       (SetLogFileNameFn)load_symbol(library, "SetLogFileName");
   FlushLogFn flush_log = (FlushLogFn)load_symbol(library, "FlushLog");
 
-  if (!initialize_injection_ring() || !start_injection_stdin_reader() ||
-      !install_injection_hook((void *)create_graph_server)) {
+  if (!initialize_injection_ring() || !start_injection_stdin_reader()) {
     unload_graph_library(library);
     return 1;
   }
@@ -1052,6 +1051,15 @@ int main(int argc, char **argv) {
   void *server = create_graph_server(&port, 100, false, scan_devices, argv[4]);
   if (server == NULL) {
     fprintf(stderr, "[logic2-bridge:native] CreateGraphServer returned NULL\n");
+    unload_graph_library(library);
+    return 1;
+  }
+  // GraphServer construction can execute LogicDeviceNode initialization on
+  // Windows. Patch the capture callback only after construction has finished;
+  // physical scanning is disabled and PXLogic data is not armed yet, so no
+  // capture callback can race this installation.
+  if (!install_injection_hook((void *)create_graph_server)) {
+    destroy_graph_server(server);
     unload_graph_library(library);
     return 1;
   }
