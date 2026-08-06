@@ -1037,7 +1037,8 @@ int main(int argc, char **argv) {
     perror("[logic2-bridge:native] set stdin binary mode");
     return 1;
   }
-  int winsock_status = WSAStartup(MAKEWORD(2, 2), &(WSADATA){0});
+  WSADATA winsock_data;
+  int winsock_status = WSAStartup(MAKEWORD(2, 2), &winsock_data);
   if (winsock_status != 0) {
     fprintf(stderr,
             "[logic2-bridge:native] WSAStartup failed (error %d)\n",
@@ -1045,6 +1046,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   HRESULT com_status = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  bool com_initialized = SUCCEEDED(com_status);
   if (FAILED(com_status) && com_status != RPC_E_CHANGED_MODE) {
     fprintf(stderr,
             "[logic2-bridge:native] CoInitializeEx failed (HRESULT 0x%08lx)\n",
@@ -1133,7 +1135,7 @@ int main(int argc, char **argv) {
   (void)flush_log();
   unload_graph_library(library);
 #if defined(_WIN32)
-  CoUninitialize();
+  if (com_initialized) CoUninitialize();
   WSACleanup();
 #endif
   return 0;
