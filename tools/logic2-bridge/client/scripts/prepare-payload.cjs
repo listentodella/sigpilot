@@ -101,6 +101,7 @@ if (targetSettings.hostCompiler) {
     ? [
       '/nologo',
       '/std:c11',
+      '/experimental:c11atomics',
       '/O2',
       '/W4',
       '/D_CRT_SECURE_NO_WARNINGS',
