@@ -34,9 +34,9 @@ jobs:
       matrix:
         include:
           - os_name: Linux x64
-            runner: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
           - os_name: Windows x64
-            runner: windows-latest
+            runner: [self-hosted, Windows, X64]
           - os_name: macOS arm64
             runner: macos-15
           - os_name: macOS x64
@@ -67,12 +67,12 @@ jobs:
         include:
           - os_name: Linux x64
             artifact: linux-x64
-            runner: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             target: x86_64-unknown-linux-gnu
             binary: usb_smoke
           - os_name: Windows x64
             artifact: windows-x64
-            runner: windows-latest
+            runner: [self-hosted, Windows, X64]
             target: x86_64-pc-windows-msvc
             binary: usb_smoke.exe
           - os_name: macOS arm64
@@ -93,14 +93,25 @@ jobs:
       - name: Install Linux USB build dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            libudev-dev \
-            libusb-1.0-0-dev \
-            libwebkit2gtk-4.1-dev \
+          packages=(
+            libayatana-appindicator3-dev
+            libgtk-3-dev
+            libudev-dev
+            libusb-1.0-0-dev
+            libwebkit2gtk-4.1-dev
             pkg-config
+          )
+          missing_packages=()
+          for package in "${packages[@]}"; do
+            dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii ' \
+              || missing_packages+=("$package")
+          done
+          if (( ${#missing_packages[@]} == 0 )); then
+            echo "Linux USB build dependencies are already installed."
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y "${missing_packages[@]}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -154,9 +165,9 @@ jobs:
       matrix:
         include:
           - os_name: Linux x64
-            runner: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
           - os_name: Windows x64
-            runner: windows-latest
+            runner: [self-hosted, Windows, X64]
           - os_name: macOS arm64
             runner: macos-15
     runs-on: ${{ matrix.runner }}
@@ -167,14 +178,25 @@ jobs:
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            libssl-dev \
+          packages=(
+            libayatana-appindicator3-dev
+            libgtk-3-dev
+            libwebkit2gtk-4.1-dev
+            libxdo-dev
+            libssl-dev
             librsvg2-dev
+          )
+          missing_packages=()
+          for package in "${packages[@]}"; do
+            dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii ' \
+              || missing_packages+=("$package")
+          done
+          if (( ${#missing_packages[@]} == 0 )); then
+            echo "Linux Tauri dependencies are already installed."
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y "${missing_packages[@]}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -201,7 +223,7 @@ jobs:
 
   linux-native-host-check:
     name: Linux GraphServer host compile check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -234,12 +256,12 @@ jobs:
       matrix:
         include:
           - os_name: Linux x64
-            runner: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             package_type: appimage
             package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-linux-x64.AppImage
             artifact: linux-x64
           - os_name: Windows x64
-            runner: ubuntu-latest
+            runner: [self-hosted, Windows, X64]
             package_type: advanced-installer
             package_url: https://downloads2.saleae.com/logic2/Logic-2.4.46-windows-x64.exe
             artifact: windows-x64
@@ -252,12 +274,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "22"
-
-      - name: Install Windows package extraction dependency
-        if: matrix.package_type == 'advanced-installer'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full
 
       - name: Download and extract Linux GraphServer
         if: matrix.package_type == 'appimage'
@@ -274,25 +290,26 @@ jobs:
 
       - name: Download and extract Windows GraphServer
         if: matrix.package_type == 'advanced-installer'
+        shell: pwsh
         run: |
-          curl -L --fail --retry 3 \
-            "${{ matrix.package_url }}" \
-            -o Logic-2.4.46-windows-x64.exe
-          node tools/logic2-bridge/scripts/extract-advanced-installer-cab.cjs \
-            Logic-2.4.46-windows-x64.exe Logic-2.4.46-windows-x64.cab
-          mkdir windows-graph
-          7z e Logic-2.4.46-windows-x64.cab \
-            graph_server_shared.dll_1 -owindows-graph -y
-          node tools/logic2-bridge/scripts/fingerprint-binary.cjs \
-            windows-graph/graph_server_shared.dll_1 \
-            | tee graph-fingerprint-${{ matrix.artifact }}.json
+          & curl.exe -L --fail --retry 3 "${{ matrix.package_url }}" -o Logic-2.4.46-windows-x64.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Logic 2 download failed' }
+          node tools/logic2-bridge/scripts/extract-advanced-installer-cab.cjs Logic-2.4.46-windows-x64.exe Logic-2.4.46-windows-x64.cab
+          New-Item -ItemType Directory -Path windows-graph | Out-Null
+          & expand.exe Logic-2.4.46-windows-x64.cab -F:graph_server_shared.dll_1 windows-graph
+          if ($LASTEXITCODE -ne 0) { throw 'GraphServer CAB extraction failed' }
+          $graph = 'windows-graph/graph_server_shared.dll_1'
+          node tools/logic2-bridge/scripts/fingerprint-binary.cjs $graph | Tee-Object -FilePath graph-fingerprint-${{ matrix.artifact }}.json
+          node tools/logic2-bridge/scripts/locate-windows-on-data-buffer.cjs $graph | Tee-Object -FilePath graph-hook-${{ matrix.artifact }}.json
 
       - name: Upload fingerprint report
         uses: actions/upload-artifact@v7
         continue-on-error: true
         with:
           name: logic2-4-46-graphserver-fingerprint-${{ matrix.artifact }}
-          path: graph-fingerprint-${{ matrix.artifact }}.json
+          path: |
+            graph-fingerprint-${{ matrix.artifact }}.json
+            graph-hook-${{ matrix.artifact }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -329,7 +346,7 @@ jobs:
           target/aarch64-apple-darwin/release/usb_smoke --help \
             | grep -q -- "--live-cross-only"
 
-      - name: Build version-locked GraphServer host
+      - name: Build GraphServer host
         run: |
           mkdir -p tools/logic2-bridge/build
           xcrun clang \
@@ -350,7 +367,7 @@ jobs:
       - name: Build desktop app bundle
         working-directory: tools/logic2-bridge/tauri-client
         run: |
-          npx tauri build --target aarch64-apple-darwin `
+          npx tauri build --target aarch64-apple-darwin \
             --config src-tauri/tauri.macos.conf.json --bundles app
 
       - name: Verify application bundle
@@ -375,7 +392,7 @@ jobs:
       - name: Build DMG installer
         working-directory: tools/logic2-bridge/tauri-client
         run: |
-          npx tauri build --target aarch64-apple-darwin `
+          npx tauri build --target aarch64-apple-darwin \
             --config src-tauri/tauri.macos.conf.json --bundles dmg
 
       - name: Verify DMG installer
@@ -394,24 +411,35 @@ jobs:
   build-linux-x64:
     name: Desktop client (Linux x64, diagnostic)
     needs: [portable-layer, capture-helper, tauri-client-check, linux-native-host-check]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Install Linux build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            libudev-dev \
-            libusb-1.0-0-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            libssl-dev \
-            librsvg2-dev \
+          packages=(
+            libayatana-appindicator3-dev
+            libgtk-3-dev
+            libudev-dev
+            libusb-1.0-0-dev
+            libwebkit2gtk-4.1-dev
+            libxdo-dev
+            libssl-dev
+            librsvg2-dev
             pkg-config
+          )
+          missing_packages=()
+          for package in "${packages[@]}"; do
+            dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii ' \
+              || missing_packages+=("$package")
+          done
+          if (( ${#missing_packages[@]} == 0 )); then
+            echo "Linux build dependencies are already installed."
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y "${missing_packages[@]}"
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -469,7 +497,7 @@ jobs:
   build-windows-x64:
     name: Desktop client (Windows x64, diagnostic)
     needs: [portable-layer, capture-helper, tauri-client-check, linux-native-host-check]
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

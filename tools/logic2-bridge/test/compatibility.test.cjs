@@ -5,7 +5,15 @@ const assert = require('node:assert/strict');
 const {
   loadCompatibilityProfiles,
   parseBinaryIdentity,
+  platformForBinaryFormat,
 } = require('../lib/compatibility.cjs');
+
+test('maps native binary formats to compatibility platforms', () => {
+  assert.equal(platformForBinaryFormat('mach-o'), 'darwin');
+  assert.equal(platformForBinaryFormat('elf'), 'linux');
+  assert.equal(platformForBinaryFormat('pe'), 'win32');
+  assert.equal(platformForBinaryFormat('unknown'), null);
+});
 
 test('parses a Mach-O LC_UUID', () => {
   const buffer = Buffer.alloc(64);

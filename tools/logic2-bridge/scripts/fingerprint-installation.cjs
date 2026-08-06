@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('node:fs');
 const path = require('node:path');
 const {
   findGraphServerBinary,
   inspectGraphBinary,
   loadCompatibilityProfiles,
+  platformForBinaryFormat,
   readLogicVersionFromInstallation,
 } = require('../lib/compatibility.cjs');
 
@@ -23,17 +25,20 @@ function option(name, fallback) {
   return index >= 0 ? process.argv[index + 1] : fallback;
 }
 
-const platform = option('--platform', process.platform);
-const architecture = option(
-  '--architecture',
-  process.arch === 'aarch64' ? 'arm64' : process.arch,
-);
-
-const graphPath = findGraphServerBinary(installationPath);
+let graphPath = findGraphServerBinary(installationPath);
+if (!graphPath && fs.statSync(installationPath).isFile()) {
+  const directFingerprint = inspectGraphBinary(path.resolve(installationPath));
+  if (directFingerprint.format !== 'unknown') graphPath = path.resolve(installationPath);
+}
 if (!graphPath) {
   throw new Error(`GraphServer binary was not found below ${path.resolve(installationPath)}`);
 }
 const fingerprint = inspectGraphBinary(graphPath);
+const platform = option(
+  '--platform',
+  platformForBinaryFormat(fingerprint.format) || process.platform,
+);
+const architecture = option('--architecture', fingerprint.architecture);
 const logicVersion = readLogicVersionFromInstallation(installationPath);
 const profiles = loadCompatibilityProfiles();
 const matches = profiles.filter(profile =>

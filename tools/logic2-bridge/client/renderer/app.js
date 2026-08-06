@@ -105,7 +105,9 @@ function renderInspection(inspection) {
     elements.compatibility.classList.add('compatible');
   } else {
     elements.logicSummary.textContent = inspection.error || '安装不可用';
-    elements.compatibility.textContent = '不兼容';
+    elements.compatibility.textContent = inspection.graphIdentity
+      ? (inspection.hookStatus ? '待验证' : '未收录')
+      : '不兼容';
     elements.compatibility.classList.add('incompatible');
   }
   renderState(currentState);

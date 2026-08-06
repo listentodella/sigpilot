@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -56,6 +57,20 @@ static _Atomic uint64_t dropped_byte_count = 0;
 static _Atomic uint64_t underflow_count = 0;
 
 enum {
+  HOOK_MAX_PROLOGUE_SIZE = 64,
+};
+
+typedef struct {
+  const char *profile_id;
+  const char *graph_identity;
+  size_t on_data_buffer_offset;
+  uint8_t prologue[HOOK_MAX_PROLOGUE_SIZE];
+  size_t prologue_size;
+} HookConfiguration;
+
+static HookConfiguration hook_configuration = {0};
+
+enum {
   INJECTION_RING_CAPACITY = 128u * 1024u * 1024u,
   INJECTION_WAIT_MILLISECONDS = 10000,
   INJECTION_FRAME_HEADER_BYTES = 12,
@@ -67,42 +82,64 @@ enum {
 
 #if defined(__APPLE__) && defined(__aarch64__)
 enum {
-  LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET = 0x1df994,
-  HOOK_PROLOGUE_SIZE = 16,
   ABSOLUTE_BRANCH_SIZE = 16,
 };
 #elif defined(__linux__) && defined(__x86_64__)
 enum {
-  LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET = 0x1df3d10,
-  HOOK_PROLOGUE_SIZE = 17,
   ABSOLUTE_BRANCH_SIZE = 12,
 };
-#endif
-
-#if defined(__APPLE__) && defined(__aarch64__)
-static const uint8_t logic_2_4_46_graph_identity[16] = {
-    0x0d, 0xf1, 0x76, 0x31, 0x8e, 0x04, 0x35, 0x01,
-    0xa7, 0xb5, 0x49, 0xa6, 0x2e, 0x23, 0x3f, 0xb0,
-};
-
-static const uint8_t logic_2_4_46_on_data_buffer_prologue[HOOK_PROLOGUE_SIZE] = {
-    0xff, 0x83, 0x03, 0xd1, 0xf6, 0x57, 0x0b, 0xa9,
-    0xf4, 0x4f, 0x0c, 0xa9, 0xfd, 0x7b, 0x0d, 0xa9,
-};
-#elif defined(__linux__) && defined(__x86_64__)
-static const uint8_t logic_2_4_46_graph_identity[8] = {
-    0xf8, 0x2e, 0x86, 0x83, 0xc4, 0x7f, 0xcd, 0x77,
-};
-
-static const uint8_t logic_2_4_46_on_data_buffer_prologue[HOOK_PROLOGUE_SIZE] = {
-    0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
-    0x53, 0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00,
+#else
+enum {
+  ABSOLUTE_BRANCH_SIZE = 0,
 };
 #endif
 
 static void handle_signal(int signal_number) {
   (void)signal_number;
   stop_requested = 1;
+}
+
+static int hex_digit(char value) {
+  if (value >= '0' && value <= '9') return value - '0';
+  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+  return -1;
+}
+
+static bool configure_hook(const char *profile_id, const char *graph_identity,
+                           const char *offset_text, const char *prologue_hex) {
+  char *end = NULL;
+  errno = 0;
+  unsigned long long offset = strtoull(offset_text, &end, 0);
+  if (errno != 0 || end == offset_text || *end != '\0' || offset > SIZE_MAX) {
+    fprintf(stderr, "[logic2-bridge:inject] invalid hook offset: %s\n", offset_text);
+    return false;
+  }
+
+  size_t hex_length = strlen(prologue_hex);
+  size_t prologue_size = hex_length / 2;
+  if (hex_length == 0 || hex_length % 2 != 0 ||
+      prologue_size < ABSOLUTE_BRANCH_SIZE ||
+      prologue_size > HOOK_MAX_PROLOGUE_SIZE) {
+    fprintf(stderr, "[logic2-bridge:inject] invalid hook prologue length: %zu\n",
+            hex_length);
+    return false;
+  }
+  for (size_t index = 0; index < prologue_size; index += 1) {
+    int high = hex_digit(prologue_hex[index * 2]);
+    int low = hex_digit(prologue_hex[index * 2 + 1]);
+    if (high < 0 || low < 0) {
+      fprintf(stderr, "[logic2-bridge:inject] hook prologue is not hexadecimal\n");
+      return false;
+    }
+    hook_configuration.prologue[index] = (uint8_t)((high << 4) | low);
+  }
+
+  hook_configuration.profile_id = profile_id;
+  hook_configuration.graph_identity = graph_identity;
+  hook_configuration.on_data_buffer_offset = (size_t)offset;
+  hook_configuration.prologue_size = prologue_size;
+  return true;
 }
 
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -130,16 +167,18 @@ static bool verify_graph_uuid(const void *image_base) {
     if (command->cmdsize < sizeof(struct load_command) || command->cmdsize > remaining) break;
     if (command->cmd == LC_UUID && command->cmdsize >= sizeof(struct uuid_command)) {
       const struct uuid_command *uuid_command = (const struct uuid_command *)command;
-      if (memcmp(uuid_command->uuid, logic_2_4_46_graph_identity,
-                 sizeof(logic_2_4_46_graph_identity)) != 0) {
-        char actual[37];
-        format_uuid(uuid_command->uuid, actual);
-        fprintf(stderr, "[logic2-bridge:inject] unsupported GraphServer LC_UUID: %s\n", actual);
+      char actual[37];
+      format_uuid(uuid_command->uuid, actual);
+      if (strcasecmp(actual, hook_configuration.graph_identity) != 0) {
+        fprintf(stderr,
+                "[logic2-bridge:inject] GraphServer identity mismatch: "
+                "expected %s, found %s\n",
+                hook_configuration.graph_identity, actual);
         return false;
       }
       fprintf(stderr,
-              "[logic2-bridge:inject] verified Logic 2.4.46 GraphServer "
-              "0DF17631-8E04-3501-A7B5-49A62E233FB0\n");
+              "[logic2-bridge:inject] verified GraphServer profile %s (%s)\n",
+              hook_configuration.profile_id, actual);
       return true;
     }
     command_data += command->cmdsize;
@@ -174,20 +213,27 @@ static bool verify_graph_build_id(const void *image_base) {
       const uint8_t *next = description + ((header_note->n_descsz + 3u) & ~3u);
       if (next > end) break;
       if (header_note->n_type == NT_GNU_BUILD_ID && header_note->n_namesz >= 3 &&
-          memcmp(name, "GNU", 3) == 0 &&
-          header_note->n_descsz == sizeof(logic_2_4_46_graph_identity)) {
-        if (memcmp(description, logic_2_4_46_graph_identity,
-                   sizeof(logic_2_4_46_graph_identity)) != 0) {
-          fprintf(stderr, "[logic2-bridge:inject] unsupported GraphServer ELF Build ID: ");
-          for (size_t byte = 0; byte < header_note->n_descsz; byte += 1) {
-            fprintf(stderr, "%02x", description[byte]);
-          }
-          fputc('\n', stderr);
+          memcmp(name, "GNU", 3) == 0) {
+        if (header_note->n_descsz == 0 || header_note->n_descsz > 64) {
+          fprintf(stderr, "[logic2-bridge:inject] invalid ELF Build ID length: %u\n",
+                  header_note->n_descsz);
+          return false;
+        }
+        char actual[129];
+        for (size_t byte = 0; byte < header_note->n_descsz; byte += 1) {
+          (void)snprintf(actual + byte * 2, 3, "%02x", description[byte]);
+        }
+        actual[header_note->n_descsz * 2] = '\0';
+        if (strcasecmp(actual, hook_configuration.graph_identity) != 0) {
+          fprintf(stderr,
+                  "[logic2-bridge:inject] GraphServer identity mismatch: "
+                  "expected %s, found %s\n",
+                  hook_configuration.graph_identity, actual);
           return false;
         }
         fprintf(stderr,
-                "[logic2-bridge:inject] verified Logic 2.4.46 GraphServer "
-                "ELF Build ID f82e8683c47fcd77\n");
+                "[logic2-bridge:inject] verified GraphServer profile %s (%s)\n",
+                hook_configuration.profile_id, actual);
         return true;
       }
       note = next;
@@ -445,10 +491,12 @@ static void write_absolute_branch(uint8_t *destination, const void *target) {
   memcpy(destination + 8, &target, sizeof(target));
 }
 
-static bool set_code_page_protection(void *address, vm_prot_t protection) {
+static bool set_code_page_protection(void *address, size_t length, vm_prot_t protection) {
   const vm_size_t page_size = (vm_size_t)getpagesize();
   const vm_address_t page = (vm_address_t)address & ~(page_size - 1);
-  return vm_protect(mach_task_self(), page, page_size, false, protection) == KERN_SUCCESS;
+  const vm_address_t end =
+      ((vm_address_t)address + length + page_size - 1) & ~(page_size - 1);
+  return vm_protect(mach_task_self(), page, end - page, false, protection) == KERN_SUCCESS;
 }
 #elif defined(__linux__) && defined(__x86_64__)
 static void write_absolute_branch(uint8_t *destination, const void *target) {
@@ -517,26 +565,28 @@ static bool install_injection_hook(void *exported_graph_symbol) {
   }
   if (!verify_graph_uuid(image_info.dli_fbase)) return false;
 
-  uint8_t *target = (uint8_t *)image_info.dli_fbase + LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET;
-  if (memcmp(target, logic_2_4_46_on_data_buffer_prologue,
-             sizeof(logic_2_4_46_on_data_buffer_prologue)) != 0) {
+  uint8_t *target =
+      (uint8_t *)image_info.dli_fbase + hook_configuration.on_data_buffer_offset;
+  if (memcmp(target, hook_configuration.prologue,
+             hook_configuration.prologue_size) != 0) {
     fprintf(stderr,
             "[logic2-bridge:inject] unsupported GraphServer: OnDataBuffer "
-            "prologue mismatch at +0x%x\n",
-            LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET);
+            "prologue mismatch at +0x%llx\n",
+            (unsigned long long)hook_configuration.on_data_buffer_offset);
     return false;
   }
 
-  const size_t trampoline_size = HOOK_PROLOGUE_SIZE + ABSOLUTE_BRANCH_SIZE;
+  const size_t trampoline_size =
+      hook_configuration.prologue_size + ABSOLUTE_BRANCH_SIZE;
   uint8_t *trampoline = mmap(NULL, trampoline_size, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANON, -1, 0);
   if (trampoline == MAP_FAILED) {
     perror("[logic2-bridge:inject] mmap trampoline");
     return false;
   }
-  memcpy(trampoline, target, HOOK_PROLOGUE_SIZE);
-  write_absolute_branch(trampoline + HOOK_PROLOGUE_SIZE,
-                        target + HOOK_PROLOGUE_SIZE);
+  memcpy(trampoline, target, hook_configuration.prologue_size);
+  write_absolute_branch(trampoline + hook_configuration.prologue_size,
+                        target + hook_configuration.prologue_size);
   sys_icache_invalidate(trampoline, trampoline_size);
   if (mprotect(trampoline, trampoline_size, PROT_READ | PROT_EXEC) != 0) {
     perror("[logic2-bridge:inject] mprotect trampoline");
@@ -545,19 +595,21 @@ static bool install_injection_hook(void *exported_graph_symbol) {
   }
   original_on_data_buffer = (OnDataBufferFn)trampoline;
 
-  if (!set_code_page_protection(target, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY)) {
+  if (!set_code_page_protection(target, hook_configuration.prologue_size,
+                                VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY)) {
     fprintf(stderr, "[logic2-bridge:inject] could not make GraphServer code writable\n");
     munmap(trampoline, trampoline_size);
     original_on_data_buffer = NULL;
     return false;
   }
   write_absolute_branch(target, (const void *)&inject_capture_data);
-  sys_icache_invalidate(target, HOOK_PROLOGUE_SIZE);
-  if (!set_code_page_protection(target, VM_PROT_READ | VM_PROT_EXECUTE)) {
+  sys_icache_invalidate(target, hook_configuration.prologue_size);
+  if (!set_code_page_protection(target, hook_configuration.prologue_size,
+                                VM_PROT_READ | VM_PROT_EXECUTE)) {
     fprintf(stderr, "[logic2-bridge:inject] warning: could not restore code protection\n");
   }
-  fprintf(stderr, "[logic2-bridge:inject] installed Logic 2.4.46 PXLogic hook at %p\n",
-          (void *)target);
+  fprintf(stderr, "[logic2-bridge:inject] installed profile %s PXLogic hook at %p\n",
+          hook_configuration.profile_id, (void *)target);
   return true;
 #elif defined(__linux__) && defined(__x86_64__)
   Dl_info image_info;
@@ -567,26 +619,28 @@ static bool install_injection_hook(void *exported_graph_symbol) {
   }
   if (!verify_graph_build_id(image_info.dli_fbase)) return false;
 
-  uint8_t *target = (uint8_t *)image_info.dli_fbase + LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET;
-  if (memcmp(target, logic_2_4_46_on_data_buffer_prologue,
-             sizeof(logic_2_4_46_on_data_buffer_prologue)) != 0) {
+  uint8_t *target =
+      (uint8_t *)image_info.dli_fbase + hook_configuration.on_data_buffer_offset;
+  if (memcmp(target, hook_configuration.prologue,
+             hook_configuration.prologue_size) != 0) {
     fprintf(stderr,
             "[logic2-bridge:inject] unsupported GraphServer: OnDataBuffer "
-            "prologue mismatch at +0x%x\n",
-            LOGIC_2_4_46_ON_DATA_BUFFER_OFFSET);
+            "prologue mismatch at +0x%llx\n",
+            (unsigned long long)hook_configuration.on_data_buffer_offset);
     return false;
   }
 
-  const size_t trampoline_size = HOOK_PROLOGUE_SIZE + ABSOLUTE_BRANCH_SIZE;
+  const size_t trampoline_size =
+      hook_configuration.prologue_size + ABSOLUTE_BRANCH_SIZE;
   uint8_t *trampoline = mmap(NULL, trampoline_size, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (trampoline == MAP_FAILED) {
     perror("[logic2-bridge:inject] mmap trampoline");
     return false;
   }
-  memcpy(trampoline, target, HOOK_PROLOGUE_SIZE);
-  write_absolute_branch(trampoline + HOOK_PROLOGUE_SIZE,
-                        target + HOOK_PROLOGUE_SIZE);
+  memcpy(trampoline, target, hook_configuration.prologue_size);
+  write_absolute_branch(trampoline + hook_configuration.prologue_size,
+                        target + hook_configuration.prologue_size);
   __builtin___clear_cache((char *)trampoline, (char *)trampoline + trampoline_size);
   if (mprotect(trampoline, trampoline_size, PROT_READ | PROT_EXEC) != 0) {
     perror("[logic2-bridge:inject] mprotect trampoline");
@@ -595,7 +649,7 @@ static bool install_injection_hook(void *exported_graph_symbol) {
   }
   original_on_data_buffer = (OnDataBufferFn)trampoline;
 
-  if (!set_code_page_protection(target, HOOK_PROLOGUE_SIZE,
+  if (!set_code_page_protection(target, hook_configuration.prologue_size,
                                 PROT_READ | PROT_WRITE | PROT_EXEC)) {
     perror("[logic2-bridge:inject] mprotect GraphServer code");
     munmap(trampoline, trampoline_size);
@@ -604,15 +658,16 @@ static bool install_injection_hook(void *exported_graph_symbol) {
   }
   write_absolute_branch(target, (const void *)&inject_capture_data);
   memset(target + ABSOLUTE_BRANCH_SIZE, 0x90,
-         HOOK_PROLOGUE_SIZE - ABSOLUTE_BRANCH_SIZE);
-  __builtin___clear_cache((char *)target, (char *)target + HOOK_PROLOGUE_SIZE);
-  if (!set_code_page_protection(target, HOOK_PROLOGUE_SIZE, PROT_READ | PROT_EXEC)) {
+         hook_configuration.prologue_size - ABSOLUTE_BRANCH_SIZE);
+  __builtin___clear_cache((char *)target,
+                          (char *)target + hook_configuration.prologue_size);
+  if (!set_code_page_protection(target, hook_configuration.prologue_size,
+                                PROT_READ | PROT_EXEC)) {
     fprintf(stderr, "[logic2-bridge:inject] warning: could not restore code protection\n");
   }
   fprintf(stderr,
-          "[logic2-bridge:inject] installed unvalidated Linux Logic 2.4.46 "
-          "PXLogic hook at %p\n",
-          (void *)target);
+          "[logic2-bridge:inject] installed profile %s PXLogic hook at %p\n",
+          hook_configuration.profile_id, (void *)target);
   return true;
 #else
   (void)exported_graph_symbol;
@@ -634,14 +689,16 @@ static uint32_t parse_port(const char *value) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 7) {
+  if (argc != 11) {
     fprintf(stderr,
             "Usage: %s <graph-library> <python-home> <log-path> "
-            "<calibration-root> <port> <scan-devices>\n",
+            "<calibration-root> <port> <scan-devices> <profile-id> "
+            "<graph-identity> <hook-offset> <hook-prologue-hex>\n",
             argv[0]);
     return 2;
   }
   setvbuf(stdout, NULL, _IONBF, 0);
+  if (!configure_hook(argv[7], argv[8], argv[9], argv[10])) return 2;
   if (setenv("SALEAE_PYTHONHOME", argv[2], 1) != 0) {
     perror("[logic2-bridge:native] setenv SALEAE_PYTHONHOME");
     return 1;

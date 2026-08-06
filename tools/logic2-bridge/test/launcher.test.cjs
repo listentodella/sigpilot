@@ -2,7 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { logicProcessEnvironment, parseArguments } = require('../index.cjs');
+const {
+  logicProcessEnvironment,
+  nativeHookArguments,
+  parseArguments,
+} = require('../index.cjs');
 
 test('uses an automatically allocated public port by default', () => {
   assert.equal(parseArguments([]).port, 0);
@@ -20,4 +24,19 @@ test('does not force the official Electron app into Node mode', () => {
     PATH: '/usr/bin',
   });
   assert.deepEqual(environment, { PATH: '/usr/bin' });
+});
+
+test('passes a matched profile to the data-driven native host', () => {
+  assert.deepEqual(nativeHookArguments({
+    compatibility: {
+      profile: {
+        id: 'logic-test',
+        graph: { identity: 'ABCDEF01' },
+        hook: {
+          onDataBufferOffset: '0x1234',
+          prologueHex: '554889e5',
+        },
+      },
+    },
+  }), ['logic-test', 'ABCDEF01', '0x1234', '554889e5']);
 });

@@ -20,7 +20,6 @@ const { startWebSocketProxy } = require('./lib/websocket-proxy.cjs');
 
 const bridgeRoot = __dirname;
 const pxlogicRoot = path.resolve(bridgeRoot, '..', '..');
-const SUPPORTED_LOGIC_VERSION = '2.4.46';
 
 function parseArguments(argv) {
   const result = {
@@ -207,12 +206,6 @@ function resolveRuntime(options) {
   requirePath(executable, 'Logic executable', 'file');
   requirePath(sharedLibrary, 'GraphServer library', 'file');
   requirePath(pythonHome, 'Logic Python runtime', 'directory');
-  if (version !== SUPPORTED_LOGIC_VERSION) {
-    throw new Error(
-      `Unsupported Logic version ${version}. This hook currently supports only ` +
-      `${SUPPORTED_LOGIC_VERSION}; refusing to patch an unknown GraphServer build.`,
-    );
-  }
   const compatibility = matchCompatibilityProfile({
     logicVersion: version,
     platform: process.platform,
@@ -222,7 +215,8 @@ function resolveRuntime(options) {
   if (!compatibility.profile) {
     const identity = compatibility.fingerprint.identity || 'unknown';
     throw new Error(
-      `Unsupported GraphServer identity ${compatibility.fingerprint.identityKind || 'unknown'} ` +
+      `Unsupported Logic ${version} GraphServer identity ` +
+      `${compatibility.fingerprint.identityKind || 'unknown'} ` +
       `${identity} (sha256 ${compatibility.fingerprint.sha256}); refusing to patch an unverified build.`,
     );
   }
@@ -232,7 +226,24 @@ function resolveRuntime(options) {
       `${compatibility.profile.hook.validation}`,
     );
   }
+  const hook = compatibility.profile.hook;
+  if (!/^0x[0-9a-f]+$/i.test(hook.onDataBufferOffset || '')) {
+    throw new Error(`GraphServer profile ${compatibility.profile.id} has an invalid hook offset`);
+  }
+  if (!/^(?:[0-9a-f]{2})+$/i.test(hook.prologueHex || '')) {
+    throw new Error(`GraphServer profile ${compatibility.profile.id} has an invalid hook prologue`);
+  }
   return { appPath, version, runtimeRoot, executable, sharedLibrary, pythonHome, compatibility };
+}
+
+function nativeHookArguments(runtime) {
+  const profile = runtime.compatibility.profile;
+  return [
+    profile.id,
+    profile.graph.identity,
+    profile.hook.onDataBufferOffset,
+    profile.hook.prologueHex,
+  ];
 }
 
 function ensureNativeHost() {
@@ -376,6 +387,7 @@ async function main() {
     calibrationRoot,
     String(backendPort),
     options.scanSaleaeDevices ? '1' : '0',
+    ...nativeHookArguments(runtime),
   ], {
     cwd: stateRoot,
     env: process.env,
@@ -448,9 +460,9 @@ async function main() {
 }
 
 module.exports = {
-  SUPPORTED_LOGIC_VERSION,
   installedAppCandidates,
   logicProcessEnvironment,
+  nativeHookArguments,
   parseArguments,
   readAppVersion,
   resolveAppPath,

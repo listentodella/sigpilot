@@ -78,19 +78,14 @@ function saveSettings(value) {
 function inspectLogicApp(appPath) {
   if (!appPath) return { path: '', version: null, supported: false, error: '未选择 Logic 2' };
   const resolvedPath = path.resolve(appPath);
+  let version = null;
   try {
     const api = bridgeApi();
-    const version = api.readAppVersion(resolvedPath);
-    const supported = version === api.SUPPORTED_LOGIC_VERSION;
-    let error = null;
-    if (supported) {
-      api.resolveRuntime({ appPath: resolvedPath });
-    } else {
-      error = `当前 bridge 支持 Logic ${api.SUPPORTED_LOGIC_VERSION}`;
-    }
-    return { path: resolvedPath, version, supported, error };
+    version = api.readAppVersion(resolvedPath);
+    api.resolveRuntime({ appPath: resolvedPath });
+    return { path: resolvedPath, version, supported: true, error: null };
   } catch (error) {
-    return { path: resolvedPath, version: null, supported: false, error: error.message };
+    return { path: resolvedPath, version, supported: false, error: error.message };
   }
 }
 

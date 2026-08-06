@@ -5,10 +5,9 @@ application. It keeps Logic 2's GraphServer, renderer, digital trigger, glitch
 filter, analyzers, measurements, markers, and `.sal` session handling intact.
 
 The bridge is intentionally outside `saleae-priv`. The desktop client contains
-its own Electron/Node runtime, the PXLogic `usb_smoke` binary, bitstreams,
-firmware, and the version-locked native host. It loads
-`libgraph_server_shared.dylib` and `pythonlibs` directly from the user's
-official Logic app.
+the PXLogic `usb_smoke` binary, bitstreams, firmware, and the platform native
+host. It reuses the Electron/Node runtime, GraphServer, and Python runtime from
+the user's official Logic installation instead of packaging a second runtime.
 
 ## Support boundary
 
@@ -16,7 +15,9 @@ The native callback hook is currently verified for the official macOS arm64
 Logic `2.4.46` GraphServer. The hook checks the GraphServer Mach-O UUID,
 function prologue, and SHA-256 before patching; an unknown build is refused
 instead of being patched optimistically. Supporting another Logic version
-requires a new verified hook record and a separate validation run.
+requires a new verified profile and a separate validation run, but no native
+host source change when the existing platform ABI and patch strategy still
+apply.
 
 | Layer | macOS arm64 | macOS x64 | Windows x64 | Linux x64 |
 | --- | --- | --- | --- | --- |
@@ -51,19 +52,23 @@ identity when present (falling back to the PE timestamp for diagnostics).
 These identifiers are not expected to be equal across platforms, even when
 the Logic application version is the same.
 
-The profile is selected from the GraphServer binary in the user-selected
-installation at startup. A version string alone never authorizes patching.
-The manifest can detect a changed binary, but it cannot invent a safe callback
-offset for an unknown future build.
+The profile is selected at startup from the Logic version and the GraphServer
+binary in the user-selected installation. The client extracts the native
+identity and SHA-256 directly; the native host then receives the selected
+identity, callback offset, and prologue as runtime data. A version string or a
+dynamically extracted UUID/Build ID/CodeView identity alone never authorizes
+patching. The manifest can detect a changed binary, but it cannot invent a safe
+callback offset or prove the ABI for an unknown future build.
 
 ## Continuous integration
 
 `.github/workflows/build-logic2-bridge.yml` checks the portable bridge layer and
-builds the PXLogic `usb_smoke` helper on GitHub-hosted Windows, Linux, macOS
-Intel, and macOS Apple Silicon runners. The helper jobs publish prerequisite
-artifacts with the hardware resources for platform-porting and diagnostics.
-They are not complete Logic bridges. The workflow also builds a runnable
-`pxlogic-logic2-bridge-client-macos-arm64` artifact containing a Tauri DMG.
+builds the PXLogic `usb_smoke` helper on self-hosted Windows x64 and Linux x64
+runners plus GitHub-hosted macOS Intel and Apple Silicon runners. The helper
+jobs publish prerequisite artifacts with the hardware resources for
+platform-porting and diagnostics. They are not complete Logic bridges. The
+workflow builds a runnable `pxlogic-logic2-bridge-client-macos-arm64` Tauri DMG
+and diagnostic Linux AppImage/DEB and Windows NSIS/MSI packages.
 The application bundle contains:
 
 - the lightweight Tauri desktop launcher (it reuses the selected Logic app's
@@ -72,18 +77,21 @@ The application bundle contains:
 - the release `usb_smoke` capture helper;
 - the PXLogic FPGA bitstreams and MCU firmware used by that helper.
 
-The archive deliberately does not contain Saleae binaries. At runtime it loads
-GraphServer and the Python runtime from the user's official Logic 2.4.46 app.
-Windows and Linux artifacts will be added only after their native GraphServer
-hooks have independent fingerprints and live-capture validation.
+The packages deliberately do not contain Saleae binaries. At runtime they load
+GraphServer and the Python runtime from the user's selected official Logic
+installation. The Windows package does not yet contain a native GraphServer
+host, and the Linux hook remains pending live validation, so those artifacts
+are diagnostic builds rather than supported live bridges.
 
 The workflow has a manual `analyze_official_packages` input. When enabled,
 GitHub downloads the official Logic 2.4.46 Linux AppImage and Windows
 installer, extracts the platform GraphServer, and uploads JSON fingerprint
-reports. The Windows extractor reverses the Advanced Installer first-sector
-XOR and then uses `7z` to unpack the embedded CAB; it does not execute or
-silently install the package. The reports contain no Saleae binaries and are
-retained only as short-lived CI artifacts.
+reports. The Windows job also derives an `OnDataBuffer` candidate and prologue
+from signature-string references and the PE runtime-function table. Its
+extractor reverses the Advanced Installer first-sector XOR and uses Windows'
+built-in CAB extractor; it does not execute or silently install the package.
+The reports contain no Saleae binaries and are retained only as short-lived CI
+artifacts.
 
 ## Desktop client
 
@@ -93,7 +101,8 @@ Logic. It displays the detected version, accepts a manually entered or selected
 `.app` path, remembers the settings, and remains available from the macOS menu
 bar while its window is hidden.
 
-Click `Start Logic 2` after a compatible Logic `2.4.46` installation is shown.
+Click `Start Logic 2` after an installation matching a verified compatibility
+profile is shown.
 The client launches Logic with the required `--useExistingGraph` and
 `--graphPort` arguments. In Logic 2 select the Demo Logic Pro 16 device as the
 session device.

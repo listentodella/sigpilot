@@ -184,6 +184,13 @@ function parseBinaryIdentity(buffer) {
   };
 }
 
+function platformForBinaryFormat(format) {
+  if (format === 'mach-o') return 'darwin';
+  if (format === 'elf') return 'linux';
+  if (format === 'pe') return 'win32';
+  return null;
+}
+
 function inspectGraphBinary(graphPath) {
   const buffer = fs.readFileSync(graphPath);
   return {
@@ -388,4 +395,5 @@ module.exports = {
   loadCompatibilityProfiles,
   matchCompatibilityProfile,
   parseBinaryIdentity,
+  platformForBinaryFormat,
 };
