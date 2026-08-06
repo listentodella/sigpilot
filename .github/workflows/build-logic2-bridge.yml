@@ -528,8 +528,16 @@ jobs:
           test -x "dist/PXLogic-Bridge-linux-x86_64.AppImage"
           tar -tzf "dist/pxlogic-logic2-bridge-linux-x64.tar.gz" \
             | grep -q '^PXLogic-Bridge-linux-x86_64.AppImage$'
+          {
+            echo '### Linux portable artifacts'
+            echo '```text'
+            realpath "dist/PXLogic-Bridge-linux-x86_64.AppImage"
+            realpath "dist/pxlogic-logic2-bridge-linux-x64.tar.gz"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Linux diagnostic client
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: pxlogic-logic2-bridge-client-linux-x64-portable
@@ -665,8 +673,15 @@ jobs:
           }
           Compress-Archive -Path (Join-Path $stage '*') `
             -DestinationPath 'dist/pxlogic-logic2-bridge-windows-x64.zip' -Force
+          @(
+            '### Windows portable artifact'
+            '```text'
+            (Resolve-Path 'dist/pxlogic-logic2-bridge-windows-x64.zip').Path
+            '```'
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
       - name: Upload Windows portable client
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: pxlogic-logic2-bridge-client-windows-x64-portable
