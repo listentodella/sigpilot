@@ -4,6 +4,15 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
+let rawFs = fs;
+try {
+  // Electron patches `fs` to expose ASAR files as directories.  `original-fs`
+  // is required when the archive itself must be fingerprinted or parsed.
+  rawFs = require('original-fs');
+} catch {
+  // Ordinary Node does not provide Electron's original-fs module.
+}
+
 const DEFAULT_PROFILES_PATH = path.join(
   __dirname,
   '..',
@@ -293,7 +302,7 @@ function findGraphServerBinary(installationPath) {
 }
 
 function asarEntryBuffer(asarPath, entryPath) {
-  const data = fs.readFileSync(asarPath);
+  const data = rawFs.readFileSync(asarPath);
   if (data.length < 16) throw new Error(`Invalid ASAR header: ${asarPath}`);
   const headerSize = data.readUInt32LE(4);
   const jsonSize = data.readUInt32LE(12);
