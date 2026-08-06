@@ -6,6 +6,7 @@ const {
   logicProcessEnvironment,
   nativeHookArguments,
   parseArguments,
+  resolveRuntimeVersion,
 } = require('../index.cjs');
 
 test('uses an automatically allocated public port by default', () => {
@@ -21,6 +22,13 @@ test('accepts a preferred public port', () => {
 test('requires an explicit opt-in for pending live-validation profiles', () => {
   assert.equal(parseArguments(['--allow-pending-profile']).allowPendingProfile, true);
   assert.equal(parseArguments([]).allowPendingProfile, false);
+});
+
+test('uses exact profile metadata only when installation metadata is unavailable', () => {
+  const profile = { logicVersion: '2.4.46' };
+  assert.equal(resolveRuntimeVersion('2.5.0', profile), '2.5.0');
+  assert.equal(resolveRuntimeVersion(undefined, profile), '2.4.46');
+  assert.equal(resolveRuntimeVersion(undefined, null), 'unknown');
 });
 
 test('does not force the official Electron app into Node mode', () => {

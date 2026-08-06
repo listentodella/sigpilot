@@ -201,9 +201,25 @@ function logicExecutable(appPath) {
   return candidates.find(candidate => fs.existsSync(candidate)) || candidates[0];
 }
 
+function resolveRuntimeVersion(detectedVersion, profile) {
+  if (typeof detectedVersion === 'string' && detectedVersion.trim()) {
+    return detectedVersion.trim();
+  }
+  if (typeof profile?.logicVersion === 'string' && profile.logicVersion.trim()) {
+    return profile.logicVersion.trim();
+  }
+  return 'unknown';
+}
+
 function resolveRuntime(options) {
   const appPath = resolveAppPath(options.appPath);
-  const version = readAppVersion(appPath);
+  let detectedVersion;
+  let versionError;
+  try {
+    detectedVersion = readAppVersion(appPath);
+  } catch (error) {
+    versionError = error;
+  }
   const executable = logicExecutable(appPath);
   const sharedLibrary = findGraphServerBinary(appPath);
   if (!sharedLibrary) {
@@ -215,17 +231,25 @@ function resolveRuntime(options) {
   requirePath(sharedLibrary, 'GraphServer library', 'file');
   requirePath(pythonHome, 'Logic Python runtime', 'directory');
   const compatibility = matchCompatibilityProfile({
-    logicVersion: version,
+    logicVersion: detectedVersion,
     platform: process.platform,
     architecture: process.arch,
     graphPath: sharedLibrary,
   });
   if (!compatibility.profile) {
     const identity = compatibility.fingerprint.identity || 'unknown';
+    const version = resolveRuntimeVersion(detectedVersion, null);
     throw new Error(
       `Unsupported Logic ${version} GraphServer identity ` +
       `${compatibility.fingerprint.identityKind || 'unknown'} ` +
       `${identity} (sha256 ${compatibility.fingerprint.sha256}); refusing to patch an unverified build.`,
+    );
+  }
+  const version = resolveRuntimeVersion(detectedVersion, compatibility.profile);
+  if (!detectedVersion) {
+    console.warn(
+      `[logic2-bridge] ${versionError?.message || 'Logic version metadata was unavailable'}; ` +
+      `using exact GraphServer profile metadata (${version})`,
     );
   }
   const pendingValidation =
@@ -494,6 +518,7 @@ module.exports = {
   readAppVersion,
   resolveAppPath,
   resolveRuntime,
+  resolveRuntimeVersion,
 };
 
 if (require.main === module) {
