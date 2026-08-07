@@ -122,6 +122,7 @@ function startPxlogicFeeder(options, host, captureSettings) {
       PXLOGIC_MCU_FIRMWARE: options.firmware,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: process.platform === 'win32',
   });
 
   let stopRequested = false;

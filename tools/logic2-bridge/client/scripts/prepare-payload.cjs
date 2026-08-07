@@ -8,6 +8,12 @@ const repositoryRoot = path.resolve(__dirname, '..', '..', '..', '..');
 const bridgeRoot = path.join(repositoryRoot, 'tools', 'logic2-bridge');
 const payloadRoot = path.join(bridgeRoot, 'build', 'payload');
 
+function windowsHostCompiler() {
+  const toolsRoot = process.env.VCToolsInstallDir;
+  if (!toolsRoot) return 'cl.exe';
+  return path.join(toolsRoot, 'bin', 'Hostx64', 'x64', 'cl.exe');
+}
+
 const target = process.env.TAURI_TARGET || process.env.TARGET || (() => {
   if (process.platform === 'darwin') {
     return process.arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
@@ -42,7 +48,7 @@ const targetSettings = {
   'x86_64-pc-windows-msvc': {
     helper: 'usb_smoke.exe',
     nativeHost: 'graph-host.exe',
-    hostCompiler: 'cl',
+    hostCompiler: windowsHostCompiler(),
     hostArgs: [],
     architecture: 'x64',
   },
@@ -59,8 +65,11 @@ function run(command, args) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (result.status !== 0) {
+    const failure = result.error
+      ? `${result.error.code || result.error.name}: ${result.error.message}`
+      : (result.stderr || result.stdout || `process exited with status ${result.status}`);
     throw new Error(
-      `${command} ${args.join(' ')} failed:\n${result.stderr || result.stdout}`,
+      `${command} ${args.join(' ')} failed:\n${failure}`,
     );
   }
   if (result.stdout) process.stdout.write(result.stdout);
@@ -128,6 +137,7 @@ if (targetSettings.hostCompiler) {
     fs.chmodSync(path.join(bridgeRoot, 'build', targetSettings.nativeHost), 0o755);
   }
 }
+
 
 const helperHelp = spawnSync(helperDestination, ['--help'], { encoding: 'utf8' });
 if (helperHelp.status !== 0 || !helperHelp.stdout.includes('--live-cross-only')) {

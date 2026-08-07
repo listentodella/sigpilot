@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1351,8 +1351,18 @@ fn configure_child_process(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_os = "windows")))]
 fn configure_child_process(_command: &mut Command) {}
+
+#[cfg(target_os = "windows")]
+fn configure_child_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    // The Bridge is launched through Logic's Electron binary in Node mode.
+    // It has piped stdout/stderr for the in-app log panel, so a separate
+    // Windows console is neither useful nor expected.
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+}
 
 #[cfg(unix)]
 fn terminate_process(pid: u32, force: bool) -> Result<(), String> {

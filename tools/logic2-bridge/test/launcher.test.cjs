@@ -12,6 +12,7 @@ const {
   parseArguments,
   resolveRuntimeVersion,
   waitForNativeGraph,
+  windowsMaximizeScript,
 } = require('../index.cjs');
 
 test('uses an automatically allocated public port by default', () => {
@@ -42,6 +43,13 @@ test('does not force the official Electron app into Node mode', () => {
     PATH: '/usr/bin',
   });
   assert.deepEqual(environment, { PATH: '/usr/bin' });
+});
+
+test('waits for the launched Logic window before maximizing it on Windows', () => {
+  const script = windowsMaximizeScript(4321);
+  assert.match(script, /Get-Process -Id 4321/);
+  assert.match(script, /MainWindowHandle/);
+  assert.match(script, /ShowWindowAsync\([^\n]+, 3\)/);
 });
 
 test('accepts a bounded native GraphServer startup timeout override', () => {
@@ -85,4 +93,12 @@ test('accepts a listening GraphServer when CreateGraphServer has not returned', 
   host.stdout = new PassThrough();
   const port = await waitForNativeGraph(host, address.port, 1000);
   assert.equal(port, address.port);
+});
+
+test('accepts an auto-assigned native GraphServer port', async () => {
+  const host = new EventEmitter();
+  host.stdout = new PassThrough();
+  const ready = waitForNativeGraph(host, 0, 1000);
+  host.stdout.write('GRAPH_WS_READY ws://127.0.0.1:49152/saleae\n');
+  assert.equal(await ready, 49152);
 });

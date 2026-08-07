@@ -4,9 +4,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <objbase.h>
 #include <fcntl.h>
 #include <io.h>
 #include <process.h>
+#include <wchar.h>
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Ole32.lib")
 #else
@@ -123,7 +125,10 @@ enum {
 };
 #elif defined(_WIN32) && defined(_M_X64)
 enum {
-  ABSOLUTE_BRANCH_SIZE = 12,
+  // ff 25 00 00 00 00 + 64-bit target: an indirect RIP-relative jump which
+  // preserves RAX. The verified OnDataBuffer prologue leaves RAX holding RSP
+  // for the function body, so the 12-byte movabs/jmp sequence is invalid here.
+  ABSOLUTE_BRANCH_SIZE = 14,
 };
 #else
 enum {
@@ -677,8 +682,7 @@ static bool set_code_page_protection(void *address, size_t length, vm_prot_t pro
       ((vm_address_t)address + length + page_size - 1) & ~(page_size - 1);
   return vm_protect(mach_task_self(), page, end - page, false, protection) == KERN_SUCCESS;
 }
-#elif (defined(__linux__) && defined(__x86_64__)) || \
-    (defined(_WIN32) && defined(_M_X64))
+#elif defined(__linux__) && defined(__x86_64__)
 static void write_absolute_branch(uint8_t *destination, const void *target) {
   const uint64_t address = (uint64_t)(uintptr_t)target;
   destination[0] = 0x48;  // movabs rax, imm64
@@ -686,6 +690,20 @@ static void write_absolute_branch(uint8_t *destination, const void *target) {
   memcpy(destination + 2, &address, sizeof(address));
   destination[10] = 0xff;  // jmp rax
   destination[11] = 0xe0;
+}
+#elif defined(_WIN32) && defined(_M_X64)
+static void write_absolute_branch(uint8_t *destination, const void *target) {
+  const uint64_t address = (uint64_t)(uintptr_t)target;
+  // jmp qword ptr [rip+0], followed by its absolute destination. Unlike the
+  // Linux movabs sequence, this preserves the RAX value established by the
+  // copied MSVC function prologue in the trampoline.
+  destination[0] = 0xff;
+  destination[1] = 0x25;
+  destination[2] = 0x00;
+  destination[3] = 0x00;
+  destination[4] = 0x00;
+  destination[5] = 0x00;
+  memcpy(destination + 6, &address, sizeof(address));
 }
 
 #if defined(_WIN32)
@@ -958,46 +976,78 @@ static uint32_t parse_port(const char *value) {
   char *end = NULL;
   errno = 0;
   unsigned long parsed = strtoul(value, &end, 10);
-  if (errno != 0 || end == value || *end != '\0' || parsed == 0 || parsed > 65535) {
+  if (errno != 0 || end == value || *end != '\0' || parsed > 65535) {
     fprintf(stderr, "[logic2-bridge:native] invalid port: %s\n", value);
     exit(2);
   }
   return (uint32_t)parsed;
 }
 
-static void *load_graph_library(const char *path) {
+#if defined(_WIN32)
+static const char *python_home_environment_path(const char *path,
+                                                char output[MAX_PATH]);
+static bool set_windows_environment_utf8(const char *name, const char *value);
+#endif
+
+static void *load_graph_library(const char *path, const char *python_home_path) {
 #if defined(_WIN32)
   // GraphServer imports Analyzer.dll, python314.dll, and several private
   // runtime DLLs from the selected Logic resource directory. Electron sets a
   // matching DLL search context before loading the graph addon; the portable
   // native host must establish it explicitly.
-  char directory[MAX_PATH];
-  DWORD directory_length = GetFullPathNameA(path, MAX_PATH, directory, NULL);
+  wchar_t wide_path[MAX_PATH];
+  int wide_length = MultiByteToWideChar(CP_UTF8, 0, path, -1,
+                                        wide_path, MAX_PATH);
+  if (wide_length <= 0) {
+    // Node passes UTF-8 paths, but retain the system code page as a fallback
+    // for direct command-line launches on older Windows configurations.
+    wide_length = MultiByteToWideChar(CP_ACP, 0, path, -1,
+                                      wide_path, MAX_PATH);
+  }
+  wchar_t directory[MAX_PATH];
+  DWORD directory_length = wide_length > 0
+      ? GetFullPathNameW(wide_path, MAX_PATH, directory, NULL) : 0;
   if (directory_length == 0 || directory_length >= MAX_PATH) {
     fprintf(stderr,
             "[logic2-bridge:native] could not resolve GraphServer path (error %lu)\n",
             (unsigned long)GetLastError());
   } else {
-    char *separator = strrchr(directory, '\\');
-    if (separator == NULL) separator = strrchr(directory, '/');
+    wchar_t *separator = wcsrchr(directory, L'\\');
+    if (separator == NULL) separator = wcsrchr(directory, L'/');
     if (separator != NULL) {
       *separator = '\0';
-      if (!SetDllDirectoryA(directory)) {
+      if (!SetDllDirectoryW(directory)) {
         fprintf(stderr,
                 "[logic2-bridge:native] SetDllDirectory failed for %s (error %lu)\n",
-                directory, (unsigned long)GetLastError());
+                path, (unsigned long)GetLastError());
       } else {
-        fprintf(stderr, "[logic2-bridge:native] DLL search directory: %s\n", directory);
+        char directory_utf8[MAX_PATH];
+        int converted = WideCharToMultiByte(CP_UTF8, 0, directory, -1,
+                                             directory_utf8, MAX_PATH, NULL, NULL);
+        fprintf(stderr, "[logic2-bridge:native] DLL search directory: %s\n",
+                converted > 0 ? directory_utf8 : path);
       }
     }
   }
-  HMODULE library = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+  if (python_home_path != NULL) {
+    char python_home_environment[MAX_PATH];
+    const char *python_home = python_home_environment_path(
+        python_home_path, python_home_environment);
+    if (!set_windows_environment_utf8("SALEAE_PYTHONHOME", python_home)) {
+      fprintf(stderr,
+              "[logic2-bridge:native] SetEnvironmentVariableW(SALEAE_PYTHONHOME) failed\n");
+      return NULL;
+    }
+  }
+  HMODULE library = wide_length > 0
+      ? LoadLibraryExW(wide_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH) : NULL;
   if (library == NULL) {
     fprintf(stderr, "[logic2-bridge:native] LoadLibraryEx failed (error %lu): %s\n",
             (unsigned long)GetLastError(), path);
   }
   return (void *)library;
 #else
+  (void)python_home_path;
   void *library = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
   if (library == NULL) {
     fprintf(stderr, "[logic2-bridge:native] dlopen failed: %s\n", dlerror());
@@ -1021,6 +1071,30 @@ static void bridge_sleep_one_second(void) {
   sleep(1);
 #endif
 }
+
+#if defined(_WIN32)
+static const char *python_home_environment_path(const char *path,
+                                                char output[MAX_PATH]) {
+  DWORD length = GetFullPathNameA(path, MAX_PATH, output, NULL);
+  if (length == 0 || length >= MAX_PATH) return path;
+  for (char *cursor = output; *cursor != '\0'; cursor += 1) {
+    if (*cursor == '\\') *cursor = '/';
+  }
+  // The official graph-interface addon passes a slash-normalized home to
+  // SALEAE_PYTHONHOME without changing the path's trailing-separator state.
+  return output;
+}
+
+static bool set_windows_environment_utf8(const char *name, const char *value) {
+  wchar_t wide_name[MAX_PATH];
+  wchar_t wide_value[MAX_PATH];
+  if (MultiByteToWideChar(CP_UTF8, 0, name, -1, wide_name, MAX_PATH) <= 0 ||
+      MultiByteToWideChar(CP_UTF8, 0, value, -1, wide_value, MAX_PATH) <= 0) {
+    return false;
+  }
+  return SetEnvironmentVariableW(wide_name, wide_value) != 0;
+}
+#endif
 
 int main(int argc, char **argv) {
   if (argc != 11) {
@@ -1056,19 +1130,14 @@ int main(int argc, char **argv) {
   }
 #endif
   if (!configure_hook(argv[7], argv[8], argv[9], argv[10])) return 2;
-#if defined(_WIN32)
-  if (_putenv_s("SALEAE_PYTHONHOME", argv[2]) != 0) {
-    perror("[logic2-bridge:native] set SALEAE_PYTHONHOME");
-    return 1;
-  }
-#else
+#if !defined(_WIN32)
   if (setenv("SALEAE_PYTHONHOME", argv[2], 1) != 0) {
     perror("[logic2-bridge:native] setenv SALEAE_PYTHONHOME");
     return 1;
   }
 #endif
 
-  void *library = load_graph_library(argv[1]);
+  void *library = load_graph_library(argv[1], argv[2]);
   if (library == NULL) {
     return 1;
   }
@@ -1080,10 +1149,16 @@ int main(int argc, char **argv) {
       (SetLogFileNameFn)load_symbol(library, "SetLogFileName");
   FlushLogFn flush_log = (FlushLogFn)load_symbol(library, "FlushLog");
 
-  if (!initialize_injection_ring() || !start_injection_stdin_reader()) {
+  if (!initialize_injection_ring()) {
     unload_graph_library(library);
     return 1;
   }
+#if !defined(_WIN32)
+  if (!start_injection_stdin_reader()) {
+    unload_graph_library(library);
+    return 1;
+  }
+#endif
 
   uint32_t port = parse_port(argv[5]);
   bool scan_devices = strcmp(argv[6], "1") == 0;
@@ -1124,6 +1199,16 @@ int main(int argc, char **argv) {
     unload_graph_library(library);
     return 1;
   }
+  // A blocking read on Node's stdin pipe can interfere with the bundled
+  // Python runtime while GraphServer is constructing. Do not touch the feeder
+  // pipe until GraphServer has completed its initialization.
+#if defined(_WIN32)
+  if (!start_injection_stdin_reader()) {
+    destroy_graph_server(server);
+    unload_graph_library(library);
+    return 1;
+  }
+#endif
   printf("GRAPH_WS_READY ws://127.0.0.1:%u/saleae\n", port);
 
   signal(SIGINT, handle_signal);

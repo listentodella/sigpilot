@@ -105,6 +105,10 @@ to Applications, and launch it normally. On Windows, unzip
 On Linux, make the AppImage executable and launch it, or extract the tarball
 which preserves the executable bit.
 
+On Windows, the client suppresses console windows for its Bridge helpers and
+maximizes the Logic window that it launches. Existing Logic windows are left
+unchanged.
+
 The client fingerprints the GraphServer inside the user-selected installation
 at runtime, so the package does not contain a hardcoded Saleae DLL.
 

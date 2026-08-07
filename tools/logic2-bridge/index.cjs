@@ -131,6 +131,44 @@ Options:
 No npm install is required.`);
 }
 
+function windowsMaximizeScript(pid) {
+  return `Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class PxlogicWindow {
+  [DllImport("user32.dll")]
+  public static extern bool ShowWindowAsync(IntPtr window, int command);
+}
+'@
+$deadline = [DateTime]::UtcNow.AddSeconds(10)
+do {
+  $process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
+  if ($process -and $process.MainWindowHandle -ne 0) {
+    [void][PxlogicWindow]::ShowWindowAsync([IntPtr]$process.MainWindowHandle, 3)
+    exit 0
+  }
+  Start-Sleep -Milliseconds 200
+} while ([DateTime]::UtcNow -lt $deadline)`;
+}
+
+function maximizeWindowsLogicWindow(pid) {
+  if (process.platform !== 'win32' || !Number.isInteger(pid) || pid <= 0) return;
+  // Electron creates its main window after process start, so wait briefly for its HWND.
+  const maximizer = spawn('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-WindowStyle',
+    'Hidden',
+    '-Command',
+    windowsMaximizeScript(pid),
+  ], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  maximizer.unref();
+}
+
 function requirePath(target, label, kind = 'any') {
   let stat;
   try {
@@ -396,9 +434,9 @@ function waitForNativeGraph(host, expectedPort, timeoutMs = 15000) {
       });
     };
     timeout = setTimeout(() => {
-      finish(new Error(
-        `Timed out waiting for the native GraphServer on port ${expectedPort}`,
-      ));
+      finish(new Error(expectedPort
+        ? `Timed out waiting for the native GraphServer on port ${expectedPort}`
+        : 'Timed out waiting for the native GraphServer to report its assigned port'));
     }, timeoutMs);
     createLineReader(host.stdout, line => {
       const match = line.match(/^GRAPH_WS_READY ws:\/\/127\.0\.0\.1:(\d+)\/saleae$/);
@@ -416,7 +454,7 @@ function waitForNativeGraph(host, expectedPort, timeoutMs = 15000) {
     host.once('error', error => {
       finish(error);
     });
-    probe();
+    if (expectedPort) probe();
   });
 }
 
@@ -456,8 +494,12 @@ async function main() {
   const calibrationRoot = path.join(stateRoot, 'mso-calibration');
   const logPath = path.join(stateRoot, 'graphio.log');
   fs.mkdirSync(calibrationRoot, { recursive: true });
-  const backendPort = options.backendPort ?? await findAvailableTcpPort();
-  if (backendPort === options.port) {
+  const requestedBackendPort = options.backendPort ?? await findAvailableTcpPort();
+  // Logic 2.4.46's Windows GraphServer completes initialization only when it
+  // selects its own port. The host reports that selected port before the
+  // public proxy is started, so no fixed backend port is needed on Windows.
+  const backendPort = process.platform === 'win32' ? 0 : requestedBackendPort;
+  if (backendPort !== 0 && backendPort === options.port) {
     throw new Error('The public proxy and private GraphServer ports must differ');
   }
 
@@ -477,7 +519,11 @@ async function main() {
     cwd: process.platform === 'win32' ? runtime.appPath : stateRoot,
     env: process.env,
     stdio: ['pipe', 'pipe', 'inherit'],
+    windowsHide: process.platform === 'win32',
   });
+  if (process.platform === 'win32') {
+    console.log('[logic2-bridge] Windows GraphServer will select its backend port');
+  }
   host.stdin.on('error', error => {
     if (error.code !== 'EPIPE') console.error(`[logic2-bridge] host input failed: ${error.message}`);
   });
@@ -537,6 +583,7 @@ async function main() {
       env: logicProcessEnvironment(),
       stdio: 'inherit',
     });
+    maximizeWindowsLogicWindow(logic.pid);
     const exit = await waitForExit(logic);
     console.log(`[logic2-bridge] Logic exited (${exit.signal || exit.code})`);
     if (!stopping && exit.code) process.exitCode = exit.code;
@@ -564,6 +611,7 @@ module.exports = {
   resolveRuntime,
   resolveRuntimeVersion,
   waitForNativeGraph,
+  windowsMaximizeScript,
 };
 
 if (require.main === module) {
