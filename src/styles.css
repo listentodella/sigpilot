@@ -2375,6 +2375,7 @@ button:disabled {
   flex: 1;
   overflow: hidden;
   padding: 0 3px;
+  text-align: center;
   text-overflow: clip;
   white-space: nowrap;
 }
@@ -3377,9 +3378,13 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  position: absolute;
-  right: calc(var(--table-visible-right, 0px) + 10px);
-  top: 2px;
+  /* In normal flow inside its own grid track, immediately left of the frame
+     number. It used to be absolutely positioned against the right edge of the
+     visible area, which made its place move with horizontal scrolling and the
+     number of data columns. */
+  position: static;
+  align-self: center;
+  justify-self: center;
   border: 1px solid var(--border-20);
   border-radius: 2px;
   color: var(--on-background-20);

@@ -43,6 +43,8 @@ struct Options {
     output: Option<PathBuf>,
     trigger_channel: Option<u8>,
     trigger_kind: CaptureTriggerKind,
+    trigger_high_mask: u32,
+    trigger_low_mask: u32,
     glitch_filter_enabled: bool,
     cancel_after_ms: Option<u64>,
     graph_smoke: bool,
@@ -84,6 +86,8 @@ impl Default for Options {
             output: None,
             trigger_channel: None,
             trigger_kind: CaptureTriggerKind::Rising,
+            trigger_high_mask: 0,
+            trigger_low_mask: 0,
             glitch_filter_enabled: false,
             cancel_after_ms: None,
             graph_smoke: false,
@@ -253,6 +257,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         trigger_enabled: options.trigger_channel.is_some(),
         trigger_channel: options.trigger_channel.unwrap_or(0),
         trigger_kind: options.trigger_kind,
+        trigger_high_mask: options.trigger_high_mask,
+        trigger_low_mask: options.trigger_low_mask,
         glitch_filter_enabled: options.glitch_filter_enabled,
         clock_edge: options.clock_negedge,
         trigger_out_enabled: options.trigger_out_enabled,
@@ -543,6 +549,14 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--trigger" => {
                 options.trigger_kind = parse_trigger_kind(&next_arg(&mut args, "--trigger")?)?
             }
+            "--trigger-high-mask" => {
+                options.trigger_high_mask =
+                    parse_u32_mask(&next_arg(&mut args, "--trigger-high-mask")?)?
+            }
+            "--trigger-low-mask" => {
+                options.trigger_low_mask =
+                    parse_u32_mask(&next_arg(&mut args, "--trigger-low-mask")?)?
+            }
             "--glitch-filter" => options.glitch_filter_enabled = true,
             "--cancel-after-ms" => {
                 options.cancel_after_ms = Some(next_arg(&mut args, "--cancel-after-ms")?.parse()?)
@@ -600,6 +614,17 @@ fn parse_mode(value: &str) -> Result<CaptureMode, Box<dyn Error>> {
     }
 }
 
+fn parse_u32_mask(value: &str) -> Result<u32, Box<dyn Error>> {
+    let normalized = value.trim();
+    if let Some(hex) = normalized
+        .strip_prefix("0x")
+        .or_else(|| normalized.strip_prefix("0X"))
+    {
+        return Ok(u32::from_str_radix(hex, 16)?);
+    }
+    Ok(normalized.parse()?)
+}
+
 fn parse_trigger_kind(value: &str) -> Result<CaptureTriggerKind, Box<dyn Error>> {
     match value.to_ascii_lowercase().as_str() {
         "rising" | "rise" | "r" => Ok(CaptureTriggerKind::Rising),
@@ -643,7 +668,7 @@ fn parse_enabled_channels(value: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
+        "usb_smoke [--list-only] [--prepare-only] [--flash-mcu] [--device id] [--rate hz] [--ms duration] [--channels n] [--enabled-channels 0,4] [--vth volts] [--external-trigger close|rising|one|falling|zero|edge] [--clock-negedge] [--trigger-out] [--mode buffer|stream] [--buffer-mb mb] [--trigger-channel n] [--trigger rising|falling|high|low] [--trigger-high-mask mask] [--trigger-low-mask mask] [--glitch-filter] [--cancel-after-ms] [--graph-smoke] [--live] [--live-cross-only] [--pwm-frequency hz] [--pwm-duty percent] [--pwm-enable] [--pwm-only] [--raw-cross] [--compare-mappings] [--out path]"
     );
 }
 
@@ -705,8 +730,10 @@ fn verify_graph_smoke(
             pixels: 1_200,
             channels: channels.clone(),
         },
+        include_tile: true,
         analyzer_view: None,
         analyzers: Vec::new(),
+        view: None,
     })?;
     if full_frame.sample_count != capture.metadata.sample_count
         || full_frame.tile.sample_count != capture.metadata.sample_count
@@ -759,8 +786,10 @@ fn verify_graph_smoke(
                 pixels: u32::try_from(exact_samples).unwrap_or(2_048).max(1),
                 channels,
             },
+            include_tile: true,
             analyzer_view: None,
             analyzers: Vec::new(),
+            view: None,
         })?;
         let edge_tile = exact_frame
             .tile

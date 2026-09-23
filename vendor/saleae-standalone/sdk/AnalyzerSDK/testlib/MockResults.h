@@ -1,6 +1,7 @@
 #ifndef ANALYZER_TEST_MOCK_RESULTS
 #define ANALYZER_TEST_MOCK_RESULTS
 
+#include <functional>
 #include <iostream>
 
 #include "AnalyzerResults.h"
@@ -41,6 +42,9 @@ public:
 
     void SetCancelled(bool cancelled);
 
+    void SetCommitCallback(std::function<void()> callback);
+    void NotifyCommit();
+
     typedef std::pair<U64, U64> FrameRange;
     FrameRange GetFrameRangeForPacket(U64 packetIndex) const;
 
@@ -67,6 +71,7 @@ private:
     std::vector<std::string> mTabularText;
 
     bool mCancelled = false;
+    std::function<void()> mCommitCallback;
 };
 
 // output operators for the test macro

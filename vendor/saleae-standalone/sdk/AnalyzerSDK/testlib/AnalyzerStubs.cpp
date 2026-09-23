@@ -41,7 +41,10 @@ U64 Analyzer::GetTriggerSample()
 
 void Analyzer::CheckIfThreadShouldExit()
 {
-    // record soemthing here?
+    D_PTR();
+    if (d->cancelled.load(std::memory_order_relaxed)) {
+        throw AnalyzerTest::CancellationException{};
+    }
 }
 
 U32 Analyzer::GetSampleRate()
@@ -72,7 +75,14 @@ AnalyzerChannelData* Analyzer::GetAnalyzerChannelData(Channel &channel)
 
 void Analyzer::ReportProgress( U64 sample_number )
 {
-    // store progress value in data? Or report directly?
+    D_PTR();
+    auto observed = d->progressSample.load(std::memory_order_relaxed);
+    while (observed < sample_number &&
+           !d->progressSample.compare_exchange_weak(
+               observed,
+               sample_number,
+               std::memory_order_relaxed)) {
+    }
 }
 
 void Analyzer::SetAnalyzerResults( AnalyzerResults* results )
@@ -89,7 +99,8 @@ void Analyzer::SetAnalyzerSettings(AnalyzerSettings *settings)
 
 void Analyzer::KillThread()
 {
-
+    D_PTR();
+    d->cancelled.store(true, std::memory_order_relaxed);
 }
 
 ////////////////////////////////////////////////////////////////////////////

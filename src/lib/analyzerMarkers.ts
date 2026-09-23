@@ -72,6 +72,50 @@ export function visibleAnalyzerProtocolMarkers(
   return visible;
 }
 
+export function mergeSortedSamples(left: number[], right: number[]): number[] {
+  if (left.length === 0) return right;
+  if (right.length === 0) return left;
+
+  const merged: number[] = [];
+  let leftIndex = 0;
+  let rightIndex = 0;
+  let last: number | null = null;
+
+  while (leftIndex < left.length || rightIndex < right.length) {
+    const leftValue = left[leftIndex];
+    const rightValue = right[rightIndex];
+    let next: number;
+    if (rightIndex >= right.length || (leftIndex < left.length && leftValue <= rightValue)) {
+      next = leftValue;
+      leftIndex += 1;
+    } else {
+      next = rightValue;
+      rightIndex += 1;
+    }
+    if (next !== last) {
+      merged.push(next);
+      last = next;
+    }
+  }
+
+  return merged;
+}
+
+export function nearestSortedSample(samples: number[], target: number) {
+  let low = 0;
+  let high = samples.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (samples[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  const right = samples[low] ?? null;
+  const left = low > 0 ? samples[low - 1] : null;
+  if (left === null) return right;
+  if (right === null) return left;
+  return Math.abs(left - target) <= Math.abs(right - target) ? left : right;
+}
+
 function firstAtOrAfter(samples: number[], sample: number) {
   let low = 0;
   let high = samples.length;

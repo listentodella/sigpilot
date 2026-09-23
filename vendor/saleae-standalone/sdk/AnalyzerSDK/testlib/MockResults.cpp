@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <iostream> // REMOVE ME
+#include <utility>
 
 #define D_PTR() \
     AnalyzerTest::MockResultData* d = reinterpret_cast<AnalyzerTest::MockResultData*>(mData);
@@ -33,6 +34,7 @@ void AnalyzerResults::CommitResults()
 {
     D_PTR();
     d->mCommitFrames.push_back(d->CurrentFrame());
+    d->NotifyCommit();
 }
 
 U64 AnalyzerResults::CommitPacketAndStartNewPacket()
@@ -196,6 +198,26 @@ void MockResultData::SetCancelled(bool cancelled)
     mCancelled = cancelled;
 }
 
+void MockResultData::SetCommitCallback(std::function<void()> callback)
+{
+    mCommitCallback = std::move(callback);
+}
+
+void MockResultData::NotifyCommit()
+{
+    if(mCommitCallback)
+    {
+        try
+        {
+            mCommitCallback();
+        }
+        catch(...)
+        {
+            // Incremental publication must never interrupt analyzer decoding.
+        }
+    }
+}
+
 auto MockResultData::GetFrameRangeForPacket(U64 packetIndex) const -> FrameRange
 {
     assert(packetIndex < mPacketStartFrames.size());
@@ -257,4 +279,3 @@ std::ostream &operator<<(std::ostream &out, const MockResultData::FrameRange &ra
 }
 
 } // of namespace
-

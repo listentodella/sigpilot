@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   analyzerRenderRequestIntervalMs,
+  analyzerRenderedTracksMatchRequests,
   analyzerRenderViewportCanServe,
   preserveLiveAnalyzerTracks,
 } from "../src/lib/analyzerRenderScheduling.ts";
@@ -63,6 +64,27 @@ test("empty live updates preserve the previous analyzer snapshot", () => {
   const previous = [trackWindow([bubble(10, 20)])];
   const incoming = [trackWindow([])];
   assert.equal(preserveLiveAnalyzerTracks(previous, incoming)[0], previous[0]);
+});
+
+test("rendered analyzer tracks match requests independent of order", () => {
+  const rendered = [
+    { ...trackWindow([]), channel: 1, role: "SCL" },
+    { ...trackWindow([]), channel: 0, role: "SDA" },
+  ];
+  assert.equal(
+    analyzerRenderedTracksMatchRequests(rendered, [
+      { channel: 0, role: "SDA" },
+      { channel: 1, role: "SCL" },
+    ]),
+    true,
+  );
+  assert.equal(
+    analyzerRenderedTracksMatchRequests(rendered, [
+      { channel: 0, role: "SDA" },
+      { channel: 2, role: "SDA" },
+    ]),
+    false,
+  );
 });
 
 function trackWindow(bubbles: AnalyzerTrackWindow["bubbles"]): AnalyzerTrackWindow {

@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<body>
+<div id="host"></div>
+<pre id="out">pending</pre>
+<script type="module">
+const lines = [];
+const log = (text) => lines.push(text);
+let failures = 0;
+const check = (label, actual, expected) => {
+  const ok = actual === expected;
+  if (!ok) failures += 1;
+  log(`${ok ? "PASS" : "FAIL"} ${label}  actual=${actual} expected=${expected}`);
+};
+
+try {
+  const mod = await import("./dist/entry.js");
+  const host = document.getElementById("host");
+  const child = () => document.getElementById("child").textContent;
+
+  const probe = mod.mountProbe(host);
+  log(`mounted parentRenders=${probe.stats.parentRenders} childRenders=${probe.stats.childRenders}`);
+  check("initial child uses the parent fallback", child(), "10:20");
+  check("initial parent renders once", probe.stats.parentRenders, 1);
+
+  // The claim under test: publishing a viewport must update the subscriber
+  // without rendering the component that owns all the other state.
+  mod.publishViewport("verify", 99, 7);
+  check("child follows the published viewport", child(), "99:7");
+  check("child re-rendered", probe.stats.childRenders, 2);
+  check("parent did NOT re-render", probe.stats.parentRenders, 1);
+
+  mod.publishViewport("verify", 100, 8);
+  check("child follows a second publish", child(), "100:8");
+  check("parent still did NOT re-render", probe.stats.parentRenders, 1);
+
+  // Sanity: the parent can still re-render on its own state, and the child keeps
+  // the published viewport rather than falling back.
+  probe.forceParentRender();
+  check("parent re-renders on its own state", probe.stats.parentRenders, 2);
+  check("child keeps the published viewport", child(), "100:8");
+
+  // A different session id must not leak the published value.
+  mod.publishViewport("other-session", 1, 2);
+  check("child ignores other sessions", child(), "100:8");
+
+  log(failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`);
+} catch (error) {
+  log(`THREW ${error && error.stack ? error.stack : error}`);
+}
+document.getElementById("out").textContent = lines.join("\n");
+</script>
+</body>
+</html>

@@ -10,7 +10,9 @@ import {
   UiAnalogChannelSettings,
 } from "../lib/analogChannels";
 import type { SaleaeGraphChannelLayout } from "../lib/saleaeGraphLayout";
+import { useSessionViewport } from "../lib/useSessionViewport";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
+import { wheelZoomFactor } from "../lib/wheelZoom";
 import { SaleaeIcon, type SaleaeIconName } from "./SaleaeIcon";
 
 export interface VisibleAnalogChannel {
@@ -99,6 +101,7 @@ interface AnalogWaveformOverlayProps {
   onViewportChange: (start: number, samples: number) => void;
   onViewportInteractionChange?: (active: boolean) => void;
   digitalSampleRateHz: number;
+  sessionId?: string;
   totalSamples: number;
   viewportSamples: number;
   viewportStart: number;
@@ -122,10 +125,16 @@ export function AnalogWaveformOverlay({
   onViewportChange,
   onViewportInteractionChange,
   digitalSampleRateHz,
+  sessionId,
   totalSamples,
-  viewportSamples,
-  viewportStart,
+  viewportSamples: viewportSamplesProp,
+  viewportStart: viewportStartProp,
 }: AnalogWaveformOverlayProps) {
+  // Analog traces are drawn in view space, so they read the live viewport to stay
+  // aligned with the digital waveform during a gesture.
+  const liveViewport = useSessionViewport(sessionId, viewportStartProp, viewportSamplesProp);
+  const viewportSamples = liveViewport.samples;
+  const viewportStart = liveViewport.start;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const activeToolRef = useRef<MarqueeMode | null>(null);
@@ -441,7 +450,7 @@ export function AnalogWaveformOverlay({
 
       const scale = event.shiftKey ? 0.1 : 1;
       const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
-      const factor = Math.exp(clamp(delta, -800, 800) * 0.0015 * scale);
+      const factor = wheelZoomFactor(event, delta, scale);
       const nextRange = clamp(
         hit.settings.viewRangeVolts * factor,
         ANALOG_VIEW_RANGE_MIN_VOLTS,

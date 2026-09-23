@@ -7,7 +7,8 @@
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "perf:self-test": "cargo run --release -p pxlogic-graph --bin pxlogic-perf-self-test --"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -106,6 +106,23 @@ typedef struct sr_marker_view
     int kind;
 } sr_marker_view;
 
+typedef struct sr_incremental_legacy_frame_view
+{
+    int64_t start_sample;
+    int64_t end_sample;
+    uint64_t data1;
+    uint64_t data2;
+    uint8_t type;
+    uint8_t flags;
+    size_t channel_count;
+} sr_incremental_legacy_frame_view;
+
+typedef struct sr_incremental_legacy_channel_view
+{
+    uint32_t channel_index;
+    size_t text_count;
+} sr_incremental_legacy_channel_view;
+
 SALEAE_COMPAT_API sr_session* sr_session_create(const char* plugin_path);
 SALEAE_COMPAT_API void sr_session_destroy(sr_session* session);
 
@@ -113,6 +130,12 @@ SALEAE_COMPAT_API const char* sr_session_analyzer_name(const sr_session* session
 SALEAE_COMPAT_API const char* sr_session_last_error(const sr_session* session);
 
 SALEAE_COMPAT_API int sr_session_set_sample_rate(sr_session* session, uint64_t sample_rate_hz);
+/**
+ * Trigger position reported to analyzers via Analyzer::GetTriggerSample().
+ * Analyzers use it to render timestamps relative to the trigger, so leaving it
+ * unset means times are relative to the start of the capture. 0 == no trigger.
+ */
+SALEAE_COMPAT_API int sr_session_set_trigger_sample(sr_session* session, uint64_t sample);
 SALEAE_COMPAT_API int sr_session_set_number_setting(sr_session* session, const char* setting_title, double value);
 SALEAE_COMPAT_API int sr_session_set_integer_setting(sr_session* session, const char* setting_title, int value);
 SALEAE_COMPAT_API int sr_session_set_bool_setting(sr_session* session, const char* setting_title, int value);
@@ -135,6 +158,9 @@ SALEAE_COMPAT_API int sr_session_add_channel(
     size_t transition_count);
 SALEAE_COMPAT_API int sr_session_commit_settings(sr_session* session);
 SALEAE_COMPAT_API int sr_session_run(sr_session* session);
+SALEAE_COMPAT_API void sr_session_enable_incremental_results(sr_session* session);
+SALEAE_COMPAT_API uint64_t sr_session_progress_sample(const sr_session* session);
+SALEAE_COMPAT_API void sr_session_cancel(sr_session* session);
 SALEAE_COMPAT_API int sr_session_generate_simulation(sr_session* session, uint64_t sample_count, uint32_t sample_rate_hz);
 SALEAE_COMPAT_API size_t sr_session_simulation_channel_count(const sr_session* session);
 SALEAE_COMPAT_API int sr_session_simulation_channel(
@@ -163,6 +189,21 @@ SALEAE_COMPAT_API int sr_session_legacy_frame(
     const sr_session* session,
     size_t index,
     sr_legacy_frame_view* output);
+SALEAE_COMPAT_API size_t sr_session_incremental_legacy_frame_count(sr_session* session);
+SALEAE_COMPAT_API int sr_session_incremental_legacy_frame(
+    const sr_session* session,
+    size_t frame_index,
+    sr_incremental_legacy_frame_view* output);
+SALEAE_COMPAT_API int sr_session_incremental_legacy_channel(
+    const sr_session* session,
+    size_t frame_index,
+    size_t channel_index,
+    sr_incremental_legacy_channel_view* output);
+SALEAE_COMPAT_API const char* sr_session_incremental_legacy_text(
+    const sr_session* session,
+    size_t frame_index,
+    size_t channel_index,
+    size_t text_index);
 
 #ifdef __cplusplus
 }

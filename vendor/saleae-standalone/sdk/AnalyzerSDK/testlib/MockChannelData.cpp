@@ -29,6 +29,7 @@ void MockChannelData::TestSetInitialBitState(BitState bs)
     assert(mTransitions.empty());
     mInitialState = bs;
     mCurrentState = mInitialState;
+    mObservedSample.store(0, std::memory_order_relaxed);
     // insert a dummy sample before the real data, so that
     // the logic in AdvanceToSample is simpler
     mTransitions.push_back(0);
@@ -45,6 +46,7 @@ void MockChannelData::TestAppendTransitionAtSamples(U64 sample)
     assert(sample > mCurrentSample);
     mTransitions.push_back(sample);
     mCurrentSample = mTransitions.back();
+    mObservedSample.store(mCurrentSample, std::memory_order_relaxed);
     mCurrentState = InvertBitState(mCurrentState);
 }
 
@@ -77,6 +79,7 @@ double MockChannelData::TestAdvanceTime(U64 sampleRateHz, double currentError, d
     const U32 samplesToAdvance = std::lround(nominalSamples);
     currentError = nominalSamples - static_cast<double>(samplesToAdvance);
     mCurrentSample += samplesToAdvance;
+    mObservedSample.store(mCurrentSample, std::memory_order_relaxed);
     return currentError;
 }
 
@@ -95,18 +98,21 @@ void MockChannelData::TestTransitionToState(BitState bs)
 void MockChannelData::TestAdvance(U32 samples)
 {
     mCurrentSample += samples;
+    mObservedSample.store(mCurrentSample, std::memory_order_relaxed);
 }
 
 void MockChannelData::TestAdvanceTo(U64 exactSample)
 {
     assert(mCurrentSample <= exactSample);
     mCurrentSample = exactSample;
+    mObservedSample.store(mCurrentSample, std::memory_order_relaxed);
 }
 
 void MockChannelData::ResetCurrentSample(U64 sampleNumber)
 {
     mCurrentState = mInitialState;
     mCurrentSample = 0;
+    mObservedSample.store(0, std::memory_order_relaxed);
     AdvanceToSample(sampleNumber);
 }
 
@@ -134,6 +140,7 @@ U32 MockChannelData::AdvanceToSample(U64 sample)
         // no transitions between current and requested sample
         // short circuit to avoud complicating the logic below
         mCurrentSample = sample;
+        mObservedSample.store(mCurrentSample, std::memory_order_relaxed);
         return 0;
     }
 
@@ -145,6 +152,7 @@ U32 MockChannelData::AdvanceToSample(U64 sample)
     }
 
     mCurrentSample = sample;
+    mObservedSample.store(mCurrentSample, std::memory_order_relaxed);
     return transitionCount;
 }
 
@@ -246,6 +254,7 @@ void AnalyzerChannelData::AdvanceToNextEdge()
  //   std::cerr << "AdvNE: advanced to " << nextEdge << " from " << d->mCurrentSample << std::endl;
     d->mCurrentState = AnalyzerTest::InvertBitState(d->mCurrentState);
     d->mCurrentSample = nextEdge;
+    d->mObservedSample.store(d->mCurrentSample, std::memory_order_relaxed);
 }
 
 U64 AnalyzerChannelData::GetSampleOfNextEdge()

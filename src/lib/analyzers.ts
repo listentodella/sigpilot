@@ -8,7 +8,7 @@ import type {
   SigrokDecoderCatalogItem,
   SigrokDecoderChannel,
   SigrokDecoderOption,
-} from "./api";
+} from "./api.ts";
 
 // Ported from Logic 2.4.43 uikit/utils/colors.ts.
 export const SALEAE_ANALYZER_COLORS = [
@@ -37,6 +37,8 @@ const GENERIC_SIGROK_C_RUNNER_STATUS = "generic_sparse_c";
 const GENERIC_SIGROK_PYTHON_RUNNER_STATUS = "generic_sparse_python";
 const CATALOG_ONLY_SIGROK_RUNNER_STATUS = "catalog_only";
 const GENERIC_SALEAE_RUNNER_STATUS = "generic_sparse_saleae";
+const ANALYZER_FRAME_INDEX_CACHE_THRESHOLD = 1024;
+const ANALYZER_FRAME_INDEX_CACHE = new WeakMap<DecodedFrame[], Map<number, number[]>>();
 const SIGROK_VERIFIED_C_RUNNER_TYPES: Record<string, string> = {
   uart_c: "Async Serial",
   i2c_c: "I2C",
@@ -106,10 +108,14 @@ export interface UiAnalyzerInstance {
   displayRadix: AnalyzerDisplayRadix;
   saleaeMetadata: unknown | null;
   protocolBubbles: AnalyzerBubble[];
+  decodedFrameCount: number;
   decodedFrames: DecodedFrame[];
+  decodedFramesComplete: boolean;
+  decodedDecodeSignature: string | null;
   previousFrame: DecodedFrame | null;
   nextFrame: DecodedFrame | null;
   renderedTracks: AnalyzerTrackWindow[];
+  renderedViewport: { pixels: number; sampleCount: number; startSample: number } | null;
   renderedDecodeSignature: string | null;
   renderBusy: boolean;
   renderProgress: number;
@@ -123,6 +129,29 @@ export interface AnalyzerChannelRole {
   hasBubbles: boolean;
   hasMarkers: boolean;
   title: string;
+}
+
+export function analyzerUsesLazyNativeSummary(backend: DecoderBackendKind) {
+  return EXTERNAL_DECODER_BACKENDS.includes(backend);
+}
+
+export function lazyNativeAnalyzerFrameCount(analyzer: Pick<UiAnalyzerInstance, "decodedFrameCount" | "decodedFrames">) {
+  return Math.max(1, analyzer.decodedFrameCount, analyzer.decodedFrames.length);
+}
+
+export function analyzerHasLazyNativeFramePlaceholder(
+  analyzer: Pick<
+    UiAnalyzerInstance,
+    "decoderBackend" | "decodeProgress" | "decodedFrameCount" | "decodedFrames" | "decodedFramesComplete"
+  >,
+) {
+  return (
+    analyzerUsesLazyNativeSummary(analyzer.decoderBackend) &&
+    !analyzer.decodedFramesComplete &&
+    analyzer.decodeProgress < 100 &&
+    analyzer.decodedFrames.length === 0 &&
+    analyzer.decodedFrameCount > 0
+  );
 }
 
 interface NativeAnalyzerDefaults {
@@ -491,10 +520,14 @@ export function createAnalyzerInstance(
     displayRadix: "Hexadecimal",
     saleaeMetadata: null,
     protocolBubbles: [],
+    decodedFrameCount: 0,
     decodedFrames: [],
+    decodedFramesComplete: false,
+    decodedDecodeSignature: null,
     previousFrame: null,
     nextFrame: null,
     renderedTracks: [],
+    renderedViewport: null,
     renderedDecodeSignature: null,
     renderBusy: false,
     renderProgress: 0,
@@ -891,12 +924,18 @@ export function analyzerDecodeSignature(analyzer: UiAnalyzerInstance) {
 export function mergeAnalyzerTrackFrames(
   decodedFrames: DecodedFrame[],
   tracks: AnalyzerTrackWindow[],
+  maxCachedFrames = Number.POSITIVE_INFINITY,
 ) {
-  const incoming = new Map<string, DecodedFrame>();
+  const incoming = new Map<number, DecodedFrame[]>();
   const collectIncoming = (frame: DecodedFrame) => {
-    const key = analyzerFrameKey(frame);
-    const existing = incoming.get(key);
-    incoming.set(key, existing ? mergeDecodedAnalyzerFrame(existing, frame) : frame);
+    const bucket = incoming.get(frame.frame_id);
+    if (!bucket) {
+      incoming.set(frame.frame_id, [frame]);
+      return;
+    }
+    const index = bucket.findIndex((candidate) => sameAnalyzerFrameIdentity(candidate, frame));
+    if (index >= 0) bucket[index] = mergeDecodedAnalyzerFrame(bucket[index], frame);
+    else bucket.push(frame);
   };
   tracks.forEach((track) => {
     track.frames.forEach(collectIncoming);
@@ -905,9 +944,10 @@ export function mergeAnalyzerTrackFrames(
   });
   if (incoming.size === 0) return decodedFrames;
 
+  const incomingFrames = [...incoming.values()].flat();
   let nextFrames: DecodedFrame[] | null = null;
   const additions: DecodedFrame[] = [];
-  incoming.forEach((frame) => {
+  incomingFrames.forEach((frame) => {
     const index = findAnalyzerFrameIndex(decodedFrames, frame);
     if (index < 0) {
       additions.push({ ...frame, channel_values: [...frame.channel_values] });
@@ -919,7 +959,9 @@ export function mergeAnalyzerTrackFrames(
     nextFrames[index] = merged;
   });
 
-  if (additions.length === 0) return nextFrames ?? decodedFrames;
+  if (additions.length === 0) {
+    return limitAnalyzerFrameCache(nextFrames ?? decodedFrames, incomingFrames, maxCachedFrames);
+  }
   additions.sort(compareAnalyzerFrameOrder);
   const existing = nextFrames ?? decodedFrames;
   const merged: DecodedFrame[] = [];
@@ -936,18 +978,35 @@ export function mergeAnalyzerTrackFrames(
       merged.push(additions[additionIndex++]);
     }
   }
-  return merged;
+  return limitAnalyzerFrameCache(merged, incomingFrames, maxCachedFrames);
 }
 
-function analyzerFrameKey(frame: DecodedFrame) {
-  return `${frame.frame_id}:${frame.start_sample}:${frame.end_sample}`;
+export function normalizeDecodedFrameOrder(frames: DecodedFrame[]) {
+  for (let index = 1; index < frames.length; index += 1) {
+    if (compareAnalyzerFrameOrder(frames[index - 1], frames[index]) > 0) {
+      return [...frames].sort(compareAnalyzerFrameOrder);
+    }
+  }
+  return frames;
 }
 
 function compareAnalyzerFrameOrder(left: DecodedFrame, right: DecodedFrame) {
   return left.start_sample - right.start_sample || left.frame_id - right.frame_id;
 }
 
+function sameAnalyzerFrameIdentity(left: DecodedFrame, right: DecodedFrame) {
+  return (
+    left.frame_id === right.frame_id &&
+    left.start_sample === right.start_sample &&
+    left.end_sample === right.end_sample
+  );
+}
+
 function findAnalyzerFrameIndex(frames: DecodedFrame[], target: DecodedFrame) {
+  if (frames.length >= ANALYZER_FRAME_INDEX_CACHE_THRESHOLD) {
+    const bucket = analyzerFrameIndexForFrames(frames).get(target.frame_id);
+    return bucket?.find((index) => sameAnalyzerFrameIdentity(frames[index], target)) ?? -1;
+  }
   let low = 0;
   let high = frames.length;
   while (low < high) {
@@ -960,6 +1019,56 @@ function findAnalyzerFrameIndex(frames: DecodedFrame[], target: DecodedFrame) {
     if (frames[index].end_sample === target.end_sample) return index;
   }
   return -1;
+}
+
+function analyzerFrameIndexForFrames(frames: DecodedFrame[]) {
+  const cached = ANALYZER_FRAME_INDEX_CACHE.get(frames);
+  if (cached) return cached;
+  const index = new Map<number, number[]>();
+  frames.forEach((frame, position) => {
+    const bucket = index.get(frame.frame_id);
+    if (bucket) bucket.push(position);
+    else index.set(frame.frame_id, [position]);
+  });
+  ANALYZER_FRAME_INDEX_CACHE.set(frames, index);
+  return index;
+}
+
+function limitAnalyzerFrameCache(
+  frames: DecodedFrame[],
+  incomingFrames: DecodedFrame[],
+  maxCachedFrames: number,
+) {
+  if (
+    !Number.isFinite(maxCachedFrames) ||
+    maxCachedFrames <= 0 ||
+    frames.length <= maxCachedFrames ||
+    incomingFrames.length === 0
+  ) {
+    return frames;
+  }
+  const maxFrames = Math.floor(maxCachedFrames);
+  let minIncomingStart = Number.POSITIVE_INFINITY;
+  let maxIncomingStart = Number.NEGATIVE_INFINITY;
+  for (const frame of incomingFrames) {
+    minIncomingStart = Math.min(minIncomingStart, frame.start_sample);
+    maxIncomingStart = Math.max(maxIncomingStart, frame.start_sample);
+  }
+  const centerSample = minIncomingStart + (maxIncomingStart - minIncomingStart) / 2;
+  const centerIndex = lowerBoundAnalyzerFrameStart(frames, centerSample);
+  const start = Math.max(0, Math.min(frames.length - maxFrames, centerIndex - Math.floor(maxFrames / 2)));
+  return frames.slice(start, start + maxFrames);
+}
+
+function lowerBoundAnalyzerFrameStart(frames: DecodedFrame[], sample: number) {
+  let low = 0;
+  let high = frames.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (frames[middle].start_sample < sample) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 function mergeDecodedAnalyzerFrame(existing: DecodedFrame, incoming: DecodedFrame) {
@@ -996,8 +1105,18 @@ function decodedAnalyzerFramesEqual(left: DecodedFrame, right: DecodedFrame) {
       value.role === candidate.role &&
       value.label === candidate.label &&
       value.value === candidate.value &&
-      JSON.stringify(value.texts ?? []) === JSON.stringify(candidate.texts ?? []);
+      analyzerTextArraysEqual(value.texts, candidate.texts);
   });
+}
+
+function analyzerTextArraysEqual(left: string[] | undefined, right: string[] | undefined) {
+  const leftValues = left ?? [];
+  const rightValues = right ?? [];
+  if (leftValues.length !== rightValues.length) return false;
+  for (let index = 0; index < leftValues.length; index += 1) {
+    if (leftValues[index] !== rightValues[index]) return false;
+  }
+  return true;
 }
 
 export function decoderBackendLabel(backend: DecoderBackendKind) {

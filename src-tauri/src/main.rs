@@ -22,12 +22,14 @@ use pxlogic_core::{
     SigrokDecoderCatalog, SigrokNativeDecoder, SparseCaptureData,
 };
 use pxlogic_graph::{
-    CaptureMemoryUsage, DigitalPointMeasurement, GraphFrameRequest, GraphFrameResponse,
-    GraphSession, NearestDigitalTransition,
+    AnalyzerFrameTableRequest, AnalyzerFrameTableWindow, CaptureMemoryUsage,
+    DigitalPointMeasurement, GraphFrameRequest, GraphFrameResponse, GraphSession,
+    NativeAnalyzerDecodeProgress, NearestDigitalTransition, SessionView, ViewIntent, ViewLimits,
 };
 use pxlogic_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -35,6 +37,104 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use pxlogic_core::RusbBackend;
 
 type CommandResult<T> = Result<T, String>;
+
+#[derive(Serialize)]
+struct PackedBinRange {
+    offset: usize,
+    length: usize,
+}
+
+#[derive(Serialize)]
+struct BinaryChannelTile<'a> {
+    channel: u8,
+    label: &'a str,
+    bins: &'a [pxlogic_waveform::WaveformBin],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packed_bins: Option<PackedBinRange>,
+    segments: &'a [pxlogic_waveform::DigitalSegment],
+    rising_edges: &'a [u64],
+    falling_edges: &'a [u64],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_transition: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_transition: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct BinaryWaveformTile<'a> {
+    start_sample: u64,
+    sample_count: u64,
+    pixels: u32,
+    samples_per_pixel: f64,
+    channels: Vec<BinaryChannelTile<'a>>,
+}
+
+#[derive(Serialize)]
+struct BinaryGraphFrameResponse<'a> {
+    frame_id: u64,
+    revision: u64,
+    sample_count: u64,
+    tile: BinaryWaveformTile<'a>,
+    analyzers: &'a [pxlogic_graph::AnalyzerRenderResult],
+}
+
+fn encode_graph_frame_response(frame: GraphFrameResponse) -> CommandResult<tauri::ipc::Response> {
+    encode_graph_frame_bytes(frame).map(tauri::ipc::Response::new)
+}
+
+fn encode_graph_frame_bytes(mut frame: GraphFrameResponse) -> CommandResult<Vec<u8>> {
+    let mut binary = Vec::new();
+    let packed_ranges = frame
+        .tile
+        .channels
+        .iter_mut()
+        .map(|channel| {
+            channel.packed_bins.take().map(|packed| {
+                let offset = binary.len();
+                let length = packed.len();
+                binary.extend_from_slice(&packed);
+                PackedBinRange { offset, length }
+            })
+        })
+        .collect::<Vec<_>>();
+    let channels = frame
+        .tile
+        .channels
+        .iter()
+        .zip(packed_ranges)
+        .map(|(channel, packed_bins)| BinaryChannelTile {
+            channel: channel.channel,
+            label: &channel.label,
+            bins: &channel.bins,
+            packed_bins,
+            segments: &channel.segments,
+            rising_edges: &channel.rising_edges,
+            falling_edges: &channel.falling_edges,
+            previous_transition: channel.previous_transition,
+            next_transition: channel.next_transition,
+        })
+        .collect();
+    let response = BinaryGraphFrameResponse {
+        frame_id: frame.frame_id,
+        revision: frame.revision,
+        sample_count: frame.sample_count,
+        tile: BinaryWaveformTile {
+            start_sample: frame.tile.start_sample,
+            sample_count: frame.tile.sample_count,
+            pixels: frame.tile.pixels,
+            samples_per_pixel: frame.tile.samples_per_pixel,
+            channels,
+        },
+        analyzers: &frame.analyzers,
+    };
+    let header = serde_json::to_vec(&response).map_err(to_string)?;
+    let mut output = Vec::with_capacity(13 + header.len() + binary.len());
+    output.extend_from_slice(b"PXGF1");
+    output.extend_from_slice(&(header.len() as u64).to_le_bytes());
+    output.extend_from_slice(&header);
+    output.extend_from_slice(&binary);
+    Ok(output)
+}
 
 #[derive(Clone, Default)]
 struct AppState {
@@ -156,6 +256,50 @@ struct WriteScreenshotRequest {
 struct WriteTextFileRequest {
     contents: String,
     path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AnalyzerDecodeBatchRequest {
+    analyzer_id: String,
+    backend: DecoderBackendKind,
+    settings: AnalyzerDecodeSettings,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnalyzerDecodeBatchResult {
+    analyzer_id: String,
+    frames: Vec<DecodedFrame>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnalyzerDecodeBatchSummaryResult {
+    analyzer_id: String,
+    frame_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnalyzerDecodeBackgroundProgressResult {
+    analyzer_id: String,
+    frame_count: usize,
+    processed_edges: usize,
+    total_edges: usize,
+    progress: f64,
+    complete: bool,
+    cancelled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AnalyzerDecodeFrameSliceRequest {
+    backend: DecoderBackendKind,
+    end: usize,
+    settings: AnalyzerDecodeSettings,
+    start: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AnalyzerDecodeFrameSliceResult {
+    frame_count: usize,
+    frames: Vec<DecodedFrame>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1097,8 +1241,10 @@ async fn get_waveform_tile(
             .render_frame(&GraphFrameRequest {
                 frame_id: 0,
                 waveform: request,
+                include_tile: true,
                 analyzer_view: None,
                 analyzers: Vec::new(),
+                view: None,
             })
             .map(|frame| frame.tile)
             .map_err(to_string)
@@ -1175,9 +1321,438 @@ async fn decode_analyzer_frames(
 }
 
 #[tauri::command]
+async fn decode_analyzer_frame_batch(
+    session_id: String,
+    requests: Vec<AnalyzerDecodeBatchRequest>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<AnalyzerDecodeBatchResult>> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        decode_analyzer_batch_for_session(session, requests)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn decode_analyzer_frame_batch_summary(
+    session_id: String,
+    requests: Vec<AnalyzerDecodeBatchRequest>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<AnalyzerDecodeBatchSummaryResult>> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        decode_analyzer_batch_summary_for_session(session, requests)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn decode_saleae_analyzer_background_step(
+    session_id: String,
+    requests: Vec<AnalyzerDecodeBatchRequest>,
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<AnalyzerDecodeBackgroundProgressResult>> {
+    if requests
+        .iter()
+        .any(|request| request.backend != DecoderBackendKind::SaleaeNative)
+    {
+        return Err("background decoder steps currently support Saleae Native only".to_string());
+    }
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = requests
+            .iter()
+            .map(|request| request.settings.clone())
+            .collect::<Vec<_>>();
+        let progress = session
+            .decode_saleae_native_background_step_batch(&settings)
+            .map_err(to_string)?;
+        if progress.len() != requests.len() {
+            return Err(format!(
+                "Saleae background decode returned {} results for {} requests",
+                progress.len(),
+                requests.len()
+            ));
+        }
+        Ok(requests
+            .into_iter()
+            .zip(progress)
+            .map(
+                |(request, progress): (
+                    AnalyzerDecodeBatchRequest,
+                    NativeAnalyzerDecodeProgress,
+                )| {
+                    AnalyzerDecodeBackgroundProgressResult {
+                        analyzer_id: request.analyzer_id,
+                        frame_count: progress.frame_count,
+                        processed_edges: progress.processed_edges,
+                        total_edges: progress.total_edges,
+                        progress: progress.progress,
+                        complete: progress.complete,
+                        cancelled: progress.cancelled,
+                    }
+                },
+            )
+            .collect())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn decode_analyzer_frame_slice(
+    session_id: String,
+    request: AnalyzerDecodeFrameSliceRequest,
+    state: State<'_, AppState>,
+) -> CommandResult<AnalyzerDecodeFrameSliceResult> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (frame_count, frames) = session
+            .decode_frame_slice_with_backend(
+                &request.settings,
+                request.backend,
+                request.start,
+                request.end,
+            )
+            .map_err(to_string)?;
+        Ok(AnalyzerDecodeFrameSliceResult {
+            frame_count,
+            frames,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn decode_analyzer_frame_table_window(
+    session_id: String,
+    requests: Vec<AnalyzerFrameTableRequest>,
+    start: usize,
+    end: usize,
+    state: State<'_, AppState>,
+) -> CommandResult<AnalyzerFrameTableWindow> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .decode_frame_table_window(&requests, start, end)
+            .map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn decode_analyzer_frame_table_search_window(
+    session_id: String,
+    requests: Vec<AnalyzerFrameTableRequest>,
+    query: String,
+    start: usize,
+    end: usize,
+    state: State<'_, AppState>,
+) -> CommandResult<AnalyzerFrameTableWindow> {
+    let session = state.existing_session(&session_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .decode_frame_table_search_window(&requests, &query, start, end)
+            .map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn decode_analyzer_batch_for_session(
+    session: Arc<GraphSession>,
+    requests: Vec<AnalyzerDecodeBatchRequest>,
+) -> CommandResult<Vec<AnalyzerDecodeBatchResult>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut results: Vec<Option<AnalyzerDecodeBatchResult>> = vec![None; requests.len()];
+    let saleae_indices = requests
+        .iter()
+        .enumerate()
+        .filter_map(|(index, request)| {
+            (request.backend == DecoderBackendKind::SaleaeNative).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    if saleae_indices.len() > 1 {
+        let settings = saleae_indices
+            .iter()
+            .map(|index| requests[*index].settings.clone())
+            .collect::<Vec<_>>();
+        let decoded = session
+            .decode_saleae_native_frames_batch(&settings)
+            .map_err(to_string)?;
+        for (index, frames) in saleae_indices.iter().copied().zip(decoded) {
+            results[index] = Some(AnalyzerDecodeBatchResult {
+                analyzer_id: requests[index].analyzer_id.clone(),
+                frames: frames.as_ref().clone(),
+            });
+        }
+    }
+
+    let remaining = requests
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| results[*index].is_none())
+        .collect::<Vec<_>>();
+    let decoded_remaining = if remaining.len() <= 1 {
+        remaining
+            .into_iter()
+            .map(|(index, request)| {
+                decode_analyzer_batch_item(&session, request).map(|result| (index, result))
+            })
+            .collect::<CommandResult<Vec<_>>>()?
+    } else {
+        remaining
+            .into_par_iter()
+            .map(|(index, request)| {
+                decode_analyzer_batch_item(&session, request).map(|result| (index, result))
+            })
+            .collect::<CommandResult<Vec<_>>>()?
+    };
+
+    for (index, result) in decoded_remaining {
+        results[index] = Some(result);
+    }
+
+    results
+        .into_iter()
+        .map(|result| result.ok_or_else(|| "analyzer batch decode omitted a result".to_string()))
+        .collect()
+}
+
+fn decode_analyzer_batch_item(
+    session: &GraphSession,
+    request: AnalyzerDecodeBatchRequest,
+) -> CommandResult<AnalyzerDecodeBatchResult> {
+    let frames = session
+        .decode_frames_with_backend(&request.settings, request.backend)
+        .map(|frames| frames.as_ref().clone())
+        .map_err(to_string)?;
+    Ok(AnalyzerDecodeBatchResult {
+        analyzer_id: request.analyzer_id,
+        frames,
+    })
+}
+
+fn decode_analyzer_batch_summary_for_session(
+    session: Arc<GraphSession>,
+    requests: Vec<AnalyzerDecodeBatchRequest>,
+) -> CommandResult<Vec<AnalyzerDecodeBatchSummaryResult>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut results: Vec<Option<AnalyzerDecodeBatchSummaryResult>> = vec![None; requests.len()];
+    let saleae_indices = requests
+        .iter()
+        .enumerate()
+        .filter_map(|(index, request)| {
+            (request.backend == DecoderBackendKind::SaleaeNative).then_some(index)
+        })
+        .collect::<Vec<_>>();
+
+    if saleae_indices.len() > 1 {
+        let settings = saleae_indices
+            .iter()
+            .map(|index| requests[*index].settings.clone())
+            .collect::<Vec<_>>();
+        let decoded = session
+            .decode_saleae_native_frames_batch(&settings)
+            .map_err(to_string)?;
+        for (index, frames) in saleae_indices.iter().copied().zip(decoded) {
+            results[index] = Some(AnalyzerDecodeBatchSummaryResult {
+                analyzer_id: requests[index].analyzer_id.clone(),
+                frame_count: frames.len(),
+            });
+        }
+    }
+
+    let remaining = requests
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| results[*index].is_none())
+        .collect::<Vec<_>>();
+    let decoded_remaining = if remaining.len() <= 1 {
+        remaining
+            .into_iter()
+            .map(|(index, request)| {
+                decode_analyzer_batch_summary_item(&session, request).map(|result| (index, result))
+            })
+            .collect::<CommandResult<Vec<_>>>()?
+    } else {
+        remaining
+            .into_par_iter()
+            .map(|(index, request)| {
+                decode_analyzer_batch_summary_item(&session, request).map(|result| (index, result))
+            })
+            .collect::<CommandResult<Vec<_>>>()?
+    };
+
+    for (index, result) in decoded_remaining {
+        results[index] = Some(result);
+    }
+
+    results
+        .into_iter()
+        .map(|result| result.ok_or_else(|| "analyzer batch summary omitted a result".to_string()))
+        .collect()
+}
+
+fn decode_analyzer_batch_summary_item(
+    session: &GraphSession,
+    request: AnalyzerDecodeBatchRequest,
+) -> CommandResult<AnalyzerDecodeBatchSummaryResult> {
+    let frame_count = session
+        .decode_frame_count_with_backend(&request.settings, request.backend)
+        .map_err(to_string)?;
+    Ok(AnalyzerDecodeBatchSummaryResult {
+        analyzer_id: request.analyzer_id,
+        frame_count,
+    })
+}
+
+#[cfg(test)]
+mod analyzer_decode_batch_tests {
+    use pxlogic_core::{
+        capture::generate_sample_words_with_count, CaptureSettings, I2cDecodeSettings,
+        SpiDecodeSettings,
+    };
+
+    use super::*;
+
+    fn demo_session() -> Arc<GraphSession> {
+        let mut settings = CaptureSettings::default();
+        settings.channel_count = 16;
+        let capture = generate_sample_words_with_count(&settings, 250_000, 2)
+            .expect("demo capture should be generated");
+        let session = Arc::new(GraphSession::default());
+        session
+            .begin_capture(capture.metadata.clone())
+            .expect("capture should start");
+        session
+            .append_samples(&capture.samples)
+            .expect("samples should append");
+        session
+    }
+
+    #[test]
+    fn analyzer_batch_decode_preserves_request_order() {
+        let session = demo_session();
+        let output = decode_analyzer_batch_for_session(
+            session,
+            vec![
+                AnalyzerDecodeBatchRequest {
+                    analyzer_id: "i2c-analyzer".to_string(),
+                    backend: DecoderBackendKind::LegacyRust,
+                    settings: AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
+                },
+                AnalyzerDecodeBatchRequest {
+                    analyzer_id: "spi-analyzer".to_string(),
+                    backend: DecoderBackendKind::LegacyRust,
+                    settings: AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
+                },
+            ],
+        )
+        .expect("batch decode should succeed");
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].analyzer_id, "i2c-analyzer");
+        assert_eq!(output[1].analyzer_id, "spi-analyzer");
+        assert!(
+            output.iter().all(|result| !result.frames.is_empty()),
+            "each analyzer should return decoded frames"
+        );
+    }
+
+    #[test]
+    fn analyzer_batch_summary_preserves_request_order_without_returning_frames() {
+        let session = demo_session();
+        let output = decode_analyzer_batch_summary_for_session(
+            session,
+            vec![
+                AnalyzerDecodeBatchRequest {
+                    analyzer_id: "i2c-analyzer".to_string(),
+                    backend: DecoderBackendKind::LegacyRust,
+                    settings: AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
+                },
+                AnalyzerDecodeBatchRequest {
+                    analyzer_id: "spi-analyzer".to_string(),
+                    backend: DecoderBackendKind::LegacyRust,
+                    settings: AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
+                },
+            ],
+        )
+        .expect("batch decode summary should succeed");
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].analyzer_id, "i2c-analyzer");
+        assert_eq!(output[1].analyzer_id, "spi-analyzer");
+        assert!(
+            output.iter().all(|result| result.frame_count > 0),
+            "each analyzer should report decoded frame counts"
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_frame_ipc_tests {
+    use super::*;
+
+    #[test]
+    fn graph_frame_binary_transport_separates_packed_bins_from_json() {
+        let packed = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let frame = GraphFrameResponse {
+            frame_id: 7,
+            revision: 11,
+            sample_count: 128,
+            view: SessionView::new(32.0, 64.0),
+            data_view: SessionView::new(32.0, 64.0),
+            tile: WaveformTile {
+                start_sample: 32,
+                sample_count: 64,
+                pixels: 4,
+                samples_per_pixel: 16.0,
+                channels: vec![pxlogic_waveform::ChannelTile {
+                    channel: 2,
+                    label: "D2".to_string(),
+                    bins: Vec::new(),
+                    packed_bins: Some(packed.clone()),
+                    segments: Vec::new(),
+                    rising_edges: vec![40],
+                    falling_edges: vec![48],
+                    previous_transition: Some(24),
+                    next_transition: Some(104),
+                }],
+            },
+            analyzers: Vec::new(),
+        };
+
+        let encoded = encode_graph_frame_bytes(frame).unwrap();
+        assert_eq!(&encoded[..5], b"PXGF1");
+        let header_length = u64::from_le_bytes(encoded[5..13].try_into().unwrap()) as usize;
+        let binary_start = 13 + header_length;
+        let header: serde_json::Value = serde_json::from_slice(&encoded[13..binary_start]).unwrap();
+        assert_eq!(header["frame_id"], 7);
+        assert_eq!(header["tile"]["channels"][0]["packed_bins"]["offset"], 0);
+        assert_eq!(
+            header["tile"]["channels"][0]["packed_bins"]["length"],
+            packed.len()
+        );
+        assert_eq!(&encoded[binary_start..], packed);
+    }
+}
+
+#[tauri::command]
 async fn sigrok_decoder_catalog() -> CommandResult<SigrokDecoderCatalog> {
     tauri::async_runtime::spawn_blocking(move || {
-        SigrokNativeDecoder::from_env()
+        SigrokNativeDecoder::from_env_cached()
             .and_then(|decoder| decoder.decoder_catalog())
             .map_err(to_string)
     })
@@ -1188,9 +1763,10 @@ async fn sigrok_decoder_catalog() -> CommandResult<SigrokDecoderCatalog> {
 #[tauri::command]
 async fn saleae_decoder_catalog() -> CommandResult<SigrokDecoderCatalog> {
     tauri::async_runtime::spawn_blocking(move || {
-        SaleaeNativeDecoder::from_env()
-            .and_then(|decoder| decoder.decoder_catalog())
-            .map_err(to_string)
+        let decoder = SaleaeNativeDecoder::from_env_cached().map_err(to_string)?;
+        let catalog = decoder.decoder_catalog().map_err(to_string)?;
+        warm_saleae_native_sidecar_async(Some(decoder), Duration::ZERO);
+        Ok(catalog)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1201,17 +1777,51 @@ async fn render_graph_frame(
     session_id: String,
     request: GraphFrameRequest,
     state: State<'_, AppState>,
-) -> CommandResult<GraphFrameResponse> {
+) -> CommandResult<tauri::ipc::Response> {
     let session = state.existing_session(&session_id)?;
-    tauri::async_runtime::spawn_blocking(move || session.render_frame(&request).map_err(to_string))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .render_frame(&request)
+            .map_err(to_string)
+            .and_then(encode_graph_frame_response)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 fn release_graph_session(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
     state.sessions.write().remove(&session_id);
     Ok(())
+}
+
+/// Applies a gesture to the session viewport and returns the authoritative
+/// result. This is the entry point for every viewport change that is not already
+/// carried by a frame request: zoom to fit, jump to an edge, and scrollbar drags.
+#[tauri::command]
+fn apply_graph_view_intent(
+    session_id: String,
+    intent: ViewIntent,
+    state: State<'_, AppState>,
+) -> CommandResult<SessionView> {
+    let session = state.existing_session(&session_id)?;
+    Ok(session.apply_view_intent(&intent))
+}
+
+/// Tells the session how to clamp viewports. `total_samples` is not part of this
+/// because the backend reads it from the capture itself.
+#[tauri::command]
+fn set_graph_view_limits(
+    session_id: String,
+    limits: ViewLimits,
+    state: State<'_, AppState>,
+) -> CommandResult<SessionView> {
+    let session = state.existing_session(&session_id)?;
+    session.set_view_limits(limits);
+    // Re-normalize the current viewport against the new limits so a capture that
+    // grew or a mode that changed cannot leave a stale view in place.
+    let current = session.session_view();
+    Ok(session.set_session_view(current.start_sample, current.samples))
 }
 
 #[tauri::command]
@@ -1345,7 +1955,19 @@ fn set_bundled_path(name: &str, path: PathBuf, directory: bool) {
 
 fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
     let resource_dir = app.path().resource_dir()?.join("resources");
-    let native_dir = resource_dir.join("native");
+    let bundled_native_dir = resource_dir.join("native");
+    #[cfg(debug_assertions)]
+    let native_dir = {
+        let workspace_native_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources/native");
+        if workspace_native_dir.is_dir() {
+            workspace_native_dir
+        } else {
+            bundled_native_dir
+        }
+    };
+    #[cfg(not(debug_assertions))]
+    let native_dir = bundled_native_dir;
     let sigrok_dir = native_dir.join("sigrok-analyzer-sidecar");
     #[cfg(target_os = "windows")]
     let sigrok_executable = "pxlogic-sigrok-sidecar.exe";
@@ -1392,12 +2014,65 @@ fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn warm_saleae_native_sidecar_async(decoder: Option<SaleaeNativeDecoder>, delay: Duration) {
+    let _ = std::thread::Builder::new()
+        .name("saleae-native-warmup".to_string())
+        .spawn(move || {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+            let decoder = match decoder {
+                Some(decoder) => Ok(decoder),
+                None => SaleaeNativeDecoder::from_env_cached(),
+            };
+            match decoder {
+                Ok(decoder) => {
+                    let _ = decoder.decoder_catalog();
+                    decoder.warm_persistent_pool();
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "pxlogic::decoder_performance",
+                        component = "tauri",
+                        stage = "saleae_native_warmup_unavailable",
+                        detail = %error
+                    );
+                }
+            }
+        });
+}
+
+fn warm_sigrok_native_catalog_async(delay: Duration) {
+    let _ = std::thread::Builder::new()
+        .name("sigrok-native-warmup".to_string())
+        .spawn(move || {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+            match SigrokNativeDecoder::from_env_cached() {
+                Ok(decoder) => {
+                    let _ = decoder.decoder_catalog();
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "pxlogic::decoder_performance",
+                        component = "tauri",
+                        stage = "sigrok_native_warmup_unavailable",
+                        detail = %error
+                    );
+                }
+            }
+        });
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             configure_bundled_resources(app)?;
+            warm_saleae_native_sidecar_async(None, Duration::from_millis(350));
+            warm_sigrok_native_catalog_async(Duration::from_millis(350));
             Ok(())
         })
         .manage(AppState::default())
@@ -1422,9 +2097,17 @@ fn main() {
             render_graph_frame,
             measure_digital_range,
             decode_analyzer_frames,
+            decode_analyzer_frame_batch,
+            decode_analyzer_frame_batch_summary,
+            decode_saleae_analyzer_background_step,
+            decode_analyzer_frame_slice,
+            decode_analyzer_frame_table_window,
+            decode_analyzer_frame_table_search_window,
             saleae_decoder_catalog,
             sigrok_decoder_catalog,
             release_graph_session,
+            apply_graph_view_intent,
+            set_graph_view_limits,
             read_extension_package,
             create_extension_template,
         ])

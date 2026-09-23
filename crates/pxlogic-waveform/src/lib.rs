@@ -72,7 +72,7 @@ pub struct ChannelTile {
     pub label: String,
     pub bins: Vec<WaveformBin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub packed_bins: Option<String>,
+    pub packed_bins: Option<Vec<u8>>,
     pub segments: Vec<DigitalSegment>,
     pub rising_edges: Vec<u64>,
     pub falling_edges: Vec<u64>,

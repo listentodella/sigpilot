@@ -1,6 +1,7 @@
 #ifndef ANALYZER_TEST_MOCK_CHANNEL_DATA
 #define ANALYZER_TEST_MOCK_CHANNEL_DATA
 
+#include <atomic>
 #include <exception>
 
 #include "AnalyzerChannelData.h"
@@ -67,7 +68,7 @@ public:
     void DumpTestData(double sampleRateMhz);
 
     U64 GetCurrentSample() const
-    { return mCurrentSample; }
+    { return mObservedSample.load(std::memory_order_relaxed); }
 
     /**
      * @brief AdvanceNTransitions - advance a number of transitions in the data
@@ -96,6 +97,7 @@ private:
 
     BitState mCurrentState = BIT_LOW;
     U64 mCurrentSample = 0;
+    std::atomic<U64> mObservedSample{0};
 
     BitState mInitialState = BIT_LOW
             ;

@@ -1,10 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  normalizeCaptureViewport,
+  normalizeLiveCaptureViewport,
+} from "./captureViewport.ts";
+import {
+  DEFAULT_CAPTURE_VIEW_SECONDS,
+  MINIMUM_DEFAULT_CAPTURE_VIEW_SAMPLES,
+} from "./liveViewport.ts";
+import type {
   UiExtensionFeatureType,
   UiExtensionManifest,
   UiExtensionPackage,
   UiExtensionTemplateRequest,
-} from "./extensions";
+} from "./extensions.ts";
 
 export type DeviceKind = "Fake" | "Usb";
 
@@ -235,7 +243,7 @@ export interface ChannelTile {
   channel: number;
   label: string;
   bins: WaveformBin[];
-  packed_bins?: string | null;
+  packed_bins?: Uint8Array | null;
   segments: DigitalSegment[];
   rising_edges: number[];
   falling_edges: number[];
@@ -398,6 +406,12 @@ export interface DecodedFrame {
   }>;
 }
 
+export interface AnalyzerFrameRef {
+  frame_id: number;
+  start_sample: number;
+  end_sample: number;
+}
+
 export interface AnalyzerBubble {
   type: "SingleBubble" | "MultiBubble";
   frame_id_interval: {
@@ -418,8 +432,11 @@ export interface UartFrameWindowRequest extends UartDecodeSettings {
 
 export interface UartFrameWindow {
   bubbles: AnalyzerBubble[];
+  frame_refs?: AnalyzerFrameRef[];
   frames: DecodedFrame[];
+  previous_frame_ref?: AnalyzerFrameRef | null;
   previous_frame: DecodedFrame | null;
+  next_frame_ref?: AnalyzerFrameRef | null;
   next_frame: DecodedFrame | null;
 }
 
@@ -465,17 +482,108 @@ export interface AnalyzerRenderResult {
   tracks: AnalyzerTrackWindow[];
 }
 
+export interface AnalyzerDecodeBatchRequest {
+  analyzer_id: string;
+  backend: DecoderBackendKind;
+  settings: AnalyzerDecodeSettings;
+}
+
+export interface AnalyzerDecodeBatchResult {
+  analyzer_id: string;
+  frames: DecodedFrame[];
+}
+
+export interface AnalyzerDecodeBatchSummaryResult {
+  analyzer_id: string;
+  frame_count: number;
+}
+
+export interface AnalyzerDecodeBackgroundProgressResult {
+  analyzer_id: string;
+  frame_count: number;
+  processed_edges: number;
+  total_edges: number;
+  progress: number;
+  complete: boolean;
+  cancelled: boolean;
+}
+
+export interface AnalyzerDecodeFrameSliceRequest {
+  backend: DecoderBackendKind;
+  end: number;
+  settings: AnalyzerDecodeSettings;
+  start: number;
+}
+
+export interface AnalyzerDecodeFrameSliceResult {
+  frame_count: number;
+  frames: DecodedFrame[];
+}
+
+export interface AnalyzerFrameTableRequest {
+  analyzer_id: string;
+  analyzer_name: string;
+  backend: DecoderBackendKind;
+  display_radix: string;
+  settings: AnalyzerDecodeSettings;
+}
+
+export interface AnalyzerFrameTableRow {
+  analyzer_id: string;
+  frame: DecodedFrame;
+  frame_index: number;
+  frame_number: number;
+}
+
+export interface AnalyzerFrameTableWindow {
+  roles: string[];
+  row_count: number;
+  rows: AnalyzerFrameTableRow[];
+}
+
+// The backend owns the viewport. A gesture is described as an intent and the
+// authoritative result comes back in `GraphFrameResponse.view`, so the frontend
+// never clamps a copy of its own.
+export interface SessionView {
+  start_sample: number;
+  samples: number;
+}
+
+export type ViewIntent =
+  /** Render wherever the session already is. The per-frame loop sends this when
+   * no new gesture arrived, which keeps an in-flight glide running. */
+  | { kind: "keep_current" }
+  | { kind: "set"; start_sample: number; samples: number }
+  | { kind: "pan_samples"; delta_samples: number }
+  | { kind: "zoom"; factor: number; anchor_ratio: number }
+  /** Glide to a viewport over `duration_ms`. The backend owns the animation. */
+  | { kind: "animate_to"; start_sample: number; samples: number; duration_ms: number };
+
 export interface GraphFrameRequest {
   frame_id: number;
   waveform: WaveformRequest;
+  include_tile?: boolean;
   analyzer_view?: WaveformRequest | null;
   analyzers: AnalyzerRenderRequest[];
+  /**
+   * When present the backend applies this gesture and renders the session's own
+   * viewport. `waveform` then only supplies `pixels` and `channels`.
+   */
+  view?: ViewIntent | null;
 }
 
 export interface GraphFrameResponse {
   frame_id: number;
   revision: number;
   sample_count: number;
+  /** The authoritative viewport this frame was rendered for. */
+  view: SessionView;
+  /**
+   * The viewport the returned data was computed for. It trails `view` whenever
+   * the user kept moving while the frame was in flight, and the gap between the
+   * two is exactly what the residual pixel transform stretches.
+   */
+  data_view: SessionView;
   tile: WaveformTile;
   analyzers: AnalyzerRenderResult[];
 }
@@ -486,7 +594,8 @@ export interface CaptureCallbacks {
   onTrigger?: (trigger: CaptureTriggerMetadata) => void;
 }
 
-const isTauriRuntime = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const isTauriRuntime = () =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 let previewCapture: CaptureSummary = {
   metadata: {
@@ -514,8 +623,10 @@ const previewAnalyzerFrameCache = new Map<string, DecodedFrame[]>();
 const previewDemoSignalsBySession = new Map<string, PreviewDemoSignal[]>();
 let previewDemoSignals: PreviewDemoSignal[] = [];
 
-// Ported from Logic 2.4.43 BaseAnalyzerManager.maximumMarkerResults.
+// Ported from Logic 2.4.43 BaseAnalyzerManager. Bubble responses may grow
+// with the viewport; the fixed 300-result limit is reserved for marker lists.
 const PREVIEW_MAX_ANALYZER_MARKER_RESULTS = 300;
+const PREVIEW_MAX_ANALYZER_BUBBLE_RESULTS = 4_096;
 const PREVIEW_MAX_MULTI_BUBBLE_STRINGS = 400;
 const PREVIEW_MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME = 15;
 const PREVIEW_MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES = 30;
@@ -772,6 +883,106 @@ async function callBackend<T>(command: string, args?: Record<string, unknown>): 
     throw new Error("Tauri runtime is not available");
   }
   return invoke<T>(command, args);
+}
+
+interface PackedBinRange {
+  offset: number;
+  length: number;
+}
+
+export function decodeBinaryGraphFrame(payload: Uint8Array | ArrayBuffer | number[]): GraphFrameResponse {
+  const bytes = payload instanceof Uint8Array
+    ? payload
+    : payload instanceof ArrayBuffer
+      ? new Uint8Array(payload)
+      : Uint8Array.from(payload);
+  if (
+    bytes.length < 13 ||
+    bytes[0] !== 0x50 ||
+    bytes[1] !== 0x58 ||
+    bytes[2] !== 0x47 ||
+    bytes[3] !== 0x46 ||
+    bytes[4] !== 0x31
+  ) {
+    throw new Error("Invalid graph frame response");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const headerLength = Number(view.getBigUint64(5, true));
+  const headerStart = 13;
+  const binaryStart = headerStart + headerLength;
+  if (!Number.isSafeInteger(headerLength) || binaryStart > bytes.length) {
+    throw new Error("Invalid graph frame header length");
+  }
+  const response = JSON.parse(
+    new TextDecoder().decode(bytes.subarray(headerStart, binaryStart)),
+  ) as GraphFrameResponse;
+  for (const channel of response.tile.channels) {
+    const range = channel.packed_bins as unknown as PackedBinRange | null | undefined;
+    if (!range) {
+      channel.packed_bins = null;
+      continue;
+    }
+    const begin = binaryStart + range.offset;
+    const end = begin + range.length;
+    if (
+      !Number.isSafeInteger(range.offset) ||
+      !Number.isSafeInteger(range.length) ||
+      range.offset < 0 ||
+      range.length < 0 ||
+      begin < binaryStart ||
+      end > bytes.length
+    ) {
+      throw new Error("Invalid packed waveform range");
+    }
+    channel.packed_bins = bytes.subarray(begin, end);
+  }
+  return response;
+}
+
+async function callGraphFrameBackend(
+  sessionId: string,
+  request: GraphFrameRequest,
+): Promise<GraphFrameResponse> {
+  const payload = await invoke<Uint8Array | ArrayBuffer | number[]>("render_graph_frame", {
+    sessionId,
+    request,
+  });
+  return decodeBinaryGraphFrame(payload);
+}
+
+/** How the backend clamps viewports. `total_samples` is not part of this: the
+ * backend reads it from the capture so the two can never disagree. */
+export interface ViewLimits {
+  live: boolean;
+  maximum_samples: number | null;
+  sample_rate_hz: number;
+}
+
+/**
+ * Applies a gesture to the session viewport and returns the authoritative
+ * result. This is the entry point for viewport changes that are not already
+ * carried by a frame request: zoom to fit, jump to an edge, scrollbar drags.
+ *
+ * Returns `null` outside Tauri, where there is no backend to own the viewport.
+ */
+export async function applyGraphViewIntent(
+  sessionId: string,
+  intent: ViewIntent,
+): Promise<SessionView | null> {
+  if (!isTauriRuntime()) return previewApplyViewIntent(sessionId, intent);
+  return invoke<SessionView>("apply_graph_view_intent", { sessionId, intent });
+}
+
+/**
+ * Updates the clamping policy and returns the re-clamped current viewport, so a
+ * capture that grew or a mode that changed cannot leave a stale view in place.
+ */
+export async function setGraphViewLimits(
+  sessionId: string,
+  limits: ViewLimits,
+): Promise<SessionView | null> {
+  if (!isTauriRuntime()) return previewSetViewLimits(sessionId, limits);
+  return invoke<SessionView>("set_graph_view_limits", { sessionId, limits });
 }
 
 function previewCaptureForSession(sessionId: string) {
@@ -1089,7 +1300,13 @@ export function getWaveformTile(sessionId: string, request: WaveformRequest): Pr
   if (!isTauriRuntime()) {
     return Promise.resolve(withPreviewCapture(sessionId, () => buildPreviewTile(request)));
   }
-  return callBackend("get_waveform_tile", { sessionId, request });
+  return callGraphFrameBackend(sessionId, {
+    frame_id: 0,
+    waveform: request,
+    include_tile: true,
+    analyzer_view: null,
+    analyzers: [],
+  }).then((frame) => frame.tile);
 }
 
 export function nearestDigitalTransition(
@@ -1155,6 +1372,124 @@ export function decodeAnalyzerFrames(
   return callBackend("decode_analyzer_frames", { sessionId, backend, settings });
 }
 
+export function decodeAnalyzerFrameBatch(
+  sessionId: string,
+  requests: AnalyzerDecodeBatchRequest[],
+): Promise<AnalyzerDecodeBatchResult[]> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(
+      withPreviewCapture(sessionId, () =>
+        requests.map((request) => ({
+          analyzer_id: request.analyzer_id,
+          frames: cachedPreviewAnalyzerFrames(request.settings),
+        })),
+      ),
+    );
+  }
+  return callBackend("decode_analyzer_frame_batch", { sessionId, requests });
+}
+
+export function decodeAnalyzerFrameBatchSummary(
+  sessionId: string,
+  requests: AnalyzerDecodeBatchRequest[],
+): Promise<AnalyzerDecodeBatchSummaryResult[]> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(
+      withPreviewCapture(sessionId, () =>
+        requests.map((request) => ({
+          analyzer_id: request.analyzer_id,
+          frame_count: cachedPreviewAnalyzerFrames(request.settings).length,
+        })),
+      ),
+    );
+  }
+  return callBackend("decode_analyzer_frame_batch_summary", { sessionId, requests });
+}
+
+export function decodeSaleaeAnalyzerBackgroundStep(
+  sessionId: string,
+  requests: AnalyzerDecodeBatchRequest[],
+): Promise<AnalyzerDecodeBackgroundProgressResult[]> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(
+      withPreviewCapture(sessionId, () =>
+        requests.map((request) => {
+          const frameCount = cachedPreviewAnalyzerFrames(request.settings).length;
+          return {
+            analyzer_id: request.analyzer_id,
+            frame_count: frameCount,
+            processed_edges: 1,
+            total_edges: 1,
+            progress: 1,
+            complete: true,
+            cancelled: false,
+          };
+        }),
+      ),
+    );
+  }
+  return callBackend("decode_saleae_analyzer_background_step", { sessionId, requests });
+}
+
+export function decodeAnalyzerFrameSlice(
+  sessionId: string,
+  request: AnalyzerDecodeFrameSliceRequest,
+): Promise<AnalyzerDecodeFrameSliceResult> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(
+      withPreviewCapture(sessionId, () => {
+        const frames = cachedPreviewAnalyzerFrames(request.settings);
+        const start = Math.max(0, Math.min(frames.length, Math.trunc(request.start)));
+        const end = Math.max(start, Math.min(frames.length, Math.trunc(request.end)));
+        return {
+          frame_count: frames.length,
+          frames: frames.slice(start, end),
+        };
+      }),
+    );
+  }
+  return callBackend("decode_analyzer_frame_slice", { sessionId, request });
+}
+
+export function decodeAnalyzerFrameTableWindow(
+  sessionId: string,
+  requests: AnalyzerFrameTableRequest[],
+  start: number,
+  end: number,
+): Promise<AnalyzerFrameTableWindow> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(
+      withPreviewCapture(sessionId, () =>
+        buildPreviewAnalyzerFrameTableWindow(requests, start, end),
+      ),
+    );
+  }
+  return callBackend("decode_analyzer_frame_table_window", { sessionId, requests, start, end });
+}
+
+export function decodeAnalyzerFrameTableSearchWindow(
+  sessionId: string,
+  requests: AnalyzerFrameTableRequest[],
+  query: string,
+  start: number,
+  end: number,
+): Promise<AnalyzerFrameTableWindow> {
+  if (!isTauriRuntime()) {
+    return Promise.resolve(
+      withPreviewCapture(sessionId, () =>
+        buildPreviewAnalyzerFrameTableSearchWindow(requests, query, start, end),
+      ),
+    );
+  }
+  return callBackend("decode_analyzer_frame_table_search_window", {
+    sessionId,
+    requests,
+    query,
+    start,
+    end,
+  });
+}
+
 export function decodeUartFrames(
   settings: UartDecodeSettings,
   sessionId = "preview",
@@ -1170,21 +1505,171 @@ export async function getUartFrameWindow(
   return buildAnalyzerFrameWindow(frames, request.start_sample, request.sample_count, request.width_px);
 }
 
+// --- Browser preview viewport -------------------------------------------------
+// Mirrors what `GraphSession` does in Rust: an authoritative viewport per
+// session plus the clamping limits. It exists so `pnpm dev` exercises the same
+// intent protocol the desktop build uses, rather than a shortcut that would hide
+// integration mistakes until someone ran the real thing.
+
+interface PreviewViewLimits {
+  live: boolean;
+  maximum_samples: number | null;
+  sample_rate_hz: number;
+}
+
+const previewViews = new Map<string, { samples: number; start: number }>();
+const previewViewLimits = new Map<string, PreviewViewLimits>();
+
+function previewLimitsFor(sessionId: string): PreviewViewLimits {
+  const existing = previewViewLimits.get(sessionId);
+  if (existing) return existing;
+  const capture = previewCaptureForSession(sessionId);
+  return {
+    live: false,
+    maximum_samples: null,
+    sample_rate_hz: capture.metadata.sample_rate_hz,
+  };
+}
+
+function normalizePreviewView(sessionId: string, start: number, samples: number) {
+  const capture = previewCaptureForSession(sessionId);
+  const total = Math.max(1, capture.metadata.sample_count);
+  const limits = previewLimitsFor(sessionId);
+  const viewport = limits.live
+    ? normalizeLiveCaptureViewport(
+        start,
+        samples,
+        total,
+        limits.sample_rate_hz,
+        limits.maximum_samples ?? undefined,
+      )
+    : normalizeCaptureViewport(start, samples, total, limits.maximum_samples ?? undefined);
+  return { samples: viewport.samples, start: viewport.start };
+}
+
+function defaultPreviewView(sessionId: string) {
+  const capture = previewCaptureForSession(sessionId);
+  const limits = previewLimitsFor(sessionId);
+  const total = Math.max(1, capture.metadata.sample_count);
+  const preferred = Math.max(
+    MINIMUM_DEFAULT_CAPTURE_VIEW_SAMPLES,
+    Math.round(Math.max(1, limits.sample_rate_hz) * DEFAULT_CAPTURE_VIEW_SECONDS),
+  );
+  const samples = Math.min(total, preferred);
+  return limits.live
+    ? { samples, start: Math.max(0, total - samples) }
+    : { samples, start: 0 };
+}
+
+function applyPreviewIntent(
+  current: { samples: number; start: number },
+  intent: ViewIntent,
+): { samples: number; start: number } {
+  switch (intent.kind) {
+    case "keep_current":
+      return current;
+    case "set":
+    case "animate_to":
+      return { samples: intent.samples, start: intent.start_sample };
+    case "pan_samples":
+      return { samples: current.samples, start: current.start + intent.delta_samples };
+    case "zoom": {
+      const factor = Math.min(1_000, Math.max(0.001, intent.factor));
+      const anchor = Math.min(1, Math.max(0, intent.anchor_ratio));
+      const anchorSample = current.start + current.samples * anchor;
+      const samples = Math.max(1, current.samples * factor);
+      return { samples, start: anchorSample - samples * anchor };
+    }
+  }
+}
+
+/**
+ * The current viewport, *without* storing it. A session that has never been
+ * moved keeps recomputing its default, which is what lets a live capture follow
+ * the tail as samples stream in. Materializing the default here would pin
+ * whatever the capture happened to contain at that instant — including nothing
+ * at all, which collapses the viewport to a single sample.
+ */
+function previewSessionView(sessionId: string): SessionView {
+  const stored = previewViews.get(sessionId);
+  const current = stored ?? defaultPreviewView(sessionId);
+  const normalized = normalizePreviewView(sessionId, current.start, current.samples);
+  return { samples: normalized.samples, start_sample: normalized.start };
+}
+
+function applyPreviewViewIntent(sessionId: string, intent: ViewIntent): SessionView {
+  const current = previewViews.get(sessionId) ?? defaultPreviewView(sessionId);
+  const next = applyPreviewIntent(current, intent);
+  const normalized = normalizePreviewView(sessionId, next.start, next.samples);
+  // A gesture is a real decision, so this one is remembered.
+  previewViews.set(sessionId, normalized);
+  return { samples: normalized.samples, start_sample: normalized.start };
+}
+
+export function previewSetViewLimits(sessionId: string, limits: ViewLimits): SessionView {
+  previewViewLimits.set(sessionId, {
+    live: limits.live,
+    maximum_samples: limits.maximum_samples,
+    sample_rate_hz: limits.sample_rate_hz,
+  });
+  // Re-clamp whatever the session already had. A session that never moved stays
+  // on its default, so a live one keeps following the tail.
+  const stored = previewViews.get(sessionId);
+  if (stored) {
+    const normalized = normalizePreviewView(sessionId, stored.start, stored.samples);
+    previewViews.set(sessionId, normalized);
+    return { samples: normalized.samples, start_sample: normalized.start };
+  }
+  return previewSessionView(sessionId);
+}
+
+export function previewApplyViewIntent(sessionId: string, intent: ViewIntent): SessionView {
+  return applyPreviewViewIntent(sessionId, intent);
+}
+
 export function renderGraphFrame(
   sessionId: string,
   request: GraphFrameRequest,
 ): Promise<GraphFrameResponse> {
   if (isTauriRuntime()) {
-    return callBackend("render_graph_frame", { sessionId, request });
+    return callGraphFrameBackend(sessionId, request);
   }
   return Promise.resolve(
     withPreviewCapture(sessionId, () => {
-      const analyzerView = request.analyzer_view ?? request.waveform;
+      // The browser preview has no backend to own the viewport, so it keeps the
+      // same state the Rust session keeps. Echoing the caller's range instead
+      // would be wrong now that callers deliberately send an empty one when they
+      // are driving the viewport with an intent.
+      // `keep_current` is what the per-frame loop sends when nothing moved, so it
+      // must be passive: remembering it would freeze a live session's tail
+      // follow at whatever it happened to be on the first frame.
+      const view =
+        request.view && request.view.kind !== "keep_current"
+          ? applyPreviewViewIntent(sessionId, request.view)
+          : previewSessionView(sessionId);
+      // Whenever the caller is driving the viewport, the range comes from the
+      // session view — including for a passive `keep_current`, which is what the
+      // per-frame loop sends. Falling back to the caller's own range there would
+      // use the placeholder it deliberately sends and render a single sample.
+      const waveform = request.view
+        ? {
+            ...request.waveform,
+            start_sample: Math.max(0, Math.floor(view.start_sample)),
+            sample_count: Math.max(
+              1,
+              Math.ceil(view.start_sample + view.samples) -
+                Math.max(0, Math.floor(view.start_sample)),
+            ),
+          }
+        : request.waveform;
+      const analyzerView = request.analyzer_view ?? waveform;
       return {
         frame_id: request.frame_id,
         revision: previewCaptureRevisions.get(sessionId) ?? 0,
         sample_count: previewCapture.metadata.sample_count,
-        tile: buildPreviewTile(request.waveform),
+        view,
+        data_view: view,
+        tile: request.include_tile === false ? emptyPreviewTile(waveform) : buildPreviewTile(waveform),
         analyzers: request.analyzers.map((analyzer) => {
           return {
             analyzer_id: analyzer.analyzer_id,
@@ -1237,6 +1722,198 @@ function cachedPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings) {
   if (previewAnalyzerFrameCache.size >= 32) previewAnalyzerFrameCache.clear();
   previewAnalyzerFrameCache.set(key, frames);
   return frames;
+}
+
+function buildPreviewAnalyzerFrameTableWindow(
+  requests: AnalyzerFrameTableRequest[],
+  start: number,
+  end: number,
+): AnalyzerFrameTableWindow {
+  const sources = requests
+    .map((request) => ({
+      analyzerId: request.analyzer_id,
+      frames: cachedPreviewAnalyzerFrames(request.settings),
+    }))
+    .filter((source) => source.frames.length > 0);
+  const rowCount = sources.reduce((count, source) => count + source.frames.length, 0);
+  const roles = previewAnalyzerFrameTableRoles(sources);
+  const windowStart = Math.min(rowCount, Math.max(0, Math.trunc(start)));
+  const windowEnd = Math.max(windowStart, Math.min(rowCount, Math.trunc(end)));
+  if (windowStart >= windowEnd || sources.length === 0) {
+    return { roles, row_count: rowCount, rows: [] };
+  }
+  if (sources.length === 1) {
+    const source = sources[0];
+    return {
+      roles,
+      row_count: rowCount,
+      rows: source.frames.slice(windowStart, windowEnd).map((frame, offset) => ({
+        analyzer_id: source.analyzerId,
+        frame,
+        frame_index: frame.frame_id,
+        frame_number: windowStart + offset + 1,
+      })),
+    };
+  }
+
+  const positions = Array.from({ length: sources.length }, () => 0);
+  const rows: AnalyzerFrameTableRow[] = [];
+  for (let rowIndex = 0; rowIndex < windowEnd; rowIndex += 1) {
+    const sourceIndex = nextPreviewAnalyzerTableSourceIndex(sources, positions);
+    if (sourceIndex < 0) break;
+    const framePosition = positions[sourceIndex];
+    const frame = sources[sourceIndex].frames[framePosition];
+    if (rowIndex >= windowStart) {
+      rows.push({
+        analyzer_id: sources[sourceIndex].analyzerId,
+        frame,
+        frame_index: frame.frame_id,
+        frame_number: framePosition + 1,
+      });
+    }
+    positions[sourceIndex] += 1;
+  }
+  return { roles, row_count: rowCount, rows };
+}
+
+function buildPreviewAnalyzerFrameTableSearchWindow(
+  requests: AnalyzerFrameTableRequest[],
+  query: string,
+  start: number,
+  end: number,
+): AnalyzerFrameTableWindow {
+  const fullWindow = buildPreviewAnalyzerFrameTableWindow(requests, 0, Number.MAX_SAFE_INTEGER);
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return buildPreviewAnalyzerFrameTableWindow(requests, start, end);
+  const matching = fullWindow.rows.filter((row) =>
+    previewAnalyzerFrameSearchText(row, requests).includes(normalizedQuery),
+  );
+  const windowStart = Math.min(matching.length, Math.max(0, Math.trunc(start)));
+  const windowEnd = Math.max(windowStart, Math.min(matching.length, Math.trunc(end)));
+  return {
+    roles: fullWindow.roles,
+    row_count: matching.length,
+    rows: matching.slice(windowStart, windowEnd),
+  };
+}
+
+function previewAnalyzerFrameSearchText(
+  row: AnalyzerFrameTableRow,
+  requests: AnalyzerFrameTableRequest[],
+) {
+  const request = requests.find((item) => item.analyzer_id === row.analyzer_id);
+  const analyzerName = request?.analyzer_name ?? row.analyzer_id;
+  const displayRadix = request?.display_radix ?? "Hexadecimal";
+  let text = `${analyzerName} ${row.frame_number} ${row.frame.frame_type} ${formatPreviewAnalyzerText(row.frame.label, displayRadix, row.frame.value)}`;
+  for (const value of row.frame.channel_values) {
+    text += ` ${value.role} ${formatPreviewAnalyzerText(value.label, displayRadix, value.value)}`;
+  }
+  return text.toLowerCase();
+}
+
+function formatPreviewAnalyzerText(text: string, displayRadix: string, fallbackValue?: number) {
+  const source = text || "";
+  let replaced = false;
+  const withExplicitTokens = source.replace(/0x[0-9a-f]+|0b[01]+/gi, (token) => {
+    const parsed = parsePreviewAnalyzerNumericToken(token);
+    if (!parsed) return token;
+    replaced = true;
+    return formatPreviewAnalyzerValue(parsed.value, displayRadix, parsed.bits);
+  });
+  if (replaced) return withExplicitTokens;
+  const trimmed = source.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const parsed = Number.parseInt(trimmed, 10);
+    if (Number.isFinite(parsed)) {
+      return source.replace(trimmed, formatPreviewAnalyzerValue(parsed, displayRadix, previewBitsForAnalyzerValue(parsed)));
+    }
+  }
+  if (source === "" && typeof fallbackValue === "number" && Number.isFinite(fallbackValue)) {
+    return formatPreviewAnalyzerValue(fallbackValue, displayRadix, previewBitsForAnalyzerValue(fallbackValue));
+  }
+  return source;
+}
+
+function parsePreviewAnalyzerNumericToken(token: string) {
+  if (/^0x/i.test(token)) {
+    const digits = token.slice(2);
+    const value = Number.parseInt(digits, 16);
+    return Number.isFinite(value) ? { bits: Math.max(8, digits.length * 4), value } : null;
+  }
+  if (/^0b/i.test(token)) {
+    const digits = token.slice(2);
+    const value = Number.parseInt(digits, 2);
+    return Number.isFinite(value) ? { bits: Math.max(1, digits.length), value } : null;
+  }
+  return null;
+}
+
+function formatPreviewAnalyzerValue(value: number, displayRadix: string, bits = previewBitsForAnalyzerValue(value)) {
+  const normalizedValue = Math.max(0, Math.trunc(value));
+  if (displayRadix === "Decimal") return normalizedValue.toString(10);
+  if (displayRadix === "Binary") return `0b${normalizedValue.toString(2).padStart(Math.max(1, bits), "0")}`;
+  if (displayRadix === "Ascii") return formatPreviewAsciiAnalyzerValue(normalizedValue);
+  return `0x${normalizedValue.toString(16).toUpperCase().padStart(Math.max(1, Math.ceil(bits / 4)), "0")}`;
+}
+
+function previewBitsForAnalyzerValue(value: number) {
+  const normalizedValue = Math.max(0, Math.trunc(value));
+  if (normalizedValue <= 0xff) return 8;
+  return Math.max(1, Math.ceil(Math.log2(normalizedValue + 1)));
+}
+
+function formatPreviewAsciiAnalyzerValue(value: number): string {
+  const byte = value & 0xff;
+  const escaped =
+    byte === 0x09
+      ? "\\t"
+      : byte === 0x0a
+        ? "\\n"
+        : byte === 0x0d
+          ? "\\r"
+          : byte === 0x27
+            ? "\\'"
+            : byte === 0x5c
+              ? "\\\\"
+              : byte >= 0x20 && byte <= 0x7e
+                ? String.fromCharCode(byte)
+                : null;
+  return escaped === null ? formatPreviewAnalyzerValue(value, "Hexadecimal", previewBitsForAnalyzerValue(value)) : `'${escaped}'`;
+}
+
+function previewAnalyzerFrameTableRoles(
+  sources: Array<{ analyzerId: string; frames: DecodedFrame[] }>,
+) {
+  const roles: string[] = [];
+  for (const source of sources) {
+    for (const frame of source.frames) {
+      for (const value of frame.channel_values) {
+        if (!roles.includes(value.role)) roles.push(value.role);
+      }
+    }
+  }
+  return roles;
+}
+
+function nextPreviewAnalyzerTableSourceIndex(
+  sources: Array<{ analyzerId: string; frames: DecodedFrame[] }>,
+  positions: number[],
+) {
+  let bestSourceIndex = -1;
+  let bestFrame: DecodedFrame | null = null;
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
+    const frame = sources[sourceIndex].frames[positions[sourceIndex]];
+    if (!frame) continue;
+    if (
+      !bestFrame ||
+      frame.start_sample < bestFrame.start_sample ||
+      (frame.start_sample === bestFrame.start_sample && sourceIndex < bestSourceIndex)
+    ) {
+      bestSourceIndex = sourceIndex;
+      bestFrame = frame;
+    }
+  }
+  return bestSourceIndex;
 }
 
 function framesForAnalyzerTrack(frames: DecodedFrame[], track: AnalyzerTrackRequest) {
@@ -1486,49 +2163,37 @@ export function buildAnalyzerFrameWindow(
   const visibleCount = Math.max(0, visibleEnd - firstCandidate);
   const limitedEnd = Math.min(visibleEnd, firstCandidate + PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
   const limited = frames.slice(firstCandidate, limitedEnd);
-  const bubbles =
-    visibleCount > PREVIEW_MAX_ANALYZER_MARKER_RESULTS * 4
-      ? buildDenseAnalyzerBubbles(frames, firstCandidate, visibleEnd)
-      : buildAnalyzerBubblesFromFrames(
-          frames.slice(firstCandidate, visibleEnd),
-          sampleCount,
-          widthPx,
-        );
+  const previousFrame = firstCandidate > 0 ? frames[firstCandidate - 1] : null;
+  const nextFrame =
+    visibleCount > PREVIEW_MAX_ANALYZER_MARKER_RESULTS
+      ? frames[firstCandidate + PREVIEW_MAX_ANALYZER_MARKER_RESULTS]
+      : visibleEnd < frames.length
+        ? frames[visibleEnd]
+        : null;
+  const bubbles = buildAnalyzerBubblesFromFrameRange(
+    frames,
+    firstCandidate,
+    visibleEnd,
+    sampleCount,
+    widthPx,
+  );
   return {
     bubbles,
+    frame_refs: limited.map(analyzerFrameRef),
     frames: limited,
-    previous_frame: firstCandidate > 0 ? frames[firstCandidate - 1] : null,
-    next_frame:
-      visibleCount > PREVIEW_MAX_ANALYZER_MARKER_RESULTS
-        ? frames[firstCandidate + PREVIEW_MAX_ANALYZER_MARKER_RESULTS]
-        : visibleEnd < frames.length
-          ? frames[visibleEnd]
-          : null,
+    previous_frame_ref: previousFrame ? analyzerFrameRef(previousFrame) : null,
+    previous_frame: previousFrame,
+    next_frame_ref: nextFrame ? analyzerFrameRef(nextFrame) : null,
+    next_frame: nextFrame,
   };
 }
 
-function buildDenseAnalyzerBubbles(frames: DecodedFrame[], begin: number, end: number): AnalyzerBubble[] {
-  const count = Math.max(0, end - begin);
-  if (count === 0) return [];
-  const bucketSize = Math.ceil(count / PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
-  const bubbles: AnalyzerBubble[] = [];
-  for (let bucketBegin = begin; bucketBegin < end; bucketBegin += bucketSize) {
-    const bucketEnd = Math.min(end, bucketBegin + bucketSize);
-    const first = frames[bucketBegin];
-    const last = frames[bucketEnd - 1];
-    const displayText = frames
-      .slice(bucketBegin, Math.min(bucketEnd, bucketBegin + 12))
-      .map((frame) => frame.label);
-    bubbles.push({
-      type: bucketEnd - bucketBegin === 1 ? "SingleBubble" : "MultiBubble",
-      frame_id_interval: { begin: first.frame_id, end: last.frame_id + 1 },
-      start_sample: first.start_sample,
-      end_sample: last.end_sample,
-      display_text: displayText,
-      result_count: bucketEnd - bucketBegin,
-    });
-  }
-  return bubbles;
+function analyzerFrameRef(frame: DecodedFrame): AnalyzerFrameRef {
+  return {
+    frame_id: frame.frame_id,
+    start_sample: frame.start_sample,
+    end_sample: frame.end_sample,
+  };
 }
 
 function lowerBoundFrameEnd(frames: DecodedFrame[], sample: number) {
@@ -1562,16 +2227,18 @@ function emptyUartFrameWindow(): UartFrameWindow {
   return { bubbles: [], frames: [], previous_frame: null, next_frame: null };
 }
 
-function buildAnalyzerBubblesFromFrames(
+function buildAnalyzerBubblesFromFrameRange(
   frames: DecodedFrame[],
+  begin: number,
+  end: number,
   viewportSamples: number,
   widthPx: number,
 ): AnalyzerBubble[] {
   const accumulators: BubbleAccumulator[] = [];
-  frames.forEach((frame) =>
-    appendFrameToBubbleAccumulators(accumulators, frame, viewportSamples, widthPx),
-  );
-  return enforceMaximumBubbleResults(finalizeBubbleAccumulators(accumulators));
+  for (let index = begin; index < end; index += 1) {
+    appendFrameToBubbleAccumulators(accumulators, frames[index], viewportSamples, widthPx);
+  }
+  return enforceMaximumBubbleResults(finalizeBubbleAccumulators(accumulators), widthPx);
 }
 
 function appendFrameToBubbleAccumulators(
@@ -1626,26 +2293,33 @@ function finalizeBubbleAccumulators(accumulators: BubbleAccumulator[]): Analyzer
   );
 }
 
-function enforceMaximumBubbleResults(bubbles: AnalyzerBubble[]): AnalyzerBubble[] {
-  if (bubbles.length <= PREVIEW_MAX_ANALYZER_MARKER_RESULTS) return bubbles;
-  const bucketSize = Math.ceil(bubbles.length / PREVIEW_MAX_ANALYZER_MARKER_RESULTS);
+function enforceMaximumBubbleResults(bubbles: AnalyzerBubble[], widthPx: number): AnalyzerBubble[] {
+  const maximumResults = Math.min(
+    PREVIEW_MAX_ANALYZER_BUBBLE_RESULTS,
+    Math.max(PREVIEW_MAX_ANALYZER_MARKER_RESULTS, Math.ceil(widthPx)),
+  );
+  if (bubbles.length <= maximumResults) return bubbles;
+  const bucketSize = Math.ceil(bubbles.length / maximumResults);
   const merged: AnalyzerBubble[] = [];
   for (let index = 0; index < bubbles.length; index += bucketSize) {
-    const bucket = bubbles.slice(index, index + bucketSize);
-    if (bucket.length === 1) {
-      merged.push(bucket[0]);
+    const bucketEnd = Math.min(bubbles.length, index + bucketSize);
+    if (bucketEnd - index === 1) {
+      merged.push(bubbles[index]);
       continue;
     }
-    merged.push(mergeBubbles(bucket));
+    merged.push(mergeBubbleRange(bubbles, index, bucketEnd));
   }
   return merged;
 }
 
-function mergeBubbles(bubbles: AnalyzerBubble[]): AnalyzerBubble {
-  const first = bubbles[0];
-  const last = bubbles[bubbles.length - 1];
+function mergeBubbleRange(bubbles: AnalyzerBubble[], begin: number, end: number): AnalyzerBubble {
+  const first = bubbles[begin];
+  const last = bubbles[end - 1];
   const displayText: string[] = [];
-  for (const bubble of bubbles) {
+  let resultCount = 0;
+  for (let index = begin; index < end; index += 1) {
+    const bubble = bubbles[index];
+    resultCount += bubble.result_count;
     for (const text of bubble.display_text) {
       if (displayText.length >= PREVIEW_MAX_MULTI_BUBBLE_STRINGS) break;
       displayText.push(text);
@@ -1661,7 +2335,7 @@ function mergeBubbles(bubbles: AnalyzerBubble[]): AnalyzerBubble {
     start_sample: first.start_sample,
     end_sample: last.end_sample,
     display_text: displayText,
-    result_count: bubbles.reduce((count, bubble) => count + bubble.result_count, 0),
+    result_count: resultCount,
   };
 }
 
@@ -1891,6 +2565,16 @@ function buildPreviewTile(request: WaveformRequest): WaveformTile {
         bins,
       };
     }),
+  };
+}
+
+function emptyPreviewTile(request: WaveformRequest): WaveformTile {
+  return {
+    start_sample: Math.max(0, Math.round(request.start_sample)),
+    sample_count: 0,
+    pixels: Math.max(0, Math.round(request.pixels)),
+    samples_per_pixel: 0,
+    channels: [],
   };
 }
 

@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<body>
+<div id="host" style="position: relative; width: 1350px; height: 400px"></div>
+<pre id="out">pending</pre>
+<script type="module">
+// Static import plus synchronous work: a deferred module runs before
+// DOMContentLoaded, so --dump-dom (which waits for load) captures the finished
+// result. No --virtual-time-budget is needed, which also avoids the virtual
+// clock's interaction with the component's rAF loops.
+import { mountBubbleProbe } from "./dist/entry.js";
+
+const lines = [];
+const log = (text) => lines.push(text);
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+try {
+  const host = document.getElementById("host");
+  const probe = mountBubbleProbe(host);
+
+  log(`fixture: ${probe.describe()}`);
+  log(`mounted with ${host.querySelectorAll(".analyzerBubble").length} bubble elements`);
+
+  // Without these two numbers a 0.00 ms reading is ambiguous: it could mean
+  // "fast" or "below the clock's floor". Both are reported up front.
+  const floor = probe.clockResolutionMs();
+  const busy = probe.busyLoopMs();
+  log(`clock floor: ${floor.toFixed(4)} ms   busy loop (3e6 adds): ${busy.toFixed(2)} ms`);
+  if (floor > 0.5) log("WARNING: coarse clock; treat small readings as upper bounds");
+  log("");
+
+  log("rebuild = new track data every commit (pan/zoom re-aggregation)");
+  log("  size   per-commit   elements  nodes-added/commit  renders  fixture-build");
+  for (const [count, iterations] of [
+    [25, 20], [50, 20], [100, 20], [200, 12], [400, 8], [800, 5], [1600, 3], [3200, 2],
+  ]) {
+    const settled = probe.settle(count);
+    const fixtureMs = probe.fixtureBuildMs(count, iterations);
+
+    const runs = [];
+    let elements = 0;
+    let nodesPerCommit = 0;
+    let renders = 0;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = probe.measureRebuild(count, iterations);
+      runs.push(result.perCommitMs);
+      elements = result.elements;
+      nodesPerCommit = result.nodesAdded / result.iterations;
+      renders = result.renders;
+    }
+
+    log(
+      `  ${String(count).padStart(4)}   ${median(runs).toFixed(3).padStart(8)} ms   ` +
+      `${String(elements).padStart(8)}  ${nodesPerCommit.toFixed(1).padStart(16)}  ` +
+      `${String(renders).padStart(7)}  ${fixtureMs.toFixed(3).padStart(8)} ms` +
+      (settled === elements ? "" : `  [settle=${settled}]`),
+    );
+  }
+
+  log("");
+  log("viewport only = same tracks, new viewport (pure pan, no re-aggregation)");
+  // The element window has to be re-settled per size: without it this would
+  // inherit whatever the previous block left behind and the number would say
+  // more about the sweep order than about panning.
+  for (const count of [100, 400, 800]) {
+    const settled = probe.settle(count);
+    const runs = [];
+    let nodesPerCommit = 0;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = probe.measureViewportOnly(30);
+      runs.push(result.perCommitMs);
+      nodesPerCommit = result.nodesAdded / result.iterations;
+    }
+    log(
+      `  window ${String(count).padStart(4)}/track (${String(settled).padStart(4)} elements) -> ` +
+      `${median(runs).toFixed(3)} ms/commit, nodes added/commit=${nodesPerCommit.toFixed(1)}`,
+    );
+  }
+
+  log("");
+  log("frame budget is 16.67 ms; the bubble rebuild shares it with the waveform draw");
+  probe.unmount();
+} catch (error) {
+  log(`THREW ${error && error.stack ? error.stack : error}`);
+}
+document.getElementById("out").textContent = lines.join("\n");
+</script>
+</body>
+</html>

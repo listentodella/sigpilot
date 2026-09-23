@@ -1,35 +1,43 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use parking_lot::{Mutex, RwLock};
 use pxlogic_core::{
     resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData, CaptureMetadata,
-    CaptureTriggerMetadata, DecodedChannelValue, DecodedFrame, DecoderBackend, DecoderBackendKind,
-    I2cDecodeSettings, SaleaeNativeDecoder, SigrokNativeDecoder, SparseCaptureData,
-    SparseCaptureView, SparseDigitalChannel, SparseDigitalChannelView, SpiDecodeSettings,
-    UartDecodeSettings,
+    CaptureTriggerMetadata, DecodedChannelValue, DecodedFrame, DecodedProtocolMarker,
+    DecoderBackend, DecoderBackendKind, I2cDecodeSettings, SaleaeAsyncDecodeStep,
+    SaleaeNativeDecoder, SigrokNativeDecoder, SparseCaptureData, SparseCaptureView,
+    SparseDigitalChannel, SparseDigitalChannelView, SpiDecodeSettings, UartDecodeSettings,
 };
 use pxlogic_waveform::{ChannelTile, DigitalSegment, WaveformBin, WaveformRequest, WaveformTile};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub mod performance_self_test;
+pub mod view_state;
+
+pub use view_state::{
+    default_capture_view_samples, ease_out_cubic, normalize_capture_view,
+    normalize_live_capture_view, SessionView, ViewAnimation, ViewIntent, ViewLimits,
+};
 
 const MAX_CHANNELS: u8 = 32;
 const MAX_DECODED_FRAMES: usize = 100_000;
 
-// Logic 2.4.43 BaseAnalyzerManager render limits.
+// Logic 2.4.43 BaseAnalyzerManager render limits. Bubble responses may grow
+// with the viewport; the fixed 300-result limit is reserved for marker lists.
 const MAX_ANALYZER_MARKER_RESULTS: usize = 300;
+const MAX_ANALYZER_BUBBLE_RESULTS: usize = 4_096;
 const MAX_MULTI_BUBBLE_STRINGS: usize = 400;
 const MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME: f64 = 15.0;
 const MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES: f64 = 30.0;
-const DENSE_BUBBLE_THRESHOLD: usize = MAX_ANALYZER_MARKER_RESULTS * 4;
 const MAX_COARSE_EDGE_MARKERS: usize = 400;
 const PACKED_DIGITAL_BIN_BYTES: usize = 16;
 const MAX_EXACT_SAMPLES_PER_PIXEL: u64 = 8;
@@ -38,11 +46,21 @@ const NATIVE_VIEW_EDGE_BUDGET: usize = 32_768;
 const NATIVE_FIT_MAX_CHUNKS: usize = 16;
 const NATIVE_FIT_EDGES_PER_CHUNK: usize = 1_024;
 const NATIVE_CONTEXT_EDGES: usize = 256;
+const NATIVE_CACHE_REUSE_EDGES: usize = 128;
+const NATIVE_BACKGROUND_BODY_EDGES: usize = 131_072;
+const NATIVE_BACKGROUND_CONTEXT_EDGES: usize = 4_096;
 const MAX_ANALYZER_WINDOW_CACHE_ENTRIES: usize = 64;
 const MAX_PARALLEL_ANALYZER_RENDERS: usize = 4;
+const MAX_DEFAULT_PARALLEL_NATIVE_WINDOW_DECODES: usize = 4;
+const MAX_PARALLEL_NATIVE_BACKGROUND_STEPS: usize = 4;
+const MAX_PARALLEL_ANALYZER_TRACK_RENDERS: usize = 4;
+const NATIVE_WINDOW_DECODE_WORKERS_ENV: &str = "PXLOGIC_NATIVE_WINDOW_DECODE_WORKERS";
+static NEXT_GRAPH_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 fn trace_graph_timing(stage: &str, started: Instant, detail: &str) {
-    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let elapsed = started.elapsed();
+    let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
+    pxlogic_core::record_performance_event("graph", None, stage, elapsed, detail);
     tracing::debug!(
         target: "pxlogic::decoder_performance",
         component = "graph",
@@ -94,13 +112,62 @@ pub struct AnalyzerRenderRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyzerFrameTableRequest {
+    pub analyzer_id: String,
+    #[serde(default)]
+    pub analyzer_name: String,
+    #[serde(default)]
+    pub backend: DecoderBackendKind,
+    #[serde(default)]
+    pub display_radix: String,
+    pub settings: AnalyzerDecodeSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyzerFrameTableRow {
+    pub analyzer_id: String,
+    pub frame: DecodedFrame,
+    pub frame_index: u64,
+    pub frame_number: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyzerFrameTableWindow {
+    pub roles: Vec<String>,
+    pub row_count: usize,
+    pub rows: Vec<AnalyzerFrameTableRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NativeAnalyzerDecodeProgress {
+    pub frame_count: usize,
+    pub processed_edges: usize,
+    pub total_edges: usize,
+    pub progress: f64,
+    pub complete: bool,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GraphFrameRequest {
     pub frame_id: u64,
     pub waveform: WaveformRequest,
+    #[serde(default = "default_include_graph_tile")]
+    pub include_tile: bool,
     #[serde(default)]
     pub analyzer_view: Option<WaveformRequest>,
     #[serde(default)]
     pub analyzers: Vec<AnalyzerRenderRequest>,
+    /// When present, the backend applies this gesture to the session viewport and
+    /// renders that instead of `waveform`'s range. `waveform` still carries the
+    /// resolution and channel selection, so a caller migrating over can keep
+    /// sending its old range without it being used.
+    #[serde(default)]
+    pub view: Option<ViewIntent>,
+}
+
+fn default_include_graph_tile() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -108,6 +175,13 @@ pub struct GraphFrameResponse {
     pub frame_id: u64,
     pub revision: u64,
     pub sample_count: u64,
+    /// The authoritative viewport this frame was rendered for.
+    pub view: SessionView,
+    /// The viewport the returned data was actually computed for. It trails
+    /// `view` whenever the user kept moving while this frame was in flight, and
+    /// the gap between the two is exactly what the frontend's residual pixel
+    /// transform stretches. Saleae calls this `dataViewState`.
+    pub data_view: SessionView,
     pub tile: WaveformTile,
     pub analyzers: Vec<AnalyzerRenderResult>,
 }
@@ -124,9 +198,19 @@ pub struct AnalyzerTrackWindow {
     pub role: String,
     pub bubbles: Vec<AnalyzerBubble>,
     pub protocol_markers: Vec<AnalyzerProtocolMarker>,
+    pub frame_refs: Vec<AnalyzerFrameRef>,
+    pub previous_frame_ref: Option<AnalyzerFrameRef>,
+    pub next_frame_ref: Option<AnalyzerFrameRef>,
     pub frames: Vec<DecodedFrame>,
     pub previous_frame: Option<DecodedFrame>,
     pub next_frame: Option<DecodedFrame>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyzerFrameRef {
+    pub frame_id: u64,
+    pub start_sample: u64,
+    pub end_sample: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -566,19 +650,24 @@ impl DigitalGraph {
             .saturating_mul(MAX_EXACT_SAMPLES_PER_PIXEL)
             .max(4096);
         let include_exact = visible_samples <= exact_limit;
-        let channels = requested_channels
-            .into_iter()
-            .map(|channel| {
-                self.build_channel_tile(
-                    channel,
-                    start,
-                    end,
-                    bin_count,
-                    samples_per_bin,
-                    include_exact,
-                )
-            })
-            .collect();
+        let build_channel = |channel| {
+            self.build_channel_tile(
+                channel,
+                start,
+                end,
+                bin_count,
+                samples_per_bin,
+                include_exact,
+            )
+        };
+        let channels = if requested_channels.len() > 4 {
+            requested_channels
+                .into_par_iter()
+                .map(build_channel)
+                .collect()
+        } else {
+            requested_channels.into_iter().map(build_channel).collect()
+        };
 
         Ok(WaveformTile {
             start_sample: start,
@@ -1063,24 +1152,197 @@ impl DigitalGraph {
     }
 }
 
+fn sparse_capture_view(capture: &SparseCaptureData) -> SparseCaptureView<'_> {
+    SparseCaptureView {
+        metadata: &capture.metadata,
+        channels: capture
+            .channels
+            .iter()
+            .map(|channel| SparseDigitalChannelView {
+                channel: channel.channel,
+                initial_high: channel.initial_high,
+                transitions: &channel.transitions,
+            })
+            .collect(),
+    }
+}
+
+fn empty_waveform_tile(request: &WaveformRequest) -> WaveformTile {
+    WaveformTile {
+        start_sample: request.start_sample,
+        sample_count: 0,
+        pixels: request.pixels,
+        samples_per_pixel: 0.0,
+        channels: Vec::new(),
+    }
+}
+
 /// Per-UI-session graph state. Analyzer frames are cached by settings and are
 /// invalidated whenever new samples arrive.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GraphSession {
+    instance_id: u64,
     graph: RwLock<Option<DigitalGraph>>,
     capture: RwLock<Option<Arc<CaptureData>>>,
     sparse_capture: RwLock<Option<Arc<SparseCaptureData>>>,
     analyzer_cache: Mutex<HashMap<String, AnalyzerCacheEntry>>,
+    native_window_cache: Mutex<HashMap<NativeWindowCacheKey, NativeWindowCacheEntry>>,
+    native_background_cache: Mutex<HashMap<String, NativeBackgroundDecodeState>>,
+    analyzer_generation: AtomicU64,
     revision: AtomicU64,
+    /// Authoritative viewport. `None` until a caller sets one, in which case the
+    /// session falls back to fitting the whole capture.
+    view: Mutex<Option<SessionView>>,
+    /// An in-flight glide. It is resolved by `session_view` against the wall
+    /// clock rather than stepped by the frontend, so the animated view and the
+    /// view the data was rendered for share one time source.
+    view_animation: Mutex<Option<ViewAnimation>>,
+    view_limits: Mutex<ViewLimits>,
+}
+
+impl Default for GraphSession {
+    fn default() -> Self {
+        Self {
+            instance_id: NEXT_GRAPH_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            graph: RwLock::new(None),
+            capture: RwLock::new(None),
+            sparse_capture: RwLock::new(None),
+            analyzer_cache: Mutex::new(HashMap::new()),
+            native_window_cache: Mutex::new(HashMap::new()),
+            native_background_cache: Mutex::new(HashMap::new()),
+            analyzer_generation: AtomicU64::new(0),
+            revision: AtomicU64::new(0),
+            view: Mutex::new(None),
+            view_animation: Mutex::new(None),
+            view_limits: Mutex::new(ViewLimits::default()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct AnalyzerCacheEntry {
     decoded_sample_count: u64,
+    complete: bool,
+    frames: Arc<Vec<DecodedFrame>>,
+    table_roles: Arc<Vec<String>>,
+    table_search_texts: Arc<Mutex<HashMap<String, Arc<Vec<String>>>>>,
+    table_search_matches: Arc<Mutex<HashMap<String, Arc<Vec<usize>>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NativeWindowCacheKey {
+    analyzer_key: String,
+    start_sample: u64,
+    end_sample: u64,
+}
+
+#[derive(Debug, Clone)]
+struct NativeWindowCacheEntry {
+    decoded_sample_count: u64,
+    start_sample: u64,
+    end_sample: u64,
     frames: Arc<Vec<DecodedFrame>>,
 }
 
-fn decoded_frames_allocated_bytes(frames: &Arc<Vec<DecodedFrame>>) -> u64 {
+#[derive(Debug)]
+struct NativeBackgroundDecodeState {
+    generation: u64,
+    decoded_sample_count: u64,
+    next_driver_edge: usize,
+    total_driver_edges: usize,
+    frames: Vec<DecodedFrame>,
+    async_decode_id: String,
+    async_started: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeBackgroundWindow {
+    body_edge_begin: usize,
+    body_edge_end: usize,
+    retain_start_sample: u64,
+    retain_end_sample: u64,
+    decode_start_sample: u64,
+    decode_end_sample: u64,
+}
+
+struct NativeBackgroundPending<'a> {
+    key: String,
+    settings: &'a AnalyzerDecodeSettings,
+    window: NativeBackgroundWindow,
+    progress_numerator: usize,
+    progress_denominator: usize,
+}
+
+struct NativeBackgroundDecoded {
+    key: String,
+    window: NativeBackgroundWindow,
+    frames: Arc<Vec<DecodedFrame>>,
+}
+
+struct SaleaeBatchRenderState<'a> {
+    request_index: usize,
+    request: &'a AnalyzerRenderRequest,
+    full_cache_key: String,
+    window_cache_key: String,
+    windows: Vec<(u64, u64)>,
+    missing_windows: Vec<(u64, u64)>,
+    frames: Vec<DecodedFrame>,
+    window_entries: Vec<NativeWindowCacheEntry>,
+}
+
+struct SaleaeBatchWindowDecodeResult {
+    pending_index: usize,
+    start_sample: u64,
+    end_sample: u64,
+    frames: Arc<Vec<DecodedFrame>>,
+}
+
+struct SaleaeBatchFinalizedRender {
+    request_index: usize,
+    full_cache_key: String,
+    window_cache_key: String,
+    window_cache_entry: AnalyzerCacheEntry,
+    full_cache_entry: Option<(String, AnalyzerCacheEntry)>,
+    window_entries: Vec<NativeWindowCacheEntry>,
+    render: AnalyzerRenderResult,
+}
+
+#[derive(Debug, Clone)]
+struct AnalyzerFrameTableSource {
+    analyzer_id: String,
+    analyzer_name_search: String,
+    display_radix: String,
+    frames: Arc<Vec<DecodedFrame>>,
+    roles: Arc<Vec<String>>,
+    search_texts: Option<Arc<Vec<String>>>,
+    search_matches: Option<Arc<Vec<usize>>>,
+}
+
+fn analyzer_cache_entry(
+    decoded_sample_count: u64,
+    frames: Arc<Vec<DecodedFrame>>,
+) -> AnalyzerCacheEntry {
+    let table_roles = Arc::new(analyzer_frame_roles(&frames));
+    AnalyzerCacheEntry {
+        decoded_sample_count,
+        complete: true,
+        frames,
+        table_roles,
+        table_search_texts: Arc::new(Mutex::new(HashMap::new())),
+        table_search_matches: Arc::new(Mutex::new(HashMap::new())),
+    }
+}
+
+fn partial_analyzer_cache_entry(
+    decoded_sample_count: u64,
+    frames: Arc<Vec<DecodedFrame>>,
+) -> AnalyzerCacheEntry {
+    let mut entry = analyzer_cache_entry(decoded_sample_count, frames);
+    entry.complete = false;
+    entry
+}
+
+fn decoded_frame_vec_allocated_bytes(frames: &Vec<DecodedFrame>) -> u64 {
     frames.iter().fold(
         u64::try_from(
             frames
@@ -1109,6 +1371,59 @@ fn decoded_frames_allocated_bytes(frames: &Arc<Vec<DecodedFrame>>) -> u64 {
                 .saturating_add(u64::try_from(channel_values).unwrap_or(u64::MAX))
         },
     )
+}
+
+fn decoded_frames_allocated_bytes(entry: &AnalyzerCacheEntry) -> u64 {
+    let frame_bytes = decoded_frame_vec_allocated_bytes(entry.frames.as_ref());
+    let role_bytes = entry.table_roles.iter().fold(
+        u64::try_from(
+            entry
+                .table_roles
+                .capacity()
+                .saturating_mul(std::mem::size_of::<String>()),
+        )
+        .unwrap_or(u64::MAX),
+        |bytes, role| bytes.saturating_add(u64::try_from(role.capacity()).unwrap_or(u64::MAX)),
+    );
+    let search_text_bytes =
+        entry
+            .table_search_texts
+            .lock()
+            .values()
+            .fold(0u64, |cache_bytes, texts| {
+                cache_bytes.saturating_add(
+                    texts.iter().fold(
+                        u64::try_from(
+                            texts
+                                .capacity()
+                                .saturating_mul(std::mem::size_of::<String>()),
+                        )
+                        .unwrap_or(u64::MAX),
+                        |bytes, text| {
+                            bytes.saturating_add(u64::try_from(text.capacity()).unwrap_or(u64::MAX))
+                        },
+                    ),
+                )
+            });
+    let search_match_bytes =
+        entry
+            .table_search_matches
+            .lock()
+            .values()
+            .fold(0u64, |cache_bytes, matches| {
+                cache_bytes.saturating_add(
+                    u64::try_from(
+                        matches
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<usize>()),
+                    )
+                    .unwrap_or(u64::MAX),
+                )
+            });
+    frame_bytes
+        .saturating_add(role_bytes)
+        .saturating_add(search_text_bytes)
+        .saturating_add(search_match_bytes)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1158,13 +1473,27 @@ impl GraphSession {
                 })
             })
             .unwrap_or(0);
-        let analyzer_bytes = self
-            .analyzer_cache
-            .lock()
-            .values()
-            .fold(0u64, |bytes, entry| {
-                bytes.saturating_add(decoded_frames_allocated_bytes(&entry.frames))
-            });
+        let analyzer_bytes =
+            self.analyzer_cache
+                .lock()
+                .values()
+                .fold(0u64, |bytes, entry| {
+                    bytes.saturating_add(decoded_frames_allocated_bytes(entry))
+                })
+                .saturating_add(self.native_window_cache.lock().values().fold(
+                    0u64,
+                    |bytes, entry| {
+                        bytes.saturating_add(decoded_frame_vec_allocated_bytes(
+                            entry.frames.as_ref(),
+                        ))
+                    },
+                ))
+                .saturating_add(self.native_background_cache.lock().values().fold(
+                    0u64,
+                    |bytes, state| {
+                        bytes.saturating_add(decoded_frame_vec_allocated_bytes(&state.frames))
+                    },
+                ));
         CaptureMemoryUsage {
             buffer_bytes,
             sample_bytes,
@@ -1180,7 +1509,7 @@ impl GraphSession {
         *self.graph.write() = Some(DigitalGraph::new(metadata)?);
         *self.capture.write() = None;
         *self.sparse_capture.write() = None;
-        self.analyzer_cache.lock().clear();
+        self.clear_analyzer_caches();
         self.bump_revision();
         Ok(())
     }
@@ -1227,7 +1556,7 @@ impl GraphSession {
         *self.graph.write() = Some(graph);
         *self.capture.write() = Some(Arc::new(capture));
         *self.sparse_capture.write() = None;
-        self.analyzer_cache.lock().clear();
+        self.clear_analyzer_caches();
         self.bump_revision();
         Ok(())
     }
@@ -1262,7 +1591,7 @@ impl GraphSession {
         *self.graph.write() = Some(graph);
         *self.capture.write() = None;
         *self.sparse_capture.write() = Some(Arc::new(capture));
-        self.analyzer_cache.lock().clear();
+        self.clear_analyzer_caches();
         self.bump_revision();
         Ok(())
     }
@@ -1286,7 +1615,7 @@ impl GraphSession {
         };
 
         graph.trim(start, end)?;
-        self.analyzer_cache.lock().clear();
+        self.clear_analyzer_caches();
         self.bump_revision();
         Ok((metadata, bytes))
     }
@@ -1312,6 +1641,29 @@ impl GraphSession {
             .as_ref()
             .map(DigitalGraph::sample_count)
             .unwrap_or(0)
+    }
+
+    /// Returns the total number of indexed digital transitions across all channels.
+    pub fn digital_edge_count(&self) -> usize {
+        self.graph
+            .read()
+            .as_ref()
+            .map(|graph| {
+                graph
+                    .channels
+                    .iter()
+                    .map(|channel| channel.edges.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Invalidates decoded analyzer output while preserving capture and waveform indexes.
+    ///
+    /// This is useful after an external decoder runtime changes and for repeated
+    /// performance measurements that must not time an in-memory frame cache hit.
+    pub fn reset_analyzer_decode_state(&self) {
+        self.clear_analyzer_caches();
     }
 
     pub fn nearest_transition(
@@ -1373,13 +1725,9 @@ impl GraphSession {
                 ))
             };
             let result = frames.clone();
-            self.analyzer_cache.lock().insert(
-                key,
-                AnalyzerCacheEntry {
-                    decoded_sample_count: sample_count,
-                    frames,
-                },
-            );
+            self.analyzer_cache
+                .lock()
+                .insert(key, analyzer_cache_entry(sample_count, frames));
             return Ok(result);
         }
 
@@ -1391,15 +1739,11 @@ impl GraphSession {
                 .decode(settings)?,
         );
         let mut cache = self.analyzer_cache.lock();
-        let entry = cache.entry(key).or_insert_with(|| AnalyzerCacheEntry {
-            decoded_sample_count: sample_count,
-            frames: frames.clone(),
-        });
+        let entry = cache
+            .entry(key)
+            .or_insert_with(|| analyzer_cache_entry(sample_count, frames.clone()));
         if entry.decoded_sample_count < sample_count {
-            *entry = AnalyzerCacheEntry {
-                decoded_sample_count: sample_count,
-                frames: frames.clone(),
-            };
+            *entry = analyzer_cache_entry(sample_count, frames.clone());
         }
         Ok(entry.frames.clone())
     }
@@ -1432,7 +1776,7 @@ impl GraphSession {
             return self.decode_frames(settings);
         }
 
-        let key = serde_json::to_string(&(backend, settings))?;
+        let key = native_full_analyzer_cache_key(backend, settings)?;
         let sample_count = self.sample_count();
         if let Some(entry) = self.analyzer_cache.lock().get(&key) {
             if entry.decoded_sample_count == sample_count {
@@ -1459,12 +1803,12 @@ impl GraphSession {
         let decode_started = Instant::now();
         let output = match backend {
             DecoderBackendKind::SaleaeNative => {
-                let decoder = SaleaeNativeDecoder::from_env()
+                let decoder = SaleaeNativeDecoder::from_env_cached()
                     .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
                 decode_indexed(&decoder)
             }
             DecoderBackendKind::SigrokNative => {
-                let decoder = SigrokNativeDecoder::from_env()
+                let decoder = SigrokNativeDecoder::from_env_cached()
                     .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
                 decode_indexed(&decoder)
             }
@@ -1483,14 +1827,990 @@ impl GraphSession {
             conversion_started,
             &format!("backend={backend:?} frames={}", frames.len()),
         );
-        self.analyzer_cache.lock().insert(
-            key,
-            AnalyzerCacheEntry {
-                decoded_sample_count: sample_count,
-                frames: frames.clone(),
-            },
-        );
+        self.analyzer_cache
+            .lock()
+            .insert(key, analyzer_cache_entry(sample_count, frames.clone()));
         Ok(frames)
+    }
+
+    pub fn decode_saleae_native_frames_batch(
+        &self,
+        settings: &[AnalyzerDecodeSettings],
+    ) -> Result<Vec<Arc<Vec<DecodedFrame>>>> {
+        if settings.is_empty() {
+            return Ok(Vec::new());
+        }
+        if settings.len() == 1 {
+            return Ok(vec![self.decode_frames_with_backend(
+                &settings[0],
+                DecoderBackendKind::SaleaeNative,
+            )?]);
+        }
+
+        let sample_count = self.sample_count();
+        let mut results: Vec<Option<Arc<Vec<DecodedFrame>>>> = vec![None; settings.len()];
+        let mut pending_indices = Vec::new();
+        let mut pending_settings = Vec::new();
+        let mut pending_keys = Vec::new();
+
+        for (index, setting) in settings.iter().enumerate() {
+            let key = native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, setting)?;
+            if let Some(entry) = self.analyzer_cache.lock().get(&key) {
+                if entry.decoded_sample_count == sample_count {
+                    results[index] = Some(entry.frames.clone());
+                    continue;
+                }
+            }
+            pending_indices.push(index);
+            pending_settings.push(setting.clone());
+            pending_keys.push(key);
+        }
+
+        if pending_indices.is_empty() {
+            return results
+                .into_iter()
+                .map(|frames| {
+                    frames.ok_or_else(|| {
+                        GraphError::DecoderBackend(
+                            "Saleae batch decode omitted cached analyzer output".to_string(),
+                        )
+                    })
+                })
+                .collect();
+        }
+
+        let has_native_capture = self.capture().is_some() || self.sparse_capture().is_some();
+        if pending_indices.len() == 1 || !has_native_capture || sample_count == 0 {
+            for index in pending_indices {
+                results[index] = Some(self.decode_frames_with_backend(
+                    &settings[index],
+                    DecoderBackendKind::SaleaeNative,
+                )?);
+            }
+            return results
+                .into_iter()
+                .map(|frames| {
+                    frames.ok_or_else(|| {
+                        GraphError::DecoderBackend(
+                            "Saleae batch decode omitted fallback analyzer output".to_string(),
+                        )
+                    })
+                })
+                .collect();
+        }
+
+        let decoder = SaleaeNativeDecoder::from_env_cached()
+            .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        let setting_refs = pending_settings.iter().collect::<Vec<_>>();
+        let decode_started = Instant::now();
+        let outputs = if let Some(capture) = self.sparse_capture() {
+            let capture = sparse_capture_view(capture.as_ref());
+            decoder.decode_sparse_view_window_batch(&capture, 0, sample_count, &setting_refs)
+        } else {
+            let graph_guard = self.graph.read();
+            let graph = graph_guard.as_ref().ok_or(GraphError::EmptyGraph)?;
+            let capture = graph.sparse_view();
+            decoder.decode_sparse_view_window_batch(&capture, 0, sample_count, &setting_refs)
+        }
+        .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+
+        let Some(outputs) = outputs else {
+            for index in pending_indices {
+                results[index] = Some(self.decode_frames_with_backend(
+                    &settings[index],
+                    DecoderBackendKind::SaleaeNative,
+                )?);
+            }
+            return results
+                .into_iter()
+                .map(|frames| {
+                    frames.ok_or_else(|| {
+                        GraphError::DecoderBackend(
+                            "Saleae batch decode omitted nonpersistent analyzer output".to_string(),
+                        )
+                    })
+                })
+                .collect();
+        };
+
+        let conversion_started = Instant::now();
+        let decoded_frames = if outputs.len() > 1 {
+            outputs
+                .into_par_iter()
+                .map(|output| Arc::new(output.into_decoded_frames()))
+                .collect::<Vec<_>>()
+        } else {
+            outputs
+                .into_iter()
+                .map(|output| Arc::new(output.into_decoded_frames()))
+                .collect::<Vec<_>>()
+        };
+        let decoded_frame_count = decoded_frames
+            .iter()
+            .map(|frames| frames.len())
+            .sum::<usize>();
+        trace_graph_timing(
+            "saleae_full_batch_frame_conversion",
+            conversion_started,
+            &format!(
+                "analyzers={} frames={decoded_frame_count}",
+                decoded_frames.len()
+            ),
+        );
+        for ((index, key), frames) in pending_indices
+            .into_iter()
+            .zip(pending_keys)
+            .zip(decoded_frames)
+        {
+            self.analyzer_cache
+                .lock()
+                .insert(key, analyzer_cache_entry(sample_count, frames.clone()));
+            results[index] = Some(frames);
+        }
+        trace_graph_timing(
+            "saleae_full_batch_decode",
+            decode_started,
+            &format!(
+                "analyzers={} frames={decoded_frame_count}",
+                pending_settings.len()
+            ),
+        );
+
+        results
+            .into_iter()
+            .map(|frames| {
+                frames.ok_or_else(|| {
+                    GraphError::DecoderBackend(
+                        "Saleae batch decode omitted analyzer output".to_string(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub fn decode_saleae_native_background_step_batch(
+        &self,
+        settings: &[AnalyzerDecodeSettings],
+    ) -> Result<Vec<NativeAnalyzerDecodeProgress>> {
+        if settings.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(capture) = self.sparse_capture() {
+            let capture = sparse_capture_view(capture.as_ref());
+            return self.decode_saleae_native_background_step_for_capture(settings, &capture);
+        }
+        if self.capture().is_some() {
+            let graph = self.graph.read();
+            let graph = graph.as_ref().ok_or(GraphError::EmptyGraph)?;
+            let capture = graph.sparse_view();
+            return self.decode_saleae_native_background_step_for_capture(settings, &capture);
+        }
+        Err(GraphError::EmptyGraph)
+    }
+
+    fn decode_saleae_native_background_step_for_capture<'a>(
+        &self,
+        settings: &[AnalyzerDecodeSettings],
+        capture: &SparseCaptureView<'a>,
+    ) -> Result<Vec<NativeAnalyzerDecodeProgress>> {
+        let started = Instant::now();
+        let sample_count = capture.metadata.sample_count;
+        let generation = self.analyzer_generation.load(Ordering::Acquire);
+        let mut unique_settings = Vec::new();
+        let mut seen_keys = HashSet::new();
+        for setting in settings {
+            let key = native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, setting)?;
+            if seen_keys.insert(key.clone()) {
+                unique_settings.push((key, setting));
+            }
+        }
+
+        let complete_keys = {
+            let cache = self.analyzer_cache.lock();
+            unique_settings
+                .iter()
+                .filter_map(|(key, _)| {
+                    cache
+                        .get(key)
+                        .filter(|entry| {
+                            entry.decoded_sample_count == sample_count && entry.complete
+                        })
+                        .map(|entry| (key.clone(), entry.frames.len()))
+                })
+                .collect::<HashMap<_, _>>()
+        };
+
+        if let Some(progress) = self.try_decode_saleae_native_async_background_step(
+            &capture,
+            settings,
+            &unique_settings,
+            &complete_keys,
+            sample_count,
+            generation,
+        )? {
+            trace_graph_timing(
+                "saleae_background_async_step",
+                started,
+                &format!(
+                    "analyzers={} completed={} progress_edges={}/{}",
+                    progress.len(),
+                    progress.iter().filter(|item| item.complete).count(),
+                    progress
+                        .iter()
+                        .map(|item| item.processed_edges)
+                        .sum::<usize>(),
+                    progress.iter().map(|item| item.total_edges).sum::<usize>()
+                ),
+            );
+            return Ok(progress);
+        }
+
+        let mut pending = Vec::new();
+        let mut completed_empty_keys = Vec::new();
+        {
+            let mut cache = self.native_background_cache.lock();
+            for (key, setting) in &unique_settings {
+                if complete_keys.contains_key(key) {
+                    continue;
+                }
+                let driver = native_driver_channel(capture, setting)?;
+                let total_driver_edges = driver.transitions.len();
+                let state =
+                    cache
+                        .entry(key.clone())
+                        .or_insert_with(|| NativeBackgroundDecodeState {
+                            generation,
+                            decoded_sample_count: sample_count,
+                            next_driver_edge: 0,
+                            total_driver_edges,
+                            frames: Vec::new(),
+                            async_decode_id: native_async_decode_id(
+                                self.instance_id,
+                                generation,
+                                key,
+                            ),
+                            async_started: false,
+                        });
+                if state.generation != generation
+                    || state.decoded_sample_count != sample_count
+                    || state.total_driver_edges != total_driver_edges
+                {
+                    *state = NativeBackgroundDecodeState {
+                        generation,
+                        decoded_sample_count: sample_count,
+                        next_driver_edge: 0,
+                        total_driver_edges,
+                        frames: Vec::new(),
+                        async_decode_id: native_async_decode_id(self.instance_id, generation, key),
+                        async_started: false,
+                    };
+                }
+                if total_driver_edges == 0 {
+                    completed_empty_keys.push(key.clone());
+                    continue;
+                }
+                if state.next_driver_edge >= total_driver_edges {
+                    continue;
+                }
+                let window = native_background_window(
+                    capture,
+                    setting,
+                    state.next_driver_edge,
+                    NATIVE_BACKGROUND_BODY_EDGES,
+                )?;
+                pending.push(NativeBackgroundPending {
+                    key: key.clone(),
+                    settings: setting,
+                    window,
+                    progress_numerator: state.next_driver_edge,
+                    progress_denominator: total_driver_edges,
+                });
+            }
+        }
+
+        if !completed_empty_keys.is_empty()
+            && self.analyzer_generation.load(Ordering::Acquire) == generation
+        {
+            {
+                let mut background = self.native_background_cache.lock();
+                for key in &completed_empty_keys {
+                    if let Some(state) = background.get_mut(key) {
+                        state.next_driver_edge = state.total_driver_edges;
+                    }
+                }
+            }
+            let mut analyzer = self.analyzer_cache.lock();
+            for key in completed_empty_keys {
+                analyzer.insert(
+                    key,
+                    analyzer_cache_entry(sample_count, Arc::new(Vec::new())),
+                );
+            }
+        }
+
+        pending.sort_by(|left, right| {
+            let left_progress = (left.progress_numerator as u128)
+                .saturating_mul(right.progress_denominator as u128);
+            let right_progress = (right.progress_numerator as u128)
+                .saturating_mul(left.progress_denominator as u128);
+            left_progress.cmp(&right_progress)
+        });
+        pending.truncate(MAX_PARALLEL_NATIVE_BACKGROUND_STEPS);
+
+        let mut decoded = Vec::new();
+        let mut uncached = Vec::new();
+        for task in pending {
+            if let Some(frames) = self.cached_native_window_frames(
+                &task.key,
+                sample_count,
+                task.window.decode_start_sample,
+                task.window.decode_end_sample,
+            ) {
+                decoded.push(NativeBackgroundDecoded {
+                    key: task.key,
+                    window: task.window,
+                    frames,
+                });
+            } else {
+                uncached.push(task);
+            }
+        }
+
+        if !uncached.is_empty() {
+            let decoder = SaleaeNativeDecoder::from_env_cached()
+                .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+            let mut grouped: HashMap<(u64, u64), Vec<NativeBackgroundPending<'_>>> = HashMap::new();
+            for task in uncached {
+                grouped
+                    .entry((
+                        task.window.decode_start_sample,
+                        task.window.decode_end_sample,
+                    ))
+                    .or_default()
+                    .push(task);
+            }
+            let groups = grouped.into_values().collect::<Vec<_>>();
+            let group_results = if groups.len() <= 1 {
+                groups
+                    .into_iter()
+                    .map(|group| decode_native_background_group(&decoder, capture, group))
+                    .collect::<Vec<_>>()
+            } else {
+                groups
+                    .into_par_iter()
+                    .map(|group| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            decode_native_background_group(&decoder, capture, group)
+                        }))
+                        .unwrap_or_else(|_| {
+                            Err(GraphError::DecoderBackend(
+                                "Saleae background decode worker panicked".to_string(),
+                            ))
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for result in group_results {
+                decoded.extend(result?);
+            }
+        }
+
+        if self.analyzer_generation.load(Ordering::Acquire) != generation {
+            return Ok(settings
+                .iter()
+                .map(|_| NativeAnalyzerDecodeProgress {
+                    frame_count: 0,
+                    processed_edges: 0,
+                    total_edges: 0,
+                    progress: 0.0,
+                    complete: false,
+                    cancelled: true,
+                })
+                .collect());
+        }
+
+        let window_entries = decoded
+            .iter()
+            .map(|result| {
+                (
+                    result.key.clone(),
+                    NativeWindowCacheEntry {
+                        decoded_sample_count: sample_count,
+                        start_sample: result.window.decode_start_sample,
+                        end_sample: result.window.decode_end_sample,
+                        frames: result.frames.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        for (key, entry) in window_entries {
+            self.insert_native_window_cache_entries(&key, vec![entry]);
+        }
+
+        let mut completed = Vec::new();
+        {
+            let mut cache = self.native_background_cache.lock();
+            for result in decoded {
+                let Some(state) = cache.get_mut(&result.key) else {
+                    continue;
+                };
+                if state.generation != generation
+                    || state.decoded_sample_count != sample_count
+                    || state.next_driver_edge != result.window.body_edge_begin
+                {
+                    continue;
+                }
+                let mut retained = result
+                    .frames
+                    .iter()
+                    .filter(|frame| {
+                        frame.start_sample >= result.window.retain_start_sample
+                            && frame.start_sample < result.window.retain_end_sample
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                normalize_native_decoded_frames(&mut retained);
+                for frame in &mut retained {
+                    frame.frame_id = frame.start_sample;
+                }
+                append_native_background_frames(&mut state.frames, retained);
+                state.next_driver_edge = result.window.body_edge_end;
+                if state.next_driver_edge >= state.total_driver_edges {
+                    completed.push((result.key, Arc::new(std::mem::take(&mut state.frames))));
+                }
+            }
+        }
+        if !completed.is_empty() {
+            let mut cache = self.analyzer_cache.lock();
+            for (key, frames) in completed {
+                cache.insert(key, analyzer_cache_entry(sample_count, frames));
+            }
+        }
+
+        let result = self.native_background_progress(settings, sample_count, false)?;
+        trace_graph_timing(
+            "saleae_background_step",
+            started,
+            &format!(
+                "analyzers={} completed={} progress_edges={}/{}",
+                result.len(),
+                result.iter().filter(|item| item.complete).count(),
+                result
+                    .iter()
+                    .map(|item| item.processed_edges)
+                    .sum::<usize>(),
+                result.iter().map(|item| item.total_edges).sum::<usize>()
+            ),
+        );
+        Ok(result)
+    }
+
+    fn try_decode_saleae_native_async_background_step(
+        &self,
+        capture: &SparseCaptureView<'_>,
+        requested_settings: &[AnalyzerDecodeSettings],
+        unique_settings: &[(String, &AnalyzerDecodeSettings)],
+        complete_keys: &HashMap<String, usize>,
+        sample_count: u64,
+        generation: u64,
+    ) -> Result<Option<Vec<NativeAnalyzerDecodeProgress>>> {
+        struct PendingAsyncDecode<'a> {
+            key: String,
+            settings: &'a AnalyzerDecodeSettings,
+            decode_id: String,
+            started: bool,
+        }
+
+        let seeded_frames = unique_settings
+            .iter()
+            .map(|(key, _)| {
+                (
+                    key.clone(),
+                    self.cached_native_analyzer_frames(key, sample_count),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut pending = Vec::new();
+        let mut completed_empty = Vec::new();
+        let mut seeded_partial = Vec::new();
+        {
+            let mut background = self.native_background_cache.lock();
+            for (key, settings) in unique_settings {
+                if complete_keys.contains_key(key) {
+                    continue;
+                }
+                let driver = native_driver_channel(capture, settings)?;
+                let total_driver_edges = driver.transitions.len();
+                let reset_state = background.get(key).is_none_or(|state| {
+                    state.generation != generation
+                        || state.decoded_sample_count != sample_count
+                        || state.total_driver_edges != total_driver_edges
+                });
+                if reset_state {
+                    let frames = seeded_frames.get(key).cloned().unwrap_or_default();
+                    if !frames.is_empty() {
+                        seeded_partial.push((key.clone(), Arc::new(frames.clone())));
+                    }
+                    background.insert(
+                        key.clone(),
+                        NativeBackgroundDecodeState {
+                            generation,
+                            decoded_sample_count: sample_count,
+                            next_driver_edge: 0,
+                            total_driver_edges,
+                            frames,
+                            async_decode_id: native_async_decode_id(
+                                self.instance_id,
+                                generation,
+                                key,
+                            ),
+                            async_started: false,
+                        },
+                    );
+                }
+                let state = background
+                    .get_mut(key)
+                    .expect("Saleae background state is initialized");
+                if total_driver_edges == 0 {
+                    state.next_driver_edge = 0;
+                    completed_empty.push(key.clone());
+                    continue;
+                }
+                pending.push(PendingAsyncDecode {
+                    key: key.clone(),
+                    settings,
+                    decode_id: state.async_decode_id.clone(),
+                    started: state.async_started,
+                });
+            }
+        }
+
+        if !seeded_partial.is_empty() {
+            let mut analyzer = self.analyzer_cache.lock();
+            for (key, frames) in seeded_partial {
+                analyzer.insert(key, partial_analyzer_cache_entry(sample_count, frames));
+            }
+        }
+
+        if !completed_empty.is_empty() {
+            let mut analyzer = self.analyzer_cache.lock();
+            for key in completed_empty {
+                analyzer.insert(
+                    key,
+                    analyzer_cache_entry(sample_count, Arc::new(Vec::new())),
+                );
+            }
+        }
+        if pending.is_empty() {
+            return self
+                .native_background_progress(requested_settings, sample_count, false)
+                .map(Some);
+        }
+
+        pending.sort_by_key(|task| !task.started);
+        let active_count = pending.iter().filter(|task| task.started).count();
+        let mut start_budget = MAX_PARALLEL_NATIVE_BACKGROUND_STEPS.saturating_sub(active_count);
+        pending.retain(|task| {
+            if task.started {
+                true
+            } else if start_budget > 0 {
+                start_budget -= 1;
+                true
+            } else {
+                false
+            }
+        });
+        let decoder = SaleaeNativeDecoder::from_env_cached()
+            .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+
+        let run = |task: PendingAsyncDecode<'_>| -> Result<_> {
+            let step = if task.started {
+                decoder.poll_async_decode(&task.decode_id)
+            } else {
+                decoder.start_sparse_view_async_decode(capture, task.settings, &task.decode_id)
+            }
+            .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+            Ok((task.key, task.decode_id, step))
+        };
+
+        let first = run(pending.remove(0))?;
+        if first.2.is_none() {
+            return Ok(None);
+        }
+        let mut steps = vec![first];
+        let remaining = pending.into_par_iter().map(run).collect::<Vec<_>>();
+        for result in remaining {
+            let step = result?;
+            if step.2.is_none() {
+                return Ok(None);
+            }
+            steps.push(step);
+        }
+
+        if self.analyzer_generation.load(Ordering::Acquire) != generation {
+            cancel_saleae_async_decode_ids(steps.iter().filter_map(|(_, decode_id, step)| {
+                matches!(step, Some(SaleaeAsyncDecodeStep::Pending { .. }))
+                    .then_some(decode_id.as_str())
+            }));
+            return Ok(Some(
+                unique_settings
+                    .iter()
+                    .map(|_| NativeAnalyzerDecodeProgress {
+                        frame_count: 0,
+                        processed_edges: 0,
+                        total_edges: 0,
+                        progress: 0.0,
+                        complete: false,
+                        cancelled: true,
+                    })
+                    .collect(),
+            ));
+        }
+
+        let mut completed = Vec::new();
+        let mut partial = Vec::new();
+        let mut cancelled = false;
+        {
+            let mut background = self.native_background_cache.lock();
+            for (key, _, step) in steps {
+                let Some(step) = step else {
+                    continue;
+                };
+                let Some(state) = background.get_mut(&key) else {
+                    continue;
+                };
+                match step {
+                    SaleaeAsyncDecodeStep::Pending {
+                        progress_sample,
+                        output,
+                    } => {
+                        state.async_started = true;
+                        if let Some(output) = output {
+                            let mut frames = output.into_decoded_frames();
+                            normalize_native_decoded_frames(&mut frames);
+                            append_native_background_frames(&mut state.frames, frames);
+                            partial.push((key.clone(), Arc::new(state.frames.clone())));
+                        }
+                        if let Some((_, settings)) = unique_settings
+                            .iter()
+                            .find(|(candidate, _)| candidate == &key)
+                        {
+                            let driver = native_driver_channel(capture, settings)?;
+                            state.next_driver_edge = state.next_driver_edge.max(
+                                driver
+                                    .transitions
+                                    .partition_point(|sample| *sample <= progress_sample)
+                                    .min(state.total_driver_edges),
+                            );
+                        }
+                    }
+                    SaleaeAsyncDecodeStep::Complete(output) => {
+                        let frames = output.into_decoded_frames();
+                        state.next_driver_edge = state.total_driver_edges;
+                        state.async_started = false;
+                        completed.push((key, Arc::new(frames)));
+                    }
+                    SaleaeAsyncDecodeStep::CompleteDelta {
+                        output,
+                        markers,
+                        expected_frame_count,
+                    } => {
+                        let mut frames = output.into_decoded_frames();
+                        normalize_native_decoded_frames(&mut frames);
+                        append_native_background_frames(&mut state.frames, frames);
+                        if state.frames.len() != expected_frame_count {
+                            return Err(GraphError::DecoderBackend(format!(
+                                "Saleae async decoder completed with {} accumulated frames, expected {expected_frame_count}",
+                                state.frames.len()
+                            )));
+                        }
+                        attach_native_completion_markers(&mut state.frames, markers);
+                        state.next_driver_edge = state.total_driver_edges;
+                        state.async_started = false;
+                        completed.push((key, Arc::new(std::mem::take(&mut state.frames))));
+                    }
+                    SaleaeAsyncDecodeStep::Cancelled => {
+                        state.async_started = false;
+                        cancelled = true;
+                    }
+                }
+            }
+        }
+        if !partial.is_empty() {
+            let mut analyzer = self.analyzer_cache.lock();
+            for (key, frames) in partial {
+                analyzer.insert(key, partial_analyzer_cache_entry(sample_count, frames));
+            }
+        }
+        if !completed.is_empty() {
+            let mut analyzer = self.analyzer_cache.lock();
+            for (key, frames) in completed {
+                analyzer.insert(key, analyzer_cache_entry(sample_count, frames));
+            }
+        }
+
+        self.native_background_progress(requested_settings, sample_count, cancelled)
+            .map(Some)
+    }
+
+    fn native_background_progress(
+        &self,
+        settings: &[AnalyzerDecodeSettings],
+        sample_count: u64,
+        cancelled: bool,
+    ) -> Result<Vec<NativeAnalyzerDecodeProgress>> {
+        let keys = settings
+            .iter()
+            .map(|setting| {
+                native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, setting)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let complete_frame_counts = {
+            let analyzer = self.analyzer_cache.lock();
+            keys.iter()
+                .filter_map(|key| {
+                    analyzer
+                        .get(key)
+                        .filter(|entry| {
+                            entry.decoded_sample_count == sample_count && entry.complete
+                        })
+                        .map(|entry| (key.clone(), entry.frames.len()))
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let background = self.native_background_cache.lock();
+        settings
+            .iter()
+            .zip(keys)
+            .map(|(_, key)| {
+                if let Some(frame_count) = complete_frame_counts.get(&key) {
+                    let state = background.get(&key);
+                    let total_edges = state.map(|state| state.total_driver_edges).unwrap_or(1);
+                    return Ok(NativeAnalyzerDecodeProgress {
+                        frame_count: *frame_count,
+                        processed_edges: total_edges,
+                        total_edges,
+                        progress: 1.0,
+                        complete: true,
+                        cancelled,
+                    });
+                }
+                let state = background.get(&key);
+                let processed_edges = state.map(|state| state.next_driver_edge).unwrap_or(0);
+                let total_edges = state.map(|state| state.total_driver_edges).unwrap_or(0);
+                Ok(NativeAnalyzerDecodeProgress {
+                    frame_count: state.map(|state| state.frames.len()).unwrap_or(0),
+                    processed_edges,
+                    total_edges,
+                    progress: if total_edges == 0 {
+                        0.0
+                    } else {
+                        processed_edges as f64 / total_edges as f64
+                    },
+                    complete: false,
+                    cancelled,
+                })
+            })
+            .collect()
+    }
+
+    pub fn decode_frame_count_with_backend(
+        &self,
+        settings: &AnalyzerDecodeSettings,
+        backend: DecoderBackendKind,
+    ) -> Result<usize> {
+        self.decode_frames_with_backend(settings, backend)
+            .map(|frames| frames.len())
+    }
+
+    pub fn decode_frame_slice_with_backend(
+        &self,
+        settings: &AnalyzerDecodeSettings,
+        backend: DecoderBackendKind,
+        start: usize,
+        end: usize,
+    ) -> Result<(usize, Vec<DecodedFrame>)> {
+        let frames = self.decode_frames_with_backend(settings, backend)?;
+        let total = frames.len();
+        let start = start.min(total);
+        let end = end.min(total).max(start);
+        Ok((total, frames[start..end].to_vec()))
+    }
+
+    pub fn decode_frame_table_window(
+        &self,
+        requests: &[AnalyzerFrameTableRequest],
+        start: usize,
+        end: usize,
+    ) -> Result<AnalyzerFrameTableWindow> {
+        let decoded_sources = if requests.len() > 1
+            && requests
+                .iter()
+                .all(|request| request.backend == DecoderBackendKind::SaleaeNative)
+        {
+            self.decode_saleae_frame_table_sources_batch(requests, None)?
+        } else if requests.len() <= 1 {
+            requests
+                .iter()
+                .map(|request| self.decode_frame_table_source(request))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            requests
+                .par_iter()
+                .map(|request| self.decode_frame_table_source(request))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let sources = decoded_sources.into_iter().flatten().collect::<Vec<_>>();
+        Ok(analyzer_frame_table_window_from_sources(
+            &sources, start, end,
+        ))
+    }
+
+    fn decode_frame_table_source(
+        &self,
+        request: &AnalyzerFrameTableRequest,
+    ) -> Result<Option<AnalyzerFrameTableSource>> {
+        let (frames, roles, cached_entry) =
+            self.decode_frames_and_table_roles_with_backend(&request.settings, request.backend)?;
+        Ok(analyzer_frame_table_source_from_frames(
+            request,
+            frames,
+            roles,
+            cached_entry.as_ref(),
+            None,
+        ))
+    }
+
+    fn decode_frame_table_search_source(
+        &self,
+        request: &AnalyzerFrameTableRequest,
+        query: &str,
+    ) -> Result<Option<AnalyzerFrameTableSource>> {
+        let (frames, roles, cached_entry) =
+            self.decode_frames_and_table_roles_with_backend(&request.settings, request.backend)?;
+        Ok(analyzer_frame_table_source_from_frames(
+            request,
+            frames,
+            roles,
+            cached_entry.as_ref(),
+            Some(query),
+        ))
+    }
+
+    fn decode_saleae_frame_table_sources_batch(
+        &self,
+        requests: &[AnalyzerFrameTableRequest],
+        query: Option<&str>,
+    ) -> Result<Vec<Option<AnalyzerFrameTableSource>>> {
+        let settings = requests
+            .iter()
+            .map(|request| request.settings.clone())
+            .collect::<Vec<_>>();
+        let decode_started = Instant::now();
+        let decoded = self.decode_saleae_native_frames_batch(&settings)?;
+        trace_graph_timing(
+            "saleae_frame_table_batch_decode",
+            decode_started,
+            &format!(
+                "analyzers={} frames={}",
+                decoded.len(),
+                decoded.iter().map(|frames| frames.len()).sum::<usize>()
+            ),
+        );
+        requests
+            .iter()
+            .zip(decoded)
+            .map(|(request, frames)| {
+                let cached_entry = self.cached_analyzer_entry_for_frames(
+                    &request.settings,
+                    request.backend,
+                    &frames,
+                )?;
+                let roles = cached_entry.as_ref().map_or_else(
+                    || Arc::new(analyzer_frame_roles(&frames)),
+                    |entry| entry.table_roles.clone(),
+                );
+                Ok(analyzer_frame_table_source_from_frames(
+                    request,
+                    frames,
+                    roles,
+                    cached_entry.as_ref(),
+                    query,
+                ))
+            })
+            .collect()
+    }
+
+    fn cached_analyzer_entry_for_frames(
+        &self,
+        settings: &AnalyzerDecodeSettings,
+        backend: DecoderBackendKind,
+        frames: &Arc<Vec<DecodedFrame>>,
+    ) -> Result<Option<AnalyzerCacheEntry>> {
+        let sample_count = self.sample_count();
+        let cache_key = if matches!(
+            backend,
+            DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust
+        ) {
+            serde_json::to_string(settings)?
+        } else {
+            native_full_analyzer_cache_key(backend, settings)?
+        };
+        Ok(self
+            .analyzer_cache
+            .lock()
+            .get(&cache_key)
+            .filter(|entry| entry.decoded_sample_count == sample_count)
+            .filter(|entry| Arc::ptr_eq(&entry.frames, frames))
+            .cloned())
+    }
+
+    fn decode_frames_and_table_roles_with_backend(
+        &self,
+        settings: &AnalyzerDecodeSettings,
+        backend: DecoderBackendKind,
+    ) -> Result<(
+        Arc<Vec<DecodedFrame>>,
+        Arc<Vec<String>>,
+        Option<AnalyzerCacheEntry>,
+    )> {
+        let frames = self.decode_frames_with_backend(settings, backend)?;
+        let cached_entry = self.cached_analyzer_entry_for_frames(settings, backend, &frames)?;
+        let roles = cached_entry.as_ref().map_or_else(
+            || Arc::new(analyzer_frame_roles(&frames)),
+            |entry| entry.table_roles.clone(),
+        );
+        Ok((frames, roles, cached_entry))
+    }
+
+    pub fn decode_frame_table_search_window(
+        &self,
+        requests: &[AnalyzerFrameTableRequest],
+        query: &str,
+        start: usize,
+        end: usize,
+    ) -> Result<AnalyzerFrameTableWindow> {
+        let decoded_sources = if requests.len() > 1
+            && requests
+                .iter()
+                .all(|request| request.backend == DecoderBackendKind::SaleaeNative)
+        {
+            self.decode_saleae_frame_table_sources_batch(requests, Some(query))?
+        } else if requests.len() <= 1 {
+            requests
+                .iter()
+                .map(|request| self.decode_frame_table_search_source(request, query))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            requests
+                .par_iter()
+                .map(|request| self.decode_frame_table_search_source(request, query))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let sources = decoded_sources.into_iter().flatten().collect::<Vec<_>>();
+        Ok(analyzer_frame_table_search_window_from_sources(
+            &sources, query, start, end,
+        ))
     }
 
     pub fn decode_frames_with_backend_for_view(
@@ -1504,35 +2824,193 @@ impl GraphSession {
             DecoderBackendKind::SaleaeNative | DecoderBackendKind::SigrokNative
         ) {
             if let Some(capture) = self.sparse_capture() {
-                return self.decode_sparse_frames_for_view(
-                    capture.as_ref(),
-                    settings,
-                    backend,
-                    waveform,
-                );
+                let capture = sparse_capture_view(capture.as_ref());
+                return self.decode_sparse_frames_for_view(&capture, settings, backend, waveform);
+            }
+            if self.capture().is_some() {
+                let graph = self.graph.read();
+                let graph = graph.as_ref().ok_or(GraphError::EmptyGraph)?;
+                let capture = graph.sparse_view();
+                return self.decode_sparse_frames_for_view(&capture, settings, backend, waveform);
             }
         }
         self.decode_frames_with_backend(settings, backend)
     }
 
+    /// Replaces the clamping policy the session applies to every viewport
+    /// change. `total_samples` is taken from the session, never from the caller,
+    /// so the limits and the data cannot disagree. The current viewport is
+    /// re-clamped and returned, so a capture that grew or a mode that changed
+    /// cannot leave a stale view in place.
+    pub fn set_view_limits(&self, limits: ViewLimits) -> SessionView {
+        *self.view_limits.lock() = limits;
+        // Only re-clamp a viewport that was actually established. Materializing
+        // one here would turn "never moved" into "explicitly set" and stop a live
+        // session from following the tail.
+        let existing = *self.view.lock();
+        match existing {
+            Some(view) => self.set_session_view(view.start_sample, view.samples),
+            None => self.session_view(),
+        }
+    }
+
+    fn normalize_view(&self, view: SessionView) -> SessionView {
+        let limits = *self.view_limits.lock();
+        let total = self.sample_count();
+        if limits.live {
+            normalize_live_capture_view(
+                view.start_sample,
+                view.samples,
+                total,
+                limits.sample_rate_hz,
+                limits.maximum_samples,
+            )
+        } else {
+            normalize_capture_view(
+                view.start_sample,
+                view.samples,
+                total,
+                limits.maximum_samples,
+            )
+        }
+    }
+
+    /// The viewport used until a caller establishes one. A live session follows a
+    /// fixed-width window at the tail; fitting the whole capture instead would
+    /// zoom out continuously as samples stream in, which is what made a live
+    /// graph unreadable.
+    fn default_view(&self) -> SessionView {
+        let total = self.sample_count();
+        let limits = *self.view_limits.lock();
+        let samples = default_capture_view_samples(total, limits.sample_rate_hz);
+        if limits.live {
+            SessionView::new((total as f64 - samples).max(0.0), samples)
+        } else {
+            SessionView::new(0.0, samples)
+        }
+    }
+
+    pub fn session_view(&self) -> SessionView {
+        // Resolve any glide first, then settle or report it. The animation lock
+        // is released before the view lock is taken so the two never nest.
+        let settled = {
+            let mut animation = self.view_animation.lock();
+            match animation.as_ref() {
+                None => None,
+                Some(active) => match active.sample() {
+                    Some(sampled) => Some(self.normalize_view(sampled)),
+                    None => {
+                        let destination = active.to;
+                        *animation = None;
+                        Some(self.normalize_view(destination))
+                    }
+                },
+            }
+        };
+        if let Some(view) = settled {
+            *self.view.lock() = Some(view);
+            return view;
+        }
+        self.view.lock().unwrap_or_else(|| self.default_view())
+    }
+
+    /// Establishes a viewport outright, applying the session's clamping.
+    pub fn set_session_view(&self, start_sample: f64, samples: f64) -> SessionView {
+        *self.view_animation.lock() = None;
+        let next = self.normalize_view(SessionView::new(start_sample, samples));
+        *self.view.lock() = Some(next);
+        next
+    }
+
+    /// Applies a gesture and stores the clamped result. This is the single entry
+    /// point for every viewport change the user can make.
+    ///
+    /// An animated intent starts a glide from wherever the view is right now, so
+    /// retargeting mid-flight does not snap back to the original start. Any other
+    /// intent cancels a glide, which is what makes a wheel tick interrupt a
+    /// toolbar zoom instead of fighting it.
+    pub fn apply_view_intent(&self, intent: &ViewIntent) -> SessionView {
+        if intent.is_passive() {
+            return self.session_view();
+        }
+        if let ViewIntent::AnimateTo {
+            start_sample,
+            samples,
+            duration_ms,
+        } = *intent
+        {
+            let from = self.session_view();
+            let to = self.normalize_view(SessionView::new(start_sample, samples));
+            let duration = Duration::from_secs_f64((duration_ms.max(0.0) / 1_000.0).min(60.0));
+            if duration.is_zero() {
+                *self.view.lock() = Some(to);
+                *self.view_animation.lock() = None;
+                return to;
+            }
+            *self.view_animation.lock() = Some(ViewAnimation::new(from, to, duration));
+            return from;
+        }
+        *self.view_animation.lock() = None;
+        let current = self.view.lock().unwrap_or_else(|| self.default_view());
+        let next = self.normalize_view(intent.apply(current));
+        *self.view.lock() = Some(next);
+        next
+    }
+
     pub fn render_frame(&self, request: &GraphFrameRequest) -> Result<GraphFrameResponse> {
         let total_started = Instant::now();
+        // A request that carries a gesture hands the range to the backend; the
+        // caller's `waveform` then only supplies resolution and channel
+        // selection. Requests without one keep their explicit range so existing
+        // callers are unaffected.
+        let (data_view, waveform) = match &request.view {
+            Some(intent) => {
+                self.apply_view_intent(intent);
+                // Read the view *after* applying, so an in-flight glide is
+                // sampled at the moment this frame is built.
+                let data_view = self.session_view();
+                let (start_sample, sample_count) = data_view.sample_window(self.sample_count());
+                (
+                    data_view,
+                    WaveformRequest {
+                        start_sample,
+                        sample_count,
+                        pixels: request.waveform.pixels,
+                        channels: request.waveform.channels.clone(),
+                    },
+                )
+            }
+            None => (
+                SessionView::new(
+                    request.waveform.start_sample as f64,
+                    request.waveform.sample_count.max(1) as f64,
+                ),
+                request.waveform.clone(),
+            ),
+        };
         let tile_started = Instant::now();
-        let tile = self
-            .graph
-            .read()
-            .as_ref()
-            .ok_or(GraphError::EmptyGraph)?
-            .build_tile(&request.waveform)?;
+        let tile = if request.include_tile {
+            self.graph
+                .read()
+                .as_ref()
+                .ok_or(GraphError::EmptyGraph)?
+                .build_tile(&waveform)?
+        } else {
+            empty_waveform_tile(&waveform)
+        };
         trace_graph_timing(
             "waveform_tile",
             tile_started,
-            &format!("channels={}", tile.channels.len()),
+            &format!(
+                "channels={} skipped={}",
+                tile.channels.len(),
+                !request.include_tile
+            ),
         );
         let analyzers_started = Instant::now();
         let analyzers = self.render_analyzers(
             &request.analyzers,
-            request.analyzer_view.as_ref().unwrap_or(&request.waveform),
+            request.analyzer_view.as_ref().unwrap_or(&waveform),
         )?;
         trace_graph_timing(
             "analyzer_render",
@@ -1540,10 +3018,21 @@ impl GraphSession {
             &format!("analyzers={}", analyzers.len()),
         );
 
+        // Read the view again: if the user kept moving while this frame was
+        // being built, `view` now leads `data_view` and the frontend stretches
+        // the difference instead of waiting for another round trip.
+        let view = if request.view.is_some() {
+            self.session_view()
+        } else {
+            data_view
+        };
+
         let response = GraphFrameResponse {
             frame_id: request.frame_id,
             revision: self.revision(),
             sample_count: self.sample_count(),
+            view,
+            data_view,
             tile,
             analyzers,
         };
@@ -1574,11 +3063,7 @@ impl GraphSession {
             ),
         );
         let aggregate_started = Instant::now();
-        let tracks = request
-            .tracks
-            .iter()
-            .map(|track| render_analyzer_track(&frames, track, waveform))
-            .collect::<Vec<_>>();
+        let tracks = render_analyzer_tracks(&frames, &request.tracks, waveform)?;
         trace_graph_timing(
             "bubble_aggregation",
             aggregate_started,
@@ -1602,6 +3087,15 @@ impl GraphSession {
                 .collect();
         }
 
+        if requests
+            .iter()
+            .all(|request| request.backend == DecoderBackendKind::SaleaeNative)
+        {
+            if let Some(rendered) = self.render_saleae_native_analyzers(requests, waveform)? {
+                return Ok(rendered);
+            }
+        }
+
         let worker_count = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(2)
@@ -1615,14 +3109,12 @@ impl GraphSession {
         }
 
         let chunk_size = requests.len().div_ceil(worker_count);
-        let mut indexed_results: Vec<(usize, AnalyzerRenderResult)> =
-            Vec::with_capacity(requests.len());
-        let mut first_error = None;
-        thread::scope(|scope| {
-            let mut workers = Vec::with_capacity(worker_count);
-            for (chunk_index, chunk) in requests.chunks(chunk_size).enumerate() {
+        let worker_outputs = requests
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
                 let start_index = chunk_index * chunk_size;
-                workers.push(scope.spawn(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     chunk
                         .iter()
                         .enumerate()
@@ -1631,26 +3123,20 @@ impl GraphSession {
                                 .map(|result| (start_index + index, result))
                         })
                         .collect::<Result<Vec<_>>>()
-                }));
-            }
+                }))
+                .unwrap_or_else(|_| {
+                    Err(GraphError::DecoderBackend(
+                        "analyzer render worker panicked".to_string(),
+                    ))
+                })
+            })
+            .collect::<Vec<_>>();
 
-            for worker in workers {
-                match worker.join() {
-                    Ok(Ok(mut results)) => indexed_results.append(&mut results),
-                    Ok(Err(error)) => {
-                        first_error.get_or_insert(error);
-                    }
-                    Err(_) => {
-                        first_error.get_or_insert(GraphError::DecoderBackend(
-                            "analyzer render worker panicked".to_string(),
-                        ));
-                    }
-                }
-            }
-        });
-
-        if let Some(error) = first_error {
-            return Err(error);
+        let mut indexed_results: Vec<(usize, AnalyzerRenderResult)> =
+            Vec::with_capacity(requests.len());
+        for output in worker_outputs {
+            let mut results = output?;
+            indexed_results.append(&mut results);
         }
         indexed_results.sort_by_key(|(index, _)| *index);
         Ok(indexed_results
@@ -1659,72 +3145,508 @@ impl GraphSession {
             .collect())
     }
 
+    fn render_saleae_native_analyzers(
+        &self,
+        requests: &[AnalyzerRenderRequest],
+        waveform: &WaveformRequest,
+    ) -> Result<Option<Vec<AnalyzerRenderResult>>> {
+        if requests.len() <= 1 {
+            return Ok(None);
+        }
+        if let Some(capture) = self.sparse_capture() {
+            let capture = sparse_capture_view(capture.as_ref());
+            return self
+                .render_saleae_native_analyzers_for_capture(requests, waveform, &capture)
+                .map(Some);
+        }
+        if self.capture().is_some() {
+            let graph = self.graph.read();
+            let graph = graph.as_ref().ok_or(GraphError::EmptyGraph)?;
+            let capture = graph.sparse_view();
+            return self
+                .render_saleae_native_analyzers_for_capture(requests, waveform, &capture)
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    fn render_saleae_native_analyzers_for_capture<'a>(
+        &self,
+        requests: &[AnalyzerRenderRequest],
+        waveform: &WaveformRequest,
+        capture: &SparseCaptureView<'a>,
+    ) -> Result<Vec<AnalyzerRenderResult>> {
+        let sample_count = self.sample_count();
+        let mut rendered: Vec<Option<AnalyzerRenderResult>> = vec![None; requests.len()];
+        let mut window_plans_by_key: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
+        let mut pending = Vec::new();
+
+        for (request_index, request) in requests.iter().enumerate() {
+            let full_key = native_full_analyzer_cache_key(request.backend, &request.settings)?;
+            if let Some(entry) = self.analyzer_cache.lock().get(&full_key) {
+                if entry.decoded_sample_count == sample_count {
+                    let tracks = render_analyzer_tracks_timed(
+                        &entry.frames,
+                        &request.tracks,
+                        waveform,
+                        &request.analyzer_id,
+                        "full-cache-hit",
+                    )?;
+                    rendered[request_index] = Some(AnalyzerRenderResult {
+                        analyzer_id: request.analyzer_id.clone(),
+                        tracks,
+                    });
+                    continue;
+                }
+            }
+
+            let windows = if let Some(windows) = window_plans_by_key.get(&full_key) {
+                windows.clone()
+            } else {
+                let windows = sparse_native_analysis_windows(capture, &request.settings, waveform)?;
+                window_plans_by_key.insert(full_key.clone(), windows.clone());
+                windows
+            };
+            if windows.is_empty() {
+                let frames = Arc::new(Vec::new());
+                let tracks = render_analyzer_tracks_timed(
+                    &frames,
+                    &request.tracks,
+                    waveform,
+                    &request.analyzer_id,
+                    "no-windows",
+                )?;
+                rendered[request_index] = Some(AnalyzerRenderResult {
+                    analyzer_id: request.analyzer_id.clone(),
+                    tracks,
+                });
+                continue;
+            }
+
+            let mut frames = Vec::new();
+            let window_entries = Vec::new();
+            let mut missing_windows = Vec::new();
+            for &(start, end) in &windows {
+                if let Some(window_frames) =
+                    self.cached_native_window_frames(&full_key, sample_count, start, end)
+                {
+                    frames.extend(window_frames.iter().cloned());
+                } else {
+                    missing_windows.push((start, end));
+                }
+            }
+            let window_cache_key = serde_json::to_string(&(
+                "sparse-native-window-v1",
+                request.backend,
+                &request.settings,
+                &windows,
+            ))?;
+
+            if missing_windows.is_empty() {
+                let mut frames = frames;
+                normalize_native_decoded_frames(&mut frames);
+                for frame in &mut frames {
+                    frame.frame_id = frame.start_sample;
+                }
+                let uncapped_frame_count = frames.len();
+                if frames.len() > MAX_DECODED_FRAMES {
+                    let stride = frames.len().div_ceil(MAX_DECODED_FRAMES);
+                    frames = frames.into_iter().step_by(stride).collect();
+                    for frame in &mut frames {
+                        frame.frame_id = frame.start_sample;
+                    }
+                }
+                let frames = Arc::new(frames);
+                let mut cache = self.analyzer_cache.lock();
+                if cache.len().saturating_add(1) >= MAX_ANALYZER_WINDOW_CACHE_ENTRIES {
+                    cache.clear();
+                }
+                cache.insert(
+                    window_cache_key.clone(),
+                    analyzer_cache_entry(sample_count, frames.clone()),
+                );
+                drop(cache);
+                if uncapped_frame_count <= MAX_DECODED_FRAMES
+                    && native_view_covers_capture(waveform, capture.metadata.sample_count)
+                    && native_windows_cover_all_driver_edges(capture, &request.settings, &windows)?
+                {
+                    self.analyzer_cache.lock().insert(
+                        full_key.clone(),
+                        analyzer_cache_entry(sample_count, frames.clone()),
+                    );
+                }
+                let tracks = render_analyzer_tracks_timed(
+                    &frames,
+                    &request.tracks,
+                    waveform,
+                    &request.analyzer_id,
+                    "window-cache-hit",
+                )?;
+                rendered[request_index] = Some(AnalyzerRenderResult {
+                    analyzer_id: request.analyzer_id.clone(),
+                    tracks,
+                });
+            } else {
+                pending.push(SaleaeBatchRenderState {
+                    request_index,
+                    request,
+                    full_cache_key: full_key,
+                    window_cache_key,
+                    windows,
+                    missing_windows,
+                    frames,
+                    window_entries,
+                });
+            }
+        }
+
+        if pending.is_empty() {
+            return Ok(rendered
+                .into_iter()
+                .map(|item| item.expect("rendered analyzer is initialized"))
+                .collect());
+        }
+
+        let decoder = SaleaeNativeDecoder::from_env_cached()
+            .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+
+        let mut window_groups: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
+        for (pending_index, state) in pending.iter().enumerate() {
+            for window in &state.missing_windows {
+                window_groups
+                    .entry(*window)
+                    .or_default()
+                    .push(pending_index);
+            }
+        }
+
+        let window_group_entries = window_groups.into_iter().collect::<Vec<_>>();
+        let window_group_count = window_group_entries.len();
+        let worker_count = native_window_decode_worker_count(window_group_entries.len());
+        let batch_window_decode_started = Instant::now();
+        let mut used_window_batch = false;
+        let group_outputs = if window_group_entries.len() > 1 {
+            let window_batch_requests = window_group_entries
+                .iter()
+                .map(|((start, end), pending_indices)| {
+                    (
+                        *start,
+                        *end,
+                        pending_indices
+                            .iter()
+                            .map(|index| &pending[*index].request.settings)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            match decoder
+                .decode_sparse_view_window_batches(capture, &window_batch_requests)
+                .map_err(|error| GraphError::DecoderBackend(error.to_string()))?
+            {
+                Some(decoded_windows) => {
+                    used_window_batch = true;
+                    window_group_entries
+                        .iter()
+                        .zip(decoded_windows)
+                        .map(|(((start, end), pending_indices), outputs)| {
+                            Ok(pending_indices
+                                .iter()
+                                .copied()
+                                .zip(outputs)
+                                .map(|(pending_index, output)| SaleaeBatchWindowDecodeResult {
+                                    pending_index,
+                                    start_sample: *start,
+                                    end_sample: *end,
+                                    frames: native_window_frames_from_output(output, *start),
+                                })
+                                .collect())
+                        })
+                        .collect::<Vec<_>>()
+                }
+                None => decode_saleae_batch_window_groups_individually(
+                    &decoder,
+                    capture,
+                    &pending,
+                    window_group_entries,
+                    worker_count,
+                ),
+            }
+        } else {
+            decode_saleae_batch_window_groups_individually(
+                &decoder,
+                capture,
+                &pending,
+                window_group_entries,
+                worker_count,
+            )
+        };
+
+        let mut decoded_window_count = 0usize;
+        let mut decoded_frame_count = 0usize;
+        for group_output in group_outputs {
+            for output in group_output? {
+                decoded_window_count += 1;
+                decoded_frame_count += output.frames.len();
+                let state = &mut pending[output.pending_index];
+                state.window_entries.push(NativeWindowCacheEntry {
+                    decoded_sample_count: sample_count,
+                    start_sample: output.start_sample,
+                    end_sample: output.end_sample,
+                    frames: output.frames,
+                });
+            }
+        }
+        trace_graph_timing(
+            "saleae_batch_window_decode",
+            batch_window_decode_started,
+            &format!(
+                "groups={} windows={} workers={} frames={} batched={}",
+                window_group_count,
+                decoded_window_count,
+                worker_count,
+                decoded_frame_count,
+                used_window_batch
+            ),
+        );
+
+        let finalize_started = Instant::now();
+        let finalized_outputs = if pending.len() <= 1 {
+            pending
+                .into_iter()
+                .map(|state| {
+                    finalize_saleae_batch_render_state(state, waveform, capture, sample_count)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            pending
+                .into_par_iter()
+                .map(|state| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        finalize_saleae_batch_render_state(state, waveform, capture, sample_count)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(GraphError::DecoderBackend(
+                            "saleae batch finalize worker panicked".to_string(),
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        trace_graph_timing(
+            "saleae_batch_finalize",
+            finalize_started,
+            &format!("analyzers={}", finalized_outputs.len()),
+        );
+
+        for output in finalized_outputs {
+            let finalized = output?;
+            let mut cache = self.analyzer_cache.lock();
+            if cache.len().saturating_add(1) >= MAX_ANALYZER_WINDOW_CACHE_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(finalized.window_cache_key, finalized.window_cache_entry);
+            drop(cache);
+            self.insert_native_window_cache_entries(
+                &finalized.full_cache_key,
+                finalized.window_entries,
+            );
+            if let Some((key, entry)) = finalized.full_cache_entry {
+                self.analyzer_cache.lock().insert(key, entry);
+            }
+            rendered[finalized.request_index] = Some(finalized.render);
+        }
+
+        Ok(rendered
+            .into_iter()
+            .map(|item| item.expect("rendered analyzer is initialized"))
+            .collect())
+    }
+
     fn decode_sparse_frames_for_view(
         &self,
-        capture: &SparseCaptureData,
+        capture: &SparseCaptureView<'_>,
         settings: &AnalyzerDecodeSettings,
         backend: DecoderBackendKind,
         waveform: &WaveformRequest,
     ) -> Result<Arc<Vec<DecodedFrame>>> {
+        let sample_count = self.sample_count();
+        let full_key = native_full_analyzer_cache_key(backend, settings)?;
+        let native_window_analyzer_key = full_key.clone();
+        if let Some(entry) = self.analyzer_cache.lock().get(&full_key) {
+            if entry.decoded_sample_count == sample_count {
+                trace_graph_timing(
+                    "native_full_decode_cache_hit",
+                    Instant::now(),
+                    &format!("backend={backend:?} frames={}", entry.frames.len()),
+                );
+                return Ok(entry.frames.clone());
+            }
+        }
+
         let windows = sparse_native_analysis_windows(capture, settings, waveform)?;
         if windows.is_empty() {
             return Ok(Arc::new(Vec::new()));
         }
 
         let key = serde_json::to_string(&("sparse-native-window-v1", backend, settings, &windows))?;
-        let sample_count = self.sample_count();
         if let Some(entry) = self.analyzer_cache.lock().get(&key) {
             if entry.decoded_sample_count == sample_count {
                 return Ok(entry.frames.clone());
             }
         }
-
-        let decoder: Box<dyn DecoderBackend> = match backend {
-            DecoderBackendKind::SaleaeNative => Box::new(
-                SaleaeNativeDecoder::from_env()
-                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?,
-            ),
-            DecoderBackendKind::SigrokNative => Box::new(
-                SigrokNativeDecoder::from_env()
-                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?,
-            ),
-            DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust => unreachable!(),
-        };
-
-        let mut frames = Vec::new();
-        let mut first_error = None;
-        for &(start, end) in &windows {
-            let window_capture = slice_sparse_capture(capture, start, end)?;
-            match decoder.decode_sparse(&window_capture, settings) {
-                Ok(output) => {
-                    frames.extend(
-                        output
-                            .into_decoded_frames()
-                            .into_iter()
-                            .map(|frame| offset_decoded_frame_samples(frame, start)),
+        if let [(start, end)] = windows.as_slice() {
+            if let Some(window_frames) = self.cached_native_window_frames(
+                &native_window_analyzer_key,
+                sample_count,
+                *start,
+                *end,
+            ) {
+                if window_frames.len() <= MAX_DECODED_FRAMES {
+                    trace_graph_timing(
+                        "native_single_window_cache_hit",
+                        Instant::now(),
+                        &format!("backend={backend:?} frames={}", window_frames.len()),
                     );
-                }
-                Err(error) => {
-                    first_error.get_or_insert_with(|| error.to_string());
+                    return Ok(window_frames);
                 }
             }
         }
+
+        let mut frames = Vec::new();
+        let mut missing_windows = Vec::new();
+        let mut window_cache_hits = 0usize;
+        for &(start, end) in &windows {
+            if let Some(window_frames) = self.cached_native_window_frames(
+                &native_window_analyzer_key,
+                sample_count,
+                start,
+                end,
+            ) {
+                frames.extend(window_frames.iter().cloned());
+                window_cache_hits += 1;
+            } else {
+                missing_windows.push((start, end));
+            }
+        }
+
+        let mut first_error = None;
+        let mut decoded_window_entries = Vec::new();
+        let window_decode_started = Instant::now();
+        let worker_count = native_window_decode_worker_count(missing_windows.len());
+        if missing_windows.is_empty() {
+            trace_graph_timing(
+                "native_window_cache_hit",
+                window_decode_started,
+                &format!(
+                    "backend={backend:?} windows={} frames={}",
+                    windows.len(),
+                    frames.len()
+                ),
+            );
+        } else if worker_count <= 1 {
+            let decoder = native_decoder_for_backend(backend)?;
+            for (start, end) in &missing_windows {
+                let (decode_start, decode_end) =
+                    native_decode_window_for_cache(capture, settings, *start, *end)?;
+                match decoder.decode_sparse_view_window(capture, decode_start, decode_end, settings)
+                {
+                    Ok(output) => {
+                        let window_frames = native_window_frames_from_output(output, decode_start);
+                        frames.extend(window_frames.iter().cloned());
+                        decoded_window_entries.push(NativeWindowCacheEntry {
+                            decoded_sample_count: sample_count,
+                            start_sample: decode_start,
+                            end_sample: decode_end,
+                            frames: window_frames,
+                        });
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert_with(|| error.to_string());
+                    }
+                }
+            }
+        } else {
+            let chunk_size = missing_windows.len().div_ceil(worker_count);
+            let worker_outputs = missing_windows
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let decoder = native_decoder_for_backend(backend)?;
+                        let mut chunk_frames = Vec::new();
+                        let mut chunk_window_entries = Vec::new();
+                        let mut chunk_error = None;
+                        for (start, end) in chunk {
+                            let (decode_start, decode_end) =
+                                native_decode_window_for_cache(capture, settings, *start, *end)?;
+                            match decoder.decode_sparse_view_window(
+                                capture,
+                                decode_start,
+                                decode_end,
+                                settings,
+                            ) {
+                                Ok(output) => {
+                                    let window_frames =
+                                        native_window_frames_from_output(output, decode_start);
+                                    chunk_frames.extend(window_frames.iter().cloned());
+                                    chunk_window_entries.push(NativeWindowCacheEntry {
+                                        decoded_sample_count: sample_count,
+                                        start_sample: decode_start,
+                                        end_sample: decode_end,
+                                        frames: window_frames,
+                                    });
+                                }
+                                Err(error) => {
+                                    chunk_error.get_or_insert_with(|| error.to_string());
+                                }
+                            }
+                        }
+                        Ok::<_, GraphError>((chunk_frames, chunk_window_entries, chunk_error))
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(GraphError::DecoderBackend(
+                            "native window decode worker panicked".to_string(),
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>();
+            for output in worker_outputs {
+                match output {
+                    Ok((mut chunk_frames, mut chunk_window_entries, chunk_error)) => {
+                        frames.append(&mut chunk_frames);
+                        decoded_window_entries.append(&mut chunk_window_entries);
+                        if let Some(error) = chunk_error {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert_with(|| error.to_string());
+                    }
+                }
+            }
+        }
+        trace_graph_timing(
+            "native_window_decode",
+            window_decode_started,
+            &format!(
+                "backend={backend:?} windows={} misses={} hits={} workers={} frames={}",
+                windows.len(),
+                missing_windows.len(),
+                window_cache_hits,
+                worker_count,
+                frames.len()
+            ),
+        );
         if frames.is_empty() {
             if let Some(error) = first_error {
                 return Err(GraphError::DecoderBackend(error));
             }
         }
 
-        frames.sort_by_key(|frame| (frame.start_sample, frame.end_sample));
-        frames.dedup_by(|right, left| {
-            left.start_sample == right.start_sample
-                && left.end_sample == right.end_sample
-                && left.value == right.value
-                && left.channel_values == right.channel_values
-        });
+        normalize_native_decoded_frames(&mut frames);
         for frame in &mut frames {
             frame.frame_id = frame.start_sample;
         }
+        let uncapped_frame_count = frames.len();
         if frames.len() > MAX_DECODED_FRAMES {
             let stride = frames.len().div_ceil(MAX_DECODED_FRAMES);
             frames = frames.into_iter().step_by(stride).collect();
@@ -1735,17 +3657,117 @@ impl GraphSession {
 
         let frames = Arc::new(frames);
         let mut cache = self.analyzer_cache.lock();
-        if cache.len() >= MAX_ANALYZER_WINDOW_CACHE_ENTRIES {
+        if cache.len().saturating_add(2) >= MAX_ANALYZER_WINDOW_CACHE_ENTRIES {
             cache.clear();
         }
-        cache.insert(
-            key,
-            AnalyzerCacheEntry {
-                decoded_sample_count: sample_count,
-                frames: frames.clone(),
-            },
+        cache.insert(key, analyzer_cache_entry(sample_count, frames.clone()));
+        drop(cache);
+        self.insert_native_window_cache_entries(
+            &native_window_analyzer_key,
+            decoded_window_entries,
         );
+        let mut cache = self.analyzer_cache.lock();
+        if uncapped_frame_count <= MAX_DECODED_FRAMES
+            && native_view_covers_capture(waveform, capture.metadata.sample_count)
+            && native_windows_cover_all_driver_edges(capture, settings, &windows)?
+        {
+            cache.insert(full_key, analyzer_cache_entry(sample_count, frames.clone()));
+        }
         Ok(frames)
+    }
+
+    fn cached_native_window_frames(
+        &self,
+        analyzer_key: &str,
+        sample_count: u64,
+        start_sample: u64,
+        end_sample: u64,
+    ) -> Option<Arc<Vec<DecodedFrame>>> {
+        let cache = self.native_window_cache.lock();
+        let exact_key = NativeWindowCacheKey {
+            analyzer_key: analyzer_key.to_string(),
+            start_sample,
+            end_sample,
+        };
+        if let Some(entry) = cache.get(&exact_key) {
+            if entry.decoded_sample_count == sample_count {
+                return Some(entry.frames.clone());
+            }
+        }
+        cache
+            .iter()
+            .filter(|(key, entry)| {
+                key.analyzer_key == analyzer_key
+                    && key.start_sample == entry.start_sample
+                    && key.end_sample == entry.end_sample
+                    && entry.decoded_sample_count == sample_count
+                    && entry.start_sample <= start_sample
+                    && entry.end_sample >= end_sample
+            })
+            .min_by_key(|(_, entry)| entry.end_sample.saturating_sub(entry.start_sample))
+            .map(|(_, entry)| entry.frames.clone())
+    }
+
+    fn cached_native_analyzer_frames(
+        &self,
+        analyzer_key: &str,
+        sample_count: u64,
+    ) -> Vec<DecodedFrame> {
+        let cache = self.native_window_cache.lock();
+        let mut frames = cache
+            .iter()
+            .filter(|(key, entry)| {
+                key.analyzer_key == analyzer_key && entry.decoded_sample_count == sample_count
+            })
+            .flat_map(|(_, entry)| entry.frames.iter().cloned())
+            .collect::<Vec<_>>();
+        drop(cache);
+        normalize_native_decoded_frames(&mut frames);
+        for frame in &mut frames {
+            frame.frame_id = frame.start_sample;
+        }
+        frames
+    }
+
+    fn insert_native_window_cache_entries(
+        &self,
+        analyzer_key: &str,
+        entries: Vec<NativeWindowCacheEntry>,
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut cache = self.native_window_cache.lock();
+        if cache.len().saturating_add(entries.len()) >= MAX_ANALYZER_WINDOW_CACHE_ENTRIES {
+            cache.clear();
+        }
+        for entry in entries {
+            cache.insert(
+                NativeWindowCacheKey {
+                    analyzer_key: analyzer_key.to_string(),
+                    start_sample: entry.start_sample,
+                    end_sample: entry.end_sample,
+                },
+                entry,
+            );
+        }
+    }
+
+    fn clear_analyzer_caches(&self) {
+        self.analyzer_generation.fetch_add(1, Ordering::AcqRel);
+        self.analyzer_cache.lock().clear();
+        self.native_window_cache.lock().clear();
+        let async_decode_ids = {
+            let mut background = self.native_background_cache.lock();
+            let ids = background
+                .values()
+                .filter(|state| state.async_started)
+                .map(|state| state.async_decode_id.clone())
+                .collect::<Vec<_>>();
+            background.clear();
+            ids
+        };
+        cancel_saleae_async_decode_ids(async_decode_ids.iter().map(String::as_str));
     }
 
     fn bump_revision(&self) {
@@ -1753,13 +3775,490 @@ impl GraphSession {
     }
 }
 
-fn offset_decoded_frame_samples(mut frame: DecodedFrame, offset: u64) -> DecodedFrame {
+impl Drop for GraphSession {
+    fn drop(&mut self) {
+        let async_decode_ids = self
+            .native_background_cache
+            .get_mut()
+            .values()
+            .filter(|state| state.async_started)
+            .map(|state| state.async_decode_id.clone())
+            .collect::<Vec<_>>();
+        cancel_saleae_async_decode_ids(async_decode_ids.iter().map(String::as_str));
+    }
+}
+
+fn cancel_saleae_async_decode_ids<'a>(decode_ids: impl IntoIterator<Item = &'a str>) {
+    let decode_ids = decode_ids.into_iter().collect::<Vec<_>>();
+    if decode_ids.is_empty() {
+        return;
+    }
+    let Ok(decoder) = SaleaeNativeDecoder::from_env_cached() else {
+        return;
+    };
+    decode_ids.into_par_iter().for_each(|decode_id| {
+        let _ = decoder.cancel_async_decode(decode_id);
+    });
+}
+
+fn native_driver_channel<'capture, 'data>(
+    capture: &'capture SparseCaptureView<'data>,
+    settings: &AnalyzerDecodeSettings,
+) -> Result<&'capture SparseDigitalChannelView<'data>> {
+    let driver_channel = match settings {
+        AnalyzerDecodeSettings::Uart(settings) => settings.channel,
+        AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
+        AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
+        AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
+    };
+    capture
+        .channels
+        .iter()
+        .find(|channel| channel.channel == driver_channel)
+        .ok_or_else(|| {
+            GraphError::InvalidAnalyzer(format!(
+                "native decoder clock/input channel D{driver_channel} is not present"
+            ))
+        })
+}
+
+fn native_background_window(
+    capture: &SparseCaptureView<'_>,
+    settings: &AnalyzerDecodeSettings,
+    body_edge_begin: usize,
+    body_edge_budget: usize,
+) -> Result<NativeBackgroundWindow> {
+    let driver = native_driver_channel(capture, settings)?;
+    let total_edges = driver.transitions.len();
+    if body_edge_begin >= total_edges || body_edge_budget == 0 {
+        return Err(GraphError::InvalidAnalyzer(
+            "native background decode edge range is empty".to_string(),
+        ));
+    }
+    let mut body_edge_end = body_edge_begin
+        .saturating_add(body_edge_budget)
+        .min(total_edges);
+    let context_begin = body_edge_begin.saturating_sub(NATIVE_BACKGROUND_CONTEXT_EDGES);
+    let context_end = body_edge_end
+        .saturating_add(NATIVE_BACKGROUND_CONTEXT_EDGES)
+        .min(total_edges);
+    let mut decode_start_sample = if context_begin == 0 {
+        0
+    } else {
+        driver.transitions[context_begin].saturating_sub(1)
+    };
+    let mut decode_end_sample = if context_end >= total_edges {
+        capture.metadata.sample_count
+    } else {
+        driver.transitions[context_end - 1]
+            .saturating_add(2)
+            .min(capture.metadata.sample_count)
+    };
+    (decode_start_sample, decode_end_sample) =
+        align_spi_window_to_enable(capture, settings, decode_start_sample, decode_end_sample);
+
+    let complete_decode_start = driver.transitions[0].saturating_sub(1);
+    let complete_decode_end = driver.transitions[total_edges - 1]
+        .saturating_add(2)
+        .min(capture.metadata.sample_count);
+    if decode_start_sample <= complete_decode_start && decode_end_sample >= complete_decode_end {
+        body_edge_end = total_edges;
+    }
+
+    let retain_start_sample = if body_edge_begin == 0 {
+        0
+    } else {
+        driver.transitions[body_edge_begin]
+    };
+    let retain_end_sample = if body_edge_end >= total_edges {
+        capture.metadata.sample_count
+    } else {
+        driver.transitions[body_edge_end]
+    };
+    Ok(NativeBackgroundWindow {
+        body_edge_begin,
+        body_edge_end,
+        retain_start_sample,
+        retain_end_sample,
+        decode_start_sample,
+        decode_end_sample,
+    })
+}
+
+fn decode_native_background_group(
+    decoder: &SaleaeNativeDecoder,
+    capture: &SparseCaptureView<'_>,
+    group: Vec<NativeBackgroundPending<'_>>,
+) -> Result<Vec<NativeBackgroundDecoded>> {
+    let Some(first) = group.first() else {
+        return Ok(Vec::new());
+    };
+    let start_sample = first.window.decode_start_sample;
+    let end_sample = first.window.decode_end_sample;
+    let setting_refs = group.iter().map(|task| task.settings).collect::<Vec<_>>();
+    let outputs = decoder
+        .decode_sparse_view_window_batch(capture, start_sample, end_sample, &setting_refs)
+        .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+    let outputs = match outputs {
+        Some(outputs) => outputs,
+        None => setting_refs
+            .iter()
+            .map(|settings| {
+                decoder
+                    .decode_sparse_view_window(capture, start_sample, end_sample, settings)
+                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    if outputs.len() != group.len() {
+        return Err(GraphError::DecoderBackend(format!(
+            "Saleae background decode returned {} outputs for {} analyzers",
+            outputs.len(),
+            group.len()
+        )));
+    }
+    Ok(group
+        .into_iter()
+        .zip(outputs)
+        .map(|(task, output)| NativeBackgroundDecoded {
+            key: task.key,
+            window: task.window,
+            frames: native_window_frames_from_output(output, start_sample),
+        })
+        .collect())
+}
+
+fn append_native_background_frames(
+    accumulated: &mut Vec<DecodedFrame>,
+    mut incoming: Vec<DecodedFrame>,
+) {
+    if incoming.is_empty() {
+        return;
+    }
+    let remains_ordered = match (accumulated.last(), incoming.first()) {
+        (Some(left), Some(right)) => {
+            left.start_sample < right.start_sample
+                || (left.start_sample == right.start_sample && left.end_sample <= right.end_sample)
+        }
+        _ => true,
+    };
+    accumulated.append(&mut incoming);
+    if remains_ordered {
+        accumulated.dedup_by(|right, left| same_decoded_frame(left, right));
+    } else {
+        normalize_native_decoded_frames(accumulated);
+    }
+}
+
+fn attach_native_completion_markers(
+    frames: &mut [DecodedFrame],
+    mut markers: Vec<DecodedProtocolMarker>,
+) {
+    for frame in frames.iter_mut() {
+        frame.protocol_markers.clear();
+    }
+    if frames.is_empty() || markers.is_empty() {
+        return;
+    }
+    markers.sort_by(|left, right| {
+        left.sample
+            .cmp(&right.sample)
+            .then_with(|| left.channel.cmp(&right.channel))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    markers.dedup();
+    let mut frame_index = 0usize;
+    for marker in markers {
+        while frame_index + 1 < frames.len()
+            && frames[frame_index + 1].start_sample <= marker.sample
+        {
+            frame_index += 1;
+        }
+        frames[frame_index].protocol_markers.push(marker);
+    }
+}
+
+fn decode_saleae_batch_window_group(
+    decoder: &SaleaeNativeDecoder,
+    capture: &SparseCaptureView<'_>,
+    pending: &[SaleaeBatchRenderState<'_>],
+    start_sample: u64,
+    end_sample: u64,
+    pending_indices: Vec<usize>,
+) -> Result<Vec<SaleaeBatchWindowDecodeResult>> {
+    let settings_refs = pending_indices
+        .iter()
+        .map(|index| &pending[*index].request.settings)
+        .collect::<Vec<_>>();
+    let decoded = decoder
+        .decode_sparse_view_window_batch(capture, start_sample, end_sample, &settings_refs)
+        .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+    let outputs = match decoded {
+        Some(outputs) => outputs,
+        None => settings_refs
+            .iter()
+            .map(|setting| {
+                decoder
+                    .decode_sparse_view_window(capture, start_sample, end_sample, setting)
+                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+
+    Ok(pending_indices
+        .into_iter()
+        .zip(outputs)
+        .map(|(pending_index, output)| SaleaeBatchWindowDecodeResult {
+            pending_index,
+            start_sample,
+            end_sample,
+            frames: native_window_frames_from_output(output, start_sample),
+        })
+        .collect())
+}
+
+fn decode_saleae_batch_window_groups_individually(
+    decoder: &SaleaeNativeDecoder,
+    capture: &SparseCaptureView<'_>,
+    pending: &[SaleaeBatchRenderState<'_>],
+    window_group_entries: Vec<((u64, u64), Vec<usize>)>,
+    worker_count: usize,
+) -> Vec<Result<Vec<SaleaeBatchWindowDecodeResult>>> {
+    if worker_count <= 1 {
+        return window_group_entries
+            .into_iter()
+            .map(|((start, end), pending_indices)| {
+                decode_saleae_batch_window_group(
+                    decoder,
+                    capture,
+                    pending,
+                    start,
+                    end,
+                    pending_indices,
+                )
+            })
+            .collect();
+    }
+
+    let chunk_size = window_group_entries.len().div_ceil(worker_count);
+    window_group_entries
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                chunk
+                    .iter()
+                    .map(|((start, end), pending_indices)| {
+                        decode_saleae_batch_window_group(
+                            decoder,
+                            capture,
+                            pending,
+                            *start,
+                            *end,
+                            pending_indices.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }))
+            .unwrap_or_else(|_| {
+                vec![Err(GraphError::DecoderBackend(
+                    "saleae batch window decode worker panicked".to_string(),
+                ))]
+            })
+        })
+        .flatten()
+        .collect()
+}
+
+fn finalize_saleae_batch_render_state(
+    state: SaleaeBatchRenderState<'_>,
+    waveform: &WaveformRequest,
+    capture: &SparseCaptureView<'_>,
+    sample_count: u64,
+) -> Result<SaleaeBatchFinalizedRender> {
+    let window_entries = state.window_entries;
+    let (frames, uncapped_frame_count) = if state.frames.is_empty()
+        && window_entries.len() == 1
+        && window_entries[0].frames.len() <= MAX_DECODED_FRAMES
+    {
+        (
+            window_entries[0].frames.clone(),
+            window_entries[0].frames.len(),
+        )
+    } else {
+        let mut frames = state.frames;
+        for entry in &window_entries {
+            frames.extend(entry.frames.iter().cloned());
+        }
+        normalize_native_decoded_frames(&mut frames);
+        for frame in &mut frames {
+            frame.frame_id = frame.start_sample;
+        }
+        let uncapped_frame_count = frames.len();
+        if frames.len() > MAX_DECODED_FRAMES {
+            let stride = frames.len().div_ceil(MAX_DECODED_FRAMES);
+            frames = frames.into_iter().step_by(stride).collect();
+            for frame in &mut frames {
+                frame.frame_id = frame.start_sample;
+            }
+        }
+        (Arc::new(frames), uncapped_frame_count)
+    };
+
+    let window_cache_entry = analyzer_cache_entry(sample_count, frames.clone());
+    let full_cache_entry = if uncapped_frame_count <= MAX_DECODED_FRAMES
+        && native_view_covers_capture(waveform, capture.metadata.sample_count)
+        && native_windows_cover_all_driver_edges(capture, &state.request.settings, &state.windows)?
+    {
+        Some((
+            state.full_cache_key.clone(),
+            analyzer_cache_entry(sample_count, frames.clone()),
+        ))
+    } else {
+        None
+    };
+    let tracks = render_analyzer_tracks_timed(
+        &frames,
+        &state.request.tracks,
+        waveform,
+        &state.request.analyzer_id,
+        "batch-finalize",
+    )?;
+
+    Ok(SaleaeBatchFinalizedRender {
+        request_index: state.request_index,
+        full_cache_key: state.full_cache_key,
+        window_cache_key: state.window_cache_key,
+        window_cache_entry,
+        full_cache_entry,
+        window_entries,
+        render: AnalyzerRenderResult {
+            analyzer_id: state.request.analyzer_id.clone(),
+            tracks,
+        },
+    })
+}
+
+fn offset_decoded_frame_samples(frame: &mut DecodedFrame, offset: u64) {
     frame.start_sample = frame.start_sample.saturating_add(offset);
     frame.end_sample = frame.end_sample.saturating_add(offset);
     for marker in &mut frame.protocol_markers {
         marker.sample = marker.sample.saturating_add(offset);
     }
-    frame
+}
+
+fn native_window_frames_from_output(
+    output: pxlogic_core::DecoderOutput,
+    offset: u64,
+) -> Arc<Vec<DecodedFrame>> {
+    let mut frames = output.into_decoded_frames();
+    if offset > 0 {
+        for frame in &mut frames {
+            offset_decoded_frame_samples(frame, offset);
+        }
+    }
+    normalize_native_decoded_frames(&mut frames);
+    for frame in &mut frames {
+        frame.frame_id = frame.start_sample;
+    }
+    Arc::new(frames)
+}
+
+fn native_full_analyzer_cache_key(
+    backend: DecoderBackendKind,
+    settings: &AnalyzerDecodeSettings,
+) -> Result<String> {
+    serde_json::to_string(&(backend, settings)).map_err(GraphError::from)
+}
+
+fn native_async_decode_id(instance_id: u64, generation: u64, analyzer_key: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in analyzer_key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("graph-{instance_id}-generation-{generation}-analyzer-{hash:016x}")
+}
+
+fn native_view_covers_capture(waveform: &WaveformRequest, sample_count: u64) -> bool {
+    waveform.start_sample == 0 && waveform.sample_count >= sample_count
+}
+
+fn native_windows_cover_all_driver_edges(
+    capture: &SparseCaptureView<'_>,
+    settings: &AnalyzerDecodeSettings,
+    windows: &[(u64, u64)],
+) -> Result<bool> {
+    let driver_channel = match settings {
+        AnalyzerDecodeSettings::Uart(settings) => settings.channel,
+        AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
+        AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
+        AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
+    };
+    let driver = capture
+        .channels
+        .iter()
+        .find(|channel| channel.channel == driver_channel)
+        .ok_or_else(|| {
+            GraphError::InvalidAnalyzer(format!(
+                "native decoder clock/input channel D{driver_channel} is not present"
+            ))
+        })?;
+    let (Some(first), Some(last)) = (driver.transitions.first(), driver.transitions.last()) else {
+        return Ok(false);
+    };
+    Ok(windows.len() == 1
+        && windows[0].0 <= first.saturating_sub(1)
+        && windows[0].1 >= last.saturating_add(2).min(capture.metadata.sample_count))
+}
+
+fn native_window_decode_worker_count(window_count: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(MAX_DEFAULT_PARALLEL_NATIVE_WINDOW_DECODES);
+    let configured = std::env::var(NATIVE_WINDOW_DECODE_WORKERS_ENV).ok();
+    native_window_decode_worker_count_value(window_count, configured.as_deref(), available)
+}
+
+fn native_window_decode_worker_count_value(
+    window_count: usize,
+    configured: Option<&str>,
+    available: usize,
+) -> usize {
+    if window_count <= 1 {
+        return 1;
+    }
+    let default = default_native_window_decode_worker_count(available);
+    let requested = configured
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(default);
+    requested.min(available.max(1)).min(window_count).max(1)
+}
+
+fn default_native_window_decode_worker_count(available: usize) -> usize {
+    let available = available.max(1);
+    match available {
+        1 => 1,
+        2 => 2,
+        _ => available
+            .saturating_sub(1)
+            .min(MAX_DEFAULT_PARALLEL_NATIVE_WINDOW_DECODES)
+            .max(2),
+    }
+}
+
+fn native_decoder_for_backend(backend: DecoderBackendKind) -> Result<Box<dyn DecoderBackend>> {
+    match backend {
+        DecoderBackendKind::SaleaeNative => Ok(Box::new(
+            SaleaeNativeDecoder::from_env_cached()
+                .map_err(|error| GraphError::DecoderBackend(error.to_string()))?,
+        )),
+        DecoderBackendKind::SigrokNative => Ok(Box::new(
+            SigrokNativeDecoder::from_env_cached()
+                .map_err(|error| GraphError::DecoderBackend(error.to_string()))?,
+        )),
+        DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust => unreachable!(),
+    }
 }
 
 fn trimmed_metadata(metadata: &CaptureMetadata, start: u64, end: u64) -> Result<CaptureMetadata> {
@@ -1848,7 +4347,7 @@ fn trim_sparse_capture(
 }
 
 fn sparse_native_analysis_windows(
-    capture: &SparseCaptureData,
+    capture: &SparseCaptureView<'_>,
     settings: &AnalyzerDecodeSettings,
     waveform: &WaveformRequest,
 ) -> Result<Vec<(u64, u64)>> {
@@ -1952,8 +4451,62 @@ fn sparse_native_analysis_windows(
     Ok(merged)
 }
 
+fn native_decode_window_for_cache(
+    capture: &SparseCaptureView<'_>,
+    settings: &AnalyzerDecodeSettings,
+    start: u64,
+    end: u64,
+) -> Result<(u64, u64)> {
+    if start >= end || capture.metadata.sample_count == 0 {
+        return Ok((start, end));
+    }
+    let driver_channel = match settings {
+        AnalyzerDecodeSettings::Uart(settings) => settings.channel,
+        AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
+        AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
+        AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
+    };
+    let driver = capture
+        .channels
+        .iter()
+        .find(|channel| channel.channel == driver_channel)
+        .ok_or_else(|| {
+            GraphError::InvalidAnalyzer(format!(
+                "native decoder clock/input channel D{driver_channel} is not present"
+            ))
+        })?;
+    if driver.transitions.is_empty() {
+        return Ok((start, end.min(capture.metadata.sample_count)));
+    }
+
+    let edge_begin = driver.transitions.partition_point(|sample| *sample < start);
+    let edge_end = driver.transitions.partition_point(|sample| *sample < end);
+    let expanded_begin = edge_begin.saturating_sub(NATIVE_CACHE_REUSE_EDGES);
+    let expanded_end = edge_end
+        .saturating_add(NATIVE_CACHE_REUSE_EDGES)
+        .min(driver.transitions.len());
+    if expanded_begin >= expanded_end {
+        return Ok((start, end.min(capture.metadata.sample_count)));
+    }
+
+    let expanded_start = start.min(driver.transitions[expanded_begin].saturating_sub(1));
+    let expanded_end_sample = end
+        .max(
+            driver.transitions[expanded_end - 1]
+                .saturating_add(2)
+                .min(capture.metadata.sample_count),
+        )
+        .min(capture.metadata.sample_count);
+    Ok(align_spi_window_to_enable(
+        capture,
+        settings,
+        expanded_start,
+        expanded_end_sample,
+    ))
+}
+
 fn align_spi_window_to_enable(
-    capture: &SparseCaptureData,
+    capture: &SparseCaptureView<'_>,
     settings: &AnalyzerDecodeSettings,
     mut start: u64,
     mut end: u64,
@@ -1989,7 +4542,7 @@ fn align_spi_window_to_enable(
     (start, end)
 }
 
-fn sparse_level_at(channel: &SparseDigitalChannel, sample: u64) -> bool {
+fn sparse_level_at(channel: &SparseDigitalChannelView<'_>, sample: u64) -> bool {
     channel.initial_high
         ^ (channel
             .transitions
@@ -1998,6 +4551,7 @@ fn sparse_level_at(channel: &SparseDigitalChannel, sample: u64) -> bool {
             == 1)
 }
 
+#[cfg(test)]
 fn slice_sparse_capture(
     capture: &SparseCaptureData,
     start: u64,
@@ -2058,13 +4612,7 @@ fn merge_incremental_frames(
     cached.reserve(incremental.len());
     cached.extend(incremental);
     let mut merged = cached;
-    merged.sort_by_key(|frame| (frame.start_sample, frame.end_sample));
-    merged.dedup_by(|right, left| {
-        left.start_sample == right.start_sample
-            && left.end_sample == right.end_sample
-            && left.channel_values == right.channel_values
-            && left.value == right.value
-    });
+    normalize_native_decoded_frames(&mut merged);
     if merged.len() > MAX_DECODED_FRAMES {
         let stride = merged.len().div_ceil(MAX_DECODED_FRAMES);
         let last = merged.last().cloned();
@@ -2079,6 +4627,25 @@ fn merge_incremental_frames(
         }
     }
     merged
+}
+
+fn normalize_native_decoded_frames(frames: &mut Vec<DecodedFrame>) {
+    if frames.len() <= 1 {
+        return;
+    }
+    if !decoded_frames_are_ordered(frames) {
+        frames.sort_by_key(|frame| (frame.start_sample, frame.end_sample));
+    }
+    frames.dedup_by(|right, left| same_decoded_frame(left, right));
+}
+
+fn decoded_frames_are_ordered(frames: &[DecodedFrame]) -> bool {
+    frames.windows(2).all(|pair| {
+        let left = &pair[0];
+        let right = &pair[1];
+        left.start_sample < right.start_sample
+            || (left.start_sample == right.start_sample && left.end_sample <= right.end_sample)
+    })
 }
 
 fn same_decoded_frame(left: &DecodedFrame, right: &DecodedFrame) -> bool {
@@ -2175,7 +4742,7 @@ fn summarize_indexed_bin(index: &DigitalChannelIndex, x: u32, start: u64, end: u
     }
 }
 
-fn pack_digital_bins(bins: &[WaveformBin]) -> String {
+fn pack_digital_bins(bins: &[WaveformBin]) -> Vec<u8> {
     let mut packed = Vec::with_capacity(bins.len() * PACKED_DIGITAL_BIN_BYTES);
     for bin in bins {
         let flags = u32::from(bin.first)
@@ -2187,13 +4754,12 @@ fn pack_digital_bins(bins: &[WaveformBin]) -> String {
         packed.extend_from_slice(&bin.first_edge_offset.unwrap_or(u32::MAX).to_le_bytes());
         packed.extend_from_slice(&bin.last_edge_offset.unwrap_or(u32::MAX).to_le_bytes());
     }
-    BASE64.encode(packed)
+    packed
 }
 
 #[cfg(test)]
-fn unpack_digital_bins(packed: &str) -> Vec<WaveformBin> {
-    let bytes = BASE64.decode(packed).expect("valid packed bins");
-    bytes
+fn unpack_digital_bins(packed: &[u8]) -> Vec<WaveformBin> {
+    packed
         .chunks_exact(PACKED_DIGITAL_BIN_BYTES)
         .enumerate()
         .map(|(x, chunk)| {
@@ -2285,6 +4851,12 @@ struct BubbleAccumulator {
     last_frame_width_px: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnalyzerTrackFrameIndex {
+    frame_index: usize,
+    value_index: usize,
+}
+
 fn render_analyzer_track(
     frames: &[DecodedFrame],
     track: &AnalyzerTrackRequest,
@@ -2296,25 +4868,21 @@ fn render_analyzer_track(
     let finish = upper_bound_frame_start(frames, end, begin);
     let visible_count = finish.saturating_sub(begin);
 
-    let bubbles = if visible_count > DENSE_BUBBLE_THRESHOLD {
-        build_dense_bubbles(frames, track, begin, finish)
-    } else {
-        build_pixel_bubbles(
-            frames,
-            track,
-            begin,
-            finish,
-            waveform.sample_count,
-            waveform.pixels,
-        )
-    };
-    let visible_frames = (begin..finish)
-        .filter_map(|index| frame_for_track(&frames[index], track))
+    let bubbles = build_pixel_bubbles(
+        frames,
+        track,
+        begin,
+        finish,
+        waveform.sample_count,
+        waveform.pixels,
+    );
+    let frame_refs = (begin..finish)
+        .filter_map(|index| frame_ref_for_track(&frames[index], track))
         .take(MAX_ANALYZER_MARKER_RESULTS)
         .collect::<Vec<_>>();
-    let previous_frame = (0..begin)
+    let previous_frame_ref = (0..begin)
         .rev()
-        .find_map(|index| frame_for_track(&frames[index], track));
+        .find_map(|index| frame_ref_for_track(&frames[index], track));
     let next_start = if visible_count > MAX_ANALYZER_MARKER_RESULTS {
         begin
             .saturating_add(MAX_ANALYZER_MARKER_RESULTS)
@@ -2322,8 +4890,8 @@ fn render_analyzer_track(
     } else {
         finish
     };
-    let next_frame =
-        (next_start..frames.len()).find_map(|index| frame_for_track(&frames[index], track));
+    let next_frame_ref =
+        (next_start..frames.len()).find_map(|index| frame_ref_for_track(&frames[index], track));
     let protocol_markers = protocol_markers_for_track(frames, track, begin, finish);
 
     AnalyzerTrackWindow {
@@ -2331,9 +4899,879 @@ fn render_analyzer_track(
         role: track.role.clone(),
         bubbles,
         protocol_markers,
-        frames: visible_frames,
-        previous_frame,
-        next_frame,
+        frame_refs,
+        previous_frame_ref,
+        next_frame_ref,
+        frames: Vec::new(),
+        previous_frame: None,
+        next_frame: None,
+    }
+}
+
+fn render_indexed_analyzer_track(
+    frames: &[DecodedFrame],
+    frame_indices: &[AnalyzerTrackFrameIndex],
+    protocol_markers: Vec<AnalyzerProtocolMarker>,
+    track: &AnalyzerTrackRequest,
+    waveform: &WaveformRequest,
+) -> AnalyzerTrackWindow {
+    let start = waveform.start_sample;
+    let end = start.saturating_add(waveform.sample_count);
+    let begin = lower_bound_track_frame_end(frames, frame_indices, start);
+    let finish = upper_bound_track_frame_start(frames, frame_indices, end, begin);
+    let visible_count = finish.saturating_sub(begin);
+
+    let bubbles = build_pixel_bubbles_from_indices(
+        frames,
+        frame_indices,
+        track,
+        begin,
+        finish,
+        waveform.sample_count,
+        waveform.pixels,
+    );
+    let frame_refs = frame_indices[begin..finish]
+        .iter()
+        .map(|index| frame_ref_for_indexed_track(frames, *index))
+        .take(MAX_ANALYZER_MARKER_RESULTS)
+        .collect::<Vec<_>>();
+    let previous_frame_ref = begin
+        .checked_sub(1)
+        .and_then(|index| frame_indices.get(index))
+        .map(|index| frame_ref_for_indexed_track(frames, *index));
+    let next_start = if visible_count > MAX_ANALYZER_MARKER_RESULTS {
+        begin
+            .saturating_add(MAX_ANALYZER_MARKER_RESULTS)
+            .min(frame_indices.len())
+    } else {
+        finish
+    };
+    let next_frame_ref = frame_indices
+        .get(next_start)
+        .map(|index| frame_ref_for_indexed_track(frames, *index));
+
+    AnalyzerTrackWindow {
+        channel: track.channel,
+        role: track.role.clone(),
+        bubbles,
+        protocol_markers,
+        frame_refs,
+        previous_frame_ref,
+        next_frame_ref,
+        frames: Vec::new(),
+        previous_frame: None,
+        next_frame: None,
+    }
+}
+
+/// Bubble aggregation with its own timing.
+///
+/// `render_analyzer` already times `bubble_aggregation`, but the multi-analyzer
+/// Saleae path never goes through it — it aggregates at several separate points
+/// here instead, so without this the aggregation cost of the path that real
+/// captures actually take is invisible. The stage name is deliberately the same
+/// as `render_analyzer`'s so both paths sum into one figure.
+fn render_analyzer_tracks_timed(
+    frames: &[DecodedFrame],
+    tracks: &[AnalyzerTrackRequest],
+    waveform: &WaveformRequest,
+    analyzer_id: &str,
+    source: &str,
+) -> Result<Vec<AnalyzerTrackWindow>> {
+    let started = Instant::now();
+    let rendered = render_analyzer_tracks(frames, tracks, waveform)?;
+    trace_graph_timing(
+        "bubble_aggregation",
+        started,
+        &format!(
+            "analyzer={} tracks={} frames={} source={}",
+            analyzer_id,
+            rendered.len(),
+            frames.len(),
+            source
+        ),
+    );
+    Ok(rendered)
+}
+
+fn render_analyzer_tracks(
+    frames: &[DecodedFrame],
+    tracks: &[AnalyzerTrackRequest],
+    waveform: &WaveformRequest,
+) -> Result<Vec<AnalyzerTrackWindow>> {
+    if tracks.len() <= 1 {
+        return Ok(tracks
+            .iter()
+            .map(|track| render_analyzer_track(frames, track, waveform))
+            .collect());
+    }
+
+    let start = waveform.start_sample;
+    let end = start.saturating_add(waveform.sample_count);
+    let frame_begin = lower_bound_frame_end(frames, start);
+    let frame_finish = upper_bound_frame_start(frames, end, frame_begin);
+    let track_analysis =
+        analyzer_track_window_analysis_for_window(frames, tracks, frame_begin, frame_finish);
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2)
+        .min(MAX_PARALLEL_ANALYZER_TRACK_RENDERS)
+        .min(tracks.len());
+    if worker_count <= 1 {
+        return Ok(tracks
+            .iter()
+            .zip(track_analysis.frame_indices)
+            .zip(track_analysis.protocol_markers)
+            .map(|((track, frame_indices), protocol_markers)| {
+                render_indexed_analyzer_track(
+                    frames,
+                    &frame_indices,
+                    protocol_markers,
+                    track,
+                    waveform,
+                )
+            })
+            .collect());
+    }
+
+    let indexed_inputs = tracks
+        .iter()
+        .enumerate()
+        .zip(track_analysis.frame_indices)
+        .zip(track_analysis.protocol_markers)
+        .map(
+            |(((track_index, track), frame_indices), protocol_markers)| {
+                (track_index, track, frame_indices, protocol_markers)
+            },
+        )
+        .collect::<Vec<_>>();
+    let chunk_size = indexed_inputs.len().div_ceil(worker_count);
+    let worker_outputs = indexed_inputs
+        .into_par_iter()
+        .chunks(chunk_size)
+        .map(|chunk| {
+            chunk
+                .into_iter()
+                .map(|(track_index, track, frame_indices, protocol_markers)| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (
+                            track_index,
+                            render_indexed_analyzer_track(
+                                frames,
+                                &frame_indices,
+                                protocol_markers,
+                                track,
+                                waveform,
+                            ),
+                        )
+                    }))
+                    .map_err(|_| {
+                        GraphError::DecoderBackend("analyzer track worker panicked".to_string())
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+
+    let mut indexed_results: Vec<(usize, AnalyzerTrackWindow)> = Vec::with_capacity(tracks.len());
+    for output in worker_outputs {
+        indexed_results.push(output?);
+    }
+    indexed_results.sort_by_key(|(index, _)| *index);
+    Ok(indexed_results
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect())
+}
+
+fn analyzer_frame_table_source_from_frames(
+    request: &AnalyzerFrameTableRequest,
+    frames: Arc<Vec<DecodedFrame>>,
+    roles: Arc<Vec<String>>,
+    cached_entry: Option<&AnalyzerCacheEntry>,
+    query: Option<&str>,
+) -> Option<AnalyzerFrameTableSource> {
+    if frames.is_empty() {
+        return None;
+    }
+    let analyzer_name_search = analyzer_frame_table_analyzer_name_search(request);
+    let search_matches = query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .and_then(|query| {
+            let normalized_query = query.to_lowercase();
+            cached_entry.map(|entry| {
+                analyzer_search_matches_for_entry(
+                    entry,
+                    &request.display_radix,
+                    &analyzer_name_search,
+                    &normalized_query,
+                )
+            })
+        });
+
+    Some(AnalyzerFrameTableSource {
+        analyzer_id: request.analyzer_id.clone(),
+        analyzer_name_search,
+        display_radix: request.display_radix.clone(),
+        frames,
+        roles,
+        search_texts: None,
+        search_matches,
+    })
+}
+
+fn analyzer_frame_table_analyzer_name_search(request: &AnalyzerFrameTableRequest) -> String {
+    let analyzer_name = if request.analyzer_name.trim().is_empty() {
+        request.analyzer_id.clone()
+    } else {
+        request.analyzer_name.clone()
+    };
+    analyzer_name.to_lowercase()
+}
+
+fn analyzer_frame_table_window_from_sources(
+    sources: &[AnalyzerFrameTableSource],
+    start: usize,
+    end: usize,
+) -> AnalyzerFrameTableWindow {
+    let row_count = sources
+        .iter()
+        .map(|source| source.frames.len())
+        .sum::<usize>();
+    let roles = analyzer_frame_table_roles(sources);
+    let start = start.min(row_count);
+    let end = end.min(row_count).max(start);
+    if start >= end || sources.is_empty() {
+        return AnalyzerFrameTableWindow {
+            roles,
+            row_count,
+            rows: Vec::new(),
+        };
+    }
+
+    if sources.len() == 1 {
+        let source = &sources[0];
+        return AnalyzerFrameTableWindow {
+            roles,
+            row_count,
+            rows: source.frames[start..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, frame)| analyzer_frame_table_row(source, start + offset, frame))
+                .collect(),
+        };
+    }
+
+    let Some(start_sample) = analyzer_frame_start_sample_at_rank(sources, start) else {
+        return AnalyzerFrameTableWindow {
+            roles,
+            row_count,
+            rows: Vec::new(),
+        };
+    };
+    let mut positions = vec![0usize; sources.len()];
+    let mut rows_before_start_sample = 0usize;
+    for (source_index, source) in sources.iter().enumerate() {
+        let lower = lower_bound_frame_start(&source.frames, start_sample);
+        positions[source_index] = lower;
+        rows_before_start_sample = rows_before_start_sample.saturating_add(lower);
+    }
+
+    let mut tied_rows_to_skip = start.saturating_sub(rows_before_start_sample);
+    for (source_index, source) in sources.iter().enumerate() {
+        if tied_rows_to_skip == 0 {
+            break;
+        }
+        let upper = upper_bound_frame_start(&source.frames, start_sample, positions[source_index]);
+        let skip = tied_rows_to_skip.min(upper.saturating_sub(positions[source_index]));
+        positions[source_index] += skip;
+        tied_rows_to_skip -= skip;
+    }
+
+    let mut rows = Vec::with_capacity(end - start);
+    while rows.len() < end - start {
+        let Some(source_index) = next_analyzer_table_source_index(sources, &positions) else {
+            break;
+        };
+        let frame_position = positions[source_index];
+        let frame = &sources[source_index].frames[frame_position];
+        rows.push(analyzer_frame_table_row(
+            &sources[source_index],
+            frame_position,
+            frame,
+        ));
+        positions[source_index] += 1;
+    }
+
+    AnalyzerFrameTableWindow {
+        roles,
+        row_count,
+        rows,
+    }
+}
+
+fn analyzer_frame_table_search_window_from_sources(
+    sources: &[AnalyzerFrameTableSource],
+    query: &str,
+    start: usize,
+    end: usize,
+) -> AnalyzerFrameTableWindow {
+    let roles = analyzer_frame_table_roles(sources);
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return analyzer_frame_table_window_from_sources(sources, start, end);
+    }
+
+    let match_sources = sources
+        .iter()
+        .filter_map(|source| {
+            let matches = analyzer_frame_table_search_matches(source, &normalized_query);
+            (!matches.is_empty()).then_some(AnalyzerFrameTableMatchSource { source, matches })
+        })
+        .collect::<Vec<_>>();
+    let row_count = match_sources
+        .iter()
+        .map(|source| source.matches.len())
+        .sum::<usize>();
+    let start = start.min(row_count);
+    let end = end.min(row_count).max(start);
+    if start >= end || match_sources.is_empty() {
+        return AnalyzerFrameTableWindow {
+            roles,
+            row_count,
+            rows: Vec::new(),
+        };
+    }
+
+    if match_sources.len() == 1 {
+        let source = &match_sources[0];
+        return AnalyzerFrameTableWindow {
+            roles,
+            row_count,
+            rows: source.matches[start..end]
+                .iter()
+                .map(|frame_position| {
+                    analyzer_frame_table_row(
+                        source.source,
+                        *frame_position,
+                        &source.source.frames[*frame_position],
+                    )
+                })
+                .collect(),
+        };
+    }
+
+    let Some(start_sample) = analyzer_match_frame_start_sample_at_rank(&match_sources, start)
+    else {
+        return AnalyzerFrameTableWindow {
+            roles,
+            row_count,
+            rows: Vec::new(),
+        };
+    };
+    let mut positions = vec![0usize; match_sources.len()];
+    let mut rows_before_start_sample = 0usize;
+    for (source_index, source) in match_sources.iter().enumerate() {
+        let lower = lower_bound_match_frame_start(source, start_sample);
+        positions[source_index] = lower;
+        rows_before_start_sample = rows_before_start_sample.saturating_add(lower);
+    }
+
+    let mut tied_rows_to_skip = start.saturating_sub(rows_before_start_sample);
+    for (source_index, source) in match_sources.iter().enumerate() {
+        if tied_rows_to_skip == 0 {
+            break;
+        }
+        let upper = upper_bound_match_frame_start(source, start_sample, positions[source_index]);
+        let skip = tied_rows_to_skip.min(upper.saturating_sub(positions[source_index]));
+        positions[source_index] += skip;
+        tied_rows_to_skip -= skip;
+    }
+
+    let mut rows = Vec::with_capacity(end - start);
+    while rows.len() < end - start {
+        let Some(source_index) = next_analyzer_table_match_source_index(&match_sources, &positions)
+        else {
+            break;
+        };
+        let source = &match_sources[source_index];
+        let match_position = positions[source_index];
+        let frame_position = source.matches[match_position];
+        rows.push(analyzer_frame_table_row(
+            source.source,
+            frame_position,
+            &source.source.frames[frame_position],
+        ));
+        positions[source_index] += 1;
+    }
+
+    AnalyzerFrameTableWindow {
+        roles,
+        row_count,
+        rows,
+    }
+}
+
+struct AnalyzerFrameTableMatchSource<'a> {
+    source: &'a AnalyzerFrameTableSource,
+    matches: Arc<Vec<usize>>,
+}
+
+fn analyzer_frame_table_roles(sources: &[AnalyzerFrameTableSource]) -> Vec<String> {
+    let mut roles = Vec::new();
+    let mut seen = HashSet::new();
+    for source in sources {
+        for role in source.roles.iter() {
+            if seen.insert(role.clone()) {
+                roles.push(role.clone());
+            }
+        }
+    }
+    roles
+}
+
+fn analyzer_frame_roles(frames: &[DecodedFrame]) -> Vec<String> {
+    let mut roles = Vec::new();
+    let mut seen = HashSet::new();
+    for frame in frames {
+        for value in &frame.channel_values {
+            if seen.insert(value.role.clone()) {
+                roles.push(value.role.clone());
+            }
+        }
+    }
+    roles
+}
+
+fn analyzer_search_texts_for_entry(
+    entry: &AnalyzerCacheEntry,
+    display_radix: &str,
+) -> Arc<Vec<String>> {
+    let cache_key = normalize_analyzer_display_radix(display_radix).to_string();
+    if let Some(cached) = entry.table_search_texts.lock().get(&cache_key).cloned() {
+        return cached;
+    }
+
+    let built = Arc::new(analyzer_frame_search_texts(&entry.frames, display_radix));
+    let mut cache = entry.table_search_texts.lock();
+    if let Some(cached) = cache.get(&cache_key).cloned() {
+        return cached;
+    }
+    cache.insert(cache_key, built.clone());
+    built
+}
+
+fn analyzer_search_matches_for_entry(
+    entry: &AnalyzerCacheEntry,
+    display_radix: &str,
+    analyzer_name_search: &str,
+    normalized_query: &str,
+) -> Arc<Vec<usize>> {
+    let cache_key =
+        analyzer_search_matches_cache_key(display_radix, analyzer_name_search, normalized_query);
+    if let Some(cached) = entry.table_search_matches.lock().get(&cache_key).cloned() {
+        return cached;
+    }
+
+    let built = if analyzer_name_search.contains(normalized_query) {
+        Arc::new((0..entry.frames.len()).collect())
+    } else {
+        let search_texts = analyzer_search_texts_for_entry(entry, display_radix);
+        Arc::new(analyzer_frame_search_matches(
+            &entry.frames,
+            &search_texts,
+            analyzer_name_search,
+            display_radix,
+            normalized_query,
+        ))
+    };
+    let mut cache = entry.table_search_matches.lock();
+    if let Some(cached) = cache.get(&cache_key).cloned() {
+        return cached;
+    }
+    cache.insert(cache_key, built.clone());
+    built
+}
+
+fn analyzer_search_matches_cache_key(
+    display_radix: &str,
+    analyzer_name_search: &str,
+    normalized_query: &str,
+) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        normalize_analyzer_display_radix(display_radix),
+        analyzer_name_search,
+        normalized_query
+    )
+}
+
+fn analyzer_frame_search_texts(frames: &[DecodedFrame], display_radix: &str) -> Vec<String> {
+    frames
+        .iter()
+        .map(|frame| analyzer_frame_search_text(frame, display_radix))
+        .collect()
+}
+
+fn analyzer_frame_search_matches(
+    frames: &[DecodedFrame],
+    search_texts: &[String],
+    analyzer_name_search: &str,
+    display_radix: &str,
+    normalized_query: &str,
+) -> Vec<usize> {
+    let mut matches = Vec::new();
+    for (frame_position, frame) in frames.iter().enumerate() {
+        if analyzer_frame_matches_search(
+            analyzer_name_search,
+            display_radix,
+            search_texts.get(frame_position).map(String::as_str),
+            frame_position,
+            frame,
+            normalized_query,
+        ) {
+            matches.push(frame_position);
+        }
+    }
+    matches
+}
+
+fn analyzer_frame_search_text(frame: &DecodedFrame, display_radix: &str) -> String {
+    let mut text = format!(
+        "{} {}",
+        frame.frame_type,
+        format_analyzer_text_for_table(&frame.label, display_radix, Some(frame.value)),
+    );
+    for value in &frame.channel_values {
+        text.push(' ');
+        text.push_str(&value.role);
+        text.push(' ');
+        text.push_str(&format_analyzer_text_for_table(
+            &value.label,
+            display_radix,
+            Some(value.value),
+        ));
+    }
+    text.to_lowercase()
+}
+
+fn analyzer_frame_start_sample_at_rank(
+    sources: &[AnalyzerFrameTableSource],
+    rank: usize,
+) -> Option<u64> {
+    let mut low = u64::MAX;
+    let mut high = 0u64;
+    let mut has_frames = false;
+    for source in sources {
+        let (Some(first), Some(last)) = (source.frames.first(), source.frames.last()) else {
+            continue;
+        };
+        low = low.min(first.start_sample);
+        high = high.max(last.start_sample);
+        has_frames = true;
+    }
+    if !has_frames {
+        return None;
+    }
+
+    let mut left = low;
+    let mut right = high;
+    while left < right {
+        let mid = left + (right - left) / 2;
+        if analyzer_frame_count_at_or_before_sample(sources, mid) > rank {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+    Some(left)
+}
+
+fn analyzer_frame_count_at_or_before_sample(
+    sources: &[AnalyzerFrameTableSource],
+    sample: u64,
+) -> usize {
+    sources.iter().fold(0usize, |count, source| {
+        count.saturating_add(upper_bound_frame_start(&source.frames, sample, 0))
+    })
+}
+
+fn analyzer_frame_table_search_matches(
+    source: &AnalyzerFrameTableSource,
+    normalized_query: &str,
+) -> Arc<Vec<usize>> {
+    if let Some(matches) = &source.search_matches {
+        return matches.clone();
+    }
+    Arc::new(analyzer_frame_search_matches(
+        &source.frames,
+        source.search_texts.as_deref().map_or(&[], Vec::as_slice),
+        &source.analyzer_name_search,
+        &source.display_radix,
+        normalized_query,
+    ))
+}
+
+fn analyzer_match_frame_start_sample_at_rank(
+    sources: &[AnalyzerFrameTableMatchSource<'_>],
+    rank: usize,
+) -> Option<u64> {
+    let mut low = u64::MAX;
+    let mut high = 0u64;
+    let mut has_frames = false;
+    for source in sources {
+        let Some(first_position) = source.matches.first() else {
+            continue;
+        };
+        let Some(last_position) = source.matches.last() else {
+            continue;
+        };
+        low = low.min(source.source.frames[*first_position].start_sample);
+        high = high.max(source.source.frames[*last_position].start_sample);
+        has_frames = true;
+    }
+    if !has_frames {
+        return None;
+    }
+
+    let mut left = low;
+    let mut right = high;
+    while left < right {
+        let mid = left + (right - left) / 2;
+        if analyzer_match_frame_count_at_or_before_sample(sources, mid) > rank {
+            right = mid;
+        } else {
+            left = mid + 1;
+        }
+    }
+    Some(left)
+}
+
+fn analyzer_match_frame_count_at_or_before_sample(
+    sources: &[AnalyzerFrameTableMatchSource<'_>],
+    sample: u64,
+) -> usize {
+    sources.iter().fold(0usize, |count, source| {
+        count.saturating_add(upper_bound_match_frame_start(source, sample, 0))
+    })
+}
+
+fn analyzer_frame_matches_search(
+    analyzer_name_search: &str,
+    display_radix: &str,
+    search_text: Option<&str>,
+    frame_position: usize,
+    frame: &DecodedFrame,
+    normalized_query: &str,
+) -> bool {
+    if analyzer_name_search.contains(normalized_query) {
+        return true;
+    }
+    let frame_number = (frame_position + 1).to_string();
+    if frame_number.contains(normalized_query) {
+        return true;
+    }
+    let fallback_body;
+    let body = if let Some(text) = search_text {
+        text
+    } else {
+        fallback_body = analyzer_frame_search_text(frame, display_radix);
+        fallback_body.as_str()
+    };
+    if body.contains(normalized_query) {
+        return true;
+    }
+    if !normalized_query.contains(char::is_whitespace) {
+        return false;
+    }
+    format!("{} {} {}", analyzer_name_search, frame_number, body).contains(normalized_query)
+}
+
+fn format_analyzer_text_for_table(
+    text: &str,
+    display_radix: &str,
+    fallback_value: Option<u64>,
+) -> String {
+    let source = text;
+    let mut replaced = false;
+    let mut output = String::with_capacity(source.len());
+    let mut index = 0usize;
+    while index < source.len() {
+        let remaining = &source[index..];
+        if let Some((token_len, value, bits)) = parse_analyzer_numeric_token(remaining) {
+            replaced = true;
+            output.push_str(&format_analyzer_value_for_table(value, display_radix, bits));
+            index += token_len;
+            continue;
+        }
+        let Some(ch) = remaining.chars().next() else {
+            break;
+        };
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    if replaced {
+        return output;
+    }
+
+    let trimmed = source.trim();
+    if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        if let Ok(value) = trimmed.parse::<u64>() {
+            return source.replacen(
+                trimmed,
+                &format_analyzer_value_for_table(
+                    value,
+                    display_radix,
+                    bits_for_analyzer_value(value),
+                ),
+                1,
+            );
+        }
+    }
+
+    if source.is_empty() {
+        if let Some(value) = fallback_value {
+            return format_analyzer_value_for_table(
+                value,
+                display_radix,
+                bits_for_analyzer_value(value),
+            );
+        }
+    }
+    source.to_string()
+}
+
+fn parse_analyzer_numeric_token(source: &str) -> Option<(usize, u64, u32)> {
+    let bytes = source.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'0' && bytes[1].eq_ignore_ascii_case(&b'x') {
+        let digits_len = source[2..]
+            .bytes()
+            .take_while(|byte| byte.is_ascii_hexdigit())
+            .count();
+        if digits_len == 0 {
+            return None;
+        }
+        let token_len = 2 + digits_len;
+        let value = u64::from_str_radix(&source[2..token_len], 16).ok()?;
+        return Some((token_len, value, (digits_len as u32 * 4).max(8)));
+    }
+    if bytes.len() >= 3 && bytes[0] == b'0' && bytes[1].eq_ignore_ascii_case(&b'b') {
+        let digits_len = source[2..]
+            .bytes()
+            .take_while(|byte| *byte == b'0' || *byte == b'1')
+            .count();
+        if digits_len == 0 {
+            return None;
+        }
+        let token_len = 2 + digits_len;
+        let value = u64::from_str_radix(&source[2..token_len], 2).ok()?;
+        return Some((token_len, value, (digits_len as u32).max(1)));
+    }
+    None
+}
+
+fn format_analyzer_value_for_table(value: u64, display_radix: &str, bits: u32) -> String {
+    match normalize_analyzer_display_radix(display_radix) {
+        "Decimal" => value.to_string(),
+        "Binary" => format!("0b{:0width$b}", value, width = bits.max(1) as usize),
+        "Ascii" => format_analyzer_ascii_value(value),
+        _ => {
+            let digits = bits.div_ceil(4).max(1) as usize;
+            format!("0x{:0width$X}", value, width = digits)
+        }
+    }
+}
+
+fn normalize_analyzer_display_radix(display_radix: &str) -> &'static str {
+    match display_radix {
+        "Binary" => "Binary",
+        "Decimal" => "Decimal",
+        "Ascii" => "Ascii",
+        _ => "Hexadecimal",
+    }
+}
+
+fn bits_for_analyzer_value(value: u64) -> u32 {
+    if value <= 0xff {
+        return 8;
+    }
+    u64::BITS - value.leading_zeros()
+}
+
+fn format_analyzer_ascii_value(value: u64) -> String {
+    let byte = (value & 0xff) as u8;
+    let escaped = match byte {
+        b'\t' => Some("\\t".to_string()),
+        b'\n' => Some("\\n".to_string()),
+        b'\r' => Some("\\r".to_string()),
+        b'\'' => Some("\\'".to_string()),
+        b'\\' => Some("\\\\".to_string()),
+        0x20..=0x7e => Some((byte as char).to_string()),
+        _ => None,
+    };
+    escaped.map_or_else(
+        || format_analyzer_value_for_table(value, "Hexadecimal", bits_for_analyzer_value(value)),
+        |value| format!("'{value}'"),
+    )
+}
+
+fn next_analyzer_table_source_index(
+    sources: &[AnalyzerFrameTableSource],
+    positions: &[usize],
+) -> Option<usize> {
+    let mut best_source_index = None;
+    let mut best_frame: Option<&DecodedFrame> = None;
+    for (source_index, source) in sources.iter().enumerate() {
+        let Some(frame) = source.frames.get(positions[source_index]) else {
+            continue;
+        };
+        if best_frame.is_none_or(|candidate| {
+            frame.start_sample < candidate.start_sample
+                || (frame.start_sample == candidate.start_sample
+                    && source_index < best_source_index.unwrap_or(usize::MAX))
+        }) {
+            best_source_index = Some(source_index);
+            best_frame = Some(frame);
+        }
+    }
+    best_source_index
+}
+
+fn next_analyzer_table_match_source_index(
+    sources: &[AnalyzerFrameTableMatchSource<'_>],
+    positions: &[usize],
+) -> Option<usize> {
+    let mut best_source_index = None;
+    let mut best_frame: Option<&DecodedFrame> = None;
+    for (source_index, source) in sources.iter().enumerate() {
+        let Some(frame_position) = source.matches.get(positions[source_index]) else {
+            continue;
+        };
+        let frame = &source.source.frames[*frame_position];
+        if best_frame.is_none_or(|candidate| {
+            frame.start_sample < candidate.start_sample
+                || (frame.start_sample == candidate.start_sample
+                    && source_index < best_source_index.unwrap_or(usize::MAX))
+        }) {
+            best_source_index = Some(source_index);
+            best_frame = Some(frame);
+        }
+    }
+    best_source_index
+}
+
+fn analyzer_frame_table_row(
+    source: &AnalyzerFrameTableSource,
+    frame_position: usize,
+    frame: &DecodedFrame,
+) -> AnalyzerFrameTableRow {
+    AnalyzerFrameTableRow {
+        analyzer_id: source.analyzer_id.clone(),
+        frame: frame.clone(),
+        frame_index: frame.frame_id,
+        frame_number: frame_position + 1,
     }
 }
 
@@ -2343,57 +5781,492 @@ fn protocol_markers_for_track(
     begin: usize,
     end: usize,
 ) -> Vec<AnalyzerProtocolMarker> {
-    let mut markers = Vec::new();
+    let scan = scan_protocol_markers_for_track(frames, track, begin, end);
+    if scan.marker_count > 0 && scan.ordered {
+        return scan.collected.unwrap_or_else(|| {
+            collect_ordered_limited_protocol_markers_for_track(
+                frames,
+                track,
+                begin,
+                end,
+                scan.marker_count,
+            )
+        });
+    }
+
+    let mut markers = scan.collected.unwrap_or_else(|| {
+        let mut markers = Vec::new();
+        visit_protocol_markers_for_track(frames, track, begin, end, |marker| markers.push(marker));
+        markers
+    });
+    if markers.is_empty() && track.role.eq_ignore_ascii_case("sda") {
+        append_sda_fallback_markers(frames, begin, end, &mut markers);
+    }
+    normalize_analyzer_protocol_markers(&mut markers);
+    limit_analyzer_protocol_markers(markers)
+}
+
+fn append_sda_fallback_markers(
+    frames: &[DecodedFrame],
+    begin: usize,
+    end: usize,
+    markers: &mut Vec<AnalyzerProtocolMarker>,
+) {
+    for frame in &frames[begin..end] {
+        let kind = if frame.frame_type.eq_ignore_ascii_case("start") {
+            AnalyzerProtocolMarkerKind::Start
+        } else if frame.frame_type.eq_ignore_ascii_case("stop") {
+            AnalyzerProtocolMarkerKind::Stop
+        } else {
+            continue;
+        };
+        markers.push(AnalyzerProtocolMarker {
+            sample: frame.start_sample,
+            kind,
+        });
+    }
+}
+
+struct ProtocolMarkerScan {
+    marker_count: usize,
+    ordered: bool,
+    collected: Option<Vec<AnalyzerProtocolMarker>>,
+}
+
+fn scan_protocol_markers_for_track(
+    frames: &[DecodedFrame],
+    track: &AnalyzerTrackRequest,
+    begin: usize,
+    end: usize,
+) -> ProtocolMarkerScan {
+    let mut marker_count = 0usize;
+    let mut ordered = true;
+    let mut previous: Option<AnalyzerProtocolMarker> = None;
+    let mut collected = Some(Vec::new());
+    visit_protocol_markers_for_track(frames, track, begin, end, |marker| {
+        if let Some(previous_marker) = previous {
+            if marker.sample < previous_marker.sample {
+                ordered = false;
+            }
+            if marker == previous_marker {
+                return;
+            }
+        }
+        previous = Some(marker);
+        marker_count = marker_count.saturating_add(1);
+        if let Some(markers) = collected.as_mut() {
+            if markers.len() < MAX_ANALYZER_MARKER_RESULTS {
+                markers.push(marker);
+            } else {
+                collected = None;
+            }
+        }
+    });
+    ProtocolMarkerScan {
+        marker_count,
+        ordered,
+        collected,
+    }
+}
+
+fn visit_protocol_markers_for_track(
+    frames: &[DecodedFrame],
+    track: &AnalyzerTrackRequest,
+    begin: usize,
+    end: usize,
+    mut visit: impl FnMut(AnalyzerProtocolMarker),
+) {
     for frame in &frames[begin..end] {
         for marker in &frame.protocol_markers {
             if marker.channel != Some(track.channel) {
                 continue;
             }
-            let kind = match marker.kind.as_str() {
-                "dot" => AnalyzerProtocolMarkerKind::Dot,
-                "error_dot" => AnalyzerProtocolMarkerKind::ErrorDot,
-                "square" => AnalyzerProtocolMarkerKind::Square,
-                "error_square" => AnalyzerProtocolMarkerKind::ErrorSquare,
-                "up_arrow" => AnalyzerProtocolMarkerKind::UpArrow,
-                "down_arrow" => AnalyzerProtocolMarkerKind::DownArrow,
-                "x" => AnalyzerProtocolMarkerKind::X,
-                "error_x" => AnalyzerProtocolMarkerKind::ErrorX,
-                "start" => AnalyzerProtocolMarkerKind::Start,
-                "stop" => AnalyzerProtocolMarkerKind::Stop,
-                "one" => AnalyzerProtocolMarkerKind::One,
-                "zero" => AnalyzerProtocolMarkerKind::Zero,
-                _ => continue,
+            let Some(kind) = analyzer_protocol_marker_kind(marker.kind.as_str()) else {
+                continue;
             };
-            markers.push(AnalyzerProtocolMarker {
+            visit(AnalyzerProtocolMarker {
                 sample: marker.sample,
                 kind,
             });
         }
     }
-    if markers.is_empty() && track.role.eq_ignore_ascii_case("sda") {
-        for frame in &frames[begin..end] {
-            let kind = if frame.frame_type.eq_ignore_ascii_case("start") {
-                AnalyzerProtocolMarkerKind::Start
-            } else if frame.frame_type.eq_ignore_ascii_case("stop") {
-                AnalyzerProtocolMarkerKind::Stop
+}
+
+fn analyzer_protocol_marker_kind(kind: &str) -> Option<AnalyzerProtocolMarkerKind> {
+    Some(match kind {
+        "dot" => AnalyzerProtocolMarkerKind::Dot,
+        "error_dot" => AnalyzerProtocolMarkerKind::ErrorDot,
+        "square" => AnalyzerProtocolMarkerKind::Square,
+        "error_square" => AnalyzerProtocolMarkerKind::ErrorSquare,
+        "up_arrow" => AnalyzerProtocolMarkerKind::UpArrow,
+        "down_arrow" => AnalyzerProtocolMarkerKind::DownArrow,
+        "x" => AnalyzerProtocolMarkerKind::X,
+        "error_x" => AnalyzerProtocolMarkerKind::ErrorX,
+        "start" => AnalyzerProtocolMarkerKind::Start,
+        "stop" => AnalyzerProtocolMarkerKind::Stop,
+        "one" => AnalyzerProtocolMarkerKind::One,
+        "zero" => AnalyzerProtocolMarkerKind::Zero,
+        _ => return None,
+    })
+}
+
+fn collect_ordered_limited_protocol_markers_for_track(
+    frames: &[DecodedFrame],
+    track: &AnalyzerTrackRequest,
+    begin: usize,
+    end: usize,
+    marker_count: usize,
+) -> Vec<AnalyzerProtocolMarker> {
+    let target_count = marker_count.min(MAX_ANALYZER_MARKER_RESULTS);
+    if target_count == 0 {
+        return Vec::new();
+    }
+    let mut markers = Vec::with_capacity(target_count);
+    let last = marker_count - 1;
+    let mut next_output_index = 0usize;
+    let mut next_target_index = 0usize;
+    let mut unique_index = 0usize;
+    let mut previous: Option<AnalyzerProtocolMarker> = None;
+    visit_protocol_markers_for_track(frames, track, begin, end, |marker| {
+        if previous == Some(marker) {
+            return;
+        }
+        previous = Some(marker);
+        if unique_index == next_target_index {
+            markers.push(marker);
+            next_output_index += 1;
+            next_target_index = if next_output_index >= target_count {
+                usize::MAX
+            } else if target_count == 1 {
+                0
             } else {
-                continue;
+                next_output_index.saturating_mul(last) / (target_count - 1)
             };
-            markers.push(AnalyzerProtocolMarker {
-                sample: frame.start_sample,
-                kind,
-            });
+        }
+        unique_index += 1;
+    });
+    markers
+}
+
+fn normalize_analyzer_protocol_markers(markers: &mut Vec<AnalyzerProtocolMarker>) {
+    if markers.len() <= 1 {
+        return;
+    }
+    if !analyzer_protocol_markers_are_ordered(markers) {
+        markers.sort_by_key(|marker| marker.sample);
+    }
+    markers.dedup();
+}
+
+fn analyzer_protocol_markers_are_ordered(markers: &[AnalyzerProtocolMarker]) -> bool {
+    markers
+        .windows(2)
+        .all(|pair| pair[0].sample <= pair[1].sample)
+}
+
+fn limit_analyzer_protocol_markers(
+    markers: Vec<AnalyzerProtocolMarker>,
+) -> Vec<AnalyzerProtocolMarker> {
+    if markers.len() <= MAX_ANALYZER_MARKER_RESULTS {
+        return markers;
+    }
+    let last = markers.len() - 1;
+    (0..MAX_ANALYZER_MARKER_RESULTS)
+        .map(|index| markers[index * last / (MAX_ANALYZER_MARKER_RESULTS - 1)])
+        .collect()
+}
+
+struct AnalyzerTrackWindowAnalysis {
+    frame_indices: Vec<Vec<AnalyzerTrackFrameIndex>>,
+    protocol_markers: Vec<Vec<AnalyzerProtocolMarker>>,
+}
+
+fn analyzer_track_window_analysis_for_window(
+    frames: &[DecodedFrame],
+    tracks: &[AnalyzerTrackRequest],
+    begin: usize,
+    end: usize,
+) -> AnalyzerTrackWindowAnalysis {
+    let mut requests_by_channel = vec![Vec::new(); MAX_CHANNELS as usize];
+    let mut has_channel_requests = false;
+    for (track_index, track) in tracks.iter().enumerate() {
+        if let Some(requests) = requests_by_channel.get_mut(track.channel as usize) {
+            has_channel_requests = true;
+            requests.push(track_index);
         }
     }
-    markers.sort_by_key(|marker| marker.sample);
-    markers.dedup();
-    if markers.len() > MAX_ANALYZER_MARKER_RESULTS {
-        let last = markers.len() - 1;
-        markers = (0..MAX_ANALYZER_MARKER_RESULTS)
-            .map(|index| markers[index * last / (MAX_ANALYZER_MARKER_RESULTS - 1)])
-            .collect();
+
+    let mut indices = vec![Vec::new(); tracks.len()];
+    let mut markers_by_track = vec![Vec::new(); tracks.len()];
+    if tracks.is_empty() || !has_channel_requests {
+        return AnalyzerTrackWindowAnalysis {
+            frame_indices: indices,
+            protocol_markers: markers_by_track,
+        };
     }
-    markers
+
+    let begin = begin.min(frames.len());
+    let end = end.min(frames.len()).max(begin);
+    for frame_index in begin..end {
+        append_frame_to_track_indices(
+            frames,
+            tracks,
+            &requests_by_channel,
+            &mut indices,
+            frame_index,
+        );
+        append_protocol_markers_to_track_windows(
+            frames,
+            &requests_by_channel,
+            &mut markers_by_track,
+            frame_index,
+        );
+    }
+    let previous_frame_indices =
+        nearest_track_frame_indices_before(frames, tracks, &requests_by_channel, begin);
+    let next_frame_indices =
+        nearest_track_frame_indices_after(frames, tracks, &requests_by_channel, end);
+    for (track_index, indices_for_track) in indices.iter_mut().enumerate() {
+        if let Some(previous) = previous_frame_indices[track_index] {
+            indices_for_track.insert(0, previous);
+        }
+        if let Some(next) = next_frame_indices[track_index] {
+            indices_for_track.push(next);
+        }
+    }
+    for (track_index, markers) in markers_by_track.iter_mut().enumerate() {
+        if markers.is_empty() && tracks[track_index].role.eq_ignore_ascii_case("sda") {
+            append_sda_fallback_markers(frames, begin, end, markers);
+        }
+        normalize_analyzer_protocol_markers(markers);
+        *markers = limit_analyzer_protocol_markers(std::mem::take(markers));
+    }
+
+    AnalyzerTrackWindowAnalysis {
+        frame_indices: indices,
+        protocol_markers: markers_by_track,
+    }
+}
+
+fn nearest_track_frame_indices_before(
+    frames: &[DecodedFrame],
+    tracks: &[AnalyzerTrackRequest],
+    requests_by_channel: &[Vec<usize>],
+    before: usize,
+) -> Vec<Option<AnalyzerTrackFrameIndex>> {
+    let mut nearest = vec![None; tracks.len()];
+    let mut remaining = tracks.len();
+    for frame_index in (0..before.min(frames.len())).rev() {
+        visit_matching_track_indexes_for_frame(
+            frames,
+            tracks,
+            requests_by_channel,
+            frame_index,
+            |track_index, value_index| {
+                if nearest[track_index].is_none() {
+                    nearest[track_index] = Some(AnalyzerTrackFrameIndex {
+                        frame_index,
+                        value_index,
+                    });
+                    remaining = remaining.saturating_sub(1);
+                }
+            },
+        );
+        if remaining == 0 {
+            break;
+        }
+    }
+    nearest
+}
+
+fn nearest_track_frame_indices_after(
+    frames: &[DecodedFrame],
+    tracks: &[AnalyzerTrackRequest],
+    requests_by_channel: &[Vec<usize>],
+    after: usize,
+) -> Vec<Option<AnalyzerTrackFrameIndex>> {
+    let mut nearest = vec![None; tracks.len()];
+    let mut remaining = tracks.len();
+    for frame_index in after.min(frames.len())..frames.len() {
+        visit_matching_track_indexes_for_frame(
+            frames,
+            tracks,
+            requests_by_channel,
+            frame_index,
+            |track_index, value_index| {
+                if nearest[track_index].is_none() {
+                    nearest[track_index] = Some(AnalyzerTrackFrameIndex {
+                        frame_index,
+                        value_index,
+                    });
+                    remaining = remaining.saturating_sub(1);
+                }
+            },
+        );
+        if remaining == 0 {
+            break;
+        }
+    }
+    nearest
+}
+
+fn append_frame_to_track_indices(
+    frames: &[DecodedFrame],
+    tracks: &[AnalyzerTrackRequest],
+    requests_by_channel: &[Vec<usize>],
+    indices: &mut [Vec<AnalyzerTrackFrameIndex>],
+    frame_index: usize,
+) {
+    visit_matching_track_indexes_for_frame(
+        frames,
+        tracks,
+        requests_by_channel,
+        frame_index,
+        |track_index, value_index| {
+            indices[track_index].push(AnalyzerTrackFrameIndex {
+                frame_index,
+                value_index,
+            });
+        },
+    );
+}
+
+fn append_protocol_markers_to_track_windows(
+    frames: &[DecodedFrame],
+    requests_by_channel: &[Vec<usize>],
+    markers_by_track: &mut [Vec<AnalyzerProtocolMarker>],
+    frame_index: usize,
+) {
+    let frame = &frames[frame_index];
+    if frame.protocol_markers.is_empty() {
+        return;
+    }
+    for marker in &frame.protocol_markers {
+        let Some(channel) = marker.channel else {
+            continue;
+        };
+        let Some(track_indexes) = requests_by_channel.get(channel as usize) else {
+            continue;
+        };
+        let Some(kind) = analyzer_protocol_marker_kind(marker.kind.as_str()) else {
+            continue;
+        };
+        let marker = AnalyzerProtocolMarker {
+            sample: marker.sample,
+            kind,
+        };
+        for track_index in track_indexes {
+            markers_by_track[*track_index].push(marker);
+        }
+    }
+}
+
+fn visit_matching_track_indexes_for_frame(
+    frames: &[DecodedFrame],
+    tracks: &[AnalyzerTrackRequest],
+    requests_by_channel: &[Vec<usize>],
+    frame_index: usize,
+    mut visit: impl FnMut(usize, usize),
+) {
+    let frame = &frames[frame_index];
+    let mut present_channel_mask = 0u64;
+    let mut present_channel_value_indexes = [usize::MAX; 64];
+    let mut overflow_present_channel_values: Option<Vec<(u8, usize)>> = None;
+    let mut exact_track_mask = 0u128;
+    let mut overflow_exact_track_indexes: Option<Vec<usize>> = None;
+    for (value_index, value) in frame.channel_values.iter().enumerate() {
+        let Some(requests) = requests_by_channel.get(value.channel as usize) else {
+            continue;
+        };
+        if value.channel < 64 {
+            let bit = 1u64 << value.channel;
+            if present_channel_mask & bit == 0 {
+                present_channel_mask |= bit;
+                present_channel_value_indexes[usize::from(value.channel)] = value_index;
+            }
+        } else if !overflow_present_channel_values
+            .as_ref()
+            .is_some_and(|entries| entries.iter().any(|(channel, _)| *channel == value.channel))
+        {
+            overflow_present_channel_values
+                .get_or_insert_with(Vec::new)
+                .push((value.channel, value_index));
+        }
+        for track_index in requests {
+            if tracks[*track_index].role != value.role
+                || !mark_track_index(
+                    &mut exact_track_mask,
+                    &mut overflow_exact_track_indexes,
+                    *track_index,
+                )
+            {
+                continue;
+            }
+            visit(*track_index, value_index);
+        }
+    }
+
+    while present_channel_mask != 0 {
+        let channel = present_channel_mask.trailing_zeros() as u8;
+        present_channel_mask &= present_channel_mask - 1;
+        let value_index = present_channel_value_indexes[usize::from(channel)];
+        let Some(requests) = requests_by_channel.get(channel as usize) else {
+            continue;
+        };
+        for track_index in requests {
+            if track_index_marked(
+                exact_track_mask,
+                overflow_exact_track_indexes.as_deref(),
+                *track_index,
+            ) {
+                continue;
+            }
+            visit(*track_index, value_index);
+        }
+    }
+    for (channel, value_index) in overflow_present_channel_values.into_iter().flatten() {
+        let Some(requests) = requests_by_channel.get(channel as usize) else {
+            continue;
+        };
+        for track_index in requests {
+            if track_index_marked(
+                exact_track_mask,
+                overflow_exact_track_indexes.as_deref(),
+                *track_index,
+            ) {
+                continue;
+            }
+            visit(*track_index, value_index);
+        }
+    }
+}
+
+fn mark_track_index(
+    mask: &mut u128,
+    overflow: &mut Option<Vec<usize>>,
+    track_index: usize,
+) -> bool {
+    if track_index < u128::BITS as usize {
+        let bit = 1u128 << track_index;
+        if *mask & bit != 0 {
+            return false;
+        }
+        *mask |= bit;
+        return true;
+    }
+    let overflow = overflow.get_or_insert_with(Vec::new);
+    if overflow.contains(&track_index) {
+        return false;
+    }
+    overflow.push(track_index);
+    true
+}
+
+fn track_index_marked(mask: u128, overflow: Option<&[usize]>, track_index: usize) -> bool {
+    if track_index < u128::BITS as usize {
+        return mask & (1u128 << track_index) != 0;
+    }
+    overflow.is_some_and(|overflow| overflow.contains(&track_index))
 }
 
 fn build_pixel_bubbles(
@@ -2461,64 +6334,96 @@ fn build_pixel_bubbles(
             });
         }
     }
-    enforce_maximum_bubbles(accumulators.into_iter().map(|item| item.bubble).collect())
+    enforce_maximum_bubbles(
+        accumulators.into_iter().map(|item| item.bubble).collect(),
+        width_px,
+    )
 }
 
-fn build_dense_bubbles(
+fn build_pixel_bubbles_from_indices(
     frames: &[DecodedFrame],
-    track: &AnalyzerTrackRequest,
+    frame_indices: &[AnalyzerTrackFrameIndex],
+    _track: &AnalyzerTrackRequest,
     begin: usize,
     end: usize,
+    viewport_samples: u64,
+    width_px: u32,
 ) -> Vec<AnalyzerBubble> {
-    let count = end.saturating_sub(begin);
-    if count == 0 {
-        return Vec::new();
-    }
-    let bucket_size = count.div_ceil(MAX_ANALYZER_MARKER_RESULTS).max(1);
-    let mut bubbles = Vec::with_capacity(count.div_ceil(bucket_size));
-    let mut bucket_begin = begin;
-    while bucket_begin < end {
-        let bucket_end = (bucket_begin + bucket_size).min(end);
-        let first = (bucket_begin..bucket_end)
-            .find_map(|index| display_frame_for_track(&frames[index], track));
-        let last = (bucket_begin..bucket_end)
-            .rev()
-            .find_map(|index| display_frame_for_track(&frames[index], track));
-        if let (Some(first), Some(last)) = (first, last) {
-            let display_text = (bucket_begin..bucket_end)
-                .filter_map(|index| display_frame_for_track(&frames[index], track))
-                .take(12)
-                .map(|frame| frame.label.to_string())
-                .collect::<Vec<_>>();
-            let result_count = (bucket_begin..bucket_end)
-                .filter(|index| display_frame_for_track(&frames[*index], track).is_some())
-                .count() as u64;
-            bubbles.push(AnalyzerBubble {
-                bubble_type: if result_count == 1 {
-                    AnalyzerBubbleType::SingleBubble
-                } else {
-                    AnalyzerBubbleType::MultiBubble
-                },
-                frame_id_interval: FrameIdInterval {
-                    begin: first.frame_id,
-                    end: last.frame_id.saturating_add(1),
-                },
-                start_sample: first.start_sample,
-                end_sample: last.end_sample,
-                display_text,
-                result_count,
+    let safe_samples = viewport_samples.max(1) as f64;
+    let width = width_px.max(1) as f64;
+    let mut accumulators: Vec<BubbleAccumulator> = Vec::new();
+    for frame_index in &frame_indices[begin..end] {
+        let Some(frame) = display_frame_for_indexed_track(frames, *frame_index) else {
+            continue;
+        };
+        let frame_width_px =
+            frame.end_sample.saturating_sub(frame.start_sample) as f64 / safe_samples * width;
+        let should_merge = accumulators.last().is_some_and(|previous| {
+            let gap_px = frame
+                .start_sample
+                .saturating_sub(previous.last_frame_end_sample) as f64
+                / safe_samples
+                * width;
+            frame_width_px <= MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME
+                && previous.last_frame_width_px <= MAX_PIXEL_WIDTH_FOR_MERGEABLE_FRAME
+                && gap_px <= MAX_PIXELS_BETWEEN_MERGEABLE_FRAMES
+        });
+
+        if should_merge {
+            let previous = accumulators.last_mut().expect("checked above");
+            previous.bubble.bubble_type = AnalyzerBubbleType::MultiBubble;
+            previous.bubble.end_sample = previous.bubble.end_sample.max(frame.end_sample);
+            previous.bubble.frame_id_interval.end = previous
+                .bubble
+                .frame_id_interval
+                .end
+                .max(frame.frame_id.saturating_add(1));
+            previous.bubble.result_count = previous.bubble.result_count.saturating_add(1);
+            if previous.bubble.display_text.len() < MAX_MULTI_BUBBLE_STRINGS {
+                previous.bubble.display_text.push(frame.label.to_string());
+            }
+            previous.last_frame_end_sample = frame.end_sample;
+            previous.last_frame_width_px = frame_width_px;
+        } else {
+            accumulators.push(BubbleAccumulator {
+                bubble: analyzer_bubble_for_display_frame(frame),
+                last_frame_end_sample: frame.end_sample,
+                last_frame_width_px: frame_width_px,
             });
         }
-        bucket_begin = bucket_end;
     }
-    bubbles
+    enforce_maximum_bubbles(
+        accumulators.into_iter().map(|item| item.bubble).collect(),
+        width_px,
+    )
 }
 
-fn enforce_maximum_bubbles(bubbles: Vec<AnalyzerBubble>) -> Vec<AnalyzerBubble> {
-    if bubbles.len() <= MAX_ANALYZER_MARKER_RESULTS {
+fn analyzer_bubble_for_display_frame(frame: DisplayFrame<'_>) -> AnalyzerBubble {
+    AnalyzerBubble {
+        bubble_type: AnalyzerBubbleType::SingleBubble,
+        frame_id_interval: FrameIdInterval {
+            begin: frame.frame_id,
+            end: frame.frame_id.saturating_add(1),
+        },
+        start_sample: frame.start_sample,
+        end_sample: frame.end_sample,
+        display_text: if frame.texts.is_empty() {
+            vec![frame.label.to_string()]
+        } else {
+            frame.texts.to_vec()
+        },
+        result_count: 1,
+    }
+}
+
+fn enforce_maximum_bubbles(bubbles: Vec<AnalyzerBubble>, width_px: u32) -> Vec<AnalyzerBubble> {
+    let maximum_results = (width_px as usize)
+        .max(MAX_ANALYZER_MARKER_RESULTS)
+        .min(MAX_ANALYZER_BUBBLE_RESULTS);
+    if bubbles.len() <= maximum_results {
         return bubbles;
     }
-    let bucket_size = bubbles.len().div_ceil(MAX_ANALYZER_MARKER_RESULTS);
+    let bucket_size = bubbles.len().div_ceil(maximum_results);
     bubbles
         .chunks(bucket_size)
         .map(merge_bubbles)
@@ -2559,47 +6464,116 @@ fn display_frame_for_track<'a>(
     frame: &'a DecodedFrame,
     track: &AnalyzerTrackRequest,
 ) -> Option<DisplayFrame<'a>> {
-    let label = channel_value_for_track(frame, track)?.label.as_str();
+    let value = channel_value_for_track(frame, track)?;
     Some(DisplayFrame {
         frame_id: frame.frame_id,
         start_sample: frame.start_sample,
         end_sample: frame.end_sample,
-        label,
-        texts: &channel_value_for_track(frame, track)?.texts,
+        label: &value.label,
+        texts: &value.texts,
     })
 }
 
-fn frame_for_track(frame: &DecodedFrame, track: &AnalyzerTrackRequest) -> Option<DecodedFrame> {
-    let value = channel_value_for_track(frame, track)?;
-    let mut result = frame.clone();
-    result.label = value.label.clone();
-    result.value = value.value;
-    result.channel_values = vec![value.clone()];
-    Some(result)
+fn display_frame_for_indexed_track(
+    frames: &[DecodedFrame],
+    index: AnalyzerTrackFrameIndex,
+) -> Option<DisplayFrame<'_>> {
+    let frame = frames.get(index.frame_index)?;
+    let value = frame.channel_values.get(index.value_index)?;
+    Some(DisplayFrame {
+        frame_id: frame.frame_id,
+        start_sample: frame.start_sample,
+        end_sample: frame.end_sample,
+        label: &value.label,
+        texts: &value.texts,
+    })
+}
+
+fn frame_ref_for_track(
+    frame: &DecodedFrame,
+    track: &AnalyzerTrackRequest,
+) -> Option<AnalyzerFrameRef> {
+    channel_value_for_track(frame, track)?;
+    Some(AnalyzerFrameRef {
+        frame_id: frame.frame_id,
+        start_sample: frame.start_sample,
+        end_sample: frame.end_sample,
+    })
+}
+
+fn frame_ref_for_indexed_track(
+    frames: &[DecodedFrame],
+    index: AnalyzerTrackFrameIndex,
+) -> AnalyzerFrameRef {
+    let frame = &frames[index.frame_index];
+    AnalyzerFrameRef {
+        frame_id: frame.frame_id,
+        start_sample: frame.start_sample,
+        end_sample: frame.end_sample,
+    }
 }
 
 fn channel_value_for_track<'a>(
     frame: &'a DecodedFrame,
     track: &AnalyzerTrackRequest,
 ) -> Option<&'a DecodedChannelValue> {
-    frame
-        .channel_values
-        .iter()
-        .find(|value| value.channel == track.channel && value.role == track.role)
-        .or_else(|| {
-            frame
-                .channel_values
-                .iter()
-                .find(|value| value.channel == track.channel)
-        })
+    let mut fallback = None;
+    for value in &frame.channel_values {
+        if value.channel != track.channel {
+            continue;
+        }
+        if value.role == track.role {
+            return Some(value);
+        }
+        fallback.get_or_insert(value);
+    }
+    fallback
 }
 
 fn lower_bound_frame_end(frames: &[DecodedFrame], sample: u64) -> usize {
     frames.partition_point(|frame| frame.end_sample < sample)
 }
 
+fn lower_bound_frame_start(frames: &[DecodedFrame], sample: u64) -> usize {
+    frames.partition_point(|frame| frame.start_sample < sample)
+}
+
 fn upper_bound_frame_start(frames: &[DecodedFrame], sample: u64, low: usize) -> usize {
     low + frames[low..].partition_point(|frame| frame.start_sample <= sample)
+}
+
+fn lower_bound_match_frame_start(source: &AnalyzerFrameTableMatchSource<'_>, sample: u64) -> usize {
+    source.matches.partition_point(|frame_position| {
+        source.source.frames[*frame_position].start_sample < sample
+    })
+}
+
+fn upper_bound_match_frame_start(
+    source: &AnalyzerFrameTableMatchSource<'_>,
+    sample: u64,
+    low: usize,
+) -> usize {
+    low + source.matches[low..].partition_point(|frame_position| {
+        source.source.frames[*frame_position].start_sample <= sample
+    })
+}
+
+fn lower_bound_track_frame_end(
+    frames: &[DecodedFrame],
+    frame_indices: &[AnalyzerTrackFrameIndex],
+    sample: u64,
+) -> usize {
+    frame_indices.partition_point(|index| frames[index.frame_index].end_sample < sample)
+}
+
+fn upper_bound_track_frame_start(
+    frames: &[DecodedFrame],
+    frame_indices: &[AnalyzerTrackFrameIndex],
+    sample: u64,
+    low: usize,
+) -> usize {
+    low + frame_indices[low..]
+        .partition_point(|index| frames[index.frame_index].start_sample <= sample)
 }
 
 fn append_spi_bit(value: u64, bit: bool, bit_index: u8, bits: u8, msb_first: bool) -> u64 {
@@ -2661,7 +6635,10 @@ impl FrameCollector {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use chrono::Utc;
     use pxlogic_core::{
@@ -2682,6 +6659,47 @@ mod tests {
             1
         };
         generate_sample_words_with_count(&settings, sample_count, unit_size).unwrap()
+    }
+
+    fn decoded_frame_for_graph_test(frame_id: u64, start_sample: u64) -> DecodedFrame {
+        DecodedFrame {
+            frame_id,
+            start_sample,
+            end_sample: start_sample + 10,
+            frame_type: "data".to_string(),
+            label: format!("frame-{frame_id}"),
+            value: frame_id,
+            channel_values: vec![DecodedChannelValue {
+                channel: 0,
+                role: "Data".to_string(),
+                label: format!("frame-{frame_id}"),
+                texts: vec![format!("frame-{frame_id}")],
+                value: frame_id,
+            }],
+            protocol_markers: Vec::new(),
+        }
+    }
+
+    fn analyzer_table_source_for_graph_test(
+        analyzer_id: &str,
+        analyzer_name: &str,
+        display_radix: &str,
+        frames: Vec<DecodedFrame>,
+    ) -> AnalyzerFrameTableSource {
+        let frames = Arc::new(frames);
+        let roles = Arc::new(analyzer_frame_roles(&frames));
+        AnalyzerFrameTableSource {
+            analyzer_id: analyzer_id.to_string(),
+            analyzer_name_search: analyzer_name.to_lowercase(),
+            display_radix: display_radix.to_string(),
+            search_texts: Some(Arc::new(analyzer_frame_search_texts(
+                &frames,
+                display_radix,
+            ))),
+            search_matches: None,
+            frames,
+            roles,
+        }
     }
 
     #[test]
@@ -3105,6 +7123,380 @@ mod tests {
     }
 
     #[test]
+    fn analyzer_decode_count_and_slice_avoid_full_vec_clones() {
+        let capture = demo_capture(16, 250_000);
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default());
+        let frames = session
+            .decode_frames_with_backend(&settings, DecoderBackendKind::LegacyRust)
+            .unwrap();
+        assert!(frames.len() > 6);
+
+        assert_eq!(
+            session
+                .decode_frame_count_with_backend(&settings, DecoderBackendKind::LegacyRust)
+                .unwrap(),
+            frames.len(),
+        );
+
+        let (frame_count, slice) = session
+            .decode_frame_slice_with_backend(&settings, DecoderBackendKind::LegacyRust, 2, 6)
+            .unwrap();
+        assert_eq!(frame_count, frames.len());
+        assert_eq!(slice, frames[2..6]);
+
+        let (frame_count, empty_tail) = session
+            .decode_frame_slice_with_backend(
+                &settings,
+                DecoderBackendKind::LegacyRust,
+                frames.len() + 10,
+                frames.len() + 20,
+            )
+            .unwrap();
+        assert_eq!(frame_count, frames.len());
+        assert!(empty_tail.is_empty());
+    }
+
+    #[test]
+    fn analyzer_frame_table_search_cache_is_lazy_and_reused() {
+        let capture = demo_capture(16, 250_000);
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default());
+        let request = AnalyzerFrameTableRequest {
+            analyzer_id: "spi".to_string(),
+            analyzer_name: "SPI".to_string(),
+            backend: DecoderBackendKind::LegacyRust,
+            display_radix: "Hexadecimal".to_string(),
+            settings: settings.clone(),
+        };
+        let cache_key = serde_json::to_string(&settings).unwrap();
+
+        let window = session
+            .decode_frame_table_window(std::slice::from_ref(&request), 0, 10)
+            .unwrap();
+        assert!(!window.rows.is_empty());
+        {
+            let cache = session.analyzer_cache.lock();
+            let entry = cache.get(&cache_key).unwrap();
+            assert!(entry.table_search_texts.lock().is_empty());
+            assert!(entry.table_search_matches.lock().is_empty());
+        }
+
+        let search = session
+            .decode_frame_table_search_window(std::slice::from_ref(&request), "0x", 0, 10)
+            .unwrap();
+        assert!(!search.rows.is_empty());
+        let first_matches = {
+            let cache = session.analyzer_cache.lock();
+            let entry = cache.get(&cache_key).unwrap();
+            assert!(!entry.table_search_texts.lock().is_empty());
+            let matches_cache = entry.table_search_matches.lock();
+            assert_eq!(matches_cache.len(), 1);
+            matches_cache.values().next().unwrap().clone()
+        };
+
+        let scrolled = session
+            .decode_frame_table_search_window(std::slice::from_ref(&request), "0x", 10, 20)
+            .unwrap();
+        assert!(!scrolled.rows.is_empty());
+        let reused_matches = {
+            let cache = session.analyzer_cache.lock();
+            let entry = cache.get(&cache_key).unwrap();
+            let matches_cache = entry.table_search_matches.lock();
+            assert_eq!(matches_cache.len(), 1);
+            matches_cache.values().next().unwrap().clone()
+        };
+        assert!(Arc::ptr_eq(&first_matches, &reused_matches));
+    }
+
+    #[test]
+    fn uncached_table_search_does_not_materialize_all_search_texts() {
+        let frames = Arc::new(
+            (0..32)
+                .map(|index| decoded_frame_for_graph_test(index, index * 10))
+                .collect::<Vec<_>>(),
+        );
+        let request = AnalyzerFrameTableRequest {
+            analyzer_id: "spi".to_string(),
+            analyzer_name: "SPI".to_string(),
+            backend: DecoderBackendKind::SaleaeNative,
+            display_radix: "Hexadecimal".to_string(),
+            settings: AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default()),
+        };
+        let source = analyzer_frame_table_source_from_frames(
+            &request,
+            frames,
+            Arc::new(vec!["Data".to_string()]),
+            None,
+            Some("frame-7"),
+        )
+        .unwrap();
+
+        assert!(source.search_texts.is_none());
+        assert!(source.search_matches.is_none());
+
+        let window = analyzer_frame_table_search_window_from_sources(&[source], "frame-7", 0, 10);
+        assert_eq!(window.row_count, 1);
+        assert_eq!(window.rows[0].frame.label, "frame-7");
+    }
+
+    #[test]
+    fn cached_table_search_by_analyzer_name_avoids_frame_text_cache() {
+        let capture = demo_capture(16, 250_000);
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default());
+        let request = AnalyzerFrameTableRequest {
+            analyzer_id: "spi".to_string(),
+            analyzer_name: "SPI Analyzer".to_string(),
+            backend: DecoderBackendKind::LegacyRust,
+            display_radix: "Hexadecimal".to_string(),
+            settings: settings.clone(),
+        };
+        let cache_key = serde_json::to_string(&settings).unwrap();
+
+        let window = session
+            .decode_frame_table_search_window(std::slice::from_ref(&request), "spi", 0, 10)
+            .unwrap();
+        assert_eq!(
+            window.row_count,
+            session.decode_frames(&settings).unwrap().len()
+        );
+        {
+            let cache = session.analyzer_cache.lock();
+            let entry = cache.get(&cache_key).unwrap();
+            assert!(entry.table_search_texts.lock().is_empty());
+            assert_eq!(entry.table_search_matches.lock().len(), 1);
+        }
+    }
+
+    #[test]
+    fn saleae_frame_table_batches_cached_sources_without_sidecar() {
+        let capture = demo_capture(16, 250_000);
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let sample_count = session.sample_count();
+        let spi_settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings::default());
+        let i2c_settings = AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default());
+        let mut spi_frame = decoded_frame_for_graph_test(10, 10);
+        spi_frame.label = "spi-first".to_string();
+        spi_frame.channel_values[0].label = "spi-first".to_string();
+        let mut i2c_frame = decoded_frame_for_graph_test(20, 20);
+        i2c_frame.label = "i2c-second".to_string();
+        i2c_frame.channel_values[0].label = "i2c-second".to_string();
+        let spi_frames = Arc::new(vec![spi_frame]);
+        let i2c_frames = Arc::new(vec![i2c_frame]);
+        {
+            let mut cache = session.analyzer_cache.lock();
+            cache.insert(
+                native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, &spi_settings)
+                    .unwrap(),
+                analyzer_cache_entry(sample_count, spi_frames.clone()),
+            );
+            cache.insert(
+                native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, &i2c_settings)
+                    .unwrap(),
+                analyzer_cache_entry(sample_count, i2c_frames.clone()),
+            );
+        }
+        let requests = vec![
+            AnalyzerFrameTableRequest {
+                analyzer_id: "spi".to_string(),
+                analyzer_name: "SPI".to_string(),
+                backend: DecoderBackendKind::SaleaeNative,
+                display_radix: "Hexadecimal".to_string(),
+                settings: spi_settings,
+            },
+            AnalyzerFrameTableRequest {
+                analyzer_id: "i2c".to_string(),
+                analyzer_name: "I2C".to_string(),
+                backend: DecoderBackendKind::SaleaeNative,
+                display_radix: "Hexadecimal".to_string(),
+                settings: i2c_settings,
+            },
+        ];
+
+        let window = session.decode_frame_table_window(&requests, 0, 2).unwrap();
+        assert_eq!(window.row_count, 2);
+        assert_eq!(
+            window
+                .rows
+                .iter()
+                .map(|row| (row.analyzer_id.as_str(), row.frame.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("spi", "spi-first"), ("i2c", "i2c-second")]
+        );
+
+        let search = session
+            .decode_frame_table_search_window(&requests, "second", 0, 2)
+            .unwrap();
+        assert_eq!(search.row_count, 1);
+        assert_eq!(search.rows[0].analyzer_id, "i2c");
+        assert_eq!(search.rows[0].frame.label, "i2c-second");
+    }
+
+    #[test]
+    fn analyzer_frame_table_window_merges_sources_without_cloning_all_rows() {
+        let sources = vec![
+            analyzer_table_source_for_graph_test(
+                "a",
+                "SPI",
+                "Hexadecimal",
+                vec![
+                    decoded_frame_for_graph_test(10, 0),
+                    decoded_frame_for_graph_test(11, 10),
+                    decoded_frame_for_graph_test(12, 20),
+                    decoded_frame_for_graph_test(13, 30),
+                ],
+            ),
+            analyzer_table_source_for_graph_test(
+                "b",
+                "I2C",
+                "Hexadecimal",
+                vec![
+                    decoded_frame_for_graph_test(20, 5),
+                    decoded_frame_for_graph_test(21, 10),
+                    decoded_frame_for_graph_test(22, 25),
+                ],
+            ),
+        ];
+
+        let window = analyzer_frame_table_window_from_sources(&sources, 2, 6);
+
+        assert_eq!(window.row_count, 7);
+        assert_eq!(window.roles, vec!["Data".to_string()]);
+        assert_eq!(
+            window
+                .rows
+                .iter()
+                .map(|row| (
+                    row.analyzer_id.as_str(),
+                    row.frame.start_sample,
+                    row.frame_number
+                ))
+                .collect::<Vec<_>>(),
+            vec![("a", 10, 2), ("b", 10, 2), ("a", 20, 3), ("b", 25, 3)]
+        );
+    }
+
+    #[test]
+    fn analyzer_frame_table_window_jumps_to_deep_merged_window() {
+        let even_frames = (0..10_000)
+            .map(|index| {
+                let sample = (index * 2) as u64;
+                decoded_frame_for_graph_test(sample, sample)
+            })
+            .collect();
+        let odd_frames = (0..10_000)
+            .map(|index| {
+                let sample = (index * 2 + 1) as u64;
+                decoded_frame_for_graph_test(sample, sample)
+            })
+            .collect();
+        let sources = vec![
+            analyzer_table_source_for_graph_test("even", "SPI", "Hexadecimal", even_frames),
+            analyzer_table_source_for_graph_test("odd", "I2C", "Hexadecimal", odd_frames),
+        ];
+
+        let window = analyzer_frame_table_window_from_sources(&sources, 19_990, 20_000);
+
+        assert_eq!(window.row_count, 20_000);
+        assert_eq!(window.rows.len(), 10);
+        assert_eq!(
+            window
+                .rows
+                .iter()
+                .map(|row| (row.analyzer_id.as_str(), row.frame.start_sample))
+                .collect::<Vec<_>>(),
+            vec![
+                ("even", 19_990),
+                ("odd", 19_991),
+                ("even", 19_992),
+                ("odd", 19_993),
+                ("even", 19_994),
+                ("odd", 19_995),
+                ("even", 19_996),
+                ("odd", 19_997),
+                ("even", 19_998),
+                ("odd", 19_999),
+            ]
+        );
+    }
+
+    #[test]
+    fn analyzer_frame_table_search_window_matches_display_text_without_full_rows() {
+        let mut address = decoded_frame_for_graph_test(0, 0);
+        address.frame_type = "address".to_string();
+        address.label = "0x2A Write ACK".to_string();
+        address.value = 0x2a;
+        address.channel_values = vec![DecodedChannelValue {
+            channel: 1,
+            role: "SDA".to_string(),
+            label: "0x2A".to_string(),
+            texts: vec!["0x2A".to_string()],
+            value: 0x2a,
+        }];
+        let mut data = decoded_frame_for_graph_test(1, 20);
+        data.label = "0x0E".to_string();
+        data.value = 0x0e;
+        data.channel_values = vec![DecodedChannelValue {
+            channel: 1,
+            role: "SDA".to_string(),
+            label: "0x0E".to_string(),
+            texts: vec!["0x0E".to_string()],
+            value: 0x0e,
+        }];
+        let mut spi = decoded_frame_for_graph_test(2, 10);
+        spi.channel_values = vec![DecodedChannelValue {
+            channel: 3,
+            role: "MOSI".to_string(),
+            label: "14".to_string(),
+            texts: vec!["14".to_string()],
+            value: 14,
+        }];
+        let sources = vec![
+            analyzer_table_source_for_graph_test(
+                "i2c",
+                "I2C Bus",
+                "Hexadecimal",
+                vec![address, data],
+            ),
+            analyzer_table_source_for_graph_test("spi", "SPI", "Decimal", vec![spi]),
+        ];
+
+        let first_match = analyzer_frame_table_search_window_from_sources(&sources, "0x0e", 0, 1);
+        assert_eq!(first_match.row_count, 1);
+        assert_eq!(
+            first_match.roles,
+            vec!["SDA".to_string(), "MOSI".to_string()]
+        );
+        assert_eq!(first_match.rows.len(), 1);
+        assert_eq!(first_match.rows[0].analyzer_id, "i2c");
+        assert_eq!(first_match.rows[0].frame_number, 2);
+
+        let analyzer_name_match =
+            analyzer_frame_table_search_window_from_sources(&sources, "i2c bus", 0, 10);
+        assert_eq!(analyzer_name_match.row_count, 2);
+        assert!(analyzer_name_match
+            .rows
+            .iter()
+            .all(|row| row.analyzer_id == "i2c"));
+
+        let decimal_match =
+            analyzer_frame_table_search_window_from_sources(&sources, "mosi 14", 0, 10);
+        assert_eq!(decimal_match.row_count, 1);
+        assert_eq!(decimal_match.rows[0].analyzer_id, "spi");
+
+        let cross_prefix_match =
+            analyzer_frame_table_search_window_from_sources(&sources, "i2c bus 2 data 0x0e", 0, 10);
+        assert_eq!(cross_prefix_match.row_count, 1);
+        assert_eq!(cross_prefix_match.rows[0].analyzer_id, "i2c");
+        assert_eq!(cross_prefix_match.rows[0].frame_number, 2);
+    }
+
+    #[test]
     fn fit_capture_bubbles_are_bounded_and_cover_the_capture() {
         let frames = (0..10_000u64)
             .map(|frame_id| DecodedFrame {
@@ -3140,6 +7532,229 @@ mod tests {
         assert!(window.bubbles.len() <= MAX_ANALYZER_MARKER_RESULTS);
         assert_eq!(window.bubbles.first().unwrap().start_sample, 0);
         assert!(window.bubbles.last().unwrap().end_sample > 990_000);
+    }
+
+    #[test]
+    fn dense_frame_counts_still_split_when_frames_are_wide_on_screen() {
+        let frames = (0..1_201u64)
+            .map(|frame_id| DecodedFrame {
+                frame_id,
+                start_sample: frame_id * 5,
+                end_sample: frame_id * 5 + 100,
+                frame_type: "data".to_string(),
+                label: format!("0x{:02X}", frame_id & 0xff),
+                value: frame_id & 0xff,
+                channel_values: vec![
+                    DecodedChannelValue {
+                        channel: 0,
+                        role: "A".to_string(),
+                        label: format!("A 0x{:02X}", frame_id & 0xff),
+                        texts: Vec::new(),
+                        value: frame_id & 0xff,
+                    },
+                    DecodedChannelValue {
+                        channel: 1,
+                        role: "B".to_string(),
+                        label: format!("B 0x{:02X}", frame_id & 0xff),
+                        texts: Vec::new(),
+                        value: frame_id & 0xff,
+                    },
+                ],
+                protocol_markers: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let view = WaveformRequest {
+            start_sample: 0,
+            sample_count: 10_000,
+            pixels: 2_000,
+            channels: vec![0, 1],
+        };
+
+        let single_track = render_analyzer_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 0,
+                role: "A".to_string(),
+            },
+            &view,
+        );
+        assert_eq!(single_track.bubbles.len(), frames.len());
+        assert!(single_track
+            .bubbles
+            .iter()
+            .all(|bubble| bubble.bubble_type == AnalyzerBubbleType::SingleBubble));
+
+        let indexed_tracks = render_analyzer_tracks(
+            &frames,
+            &[
+                AnalyzerTrackRequest {
+                    channel: 0,
+                    role: "A".to_string(),
+                },
+                AnalyzerTrackRequest {
+                    channel: 1,
+                    role: "B".to_string(),
+                },
+            ],
+            &view,
+        )
+        .unwrap();
+        assert!(indexed_tracks.iter().all(|track| {
+            track.bubbles.len() == frames.len()
+                && track
+                    .bubbles
+                    .iter()
+                    .all(|bubble| bubble.bubble_type == AnalyzerBubbleType::SingleBubble)
+        }));
+
+        let overview = render_analyzer_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 0,
+                role: "A".to_string(),
+            },
+            &WaveformRequest {
+                pixels: 100,
+                ..view
+            },
+        );
+        assert_eq!(overview.bubbles.len(), 1);
+        assert_eq!(
+            overview.bubbles[0].bubble_type,
+            AnalyzerBubbleType::MultiBubble
+        );
+        assert_eq!(overview.bubbles[0].result_count, frames.len() as u64);
+    }
+
+    #[test]
+    fn native_decoded_frame_normalization_preserves_ordered_frames() {
+        let mut frames = vec![
+            decoded_frame_for_graph_test(0, 10),
+            decoded_frame_for_graph_test(1, 20),
+            decoded_frame_for_graph_test(1, 20),
+            decoded_frame_for_graph_test(2, 40),
+        ];
+        normalize_native_decoded_frames(&mut frames);
+
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| (frame.frame_id, frame.start_sample))
+                .collect::<Vec<_>>(),
+            vec![(0, 10), (1, 20), (2, 40)]
+        );
+    }
+
+    #[test]
+    fn native_decoded_frame_normalization_sorts_unordered_frames() {
+        let mut frames = vec![
+            decoded_frame_for_graph_test(2, 40),
+            decoded_frame_for_graph_test(0, 10),
+            decoded_frame_for_graph_test(1, 20),
+            decoded_frame_for_graph_test(1, 20),
+        ];
+        normalize_native_decoded_frames(&mut frames);
+
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| (frame.frame_id, frame.start_sample))
+                .collect::<Vec<_>>(),
+            vec![(0, 10), (1, 20), (2, 40)]
+        );
+    }
+
+    #[test]
+    fn native_background_windows_advance_without_gaps_and_keep_context() {
+        let clock_edges = (1..=300_000u64).map(|edge| edge * 10).collect::<Vec<_>>();
+        let capture = SparseCaptureData {
+            metadata: CaptureMetadata {
+                version: 1,
+                source_device: "native-background-window-test".to_string(),
+                sample_rate_hz: 100_000_000,
+                channel_count: 4,
+                enabled_channels: (0..4).collect(),
+                unitsize: 1,
+                sample_count: 3_000_010,
+                captured_at: Utc::now(),
+                labels: (0..4).map(|channel| format!("D{channel}")).collect(),
+                trigger: None,
+            },
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 1,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 2,
+                    initial_high: false,
+                    transitions: clock_edges,
+                },
+                SparseDigitalChannel {
+                    channel: 3,
+                    initial_high: true,
+                    transitions: Vec::new(),
+                },
+            ],
+        };
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(0),
+            miso_channel: Some(1),
+            clock_channel: 2,
+            enable_channel: None,
+            ..SpiDecodeSettings::default()
+        });
+        let view = sparse_capture_view(&capture);
+        let mut edge = 0usize;
+        let mut previous_retain_end = 0u64;
+        let mut windows = Vec::new();
+        while edge < 300_000 {
+            let window =
+                native_background_window(&view, &settings, edge, NATIVE_BACKGROUND_BODY_EDGES)
+                    .unwrap();
+            assert_eq!(window.body_edge_begin, edge);
+            assert_eq!(window.retain_start_sample, previous_retain_end);
+            assert!(window.decode_start_sample <= window.retain_start_sample);
+            assert!(window.decode_end_sample >= window.retain_end_sample);
+            edge = window.body_edge_end;
+            previous_retain_end = window.retain_end_sample;
+            windows.push(window);
+        }
+
+        assert_eq!(edge, 300_000);
+        assert_eq!(previous_retain_end, capture.metadata.sample_count);
+        assert_eq!(windows.len(), 3);
+        assert!(windows[0].decode_end_sample > windows[0].retain_end_sample);
+        assert!(windows[1].decode_start_sample < windows[1].retain_start_sample);
+    }
+
+    #[test]
+    fn native_background_frame_append_keeps_order_and_removes_boundary_duplicates() {
+        let mut accumulated = vec![
+            decoded_frame_for_graph_test(10, 10),
+            decoded_frame_for_graph_test(20, 20),
+        ];
+        append_native_background_frames(
+            &mut accumulated,
+            vec![
+                decoded_frame_for_graph_test(20, 20),
+                decoded_frame_for_graph_test(30, 30),
+            ],
+        );
+
+        assert_eq!(
+            accumulated
+                .iter()
+                .map(|frame| frame.start_sample)
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
     }
 
     #[test]
@@ -3195,7 +7810,9 @@ mod tests {
             channels: Vec::new(),
         };
 
-        let windows = sparse_native_analysis_windows(&capture, &settings, &view).unwrap();
+        let windows =
+            sparse_native_analysis_windows(&sparse_capture_view(&capture), &settings, &view)
+                .unwrap();
         assert_eq!(windows.len(), 13);
         assert!(windows.first().unwrap().0 < 1_000);
         assert!(windows.last().unwrap().1 > 9_999_000);
@@ -3208,6 +7825,311 @@ mod tests {
             })
             .sum::<usize>();
         assert!(selected_clock_edges < 25_000);
+    }
+
+    #[test]
+    fn native_decode_cache_window_expands_beyond_logical_view() {
+        let clock_edges = (1..=1_000u64).map(|edge| edge * 100).collect::<Vec<_>>();
+        let capture = SparseCaptureData {
+            metadata: CaptureMetadata {
+                version: 1,
+                source_device: "native-cache-padding-test".to_string(),
+                sample_rate_hz: 100_000_000,
+                channel_count: 4,
+                enabled_channels: (0..4).collect(),
+                unitsize: 1,
+                sample_count: 100_200,
+                captured_at: Utc::now(),
+                labels: (0..4).map(|channel| format!("D{channel}")).collect(),
+                trigger: None,
+            },
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 1,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 2,
+                    initial_high: false,
+                    transitions: clock_edges,
+                },
+                SparseDigitalChannel {
+                    channel: 3,
+                    initial_high: true,
+                    transitions: Vec::new(),
+                },
+            ],
+        };
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(0),
+            miso_channel: Some(1),
+            clock_channel: 2,
+            enable_channel: None,
+            ..SpiDecodeSettings::default()
+        });
+        let view = WaveformRequest {
+            start_sample: 50_000,
+            sample_count: 1_000,
+            pixels: 600,
+            channels: Vec::new(),
+        };
+        let logical_window =
+            sparse_native_analysis_windows(&sparse_capture_view(&capture), &settings, &view)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+        let decode_window = native_decode_window_for_cache(
+            &sparse_capture_view(&capture),
+            &settings,
+            logical_window.0,
+            logical_window.1,
+        )
+        .unwrap();
+
+        assert!(decode_window.0 < logical_window.0);
+        assert!(decode_window.1 > logical_window.1);
+        assert!(decode_window.1 - decode_window.0 > logical_window.1 - logical_window.0);
+    }
+
+    #[test]
+    fn native_view_decode_reuses_single_window_cache_without_sidecar() {
+        let capture = SparseCaptureData {
+            metadata: CaptureMetadata {
+                version: 1,
+                source_device: "single-window-cache-test".to_string(),
+                sample_rate_hz: 10_000_000,
+                channel_count: 4,
+                enabled_channels: (0..4).collect(),
+                unitsize: 1,
+                sample_count: 20_000,
+                captured_at: Utc::now(),
+                labels: (0..4).map(|channel| format!("D{channel}")).collect(),
+                trigger: None,
+            },
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 1,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 2,
+                    initial_high: false,
+                    transitions: vec![1_000, 1_100, 1_200, 1_300],
+                },
+                SparseDigitalChannel {
+                    channel: 3,
+                    initial_high: true,
+                    transitions: Vec::new(),
+                },
+            ],
+        };
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(0),
+            miso_channel: Some(1),
+            clock_channel: 2,
+            enable_channel: None,
+            ..SpiDecodeSettings::default()
+        });
+        let view = WaveformRequest {
+            start_sample: 950,
+            sample_count: 500,
+            pixels: 600,
+            channels: Vec::new(),
+        };
+        let windows =
+            sparse_native_analysis_windows(&sparse_capture_view(&capture), &settings, &view)
+                .unwrap();
+        assert_eq!(windows.len(), 1);
+
+        let session = GraphSession::default();
+        let (window_start, window_end) = windows[0];
+        let sample_count = capture.metadata.sample_count;
+        session.replace_sparse_capture(capture).unwrap();
+        let mut cached_frame = decoded_frame_for_graph_test(window_start + 8, window_start + 8);
+        cached_frame.label = "cached-window-frame".to_string();
+        cached_frame.channel_values[0].channel = 0;
+        cached_frame.channel_values[0].role = "MOSI".to_string();
+        let cached_frames = Arc::new(vec![cached_frame]);
+        let cached_start = window_start.saturating_sub(16);
+        let cached_end = window_end.saturating_add(16);
+        let analyzer_key =
+            native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, &settings).unwrap();
+        session.native_window_cache.lock().insert(
+            NativeWindowCacheKey {
+                analyzer_key,
+                start_sample: cached_start,
+                end_sample: cached_end,
+            },
+            NativeWindowCacheEntry {
+                decoded_sample_count: sample_count,
+                start_sample: cached_start,
+                end_sample: cached_end,
+                frames: cached_frames.clone(),
+            },
+        );
+
+        let frames = session
+            .decode_frames_with_backend_for_view(&settings, DecoderBackendKind::SaleaeNative, &view)
+            .unwrap();
+
+        assert_eq!(frames.len(), 1);
+        assert!(Arc::ptr_eq(&frames, &cached_frames));
+        assert_eq!(frames[0].label, "cached-window-frame");
+        assert_eq!(frames[0].start_sample, window_start + 8);
+        assert_eq!(frames[0].frame_id, window_start + 8);
+    }
+
+    #[test]
+    fn native_background_seed_merges_visible_window_frames() {
+        let session = GraphSession::default();
+        let analyzer_key = "saleae-spi";
+        let sample_count = 20_000;
+        let early = decoded_frame_for_graph_test(11, 1_000);
+        let late = decoded_frame_for_graph_test(12, 4_000);
+        let mut cache = session.native_window_cache.lock();
+        cache.insert(
+            NativeWindowCacheKey {
+                analyzer_key: analyzer_key.to_string(),
+                start_sample: 3_500,
+                end_sample: 4_500,
+            },
+            NativeWindowCacheEntry {
+                decoded_sample_count: sample_count,
+                start_sample: 3_500,
+                end_sample: 4_500,
+                frames: Arc::new(vec![late.clone()]),
+            },
+        );
+        cache.insert(
+            NativeWindowCacheKey {
+                analyzer_key: analyzer_key.to_string(),
+                start_sample: 500,
+                end_sample: 4_500,
+            },
+            NativeWindowCacheEntry {
+                decoded_sample_count: sample_count,
+                start_sample: 500,
+                end_sample: 4_500,
+                frames: Arc::new(vec![early.clone(), late]),
+            },
+        );
+        drop(cache);
+
+        let frames = session.cached_native_analyzer_frames(analyzer_key, sample_count);
+
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].start_sample, early.start_sample);
+        assert_eq!(frames[1].start_sample, 4_000);
+        assert_eq!(frames[0].frame_id, early.start_sample);
+        assert_eq!(frames[1].frame_id, 4_000);
+        assert!(session
+            .cached_native_analyzer_frames(analyzer_key, sample_count + 1)
+            .is_empty());
+    }
+
+    #[test]
+    fn saleae_batch_finalize_reuses_single_decoded_window_arc() {
+        let capture = SparseCaptureData {
+            metadata: CaptureMetadata {
+                version: 1,
+                source_device: "single-window-finalize-test".to_string(),
+                sample_rate_hz: 10_000_000,
+                channel_count: 4,
+                enabled_channels: (0..4).collect(),
+                unitsize: 1,
+                sample_count: 20_000,
+                captured_at: Utc::now(),
+                labels: (0..4).map(|channel| format!("D{channel}")).collect(),
+                trigger: None,
+            },
+            channels: vec![
+                SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 1,
+                    initial_high: false,
+                    transitions: Vec::new(),
+                },
+                SparseDigitalChannel {
+                    channel: 2,
+                    initial_high: false,
+                    transitions: vec![1_000, 1_100, 1_200, 1_300],
+                },
+                SparseDigitalChannel {
+                    channel: 3,
+                    initial_high: true,
+                    transitions: Vec::new(),
+                },
+            ],
+        };
+        let settings = AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(0),
+            miso_channel: Some(1),
+            clock_channel: 2,
+            enable_channel: None,
+            ..SpiDecodeSettings::default()
+        });
+        let request = AnalyzerRenderRequest {
+            analyzer_id: "spi".to_string(),
+            backend: DecoderBackendKind::SaleaeNative,
+            settings: settings.clone(),
+            tracks: Vec::new(),
+        };
+        let waveform = WaveformRequest {
+            start_sample: 950,
+            sample_count: 500,
+            pixels: 600,
+            channels: Vec::new(),
+        };
+        let decoded_frames = Arc::new(vec![decoded_frame_for_graph_test(1_000, 1_000)]);
+        let state = SaleaeBatchRenderState {
+            request_index: 0,
+            request: &request,
+            full_cache_key: native_full_analyzer_cache_key(
+                DecoderBackendKind::SaleaeNative,
+                &settings,
+            )
+            .unwrap(),
+            window_cache_key: "window-cache-key".to_string(),
+            windows: vec![(950, 1_450)],
+            missing_windows: vec![(950, 1_450)],
+            frames: Vec::new(),
+            window_entries: vec![NativeWindowCacheEntry {
+                decoded_sample_count: capture.metadata.sample_count,
+                start_sample: 950,
+                end_sample: 1_450,
+                frames: decoded_frames.clone(),
+            }],
+        };
+
+        let finalized = finalize_saleae_batch_render_state(
+            state,
+            &waveform,
+            &sparse_capture_view(&capture),
+            capture.metadata.sample_count,
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(
+            &finalized.window_cache_entry.frames,
+            &decoded_frames
+        ));
     }
 
     #[test]
@@ -3265,6 +8187,19 @@ mod tests {
             )
             .unwrap();
         assert!(!frames.is_empty());
+        let zoomed_frames = session
+            .decode_frames_with_backend_for_view(
+                &settings,
+                DecoderBackendKind::SaleaeNative,
+                &WaveformRequest {
+                    start_sample: sample_count / 4,
+                    sample_count: sample_count / 8,
+                    pixels: 1_200,
+                    channels: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&frames, &zoomed_frames));
         assert!(frames.iter().any(|frame| {
             frame
                 .channel_values
@@ -3289,6 +8224,104 @@ mod tests {
 
     #[test]
     #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_full_decode_batch_populates_shared_analyzer_cache() {
+        let capture = demo_capture(16, 250_000);
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let i2c = AnalyzerDecodeSettings::I2c(I2cDecodeSettings {
+            sda_channel: 1,
+            scl_channel: 2,
+        });
+        let spi = AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(3),
+            miso_channel: Some(4),
+            clock_channel: 5,
+            enable_channel: Some(6),
+            ..SpiDecodeSettings::default()
+        });
+
+        let frames = session
+            .decode_saleae_native_frames_batch(&[i2c.clone(), spi.clone()])
+            .unwrap();
+
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|frames| !frames.is_empty()));
+
+        let cached_i2c = session
+            .decode_frames_with_backend(&i2c, DecoderBackendKind::SaleaeNative)
+            .unwrap();
+        let cached_spi = session
+            .decode_frames_with_backend(&spi, DecoderBackendKind::SaleaeNative)
+            .unwrap();
+        assert!(Arc::ptr_eq(&frames[0], &cached_i2c));
+        assert!(Arc::ptr_eq(&frames[1], &cached_spi));
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    fn saleae_async_background_decode_matches_one_shot_and_reports_monotonic_progress() {
+        let capture = demo_capture(16, 2_500_000);
+        let settings = vec![
+            AnalyzerDecodeSettings::I2c(I2cDecodeSettings {
+                sda_channel: 1,
+                scl_channel: 2,
+            }),
+            AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+                mosi_channel: Some(3),
+                miso_channel: Some(4),
+                clock_channel: 5,
+                enable_channel: Some(6),
+                ..SpiDecodeSettings::default()
+            }),
+        ];
+
+        let expected_session = GraphSession::default();
+        expected_session.finish_capture(capture.clone()).unwrap();
+        let expected = expected_session
+            .decode_saleae_native_frames_batch(&settings)
+            .unwrap();
+
+        let session = GraphSession::default();
+        session.finish_capture(capture).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut previous_processed_edges = vec![0usize; settings.len()];
+        let mut saw_partial_frames = false;
+        let completed = loop {
+            let progress = session
+                .decode_saleae_native_background_step_batch(&settings)
+                .unwrap();
+            assert_eq!(progress.len(), settings.len());
+            for (index, item) in progress.iter().enumerate() {
+                assert!(item.processed_edges >= previous_processed_edges[index]);
+                assert!((0.0..=1.0).contains(&item.progress));
+                saw_partial_frames |= !item.complete && item.frame_count > 0;
+                previous_processed_edges[index] = item.processed_edges;
+            }
+            if progress.iter().all(|item| item.complete) {
+                break progress;
+            }
+            assert!(Instant::now() < deadline, "async Saleae decode timed out");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+
+        assert!(completed
+            .iter()
+            .all(|item| item.progress == 1.0 && !item.cancelled));
+        assert!(
+            saw_partial_frames,
+            "async Saleae decode should publish frames before completion"
+        );
+        let actual = session
+            .decode_saleae_native_frames_batch(&settings)
+            .unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (actual_frames, expected_frames) in actual.iter().zip(expected.iter()) {
+            assert_eq!(actual_frames.as_ref(), expected_frames.as_ref());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
     fn saleae_i2c_and_spi_decode_in_parallel_through_shared_edge_index() {
         let capture = demo_capture(16, 2_500_000);
         let sample_count = capture.metadata.sample_count;
@@ -3303,7 +8336,9 @@ mod tests {
                     pixels: 1_200,
                     channels: vec![1, 2, 3, 4, 5, 6],
                 },
+                include_tile: true,
                 analyzer_view: None,
+                view: None,
                 analyzers: vec![
                     AnalyzerRenderRequest {
                         analyzer_id: "i2c".to_string(),
@@ -3613,6 +8648,62 @@ mod tests {
     }
 
     #[test]
+    fn unordered_protocol_markers_are_sorted_and_deduplicated_for_track_rendering() {
+        let frames = vec![DecodedFrame {
+            frame_id: 0,
+            start_sample: 0,
+            end_sample: 100,
+            frame_type: "marker".to_string(),
+            label: "marker".to_string(),
+            value: 0,
+            channel_values: Vec::new(),
+            protocol_markers: vec![
+                pxlogic_core::DecodedProtocolMarker {
+                    channel: Some(0),
+                    sample: 80,
+                    kind: "stop".to_string(),
+                },
+                pxlogic_core::DecodedProtocolMarker {
+                    channel: Some(0),
+                    sample: 10,
+                    kind: "start".to_string(),
+                },
+                pxlogic_core::DecodedProtocolMarker {
+                    channel: Some(0),
+                    sample: 10,
+                    kind: "start".to_string(),
+                },
+                pxlogic_core::DecodedProtocolMarker {
+                    channel: Some(0),
+                    sample: 50,
+                    kind: "dot".to_string(),
+                },
+            ],
+        }];
+        let markers = protocol_markers_for_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 0,
+                role: "Data".to_string(),
+            },
+            0,
+            1,
+        );
+
+        assert_eq!(
+            markers
+                .iter()
+                .map(|marker| (marker.sample, marker.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (10, AnalyzerProtocolMarkerKind::Start),
+                (50, AnalyzerProtocolMarkerKind::Dot),
+                (80, AnalyzerProtocolMarkerKind::Stop),
+            ]
+        );
+    }
+
+    #[test]
     fn native_analyzer_markers_render_on_their_reported_channel() {
         let frames = vec![DecodedFrame {
             frame_id: 0,
@@ -3659,6 +8750,119 @@ mod tests {
     }
 
     #[test]
+    fn rendered_track_windows_send_lightweight_frame_refs() {
+        let frames = vec![DecodedFrame {
+            frame_id: 0,
+            start_sample: 100,
+            end_sample: 200,
+            frame_type: "data".to_string(),
+            label: "0x12".to_string(),
+            value: 0x12,
+            channel_values: vec![DecodedChannelValue {
+                channel: 1,
+                role: "DATA".to_string(),
+                label: "0x12".to_string(),
+                texts: vec!["0x12".to_string()],
+                value: 0x12,
+            }],
+            protocol_markers: vec![pxlogic_core::DecodedProtocolMarker {
+                channel: Some(1),
+                sample: 150,
+                kind: "dot".to_string(),
+            }],
+        }];
+        let track = render_analyzer_track(
+            &frames,
+            &AnalyzerTrackRequest {
+                channel: 1,
+                role: "DATA".to_string(),
+            },
+            &WaveformRequest {
+                start_sample: 0,
+                sample_count: 400,
+                pixels: 800,
+                channels: vec![1],
+            },
+        );
+
+        assert_eq!(
+            track.protocol_markers,
+            vec![AnalyzerProtocolMarker {
+                sample: 150,
+                kind: AnalyzerProtocolMarkerKind::Dot,
+            }]
+        );
+        assert_eq!(
+            track.frame_refs,
+            vec![AnalyzerFrameRef {
+                frame_id: 0,
+                start_sample: 100,
+                end_sample: 200,
+            }]
+        );
+        assert!(track.frames.is_empty());
+        assert!(track.previous_frame.is_none());
+        assert!(track.next_frame.is_none());
+    }
+
+    #[test]
+    fn indexed_track_render_uses_cached_channel_value_matches() {
+        let frames = vec![DecodedFrame {
+            frame_id: 7,
+            start_sample: 100,
+            end_sample: 120,
+            frame_type: "data".to_string(),
+            label: "combined".to_string(),
+            value: 0,
+            channel_values: vec![
+                DecodedChannelValue {
+                    channel: 0,
+                    role: "MOSI".to_string(),
+                    label: "MOSI 0x12".to_string(),
+                    texts: vec!["MOSI 0x12".to_string()],
+                    value: 0x12,
+                },
+                DecodedChannelValue {
+                    channel: 0,
+                    role: "MISO".to_string(),
+                    label: "MISO 0x34".to_string(),
+                    texts: vec!["MISO 0x34".to_string()],
+                    value: 0x34,
+                },
+            ],
+            protocol_markers: Vec::new(),
+        }];
+        let tracks = vec![
+            AnalyzerTrackRequest {
+                channel: 0,
+                role: "MISO".to_string(),
+            },
+            AnalyzerTrackRequest {
+                channel: 0,
+                role: "DATA".to_string(),
+            },
+        ];
+
+        let windows = render_analyzer_tracks(
+            &frames,
+            &tracks,
+            &WaveformRequest {
+                start_sample: 0,
+                sample_count: 500,
+                pixels: 800,
+                channels: vec![0],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].bubbles[0].display_text, vec!["MISO 0x34"]);
+        assert_eq!(windows[1].bubbles[0].display_text, vec!["MOSI 0x12"]);
+        assert_eq!(windows[0].frame_refs[0].frame_id, 7);
+        assert_eq!(windows[1].frame_refs[0].frame_id, 7);
+    }
+
+    #[test]
     fn native_window_offset_moves_protocol_markers_with_frames() {
         let frame = DecodedFrame {
             frame_id: 4,
@@ -3681,7 +8885,8 @@ mod tests {
             }],
         };
 
-        let shifted = offset_decoded_frame_samples(frame, 1_000);
+        let mut shifted = frame;
+        offset_decoded_frame_samples(&mut shifted, 1_000);
 
         assert_eq!(shifted.start_sample, 1_010);
         assert_eq!(shifted.end_sample, 1_020);
@@ -3788,6 +8993,196 @@ mod tests {
     }
 
     #[test]
+    fn indexed_analyzer_track_render_preserves_sparse_previous_next_frames() {
+        let frames = [
+            (0, 0, 0, "A"),
+            (1, 10, 1, "B"),
+            (2, 20, 0, "A"),
+            (3, 30, 1, "B"),
+            (4, 40, 0, "A"),
+        ]
+        .into_iter()
+        .map(|(frame_id, start_sample, channel, role)| DecodedFrame {
+            frame_id,
+            start_sample,
+            end_sample: start_sample + 2,
+            frame_type: "data".to_string(),
+            label: format!("{role}{frame_id}"),
+            value: frame_id,
+            channel_values: vec![DecodedChannelValue {
+                channel,
+                role: role.to_string(),
+                label: format!("{role}{frame_id}"),
+                texts: vec![format!("{role}{frame_id}")],
+                value: frame_id,
+            }],
+            protocol_markers: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+        let tracks = vec![
+            AnalyzerTrackRequest {
+                channel: 0,
+                role: "A".to_string(),
+            },
+            AnalyzerTrackRequest {
+                channel: 1,
+                role: "B".to_string(),
+            },
+        ];
+
+        let windows = render_analyzer_tracks(
+            &frames,
+            &tracks,
+            &WaveformRequest {
+                start_sample: 23,
+                sample_count: 5,
+                pixels: 800,
+                channels: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(windows.len(), 2);
+        assert!(windows[0].frames.is_empty());
+        assert_eq!(
+            windows[0]
+                .previous_frame_ref
+                .as_ref()
+                .map(|frame| frame.frame_id),
+            Some(2)
+        );
+        assert_eq!(
+            windows[0]
+                .next_frame_ref
+                .as_ref()
+                .map(|frame| frame.frame_id),
+            Some(4)
+        );
+        assert!(windows[1].frames.is_empty());
+        assert_eq!(
+            windows[1]
+                .previous_frame_ref
+                .as_ref()
+                .map(|frame| frame.frame_id),
+            Some(1)
+        );
+        assert_eq!(
+            windows[1]
+                .next_frame_ref
+                .as_ref()
+                .map(|frame| frame.frame_id),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn indexed_analyzer_track_render_reuses_protocol_marker_index_by_channel() {
+        let frames = vec![
+            DecodedFrame {
+                frame_id: 0,
+                start_sample: 10,
+                end_sample: 20,
+                frame_type: "start".to_string(),
+                label: "start".to_string(),
+                value: 0,
+                channel_values: Vec::new(),
+                protocol_markers: Vec::new(),
+            },
+            DecodedFrame {
+                frame_id: 1,
+                start_sample: 30,
+                end_sample: 40,
+                frame_type: "data".to_string(),
+                label: "data".to_string(),
+                value: 0,
+                channel_values: vec![DecodedChannelValue {
+                    channel: 0,
+                    role: "SDA".to_string(),
+                    label: "0x11".to_string(),
+                    texts: vec!["0x11".to_string()],
+                    value: 0x11,
+                }],
+                protocol_markers: vec![
+                    pxlogic_core::DecodedProtocolMarker {
+                        channel: Some(1),
+                        sample: 32,
+                        kind: "up_arrow".to_string(),
+                    },
+                    pxlogic_core::DecodedProtocolMarker {
+                        channel: Some(2),
+                        sample: 33,
+                        kind: "dot".to_string(),
+                    },
+                ],
+            },
+            DecodedFrame {
+                frame_id: 2,
+                start_sample: 50,
+                end_sample: 60,
+                frame_type: "stop".to_string(),
+                label: "stop".to_string(),
+                value: 0,
+                channel_values: Vec::new(),
+                protocol_markers: Vec::new(),
+            },
+        ];
+        let tracks = vec![
+            AnalyzerTrackRequest {
+                channel: 0,
+                role: "SDA".to_string(),
+            },
+            AnalyzerTrackRequest {
+                channel: 1,
+                role: "SCK".to_string(),
+            },
+            AnalyzerTrackRequest {
+                channel: 2,
+                role: "SWDIO".to_string(),
+            },
+        ];
+
+        let windows = render_analyzer_tracks(
+            &frames,
+            &tracks,
+            &WaveformRequest {
+                start_sample: 0,
+                sample_count: 100,
+                pixels: 800,
+                channels: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            windows[0]
+                .protocol_markers
+                .iter()
+                .map(|marker| (marker.sample, marker.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (10, AnalyzerProtocolMarkerKind::Start),
+                (50, AnalyzerProtocolMarkerKind::Stop),
+            ]
+        );
+        assert_eq!(
+            windows[1]
+                .protocol_markers
+                .iter()
+                .map(|marker| (marker.sample, marker.kind))
+                .collect::<Vec<_>>(),
+            vec![(32, AnalyzerProtocolMarkerKind::UpArrow)]
+        );
+        assert_eq!(
+            windows[2]
+                .protocol_markers
+                .iter()
+                .map(|marker| (marker.sample, marker.kind))
+                .collect::<Vec<_>>(),
+            vec![(33, AnalyzerProtocolMarkerKind::Dot)]
+        );
+    }
+
+    #[test]
     fn analyzer_rendering_does_not_change_the_waveform_tile() {
         let capture = demo_capture(16, 250_000);
         let session = GraphSession::default();
@@ -3802,15 +9197,19 @@ mod tests {
             .render_frame(&GraphFrameRequest {
                 frame_id: 1,
                 waveform: waveform.clone(),
+                include_tile: true,
                 analyzer_view: None,
                 analyzers: Vec::new(),
+                view: None,
             })
             .unwrap();
         let with_analyzers = session
             .render_frame(&GraphFrameRequest {
                 frame_id: 2,
                 waveform: waveform.clone(),
+                include_tile: true,
                 analyzer_view: Some(waveform),
+                view: None,
                 analyzers: vec![
                     AnalyzerRenderRequest {
                         analyzer_id: "i2c".to_string(),
@@ -3836,6 +9235,336 @@ mod tests {
 
         assert_eq!(baseline.tile, with_analyzers.tile);
         assert_eq!(with_analyzers.analyzers.len(), 2);
+    }
+
+    #[test]
+    fn analyzer_only_render_can_skip_waveform_tile() {
+        let capture = demo_capture(16, 250_000);
+        let session = GraphSession::default();
+        session.replace_capture(capture).unwrap();
+
+        let response = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 3,
+                waveform: WaveformRequest {
+                    start_sample: 10_000,
+                    sample_count: 100_000,
+                    pixels: 0,
+                    channels: vec![255],
+                },
+                include_tile: false,
+                analyzer_view: Some(WaveformRequest {
+                    start_sample: 10_000,
+                    sample_count: 100_000,
+                    pixels: 1_200,
+                    channels: Vec::new(),
+                }),
+                view: None,
+                analyzers: vec![AnalyzerRenderRequest {
+                    analyzer_id: "i2c".to_string(),
+                    backend: DecoderBackendKind::LegacyRust,
+                    settings: AnalyzerDecodeSettings::I2c(I2cDecodeSettings::default()),
+                    tracks: vec![AnalyzerTrackRequest {
+                        channel: 1,
+                        role: "SDA".to_string(),
+                    }],
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(response.tile.sample_count, 0);
+        assert!(response.tile.channels.is_empty());
+        assert_eq!(response.analyzers.len(), 1);
+    }
+
+    #[test]
+    fn a_view_intent_drives_the_rendered_range() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 250_000)).unwrap();
+
+        // A request without an intent keeps its explicit range, so callers that
+        // have not migrated are unaffected.
+        let explicit = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 1,
+                waveform: WaveformRequest {
+                    start_sample: 10_000,
+                    sample_count: 20_000,
+                    pixels: 200,
+                    channels: vec![0],
+                },
+                include_tile: true,
+                analyzer_view: None,
+                analyzers: Vec::new(),
+                view: None,
+            })
+            .unwrap();
+        assert_eq!(explicit.tile.start_sample, 10_000);
+        assert_eq!(explicit.tile.sample_count, 20_000);
+
+        // A request carrying a gesture renders the session viewport instead and
+        // ignores the range the caller sent.
+        let from_intent = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 2,
+                waveform: WaveformRequest {
+                    start_sample: 0,
+                    sample_count: 0,
+                    pixels: 200,
+                    channels: vec![0],
+                },
+                include_tile: true,
+                analyzer_view: None,
+                analyzers: Vec::new(),
+                view: Some(ViewIntent::Set {
+                    start_sample: 5_000.0,
+                    samples: 1_000.0,
+                }),
+            })
+            .unwrap();
+        assert_eq!(from_intent.view.start_sample, 5_000.0);
+        assert_eq!(from_intent.view.samples, 1_000.0);
+        assert_eq!(from_intent.tile.start_sample, 5_000);
+        assert_eq!(from_intent.tile.sample_count, 1_000);
+
+        // A zoom is anchored inside the viewport the session already holds, and
+        // the authoritative result comes back on the frame itself.
+        let zoomed = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 3,
+                waveform: WaveformRequest {
+                    start_sample: 0,
+                    sample_count: 0,
+                    pixels: 200,
+                    channels: vec![0],
+                },
+                include_tile: true,
+                analyzer_view: None,
+                analyzers: Vec::new(),
+                view: Some(ViewIntent::Zoom {
+                    factor: 0.5,
+                    anchor_ratio: 0.5,
+                }),
+            })
+            .unwrap();
+        assert_eq!(zoomed.view.samples, 500.0);
+        assert_eq!(zoomed.view.start_sample, 5_250.0);
+        assert_eq!(zoomed.tile.start_sample, 5_250);
+        assert_eq!(zoomed.tile.sample_count, 500);
+    }
+
+    #[test]
+    fn view_limits_are_applied_by_the_backend() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 250_000)).unwrap();
+
+        // Without a ceiling the DataLimited rule caps zoom-out at 2.5x the data.
+        let wide = session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: 100_000_000.0,
+        });
+        assert_eq!(wide.samples, 625_000.0);
+        assert_eq!(wide.start_sample, 0.0);
+
+        // A session ceiling widens it, and the current viewport is re-clamped
+        // against the new limits so a capture that grew cannot leave a stale view.
+        let view = session.set_view_limits(ViewLimits {
+            live: false,
+            maximum_samples: Some(500_000_000.0),
+            sample_rate_hz: 1_000_000.0,
+        });
+        assert_eq!(view.samples, 625_000.0);
+
+        // Below the new ceiling nothing changes...
+        let under = session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: 100_000_000.0,
+        });
+        assert_eq!(under.samples, 100_000_000.0);
+
+        // ...and above it the ceiling wins.
+        let clamped = session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: 900_000_000.0,
+        });
+        assert_eq!(clamped.samples, 500_000_000.0);
+        assert_eq!(clamped.start_sample, 0.0);
+    }
+
+    #[test]
+    fn an_animated_intent_glides_and_reports_both_viewports() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 250_000)).unwrap();
+        session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: 1_000.0,
+        });
+
+        let request = |view: Option<ViewIntent>| GraphFrameRequest {
+            frame_id: 1,
+            waveform: WaveformRequest {
+                start_sample: 0,
+                sample_count: 0,
+                pixels: 200,
+                channels: vec![0],
+            },
+            include_tile: true,
+            analyzer_view: None,
+            analyzers: Vec::new(),
+            view,
+        };
+
+        // The frame that starts the glide is still near its origin. `view` may
+        // already lead `data_view` by a hair because the glide advances while the
+        // tile is being built — that gap is precisely what the frontend's
+        // residual transform stretches.
+        let started = session
+            .render_frame(&request(Some(ViewIntent::AnimateTo {
+                start_sample: 0.0,
+                samples: 2_000.0,
+                duration_ms: 200.0,
+            })))
+            .unwrap();
+        assert!(started.data_view.samples < 1_500.0);
+        assert!(started.view.samples >= started.data_view.samples);
+
+        std::thread::sleep(std::time::Duration::from_millis(280));
+
+        // Once the glide is over the session settles on the destination, and a
+        // per-frame request keeps rendering wherever the session now is.
+        let settled = session
+            .render_frame(&request(Some(ViewIntent::KeepCurrent)))
+            .unwrap();
+        assert_eq!(settled.view.samples, 2_000.0);
+        assert_eq!(settled.data_view, settled.view);
+        assert_eq!(settled.tile.start_sample, 0);
+        assert_eq!(settled.tile.sample_count, 2_000);
+    }
+
+    #[test]
+    fn an_instant_intent_cancels_a_running_glide() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 250_000)).unwrap();
+        session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: 1_000.0,
+        });
+        session.apply_view_intent(&ViewIntent::AnimateTo {
+            start_sample: 100_000.0,
+            samples: 1_000.0,
+            duration_ms: 5_000.0,
+        });
+
+        // A wheel tick must interrupt a toolbar zoom rather than fight it.
+        let cancelled = session.apply_view_intent(&ViewIntent::PanSamples {
+            delta_samples: 250.0,
+        });
+        assert_eq!(cancelled.start_sample, 250.0);
+        assert_eq!(session.session_view(), cancelled);
+    }
+
+    #[test]
+    fn the_data_viewport_reports_what_the_tile_was_built_for() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 250_000)).unwrap();
+
+        let response = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 1,
+                waveform: WaveformRequest {
+                    start_sample: 0,
+                    sample_count: 0,
+                    pixels: 200,
+                    channels: vec![0],
+                },
+                include_tile: true,
+                analyzer_view: None,
+                analyzers: Vec::new(),
+                view: Some(ViewIntent::Set {
+                    start_sample: 4_000.75,
+                    samples: 1_234.5,
+                }),
+            })
+            .unwrap();
+
+        // The residual transform the frontend applies is derived from these two,
+        // so the tile has to actually cover the reported data viewport.
+        assert_eq!(response.data_view.start_sample, 4_000.75);
+        assert_eq!(response.data_view.samples, 1_234.5);
+        assert_eq!(response.tile.start_sample, 4_000);
+        // ceil(4000.75 + 1234.5) - floor(4000.75) = 5236 - 4000.
+        assert_eq!(response.tile.sample_count, 1_236);
+    }
+
+    #[test]
+    fn a_live_session_follows_a_fixed_window_at_the_tail() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 4_000_000)).unwrap();
+        session.set_view_limits(ViewLimits {
+            live: true,
+            maximum_samples: None,
+            sample_rate_hz: 1_000_000.0,
+        });
+
+        // About a second of capture, anchored to the newest samples. Fitting the
+        // whole capture instead would zoom out on every frame as data streams in.
+        let view = session.session_view();
+        assert_eq!(view.samples, 1_000_000.0);
+        assert_eq!(view.start_sample, 3_000_000.0);
+        assert_eq!(view.start_sample + view.samples, 4_000_000.0);
+
+        // A manual gesture takes the session out of follow mode.
+        let panned = session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: 500_000.0,
+        });
+        assert_eq!(panned.start_sample, 0.0);
+        assert_eq!(session.session_view().start_sample, 0.0);
+    }
+
+    #[test]
+    fn a_loaded_capture_opens_on_a_readable_window_not_the_whole_thing() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 4_000_000)).unwrap();
+        session.set_view_limits(ViewLimits {
+            live: false,
+            maximum_samples: None,
+            sample_rate_hz: 1_000_000.0,
+        });
+
+        let view = session.session_view();
+        assert_eq!(view.samples, 1_000_000.0);
+        assert_eq!(view.start_sample, 0.0);
+
+        // A capture shorter than the preferred window still fits exactly.
+        let small = GraphSession::default();
+        small.replace_capture(demo_capture(16, 40_000)).unwrap();
+        small.set_view_limits(ViewLimits {
+            live: false,
+            maximum_samples: None,
+            sample_rate_hz: 1_000_000.0,
+        });
+        assert_eq!(small.session_view().samples, 40_000.0);
+    }
+
+    #[test]
+    fn setting_view_limits_does_not_pin_a_view_that_was_never_moved() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 4_000_000)).unwrap();
+        // Re-clamping must not turn "never moved" into "explicitly set", or a
+        // live session would stop following the tail the first time the
+        // workbench pushed its limits.
+        session.set_view_limits(ViewLimits {
+            live: true,
+            maximum_samples: None,
+            sample_rate_hz: 1_000_000.0,
+        });
+        session.set_view_limits(ViewLimits {
+            live: true,
+            maximum_samples: None,
+            sample_rate_hz: 1_000_000.0,
+        });
+        assert_eq!(session.session_view().start_sample, 3_000_000.0);
     }
 
     #[test]
@@ -3874,6 +9603,72 @@ mod tests {
                 .channels[0]
                 .channel,
             31
+        );
+    }
+
+    #[test]
+    fn native_window_decode_worker_count_is_bounded_and_configurable() {
+        assert_eq!(native_window_decode_worker_count_value(1, None, 8), 1);
+        assert_eq!(native_window_decode_worker_count_value(13, None, 8), 4);
+        assert_eq!(native_window_decode_worker_count_value(13, None, 2), 2);
+        assert_eq!(native_window_decode_worker_count_value(13, Some("1"), 8), 1);
+        assert_eq!(native_window_decode_worker_count_value(13, Some("8"), 4), 4);
+        assert_eq!(
+            native_window_decode_worker_count_value(13, Some("garbage"), 8),
+            4
+        );
+        assert_eq!(native_window_decode_worker_count_value(13, Some("0"), 8), 4);
+    }
+
+    #[test]
+    fn async_completion_markers_replace_preview_markers_on_the_full_timeline() {
+        let mut frames = vec![
+            decoded_frame_for_graph_test(0, 100),
+            decoded_frame_for_graph_test(1, 200),
+            decoded_frame_for_graph_test(2, 300),
+        ];
+        frames[0].protocol_markers.push(DecodedProtocolMarker {
+            channel: Some(0),
+            sample: 105,
+            kind: "preview".to_string(),
+        });
+        attach_native_completion_markers(
+            &mut frames,
+            vec![
+                DecodedProtocolMarker {
+                    channel: Some(1),
+                    sample: 350,
+                    kind: "stop".to_string(),
+                },
+                DecodedProtocolMarker {
+                    channel: Some(0),
+                    sample: 50,
+                    kind: "start".to_string(),
+                },
+                DecodedProtocolMarker {
+                    channel: Some(1),
+                    sample: 250,
+                    kind: "up_arrow".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| {
+                    frame
+                        .protocol_markers
+                        .iter()
+                        .map(|marker| (marker.sample, marker.kind.as_str()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                vec![(50, "start")],
+                vec![(250, "up_arrow")],
+                vec![(350, "stop")],
+            ]
         );
     }
 }

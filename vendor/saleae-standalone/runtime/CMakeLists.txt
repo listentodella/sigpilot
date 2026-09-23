@@ -25,8 +25,27 @@ string(REPLACE
 )
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/MockResultsCompat.cpp" "${MOCK_RESULTS_SOURCE}")
 
+# The testlib hardcodes Analyzer::GetTriggerSample() to 2, but analyzers use it
+# to render timestamps relative to the trigger, so every exported timestamp came
+# out offset. Redirect it to our own value (0 == no trigger) instead of editing
+# the vendored source. See cpp/compat_internal.hpp for the full reasoning.
+file(READ "${SALEAE_TESTLIB_ROOT}/AnalyzerStubs.cpp" ANALYZER_STUBS_SOURCE)
+string(REPLACE
+    "U64 Analyzer::GetTriggerSample()\n{\n    return 2;\n}"
+    "U64 Analyzer::GetTriggerSample()\n{\n    return SaleaeCompat::TriggerSample();\n}"
+    ANALYZER_STUBS_SOURCE
+    "${ANALYZER_STUBS_SOURCE}"
+)
+string(REPLACE
+    "#include \"TestAnalyzerData.h\""
+    "#include \"TestAnalyzerData.h\"\n#include \"compat_internal.hpp\""
+    ANALYZER_STUBS_SOURCE
+    "${ANALYZER_STUBS_SOURCE}"
+)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/AnalyzerStubsCompat.cpp" "${ANALYZER_STUBS_SOURCE}")
+
 add_library(saleae_compat SHARED
-    "${SALEAE_TESTLIB_ROOT}/AnalyzerStubs.cpp"
+    "${CMAKE_CURRENT_BINARY_DIR}/AnalyzerStubsCompat.cpp"
     "${SALEAE_TESTLIB_ROOT}/HelperStubs.cpp"
     "${SALEAE_TESTLIB_ROOT}/MockChannelData.cpp"
     "${CMAKE_CURRENT_BINARY_DIR}/MockResultsCompat.cpp"
@@ -61,6 +80,15 @@ endif()
 target_link_libraries(saleae_compat PRIVATE ${CMAKE_DL_LIBS})
 
 add_library(Saleae::AnalyzerSDK ALIAS saleae_compat)
+
+# Compatibility-runtime regression tests. These pin behaviour that we replace
+# for the closed original, so a silent drift shows up as a failing test rather
+# than as a subtly wrong decode. Run with: ctest --test-dir <build dir>
+enable_testing()
+add_executable(saleae_compat_tests cpp/test_pulse_width.cpp)
+target_include_directories(saleae_compat_tests PRIVATE "${SALEAE_TESTLIB_ROOT}")
+target_link_libraries(saleae_compat_tests PRIVATE saleae_compat)
+add_test(NAME pulse_width COMMAND saleae_compat_tests)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")

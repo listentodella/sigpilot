@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ANALYZER_MARKER_MAXIMUM_RESULTS,
+  mergeSortedSamples,
+  nearestSortedSample,
   visibleAnalyzerMarkerSamples,
 } from "../src/lib/analyzerMarkers.ts";
 
@@ -27,4 +29,15 @@ test("analyzer marker count retains Logic 2's upper bound", () => {
     visibleAnalyzerMarkerSamples(edges, 0, 10_000, 10_000).length,
     ANALYZER_MARKER_MAXIMUM_RESULTS,
   );
+});
+
+test("merged protocol edge samples are sorted and deduplicated", () => {
+  assert.deepEqual(mergeSortedSamples([10, 30, 50], [20, 30, 60]), [10, 20, 30, 50, 60]);
+  assert.deepEqual(mergeSortedSamples([], [20]), [20]);
+});
+
+test("nearest protocol marker edge uses binary-search neighbors", () => {
+  assert.equal(nearestSortedSample([10, 30, 50], 26), 30);
+  assert.equal(nearestSortedSample([10, 30, 50], 41), 50);
+  assert.equal(nearestSortedSample([], 41), null);
 });

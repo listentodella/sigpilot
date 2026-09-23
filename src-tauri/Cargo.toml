@@ -17,6 +17,7 @@ pxlogic-file = { path = "../crates/pxlogic-file" }
 pxlogic-graph = { path = "../crates/pxlogic-graph" }
 pxlogic-waveform = { path = "../crates/pxlogic-waveform" }
 parking_lot.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true

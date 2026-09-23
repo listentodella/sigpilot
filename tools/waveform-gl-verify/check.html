@@ -1,0 +1,212 @@
+<!doctype html>
+<html data-page-node-id="XUhz5GmkxZgZZ7F9Q1Cfkm">
+<body data-page-node-id="8BECCDiEh3VxIu2yvT6EsA">
+<pre id="out" data-page-node-id="yTNT6JEwZk1bCrlc1qyd6E">pending</pre>
+<script type="module">
+const responses = [];
+// `?fallback=1` forces the software path so the canvas2d renderer is exercised
+// too. It has to be installed before the worker module is imported, because the
+// renderer is chosen and cached on first use.
+const forcedFallback = new URLSearchParams(location.search).has("fallback");
+if (forcedFallback) {
+  const original = OffscreenCanvas.prototype.getContext;
+  OffscreenCanvas.prototype.getContext = function (type, ...rest) {
+    if (type === "webgl2") return null;
+    return original.call(this, type, ...rest);
+  };
+}
+// The worker module talks to the worker global scope. In a page we shim `self`
+// so the real production module can be exercised unmodified.
+globalThis.self = {
+  onmessage: null,
+  postMessage(message) {
+    responses.push(message);
+  },
+};
+
+const lines = [];
+const log = (text) => lines.push(text);
+
+try {
+  const mod = await import("./dist/entry.js");
+
+  const tileSamples = 10000;
+  const samplesPerPixel = 100;
+  const binCount = tileSamples / samplesPerPixel;
+  const packed = new Uint8Array(binCount * 16);
+  const view = new DataView(packed.buffer);
+  // bins 0..24 low, bin 25 a dense low->high transition, bins 26..74 high,
+  // bins 75..99 low. bin 75 therefore also emits a plain transition quad.
+  for (let bin = 0; bin < binCount; bin += 1) {
+    let flags;
+    if (bin === 25) flags = 2 | 4 | 8;
+    else if (bin > 25 && bin < 75) flags = 1 | 2 | 4;
+    else flags = 8;
+    view.setUint32(bin * 16, flags, true);
+    view.setUint32(bin * 16 + 4, 0, true);
+    view.setUint32(bin * 16 + 8, 0xffffffff, true);
+    view.setUint32(bin * 16 + 12, 0xffffffff, true);
+  }
+
+  const layout = mod.getSaleaeGraphChannelLayout([100], 1, 1, [])[0];
+  const gutter = Math.min(8, Math.max(0, (layout.height - 2) / 2));
+  const highY = layout.top + gutter + 0.5;
+  const lowY = highY + Math.max(1, Math.round(layout.height - 2 * gutter)) - 1;
+  log(`mode=${forcedFallback ? "canvas2d-fallback" : "webgl2"}`);
+  log(`expected highY=${highY} lowY=${lowY}`);
+
+  function readColumn(bitmap, x) {
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0);
+    const data = ctx.getImageData(x, 0, 1, bitmap.height).data;
+    const rows = [];
+    for (let y = 0; y < bitmap.height; y += 1) {
+      const alpha = data[y * 4 + 3];
+      if (alpha > 4) rows.push(`${y}:${alpha}`);
+    }
+    return rows;
+  }
+
+  const describe = (rows) => {
+    if (rows.length === 0) return "none";
+    const band = rows.filter((row) => Number(row.split(":")[0]) > 2);
+    if (band.length === 0) return "separator-only " + rows.join(" ");
+    const first = Number(band[0].split(":")[0]);
+    const last = Number(band[band.length - 1].split(":")[0]);
+    const alphas = [...new Set(band.map((row) => row.split(":")[1]))];
+    return `rows ${first}..${last} (${band.length}px) alpha=${alphas.join("/")}`;
+  };
+
+  globalThis.self.onmessage({
+    data: {
+      type: "render",
+      id: 1,
+      width: 200,
+      height: 100,
+      dpr: 1,
+      rowHeights: [100],
+      rowTopInsets: [],
+      matchChannelColors: false,
+      tileStart: 0,
+      tileSamples,
+      samplesPerPixel,
+      packedBins: packed,
+      channels: [{ binCount, binOffset: 0, bins: null, channel: 0, hasExactSegments: false }],
+    },
+  });
+  const tile = responses.shift();
+  log(`tile kind=${tile.kind} size=${tile.bitmap.width}x${tile.bitmap.height}`);
+  log(`  x=10  level-low      -> ${describe(readColumn(tile.bitmap, 10))}`);
+  log(`  x=51  dense fill     -> ${describe(readColumn(tile.bitmap, 51))}`);
+  log(`  x=100 level-high     -> ${describe(readColumn(tile.bitmap, 100))}`);
+  log(`  x=149 antialias edge -> ${describe(readColumn(tile.bitmap, 149))}`);
+  log(`  x=150 transition     -> ${describe(readColumn(tile.bitmap, 150))}`);
+  log(`  x=151 antialias edge -> ${describe(readColumn(tile.bitmap, 151))}`);
+
+  globalThis.self.onmessage({
+    data: {
+      type: "transform",
+      id: 2,
+      width: 200,
+      height: 100,
+      dpr: 1,
+      rowHeights: [100],
+      rowTopInsets: [],
+      matchChannelColors: false,
+      viewStart: 5000,
+      viewSamples: 5000,
+    },
+  });
+  const zoom = responses.shift();
+  log(`transform kind=${zoom.kind} id=${zoom.id}`);
+  log(`  x=50  level-low  -> ${describe(readColumn(zoom.bitmap, 50))}`);
+  log(`  x=150 level-high -> ${describe(readColumn(zoom.bitmap, 150))}`);
+
+  globalThis.self.onmessage({
+    data: {
+      type: "transform",
+      id: 3,
+      width: 200,
+      height: 100,
+      dpr: 1,
+      rowHeights: [100],
+      rowTopInsets: [],
+      matchChannelColors: true,
+      viewStart: 0,
+      viewSamples: 10000,
+    },
+  });
+  const colored = responses.shift();
+  const coloredCanvas = document.createElement("canvas");
+  coloredCanvas.width = 200;
+  coloredCanvas.height = 100;
+  const coloredCtx = coloredCanvas.getContext("2d");
+  coloredCtx.drawImage(colored.bitmap, 0, 0);
+  const sample = coloredCtx.getImageData(100, 8, 1, 1).data;
+  log(`transform channel colour -> rgba(${sample[0]},${sample[1]},${sample[2]},${sample[3]})`);
+
+  // --- a busy region must read as one solid block, not a striped one --------
+  // Every bin carries both levels, which is what a signal faster than a pixel
+  // looks like. Each bin boundary used to draw a full-opacity riser on top of
+  // the fill, so a dense region came out striped instead of solid.
+  const busyBins = 100;
+  const busyPacked = new Uint8Array(busyBins * 16);
+  const busyView = new DataView(busyPacked.buffer);
+  for (let bin = 0; bin < busyBins; bin += 1) {
+    // first=high, last=low on every bin: dense (both levels present) and a
+    // level change at every single boundary, so the old rule drew a riser
+    // between every pair of bins.
+    busyView.setUint32(bin * 16, 1 | 4 | 8, true);
+    busyView.setUint32(bin * 16 + 4, 3, true);
+    busyView.setUint32(bin * 16 + 8, 0xffffffff, true);
+    busyView.setUint32(bin * 16 + 12, 0xffffffff, true);
+  }
+  globalThis.self.onmessage({
+    data: {
+      type: "render",
+      id: 9,
+      width: 200,
+      height: 100,
+      dpr: 1,
+      rowHeights: [100],
+      rowTopInsets: [],
+      matchChannelColors: false,
+      tileStart: 0,
+      tileSamples: 100 * 100,
+      samplesPerPixel: 100,
+      packedBins: busyPacked,
+      channels: [{ binCount: busyBins, binOffset: 0, bins: null, channel: 0, hasExactSegments: false }],
+    },
+  });
+  const busy = responses.shift();
+  const busyCanvas = document.createElement("canvas");
+  busyCanvas.width = busy.bitmap.width;
+  busyCanvas.height = busy.bitmap.height;
+  const busyCtx = busyCanvas.getContext("2d");
+  busyCtx.drawImage(busy.bitmap, 0, 0);
+  const busyData = busyCtx.getImageData(0, 0, busyCanvas.width, busyCanvas.height).data;
+  const columnInk = (x) => {
+    let total = 0;
+    for (let y = 0; y < busyCanvas.height; y += 1) total += busyData[(y * busyCanvas.width + x) * 4 + 3];
+    return total;
+  };
+  // Sample the interior, away from the lane's own top and bottom edges.
+  const columns = [];
+  for (let x = 20; x < 180; x += 1) columns.push(columnInk(x));
+  const minimum = Math.min(...columns);
+  const maximum = Math.max(...columns);
+  const spread = maximum - minimum;
+  log(`busy region column ink min=${minimum} max=${maximum} spread=${spread}`);
+  log(`  -> ${spread <= 2 ? "uniform block" : "STRIPED (risers drawn per bin)"}`);
+
+  log(`stray responses=${responses.length}`);
+} catch (error) {
+  log(`THREW ${error && error.stack ? error.stack : error}`);
+}
+document.getElementById("out").textContent = lines.join("\n");
+</script>
+</body>
+</html>

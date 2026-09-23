@@ -1,7 +1,9 @@
 import { PointerEvent, useEffect, useRef, useState } from "react";
+import { useSessionViewport } from "../lib/useSessionViewport";
 
 interface StripChartScrollbarProps {
   onViewportStartChange: (startSample: number) => void;
+  sessionId?: string;
   totalSamples: number;
   viewportSamples: number;
   viewportStart: number;
@@ -58,6 +60,7 @@ export function stripChartPixelToSample(
 
 export function StripChartScrollbar({
   onViewportStartChange,
+  sessionId,
   totalSamples,
   viewportSamples,
   viewportStart,
@@ -67,7 +70,14 @@ export function StripChartScrollbar({
   const animationFrameRef = useRef<number | null>(null);
   const [trackWidthPx, setTrackWidthPx] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
-  const geometry = stripChartScrollbarGeometry(totalSamples, viewportStart, viewportSamples, trackWidthPx);
+  // The thumb follows the live viewport so it never lags a pan or zoom.
+  const viewport = useSessionViewport(sessionId, viewportStart, viewportSamples);
+  const geometry = stripChartScrollbarGeometry(
+    totalSamples,
+    viewport.start,
+    viewport.samples,
+    trackWidthPx,
+  );
 
   useEffect(() => {
     const track = trackRef.current;
@@ -90,7 +100,7 @@ export function StripChartScrollbar({
     return stripChartPixelToSample(
       leftPx,
       totalSamples,
-      viewportSamples,
+      viewport.samples,
       trackWidthPx,
       geometry.barWidthPx,
     );
@@ -98,7 +108,7 @@ export function StripChartScrollbar({
 
   function animatePan(targetStart: number) {
     cancelPanAnimation();
-    const initialStart = viewportStart;
+    const initialStart = viewport.start;
     const delta = targetStart - initialStart;
     if (Math.abs(delta) < 1) {
       onViewportStartChange(targetStart);
@@ -136,9 +146,9 @@ export function StripChartScrollbar({
     <div
       aria-label="Capture horizontal scroll"
       aria-orientation="horizontal"
-      aria-valuemax={Math.max(0, totalSamples - viewportSamples)}
+      aria-valuemax={Math.max(0, totalSamples - viewport.samples)}
       aria-valuemin={0}
-      aria-valuenow={Math.round(viewportStart)}
+      aria-valuenow={Math.round(viewport.start)}
       className="stripChartScrollBar"
       onPointerDown={(event) => {
         if (event.button !== 0) return;

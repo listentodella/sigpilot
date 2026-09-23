@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useSessionViewport } from "../lib/useSessionViewport";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
@@ -15,6 +16,7 @@ import {
 interface TimingDisplayCanvasProps {
   graphWidthPx: number;
   sampleRateHz: number;
+  sessionId?: string;
   timeOriginSample?: number;
   viewportSamples: number;
   viewportStart: number;
@@ -27,13 +29,23 @@ const timingGraphInsetLeftPx = SALEAE_ROW_V2_CONTAINER_PADDING_PX + SALEAE_ROW_V
 export function TimingDisplayCanvas({
   graphWidthPx,
   sampleRateHz,
+  sessionId,
   timeOriginSample = 0,
   viewportSamples,
   viewportStart,
 }: TimingDisplayCanvasProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const timingRef = useRef({ graphWidthPx, sampleRateHz, timeOriginSample, viewportSamples, viewportStart });
+  // The ruler has to stay locked to the waveform during a gesture, so it reads
+  // the live viewport directly instead of waiting for the workbench to re-render.
+  const viewport = useSessionViewport(sessionId, viewportStart, viewportSamples);
+  const timingRef = useRef({
+    graphWidthPx,
+    sampleRateHz,
+    timeOriginSample,
+    viewportSamples: viewport.samples,
+    viewportStart: viewport.start,
+  });
 
   useEffect(() => {
     const host = hostRef.current;
@@ -63,10 +75,25 @@ export function TimingDisplayCanvas({
   }, []);
 
   useEffect(() => {
-    timingRef.current = { graphWidthPx, sampleRateHz, timeOriginSample, viewportSamples, viewportStart };
+    timingRef.current = {
+      graphWidthPx,
+      sampleRateHz,
+      timeOriginSample,
+      viewportSamples: viewport.samples,
+      viewportStart: viewport.start,
+    };
     const canvas = canvasRef.current;
-    if (canvas) drawTimingDisplay(canvas, viewportStart, viewportSamples, sampleRateHz, graphWidthPx, timeOriginSample);
-  }, [graphWidthPx, sampleRateHz, timeOriginSample, viewportSamples, viewportStart]);
+    if (canvas) {
+      drawTimingDisplay(
+        canvas,
+        viewport.start,
+        viewport.samples,
+        sampleRateHz,
+        graphWidthPx,
+        timeOriginSample,
+      );
+    }
+  }, [graphWidthPx, sampleRateHz, timeOriginSample, viewport.samples, viewport.start]);
 
   return (
     <div className="timingDisplayCanvasHost" ref={hostRef}>

@@ -69,9 +69,11 @@ elif [[ "$HOST_OS" == "Darwin" ]]; then
 else
   CXX_COMMAND=(c++)
 fi
+PXLOGIC_SALEAE_SIDECAR_OPT_LEVEL="${PXLOGIC_SALEAE_SIDECAR_OPT_LEVEL:--O3}"
 COMMON_FLAGS=(
   -std=c++17
-  -O2
+  "$PXLOGIC_SALEAE_SIDECAR_OPT_LEVEL"
+  -DNDEBUG
   -I"$RUNTIME_SOURCE_DIR/include"
   -I"$JSON_DIR/single_include"
 )
@@ -138,5 +140,22 @@ case "$HOST_OS" in
     done
     ;;
 esac
+
+CANONICAL_BUILD_DIR="$ROOT_DIR/target/native/saleae-analyzer-sidecar"
+if [[ "$BUILD_DIR" != "$CANONICAL_BUILD_DIR" ]]; then
+  rm -rf "$CANONICAL_BUILD_DIR"
+  mkdir -p "$CANONICAL_BUILD_DIR"
+  cp "$BUILD_DIR/$EXECUTABLE_NAME" "$CANONICAL_BUILD_DIR/"
+  if [[ -d "$BUILD_DIR/runtime" ]]; then
+    cp -R "$BUILD_DIR/runtime" "$CANONICAL_BUILD_DIR/"
+  fi
+  case "$HOST_OS" in
+    MINGW*|MSYS*|CYGWIN*)
+      while IFS= read -r dependency; do
+        cp "$dependency" "$CANONICAL_BUILD_DIR/"
+      done < <(find "$BUILD_DIR" -maxdepth 1 -type f -iname '*.dll' -print)
+      ;;
+  esac
+fi
 
 printf '%s\n' "$BUILD_DIR/$EXECUTABLE_NAME"

@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { nearestDigitalTransition, type WaveformTile } from "../../lib/api";
+import { useSessionViewport } from "../../lib/useSessionViewport";
 import { resolveWaveformPointerSample } from "../../lib/waveformEdgeSnap";
 import {
   getNextTimingMarkerNumber,
@@ -91,9 +92,14 @@ export function TimingMarkersOverlay({
   sessionId,
   tile,
   totalSamples,
-  viewportSamples,
-  viewportStart,
+  viewportSamples: viewportSamplesProp,
+  viewportStart: viewportStartProp,
 }: TimingMarkersOverlayProps) {
+  // Markers are anchored to samples, so they must track the live viewport to stay
+  // pinned to the waveform while it is being panned or zoomed.
+  const liveViewport = useSessionViewport(sessionId, viewportStartProp, viewportSamplesProp);
+  const viewportSamples = liveViewport.samples;
+  const viewportStart = liveViewport.start;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const lastPlacementPointerRef = useRef<{ x: number; y: number } | null>(null);

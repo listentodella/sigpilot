@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findNearestEdgeSample, resolveWaveformPointerSample } from "../src/lib/waveformEdgeSnap.ts";
+import {
+  findNearestEdgeSample,
+  findNearestMergedEdgeSample,
+  resolveWaveformPointerSample,
+} from "../src/lib/waveformEdgeSnap.ts";
 
 test("edge snapping respects the pixel threshold", () => {
   assert.equal(findNearestEdgeSample([200, 600], 210, 10, 10, false), 200);
@@ -25,6 +29,16 @@ test("empty exact edge data cannot produce a timing marker snap", () => {
 
 test("edge snapping includes the configured pixel threshold", () => {
   assert.equal(findNearestEdgeSample([200], 280, 10, 8, false), 200);
+});
+
+test("edge snapping handles merged rising and falling edge lists without sorting", () => {
+  assert.equal(findNearestMergedEdgeSample([100, 500], [240, 800], 245, 10, 8, false), 240);
+  assert.equal(findNearestMergedEdgeSample([100, 500], [240, 800], 370, 10, 8, false), null);
+});
+
+test("merged edge snapping rejects crowded edge pairs across edge lists", () => {
+  assert.equal(findNearestMergedEdgeSample([200], [250], 200, 10, 8, true), null);
+  assert.equal(findNearestMergedEdgeSample([150, 400], [200], 200, 10, 8, true), 200);
 });
 
 test("waveform pointer snapping can stay fixed to the range start channel", () => {

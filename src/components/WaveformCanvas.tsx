@@ -1,22 +1,35 @@
 import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useState } from "react";
 import { measureDigitalPoint, type WaveformTile } from "../lib/api";
-import {
-  normalizeCaptureViewport,
-  normalizeLiveCaptureViewport,
-} from "../lib/captureViewport";
-import {
-  findSaleaeGraphChannelIndexAtY,
-  getSaleaeGraphChannelLayout,
-} from "../lib/saleaeGraphLayout";
+import { normalizeCaptureViewport, normalizeLiveCaptureViewport } from "../lib/captureViewport";
+import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "../lib/saleaeGraphLayout";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
+import { wheelZoomFactor } from "../lib/wheelZoom";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
   SALEAE_DARK_GRIDLINE_PRIMARY,
   SALEAE_DARK_GRIDLINE_SECONDARY,
 } from "../lib/saleaeTimingDisplay";
-import { findNearestEdgeSample } from "../lib/waveformEdgeSnap";
-import { waveformTileRequiresDirectDraw } from "../lib/waveformTileCoverage";
+import {
+  rasterMagnification,
+  rasterOverlapsViewport,
+  rasterServesViewport,
+  waveformTileRequiresDirectDraw,
+} from "../lib/waveformTileCoverage";
+import { clearSessionViewport, writeSessionViewport } from "../lib/viewportStore";
+import { dispatchSessionViewIntent } from "../lib/frameStore";
+import { useSessionFrameState } from "../lib/useFrameState";
+import { recordWaveformDraw } from "../lib/waveformDrawProbe";
+import {
+  packedDigitalBinBytes,
+  requestViewportRaster,
+  requestWaveLayerRender,
+  sameNumberArray,
+  startViewportWorkerRequest,
+  startWaveLayerWorkerRequest,
+  type WaveLayerWorkerRef,
+  type WaveLayerWorkerState,
+} from "../lib/waveLayerWorker";
 
 interface WaveformCanvasProps {
   isLive?: boolean;
@@ -33,12 +46,7 @@ interface WaveformCanvasProps {
   totalSamples: number;
   viewportStart: number;
   viewportSamples: number;
-  onOpenContextMenu?: (event: {
-    channelIndex: number;
-    clientX: number;
-    clientY: number;
-    sample: number;
-  }) => void;
+  onOpenContextMenu?: (event: { channelIndex: number; clientX: number; clientY: number; sample: number }) => void;
   onPointerPositionChange?: (xRatio: number) => void;
   onViewportChange: (start: number, samples: number) => void;
   onViewportInteractionChange?: (active: boolean) => void;
@@ -57,12 +65,16 @@ const digitalGraphLabelHeightPx = 16;
 const digitalMeasurementBoxMinWidthPx = 110;
 const panningAnimationDurationMs = 300;
 const liveViewportInterpolationMs = 55;
-const packedDigitalBinBytes = 16;
+// React is told about the viewport at most this often while a gesture is in
+// flight. Every notification re-renders the whole workbench, and the tile
+// pipeline it feeds is rate limited to roughly 40 Hz anyway, so notifying any
+// faster only spends main-thread time that the waveform draw needs.
+const viewportNotifyIntervalMs = 33;
 const packedDigitalBinCache = new WeakMap<object, DataView>();
 const digitalEdgeCache = new WeakMap<object, DigitalEdge[]>();
 
 interface WaveLayerCache {
-  canvas: HTMLCanvasElement;
+  canvas: HTMLCanvasElement | ImageBitmap;
   height: number;
   matchChannelColors: boolean;
   rowHeights: number[];
@@ -73,6 +85,26 @@ interface WaveLayerCache {
 
 interface WaveLayerCacheRef {
   current: WaveLayerCache | null;
+}
+
+// A viewport raster is re-rasterised by the worker from the retained bins at the
+// scale the user is actually looking at. Because it is produced on the GPU and
+// off the main thread, zooming no longer needs a synchronous canvas2d render and
+// no longer magnifies the stroke width of a stretched tile raster.
+interface ViewportLayerCache {
+  canvas: ImageBitmap;
+  height: number;
+  matchChannelColors: boolean;
+  rowHeights: number[];
+  rowTopInsets: number[];
+  samples: number;
+  start: number;
+  tile: WaveformTile;
+  width: number;
+}
+
+interface ViewportLayerCacheRef {
+  current: ViewportLayerCache | null;
 }
 
 type EdgeKind = "rising" | "falling";
@@ -122,7 +154,7 @@ export function WaveformCanvas({
   sessionId,
   rowHeights,
   rowTopInsets = [],
-  tile,
+  tile: tileProp,
   onWidthChange,
   matchChannelColors = true,
   maximumViewportSamples,
@@ -130,21 +162,43 @@ export function WaveformCanvas({
   timeOriginSample = 0,
   showInteractiveMeasurement = true,
   totalSamples,
-  viewportStart,
-  viewportSamples,
+  viewportStart: viewportStartProp,
+  viewportSamples: viewportSamplesProp,
   onOpenContextMenu,
   onPointerPositionChange,
   onViewportChange,
   onViewportInteractionChange,
 }: WaveformCanvasProps) {
+  // Once the workbench has wired this session into the backend frame loop, the
+  // backend owns both the viewport and the data. Everything below then draws what
+  // the loop hands over rather than the props the workbench last rendered with,
+  // which is what keeps a pan or zoom frame from going through a React render.
+  const frameState = useSessionFrameState(sessionId);
+  const live = frameState?.ready ? frameState : null;
+  const backendDriven = live !== null;
+  const tile = live?.tile ?? tileProp;
+  const viewportStart = live?.view.start_sample ?? viewportStartProp;
+  const viewportSamples = live?.view.samples ?? viewportSamplesProp;
   const hostRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const waveLayerCacheRef = useRef<WaveLayerCache | null>(null);
+  const viewportLayerCacheRef = useRef<ViewportLayerCache | null>(null);
+  const waveLayerWorkerRef = useRef<WaveLayerWorkerState | null>(null);
+  // The tile the worker currently holds bins for. A viewport render is only
+  // valid when this still matches the tile being drawn, otherwise the worker
+  // would re-rasterise the wrong capture range.
+  const workerTileRef = useRef<WaveformTile | null>(null);
   const dragRef = useRef<{ x: number; start: number; samples: number } | null>(null);
   const tileRef = useRef<WaveformTile | null>(null);
-  const viewportRef = useRef({ start: viewportStart, samples: viewportSamples });
-  const viewportPropsRef = useRef({ start: viewportStart, samples: viewportSamples });
+  const viewportRef = useRef({
+    start: viewportStart,
+    samples: viewportSamples,
+  });
+  const viewportPropsRef = useRef({
+    start: viewportStart,
+    samples: viewportSamples,
+  });
   const sampleRateRef = useRef(sampleRateHz);
   const sessionIdRef = useRef(sessionId);
   const isLiveRef = useRef(isLive);
@@ -169,6 +223,7 @@ export function WaveformCanvas({
   const matchChannelColorsRef = useRef(matchChannelColors);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
+  const lastViewportNotifyAtRef = useRef(Number.NEGATIVE_INFINITY);
   const viewportFrameRef = useRef<number | null>(null);
   const drawFrameRef = useRef<number | null>(null);
   const animatedViewportFrameRef = useRef<number | null>(null);
@@ -202,10 +257,131 @@ export function WaveformCanvas({
   }, []);
 
   useEffect(() => {
+    if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined") return;
+    const worker = new Worker(new URL("../workers/waveformRenderer.worker.ts", import.meta.url), { type: "module" });
+    const state: WaveLayerWorkerState = {
+      active: null,
+      failed: false,
+      nextId: 1,
+      queued: null,
+      viewportActive: null,
+      viewportQueued: null,
+      worker,
+    };
+    waveLayerWorkerRef.current = state;
+    worker.onmessage = (
+      event: MessageEvent<
+        | { type: "rendered"; kind: "tile" | "viewport"; id: number; bitmap: ImageBitmap }
+        | { type: "renderError"; kind: "tile" | "viewport"; id: number; message: string }
+      >,
+    ) => {
+      const current = waveLayerWorkerRef.current;
+      if (!current) {
+        if (event.data.type === "rendered") event.data.bitmap?.close();
+        return;
+      }
+      if (event.data.type === "renderError") {
+        // A viewport render can race ahead of the tile that carries its bins.
+        // That is expected during startup and needs no user-visible reaction.
+        if (event.data.kind === "tile") {
+          console.error("Waveform renderer worker failed", event.data.message);
+          current.failed = true;
+          current.active = null;
+          current.queued = null;
+          workerTileRef.current = null;
+          scheduleDraw();
+          return;
+        }
+        // Release the viewport slot so the newest request can take over.
+        current.viewportActive = null;
+        const pendingViewport = current.viewportQueued;
+        current.viewportQueued = null;
+        if (pendingViewport) startViewportWorkerRequest(current, pendingViewport);
+        return;
+      }
+      const response = event.data;
+      if (response.kind === "viewport") {
+        const request = current.viewportActive;
+        if (!request || response.id !== request.id) {
+          response.bitmap.close();
+          return;
+        }
+        closeViewportLayerCache(viewportLayerCacheRef.current);
+        viewportLayerCacheRef.current = {
+          canvas: response.bitmap,
+          height: request.height,
+          matchChannelColors: request.matchChannelColors,
+          rowHeights: request.rowHeights,
+          rowTopInsets: request.rowTopInsets,
+          samples: request.viewSamples,
+          start: request.viewStart,
+          tile: request.tile,
+          width: request.width,
+        };
+        current.viewportActive = null;
+        const queued = current.viewportQueued;
+        current.viewportQueued = null;
+        if (queued) startViewportWorkerRequest(current, queued);
+        scheduleDraw();
+        return;
+      }
+      const request = current.active;
+      if (!request || response.id !== request.id) {
+        response.bitmap.close();
+        return;
+      }
+      closeWaveLayerCache(waveLayerCacheRef.current);
+      waveLayerCacheRef.current = {
+        canvas: response.bitmap,
+        height: request.height,
+        matchChannelColors: request.matchChannelColors,
+        rowHeights: request.rowHeights,
+        rowTopInsets: request.rowTopInsets,
+        tile: request.tile,
+        width: request.width,
+      };
+      workerTileRef.current = request.tile;
+      current.active = null;
+      const queued = current.queued;
+      current.queued = null;
+      if (queued) startWaveLayerWorkerRequest(current, queued);
+      scheduleDraw();
+    };
+    worker.onerror = (event) => {
+      console.error("Waveform renderer worker failed", event.message);
+      state.failed = true;
+      state.active = null;
+      state.queued = null;
+      state.viewportActive = null;
+      state.viewportQueued = null;
+      workerTileRef.current = null;
+      scheduleDraw();
+    };
+    worker.onmessageerror = () => {
+      console.error("Waveform renderer worker returned an unreadable response");
+      state.failed = true;
+      state.active = null;
+      state.queued = null;
+      state.viewportActive = null;
+      state.viewportQueued = null;
+      workerTileRef.current = null;
+      scheduleDraw();
+    };
+    return () => {
+      worker.terminate();
+      if (waveLayerWorkerRef.current === state) waveLayerWorkerRef.current = null;
+      closeWaveLayerCache(waveLayerCacheRef.current);
+      waveLayerCacheRef.current = null;
+      closeViewportLayerCache(viewportLayerCacheRef.current);
+      viewportLayerCacheRef.current = null;
+      workerTileRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     const tileChanged = tileRef.current !== tile;
     const viewportChanged =
-      viewportPropsRef.current.start !== viewportStart ||
-      viewportPropsRef.current.samples !== viewportSamples;
+      viewportPropsRef.current.start !== viewportStart || viewportPropsRef.current.samples !== viewportSamples;
     const visualViewportChanged =
       viewportRef.current.start !== viewportStart || viewportRef.current.samples !== viewportSamples;
     const graphLayoutChanged =
@@ -218,18 +394,46 @@ export function WaveformCanvas({
 
     tileRef.current = tile;
     maximumViewportSamplesRef.current = maximumViewportSamples;
-    viewportPropsRef.current = { start: viewportStart, samples: viewportSamples };
-    if (!isLive) {
+    viewportPropsRef.current = {
+      start: viewportStart,
+      samples: viewportSamples,
+    };
+    // Programmatic viewport changes (zoom to fit, jump to edge, scrollbar drag)
+    // still publish through the store so subscribers stay consistent. The canvas
+    // is the only writer: during a gesture or a live-capture interpolation it is
+    // already publishing frame-accurate values, and the props lag behind, so
+    // writing them back here would only push a stale value.
+    if (
+      backendDriven ||
+      (!viewportInteractionActiveRef.current && liveViewportFrameRef.current === null)
+    ) {
+      writeSessionViewport(sessionId, viewportStart, viewportSamples);
+    }
+    if (backendDriven) {
+      // The loop is the only thing that moves the viewport here, and it has
+      // already published it. Mirroring the props would fight it.
       cancelLiveViewportAnimation();
+      cancelViewportAnimation();
       if (visualViewportChanged) {
         viewportRef.current = { start: viewportStart, samples: viewportSamples };
+      }
+    } else if (!isLive) {
+      cancelLiveViewportAnimation();
+      if (visualViewportChanged) {
+        viewportRef.current = {
+          start: viewportStart,
+          samples: viewportSamples,
+        };
       }
     } else if (viewportChanged && visualViewportChanged) {
       if (!dragRef.current) {
         animateLiveViewportTo(viewportStart, viewportSamples);
       } else {
         cancelLiveViewportAnimation();
-        viewportRef.current = { start: viewportStart, samples: viewportSamples };
+        viewportRef.current = {
+          start: viewportStart,
+          samples: viewportSamples,
+        };
       }
     }
     sampleRateRef.current = sampleRateHz;
@@ -243,10 +447,7 @@ export function WaveformCanvas({
     if (!showInteractiveMeasurement) cancelHoverMeasurementRequest();
     if (tileChanged && edgeJumpRef.current && hostRef.current) {
       const rect = hostRef.current.getBoundingClientRect();
-      updateEdgeJumpAt(
-        rect.left + edgeJumpRef.current.pointerX,
-        rect.top + edgeJumpRef.current.pointerY,
-      );
+      updateEdgeJumpAt(rect.left + edgeJumpRef.current.pointerX, rect.top + edgeJumpRef.current.pointerY);
     }
     if (
       tileChanged ||
@@ -257,7 +458,22 @@ export function WaveformCanvas({
     ) {
       scheduleDraw();
     }
-  }, [isLive, matchChannelColors, maximumViewportSamples, rowHeights, rowTopInsets, sampleRateHz, showInteractiveMeasurement, tile, timeOriginSample, totalSamples, viewportSamples, viewportStart]);
+  }, [
+    backendDriven,
+    isLive,
+    matchChannelColors,
+    maximumViewportSamples,
+    rowHeights,
+    rowTopInsets,
+    sampleRateHz,
+    sessionId,
+    showInteractiveMeasurement,
+    tile,
+    timeOriginSample,
+    totalSamples,
+    viewportSamples,
+    viewportStart,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -274,6 +490,7 @@ export function WaveformCanvas({
       }
       cancelHoverMeasurementRequest();
       setViewportInteractionActive(false);
+      clearSessionViewport(sessionIdRef.current);
     };
   }, []);
 
@@ -298,6 +515,9 @@ export function WaveformCanvas({
       rowTopInsetsRef.current,
       matchChannelColorsRef.current,
       waveLayerCacheRef,
+      viewportLayerCacheRef,
+      waveLayerWorkerRef,
+      workerTileRef,
     );
     drawMeasurementOverlay(
       measurementCanvas,
@@ -321,6 +541,16 @@ export function WaveformCanvas({
   }
 
   function clampViewport(start: number, samples: number) {
+    if (backendDriven) {
+      // The backend clamps and answers with the authoritative viewport; the
+      // frontend no longer keeps a second opinion.
+      dispatchSessionViewIntent(sessionIdRef.current, {
+        kind: "set",
+        samples,
+        start_sample: start,
+      });
+      return;
+    }
     const next = normalizeViewport(
       start,
       samples,
@@ -332,20 +562,57 @@ export function WaveformCanvas({
     scheduleViewportChange(next.start, next.samples);
   }
 
+  function notifyViewportProps(start: number, samples: number) {
+    lastViewportNotifyAtRef.current = performance.now();
+    onViewportChangeRef.current(start, samples);
+  }
+
+  function flushViewportNotificationFrame() {
+    viewportFrameRef.current = null;
+    const next = pendingViewportRef.current;
+    pendingViewportRef.current = null;
+    if (!next) return;
+    if (
+      viewportInteractionActiveRef.current &&
+      performance.now() - lastViewportNotifyAtRef.current < viewportNotifyIntervalMs
+    ) {
+      // Keep the newest value queued and re-arm. The trailing position is never
+      // dropped, it only waits for a slice React can act on.
+      pendingViewportRef.current = next;
+      viewportFrameRef.current = requestAnimationFrame(flushViewportNotificationFrame);
+      return;
+    }
+    notifyViewportProps(next.start, next.samples);
+  }
+
+  // A gesture ending is the one moment the parent must hear about immediately:
+  // it is the position that gets persisted and used for the final tile fetch.
+  function flushViewportNotificationNow() {
+    if (viewportFrameRef.current !== null) {
+      cancelAnimationFrame(viewportFrameRef.current);
+      viewportFrameRef.current = null;
+    }
+    const next = pendingViewportRef.current;
+    pendingViewportRef.current = null;
+    if (next) notifyViewportProps(next.start, next.samples);
+  }
+
   function scheduleViewportChange(start: number, samples: number) {
     cancelLiveViewportAnimation();
     viewportRef.current = { start, samples };
+    // Published synchronously so every out-of-band consumer sees the live
+    // viewport without waiting for a React render.
+    writeSessionViewport(sessionIdRef.current, start, samples);
     scheduleDraw();
     syncNavigationToViewport(start, samples);
 
+    // Backend-driven sessions already have an authoritative viewport on every
+    // frame, so echoing this one back to the workbench would only add renders.
+    if (backendDriven) return;
+
     pendingViewportRef.current = { start, samples };
     if (viewportFrameRef.current !== null) return;
-    viewportFrameRef.current = requestAnimationFrame(() => {
-      viewportFrameRef.current = null;
-      const next = pendingViewportRef.current;
-      pendingViewportRef.current = null;
-      if (next) onViewportChangeRef.current(next.start, next.samples);
-    });
+    viewportFrameRef.current = requestAnimationFrame(flushViewportNotificationFrame);
   }
 
   function animateLiveViewportTo(start: number, samples: number) {
@@ -361,6 +628,11 @@ export function WaveformCanvas({
         start: initial.start + startDelta * progress,
         samples: initial.samples + samplesDelta * progress,
       };
+      writeSessionViewport(
+        sessionIdRef.current,
+        viewportRef.current.start,
+        viewportRef.current.samples,
+      );
       scheduleDraw();
       if (progress < 1) {
         liveViewportFrameRef.current = requestAnimationFrame(step);
@@ -381,6 +653,17 @@ export function WaveformCanvas({
 
   function animateViewportTo(start: number, samples: number) {
     cancelViewportAnimation();
+    if (backendDriven) {
+      // The glide runs on the backend, which also owns the curve, so the two
+      // ends cannot drift apart the way a frontend animation would.
+      dispatchSessionViewIntent(sessionIdRef.current, {
+        duration_ms: panningAnimationDurationMs,
+        kind: "animate_to",
+        samples,
+        start_sample: start,
+      });
+      return;
+    }
     const target = normalizeViewport(
       start,
       samples,
@@ -431,9 +714,7 @@ export function WaveformCanvas({
       tileRef.current?.channels.length ?? 0,
       1,
       rowTopInsetsRef.current,
-    )[
-      currentNavigation.channelIndex
-    ];
+    )[currentNavigation.channelIndex];
     if (!channelLayout) return;
     setNavigation(
       findChannelNavigation(
@@ -486,14 +767,33 @@ export function WaveformCanvas({
     if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY) * 1.2) {
       const deltaPixels = normalizeWheelDelta(event.deltaX || event.deltaY, event.deltaMode);
       const deltaSamples = (deltaPixels / Math.max(1, rect.width)) * current.samples;
-      clampViewport(current.start + deltaSamples, current.samples);
+      if (backendDriven) {
+        dispatchSessionViewIntent(sessionIdRef.current, {
+          delta_samples: deltaSamples,
+          kind: "pan_samples",
+        });
+      } else {
+        clampViewport(current.start + deltaSamples, current.samples);
+      }
       if (edgeJumpRef.current) updateEdgeJumpAt(event.clientX, event.clientY);
       return;
     }
 
     const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
-    const intensity = event.ctrlKey || event.metaKey || event.altKey ? 0.003 : 0.0015;
-    const factor = Math.exp(Math.max(-800, Math.min(800, delta)) * intensity);
+    const factor = wheelZoomFactor(event, delta);
+    if (backendDriven) {
+      // The backend owns the anchor arithmetic and the zoom limits, so the wheel
+      // handler no longer pre-computes a clamped sample count it would have to
+      // throw away when the answer came back.
+      if (Math.abs(factor - 1) < 1e-9) return;
+      dispatchSessionViewIntent(sessionIdRef.current, {
+        anchor_ratio: xRatio,
+        factor,
+        kind: "zoom",
+      });
+      if (edgeJumpRef.current) updateEdgeJumpAt(event.clientX, event.clientY);
+      return;
+    }
     const requestedSamples = current.samples * factor;
     const nextSamples = normalizeViewport(
       current.start,
@@ -571,6 +871,7 @@ export function WaveformCanvas({
   function setViewportInteractionActive(active: boolean) {
     if (viewportInteractionActiveRef.current === active) return;
     viewportInteractionActiveRef.current = active;
+    if (!active) flushViewportNotificationNow();
     onViewportInteractionChangeRef.current?.(active);
   }
 
@@ -692,9 +993,7 @@ export function WaveformCanvas({
     const host = hostRef.current;
     if (!current || !host) return;
     const rect = host.getBoundingClientRect();
-    onPointerPositionChangeRef.current?.(
-      clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
-    );
+    onPointerPositionChangeRef.current?.(clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1));
     const hit = findEdgeHitAtClientPoint(
       host,
       tileRef.current,
@@ -707,18 +1006,16 @@ export function WaveformCanvas({
       10,
       false,
     );
-    const rawSample = viewportRef.current.start
-      + clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1) * viewportRef.current.samples;
+    const rawSample =
+      viewportRef.current.start +
+      clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1) * viewportRef.current.samples;
     edgeJumpRef.current = {
       ...current,
       endSample: hit?.sample ?? rawSample,
-      endChannelIndex: hit?.channelIndex ?? channelIndexAtClientY(
-        rect,
-        tileRef.current,
-        rowHeightsRef.current,
-        rowTopInsetsRef.current,
-        clientY,
-      ) ?? current.endChannelIndex,
+      endChannelIndex:
+        hit?.channelIndex ??
+        channelIndexAtClientY(rect, tileRef.current, rowHeightsRef.current, rowTopInsetsRef.current, clientY) ??
+        current.endChannelIndex,
       pointerX: clamp(clientX - rect.left, 0, rect.width),
       pointerY: clamp(clientY - rect.top, 0, rect.height),
       snapped: Boolean(hit),
@@ -761,9 +1058,7 @@ export function WaveformCanvas({
     const host = hostRef.current;
     if (!canvas || !host) return;
     const rect = host.getBoundingClientRect();
-    onPointerPositionChangeRef.current?.(
-      clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1),
-    );
+    onPointerPositionChangeRef.current?.(clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1));
     const dpr = window.devicePixelRatio || 1;
     const x = (clientX - rect.left) * dpr;
     const y = (clientY - rect.top) * dpr;
@@ -779,8 +1074,7 @@ export function WaveformCanvas({
           y,
         )
       : null;
-    const sample = viewportRef.current.start
-      + clamp(x / Math.max(1, canvas.width), 0, 1) * viewportRef.current.samples;
+    const sample = viewportRef.current.start + clamp(x / Math.max(1, canvas.width), 0, 1) * viewportRef.current.samples;
     if (
       showInteractiveMeasurementRef.current &&
       tileSnapshot &&
@@ -833,7 +1127,9 @@ export function WaveformCanvas({
       updateHoverAt(event.clientX, event.clientY);
     };
     const handleGraphSurfaceLeave = () => clearHover();
-    graphSurface.addEventListener("pointermove", handleOverlayPointerMove, { passive: true });
+    graphSurface.addEventListener("pointermove", handleOverlayPointerMove, {
+      passive: true,
+    });
     graphSurface.addEventListener("pointerleave", handleGraphSurfaceLeave);
     return () => {
       graphSurface.removeEventListener("pointermove", handleOverlayPointerMove);
@@ -898,11 +1194,7 @@ export function WaveformCanvas({
         />
       )}
       {hoverNavigation?.nextEdge != null && (
-        <DigitalNavigationButton
-          direction="next"
-          top={hoverNavigation.topPx}
-          onNavigate={() => jumpToEdge("next")}
-        />
+        <DigitalNavigationButton direction="next" top={hoverNavigation.topPx} onNavigate={() => jumpToEdge("next")} />
       )}
     </div>
   );
@@ -973,9 +1265,7 @@ function drawEdgeJumpMeasurement(
     ? xForSample(measurement.endSample, 0, canvas.width, viewportStart, viewportSamples)
     : measurement.pointerX * dpr;
   const startY = startLayout.top + startLayout.height / 2;
-  const endY = measurement.snapped
-    ? endLayout.top + endLayout.height / 2
-    : measurement.pointerY * dpr;
+  const endY = measurement.snapped ? endLayout.top + endLayout.height / 2 : measurement.pointerY * dpr;
   const deltaSamples = Math.abs(Math.round(measurement.endSample - measurement.startSample));
   const color = "rgb(255, 166, 64)";
 
@@ -999,12 +1289,7 @@ function drawEdgeJumpMeasurement(
   ctx.restore();
 }
 
-function drawEdgeJumpTarget(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  dpr: number,
-) {
+function drawEdgeJumpTarget(ctx: CanvasRenderingContext2D, x: number, y: number, dpr: number) {
   const radius = 2.5 * dpr;
   ctx.fillRect(x - 0.5 * dpr, y - radius, dpr, radius * 2);
   ctx.fillRect(x - radius, y - 0.5 * dpr, radius * 2, dpr);
@@ -1053,6 +1338,19 @@ function normalizeWheelDelta(delta: number, deltaMode: number) {
   if (deltaMode === 1) return delta * 16;
   if (deltaMode === 2) return delta * 240;
   return delta;
+}
+
+
+function closeWaveLayerCache(cache: WaveLayerCache | null) {
+  if (typeof ImageBitmap !== "undefined" && cache?.canvas instanceof ImageBitmap) {
+    cache.canvas.close();
+  }
+}
+
+function closeViewportLayerCache(cache: ViewportLayerCache | null) {
+  if (typeof ImageBitmap !== "undefined" && cache?.canvas instanceof ImageBitmap) {
+    cache.canvas.close();
+  }
 }
 
 function DigitalNavigationButton({
@@ -1151,6 +1449,9 @@ function draw(
   rowTopInsets: number[],
   matchChannelColors: boolean,
   waveLayerCacheRef: WaveLayerCacheRef,
+  viewportLayerCacheRef: ViewportLayerCacheRef,
+  waveLayerWorkerRef: WaveLayerWorkerRef,
+  workerTileRef: { current: WaveformTile | null },
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -1166,11 +1467,7 @@ function draw(
   if (!tile || tile.channels.length === 0) {
     ctx.fillStyle = "rgba(255,255,255,0.55)";
     ctx.font = `${12 * devicePixelRatio}px Roboto, Helvetica, Arial, sans-serif`;
-    ctx.fillText(
-      tile ? "No channels visible" : "No capture loaded",
-      24 * devicePixelRatio,
-      24 * devicePixelRatio,
-    );
+    ctx.fillText(tile ? "No channels visible" : "No capture loaded", 24 * devicePixelRatio, 24 * devicePixelRatio);
     return;
   }
 
@@ -1185,6 +1482,9 @@ function draw(
     rowTopInsets,
     matchChannelColors,
     waveLayerCacheRef,
+    viewportLayerCacheRef,
+    waveLayerWorkerRef,
+    workerTileRef,
   );
 
   if (hover) {
@@ -1202,6 +1502,132 @@ function draw(
   }
 }
 
+function sameLayerLayout(
+  cache: { height: number; matchChannelColors: boolean; rowHeights: number[]; rowTopInsets: number[] },
+  canvas: HTMLCanvasElement,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  matchChannelColors: boolean,
+) {
+  return (
+    cache.height === canvas.height &&
+    cache.matchChannelColors === matchChannelColors &&
+    sameNumberArray(cache.rowHeights, rowHeights) &&
+    sameNumberArray(cache.rowTopInsets, rowTopInsets)
+  );
+}
+
+// Blits the visible slice of a raster that covers `sourceSamples` samples
+// starting at `sourceStart` onto a canvas showing `viewportSamples` samples
+// starting at `viewportStart`. The same crop is used by the tile raster and by
+// the GPU viewport raster, so both stay pixel exact.
+function blitLayerRaster(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  source: CanvasImageSource,
+  sourceWidth: number,
+  sourceHeight: number,
+  sourceStart: number,
+  sourceSamples: number,
+  viewportStart: number,
+  viewportSamples: number,
+) {
+  const visibleStart = Math.max(sourceStart, viewportStart);
+  const visibleEnd = Math.min(sourceStart + sourceSamples, viewportStart + viewportSamples);
+  if (visibleEnd <= visibleStart || sourceSamples <= 0 || viewportSamples <= 0) return false;
+  const sourceX = ((visibleStart - sourceStart) / sourceSamples) * sourceWidth;
+  const sourceW = ((visibleEnd - visibleStart) / sourceSamples) * sourceWidth;
+  const destinationX = ((visibleStart - viewportStart) / viewportSamples) * canvas.width;
+  const destinationWidth = ((visibleEnd - visibleStart) / viewportSamples) * canvas.width;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(
+    source,
+    sourceX,
+    0,
+    Math.max(Number.EPSILON, sourceW),
+    sourceHeight,
+    destinationX,
+    0,
+    destinationWidth,
+    canvas.height,
+  );
+  ctx.restore();
+  return true;
+}
+
+// Blits whichever cached raster is closest to the scale the viewport needs.
+//
+// Order matters and the viewport raster comes first. It was rendered at the
+// scale the user was looking at, so even a stale one is near the right scale; the
+// tile raster is by construction coarser than the viewport in the branch that
+// reaches this fallback, which is the whole reason that branch exists. Preferring
+// the tile raster meant choosing the more magnified of the two.
+//
+// Returns which raster was used and what it covers, so the caller can report the
+// magnification it applied. `null` means nothing was usable.
+function blitAnyCachedRaster(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  viewportStart: number,
+  viewportSamples: number,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  matchChannelColors: boolean,
+  cacheRef: WaveLayerCacheRef,
+  viewportCacheRef: ViewportLayerCacheRef,
+): { path: "stale-tile-raster" | "stale-viewport-raster"; samples: number; width: number } | null {
+  const viewportCache = viewportCacheRef.current;
+  if (
+    viewportCache &&
+    sameLayerLayout(viewportCache, canvas, rowHeights, rowTopInsets, matchChannelColors) &&
+    rasterOverlapsViewport(
+      viewportCache.start,
+      viewportCache.samples,
+      viewportStart,
+      viewportSamples,
+    ) &&
+    blitLayerRaster(
+      ctx,
+      canvas,
+      viewportCache.canvas,
+      viewportCache.width,
+      viewportCache.height,
+      viewportCache.start,
+      viewportCache.samples,
+      viewportStart,
+      viewportSamples,
+    )
+  ) {
+    return { path: "stale-viewport-raster", samples: viewportCache.samples, width: viewportCache.width };
+  }
+  const tileCache = cacheRef.current;
+  if (
+    tileCache &&
+    sameLayerLayout(tileCache, canvas, rowHeights, rowTopInsets, matchChannelColors) &&
+    rasterOverlapsViewport(
+      tileCache.tile.start_sample,
+      tileCache.tile.sample_count,
+      viewportStart,
+      viewportSamples,
+    ) &&
+    blitLayerRaster(
+      ctx,
+      canvas,
+      tileCache.canvas,
+      tileCache.width,
+      tileCache.height,
+      tileCache.tile.start_sample,
+      tileCache.tile.sample_count,
+      viewportStart,
+      viewportSamples,
+    )
+  ) {
+    return { path: "stale-tile-raster", samples: tileCache.tile.sample_count, width: tileCache.width };
+  }
+  return null;
+}
+
 function drawCachedWaveLayer(
   ctx: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
@@ -1212,6 +1638,9 @@ function drawCachedWaveLayer(
   rowTopInsets: number[],
   matchChannelColors: boolean,
   cacheRef: WaveLayerCacheRef,
+  viewportCacheRef: ViewportLayerCacheRef,
+  workerRef: WaveLayerWorkerRef,
+  workerTileRef: { current: WaveformTile | null },
 ) {
   if (tile.sample_count <= 0 || viewportSamples <= 0) return;
   // A tile includes overscan and its pixel budget is expressed in CSS pixels.
@@ -1220,25 +1649,70 @@ function drawCachedWaveLayer(
   // transition by the overscan ratio (normally about 2x).
   const dpr = window.devicePixelRatio || 1;
   const canvasCssWidth = canvas.width / dpr;
-  if (
-    waveformTileRequiresDirectDraw(
-      tile.samples_per_pixel,
-      viewportSamples,
-      canvasCssWidth,
-    )
-  ) {
-    // At sub-sample pixel scales the backend has already reached its physical
-    // 1 sample/pixel limit. Magnifying the cached raster would magnify its
-    // stroke width too, so draw the small set of visible bins in view space.
-    renderWaveLayer(
-      canvas,
+  const layerWidth = Math.max(1, Math.round(tile.pixels * dpr));
+  if (waveformTileRequiresDirectDraw(tile.samples_per_pixel, viewportSamples, canvasCssWidth)) {
+    // The tile raster is coarser than the current viewport, so magnifying it
+    // would thicken every stroke. Prefer a raster the worker re-rendered at the
+    // scale the user is actually looking at: that work happens on the GPU and
+    // off the main thread, so the interaction never blocks on it.
+    if (drawViewportRaster(ctx, canvas, tile, viewportStart, viewportSamples, rowHeights, rowTopInsets, matchChannelColors, viewportCacheRef)) {
+      drawExactWaveSegments(
+        ctx,
+        canvas,
+        tile,
+        viewportStart,
+        viewportSamples,
+        rowHeights,
+        rowTopInsets,
+        matchChannelColors,
+      );
+      return;
+    }
+    requestViewportRaster(
       tile,
+      viewportStart,
+      viewportSamples,
+      canvas,
       rowHeights,
       rowTopInsets,
       matchChannelColors,
-      viewportStart,
-      viewportSamples,
+      workerRef,
+      workerTileRef,
+      layerWidth,
+      dpr,
     );
+    // Fall back to whatever raster is already on hand, even one rendered for an
+    // earlier tile: it is only blitted where its sample range overlaps, so a
+    // slightly stale picture is safe and keeps the trace on screen.
+    const stale = blitAnyCachedRaster(ctx, canvas, viewportStart, viewportSamples, rowHeights, rowTopInsets, matchChannelColors, cacheRef, viewportCacheRef);
+    if (stale) {
+      recordWaveformDraw({
+        path: stale.path,
+        stretch: rasterMagnification(stale.samples, stale.width, viewportSamples, canvas.width),
+        viewportSamplesPerPixel: viewportSamples / canvas.width,
+      });
+      drawExactWaveSegments(
+        ctx,
+        canvas,
+        tile,
+        viewportStart,
+        viewportSamples,
+        rowHeights,
+        rowTopInsets,
+        matchChannelColors,
+      );
+      return;
+    }
+    // Nothing cached covers the viewport yet. Render in view space on the main
+    // thread so the graph is never blank while a worker render is in flight:
+    // drawing nothing here is what made a zoom look like it had erased the trace
+    // and forced the user to nudge the viewport until it came back.
+    recordWaveformDraw({
+      path: "view-space-render",
+      stretch: 1,
+      viewportSamplesPerPixel: viewportSamples / canvas.width,
+    });
+    renderWaveLayer(canvas, tile, rowHeights, rowTopInsets, matchChannelColors, viewportStart, viewportSamples);
     drawExactWaveSegments(
       ctx,
       canvas,
@@ -1251,58 +1725,102 @@ function drawCachedWaveLayer(
     );
     return;
   }
-  const layerWidth = Math.max(1, Math.round(tile.pixels * dpr));
   let cache = cacheRef.current;
-  if (
-    !cache ||
-    cache.tile !== tile ||
-    cache.width !== layerWidth ||
-    cache.height !== canvas.height ||
-    cache.rowHeights !== rowHeights ||
-    cache.rowTopInsets !== rowTopInsets ||
-    cache.matchChannelColors !== matchChannelColors
-  ) {
-    const layer = document.createElement("canvas");
-    layer.width = layerWidth;
-    layer.height = canvas.height;
-    renderWaveLayer(layer, tile, rowHeights, rowTopInsets, matchChannelColors);
-    cache = {
-      canvas: layer,
-      height: canvas.height,
-      matchChannelColors,
-      rowHeights,
-      rowTopInsets,
-      tile,
-      width: layerWidth,
-    };
-    cacheRef.current = cache;
+  const cacheMatches = Boolean(
+    cache &&
+    cache.tile === tile &&
+    cache.width === layerWidth &&
+    cache.height === canvas.height &&
+    sameNumberArray(cache.rowHeights, rowHeights) &&
+    sameNumberArray(cache.rowTopInsets, rowTopInsets) &&
+    cache.matchChannelColors === matchChannelColors,
+  );
+  if (!cacheMatches) {
+    const canReusePreviousCache = Boolean(
+      cache &&
+      cache.height === canvas.height &&
+      sameNumberArray(cache.rowHeights, rowHeights) &&
+      sameNumberArray(cache.rowTopInsets, rowTopInsets) &&
+      cache.matchChannelColors === matchChannelColors,
+    );
+    if (workerRef.current && !workerRef.current.failed) {
+      requestWaveLayerRender(
+        workerRef.current,
+        tile,
+        layerWidth,
+        canvas.height,
+        rowHeights,
+        rowTopInsets,
+        matchChannelColors,
+        dpr,
+      );
+      if (!canReusePreviousCache) {
+        drawExactWaveSegments(
+          ctx,
+          canvas,
+          tile,
+          viewportStart,
+          viewportSamples,
+          rowHeights,
+          rowTopInsets,
+          matchChannelColors,
+        );
+        return;
+      }
+    } else {
+      const layer = document.createElement("canvas");
+      layer.width = layerWidth;
+      layer.height = canvas.height;
+      renderWaveLayer(layer, tile, rowHeights, rowTopInsets, matchChannelColors);
+      cache = {
+        canvas: layer,
+        height: canvas.height,
+        matchChannelColors,
+        rowHeights,
+        rowTopInsets,
+        tile,
+        width: layerWidth,
+      };
+      cacheRef.current = cache;
+    }
   }
 
-  const tileStart = tile.start_sample;
-  const tileEnd = tileStart + tile.sample_count;
-  const viewportEnd = viewportStart + viewportSamples;
-  const visibleStart = Math.max(tileStart, viewportStart);
-  const visibleEnd = Math.min(tileEnd, viewportEnd);
-  if (visibleEnd <= visibleStart) return;
-
-  const sourceX = ((visibleStart - tileStart) / tile.sample_count) * cache.width;
-  const sourceWidth = ((visibleEnd - visibleStart) / tile.sample_count) * cache.width;
-  const destinationX = ((visibleStart - viewportStart) / viewportSamples) * canvas.width;
-  const destinationWidth = ((visibleEnd - visibleStart) / viewportSamples) * canvas.width;
-  ctx.save();
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(
-    cache.canvas,
-    sourceX,
-    0,
-    Math.max(Number.EPSILON, sourceWidth),
-    cache.height,
-    destinationX,
-    0,
-    destinationWidth,
-    canvas.height,
-  );
-  ctx.restore();
+  if (!cache) return;
+  if (
+    !blitLayerRaster(
+      ctx,
+      canvas,
+      cache.canvas,
+      cache.width,
+      cache.height,
+      cache.tile.start_sample,
+      cache.tile.sample_count,
+      viewportStart,
+      viewportSamples,
+    )
+  ) {
+    recordWaveformDraw({
+      path: "exact-segments",
+      stretch: 0,
+      viewportSamplesPerPixel: viewportSamples / canvas.width,
+    });
+    drawExactWaveSegments(
+      ctx,
+      canvas,
+      tile,
+      viewportStart,
+      viewportSamples,
+      rowHeights,
+      rowTopInsets,
+      matchChannelColors,
+    );
+    return;
+  }
+  recordWaveformDraw({
+    path: "tile-raster",
+    stretch: rasterMagnification(cache.tile.sample_count, cache.width, viewportSamples, canvas.width),
+    viewportSamplesPerPixel: viewportSamples / canvas.width,
+  });
 
   drawExactWaveSegments(
     ctx,
@@ -1316,6 +1834,61 @@ function drawCachedWaveLayer(
   );
 }
 
+// Draws the GPU viewport raster when it is usable as-is. Coverage *and* scale are
+// the contract: the raster was rendered for a slightly older viewport, so it is
+// only usable while the current viewport still sits inside it and has not been
+// zoomed in since. Returning false on a scale mismatch matters beyond this call:
+// the caller then reaches `requestViewportRaster`, which is what refreshes the
+// raster. Accepting a magnified raster here is how a zoom-in ended up reusing one
+// raster for the whole gesture, thickening every stroke by up to 30x.
+function drawViewportRaster(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  tile: WaveformTile,
+  viewportStart: number,
+  viewportSamples: number,
+  rowHeights: number[],
+  rowTopInsets: number[],
+  matchChannelColors: boolean,
+  viewportCacheRef: ViewportLayerCacheRef,
+) {
+  const cache = viewportCacheRef.current;
+  if (
+    !cache ||
+    cache.tile !== tile ||
+    !sameLayerLayout(cache, canvas, rowHeights, rowTopInsets, matchChannelColors) ||
+    !rasterServesViewport(
+      cache.start,
+      cache.samples,
+      cache.width,
+      viewportStart,
+      viewportSamples,
+      canvas.width,
+    )
+  ) {
+    return false;
+  }
+  const drawn = blitLayerRaster(
+    ctx,
+    canvas,
+    cache.canvas,
+    cache.width,
+    cache.height,
+    cache.start,
+    cache.samples,
+    viewportStart,
+    viewportSamples,
+  );
+  if (drawn) {
+    recordWaveformDraw({
+      path: "viewport-raster",
+      stretch: rasterMagnification(cache.samples, cache.width, viewportSamples, canvas.width),
+      viewportSamplesPerPixel: viewportSamples / canvas.width,
+    });
+  }
+  return drawn;
+}
+// Exact segments stay live while the raster cache may trail by one worker frame.
 function drawExactWaveSegments(
   ctx: CanvasRenderingContext2D,
   canvas: HTMLCanvasElement,
@@ -1327,12 +1900,7 @@ function drawExactWaveSegments(
   matchChannelColors: boolean,
 ) {
   const dpr = window.devicePixelRatio || 1;
-  const channelLayout = getSaleaeGraphChannelLayout(
-    rowHeights,
-    tile.channels.length,
-    dpr,
-    rowTopInsets,
-  );
+  const channelLayout = getSaleaeGraphChannelLayout(rowHeights, tile.channels.length, dpr, rowTopInsets);
   const left = graphPaddingLeft * dpr;
   const right = canvas.width - graphPaddingRight * dpr;
   const viewSamples = Math.max(1, viewportSamples);
@@ -1340,10 +1908,7 @@ function drawExactWaveSegments(
   tile.channels.forEach((channel, index) => {
     if (channel.segments.length === 0) return;
     const layout = channelLayout[index];
-    const gutter = Math.min(
-      digitalGraphGutterPx * dpr,
-      Math.max(0, (layout.height - 2 * dpr) / 2),
-    );
+    const gutter = Math.min(digitalGraphGutterPx * dpr, Math.max(0, (layout.height - 2 * dpr) / 2));
     const highY = layout.top + gutter + 0.5 * dpr;
     const transitionHeight = Math.max(dpr, Math.round(layout.height - 2 * gutter));
     const lowY = highY + transitionHeight - dpr;
@@ -1472,10 +2037,7 @@ function drawDigitalSegments(ctx: CanvasRenderingContext2D, args: DigitalSegment
   ctx.stroke(path);
 }
 
-function firstSegmentEndingAtOrAfter(
-  segments: WaveformTile["channels"][number]["segments"],
-  sample: number,
-) {
+function firstSegmentEndingAtOrAfter(segments: WaveformTile["channels"][number]["segments"], sample: number) {
   let low = 0;
   let high = segments.length;
   while (low < high) {
@@ -1490,19 +2052,7 @@ function firstSegmentEndingAtOrAfter(
 }
 
 function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelDrawArgs) {
-  const {
-    color,
-    highY,
-    lowY,
-    left,
-    right,
-    viewSamples,
-    viewStart,
-    tileStart,
-    samplesPerPixel,
-    channel,
-    dpr,
-  } = args;
+  const { color, highY, lowY, left, right, viewSamples, viewStart, tileStart, samplesPerPixel, channel, dpr } = args;
   const lineWidth = Math.max(1.25 * dpr, 1);
   ctx.lineWidth = lineWidth;
   ctx.lineCap = "butt";
@@ -1518,65 +2068,72 @@ function drawDigitalChannel(ctx: CanvasRenderingContext2D, args: DigitalChannelD
     0,
     Math.floor((viewStart - tileStart) / Math.max(Number.EPSILON, samplesPerPixel)) - 1,
   );
-  const lastVisibleBin = Math.ceil(
-    (viewStart + viewSamples - tileStart) / Math.max(Number.EPSILON, samplesPerPixel),
-  ) + 1;
+  const lastVisibleBin =
+    Math.ceil((viewStart + viewSamples - tileStart) / Math.max(Number.EPSILON, samplesPerPixel)) + 1;
 
-  forEachDigitalBin(channel, (binIndex, first, last, hasHigh, hasLow, edges, firstEdgeOffset) => {
-    const sample0 = tileStart + binIndex * samplesPerPixel;
-    const sample1 = sample0 + samplesPerPixel;
-    const x0 = xForSample(sample0, left, right, viewStart, viewSamples);
-    const x1 = xForSample(sample1, left, right, viewStart, viewSamples);
-    if (x1 < left) {
+  forEachDigitalBin(
+    channel,
+    (binIndex, first, last, hasHigh, hasLow, edges, firstEdgeOffset) => {
+      const sample0 = tileStart + binIndex * samplesPerPixel;
+      const sample1 = sample0 + samplesPerPixel;
+      const x0 = xForSample(sample0, left, right, viewStart, viewSamples);
+      const x1 = xForSample(sample1, left, right, viewStart, viewSamples);
+      if (x1 < left) {
+        previousBinIndex = binIndex;
+        previousLastHigh = last;
+        return;
+      }
+      if (x0 > right) return;
+
+      const clippedX0 = Math.max(left, x0);
+      const clippedX1 = Math.min(right, x1);
+      const y0 = crispY(first ? highY : lowY);
+      const y1 = crispY(last ? highY : lowY);
+      const binWidth = Math.max(1, clippedX1 - clippedX0);
+
+      if (
+        previousBinIndex === binIndex - 1 &&
+        previousLastHigh !== null &&
+        previousLastHigh !== first &&
+        x0 >= left - lineWidth &&
+        x0 <= right + lineWidth
+      ) {
+        const edgeX = crispX(clamp(x0, left, right));
+        edgePath.moveTo(edgeX, crispY(previousLastHigh ? highY : lowY));
+        edgePath.lineTo(edgeX, y0);
+      }
       previousBinIndex = binIndex;
       previousLastHigh = last;
-      return;
-    }
-    if (x0 > right) return;
 
-    const clippedX0 = Math.max(left, x0);
-    const clippedX1 = Math.min(right, x1);
-    const y0 = crispY(first ? highY : lowY);
-    const y1 = crispY(last ? highY : lowY);
-    const binWidth = Math.max(1, clippedX1 - clippedX0);
+      if (hasHigh && hasLow) {
+        if (edges <= 1 && firstEdgeOffset != null) {
+          const edgeX = Math.max(
+            left,
+            Math.min(right, xForSample(sample0 + firstEdgeOffset, left, right, viewStart, viewSamples)),
+          );
+          stablePath.moveTo(clippedX0, y0);
+          stablePath.lineTo(edgeX, y0);
+          edgePath.moveTo(crispX(edgeX), y0);
+          edgePath.lineTo(crispX(edgeX), y1);
+          stablePath.moveTo(edgeX, y1);
+          stablePath.lineTo(clippedX1, y1);
+          return;
+        }
 
-    if (
-      previousBinIndex === binIndex - 1 &&
-      previousLastHigh !== null &&
-      previousLastHigh !== first &&
-      x0 >= left - lineWidth &&
-      x0 <= right + lineWidth
-    ) {
-      const edgeX = crispX(clamp(x0, left, right));
-      edgePath.moveTo(edgeX, crispY(previousLastHigh ? highY : lowY));
-      edgePath.lineTo(edgeX, y0);
-    }
-    previousBinIndex = binIndex;
-    previousLastHigh = last;
-
-    if (hasHigh && hasLow) {
-      if (edges <= 1 && firstEdgeOffset != null) {
-        const edgeX = Math.max(left, Math.min(right, xForSample(sample0 + firstEdgeOffset, left, right, viewStart, viewSamples)));
-        stablePath.moveTo(clippedX0, y0);
-        stablePath.lineTo(edgeX, y0);
-        edgePath.moveTo(crispX(edgeX), y0);
-        edgePath.lineTo(crispX(edgeX), y1);
-        stablePath.moveTo(edgeX, y1);
-        stablePath.lineTo(clippedX1, y1);
+        const denseLeft = Math.floor(clippedX0);
+        const denseWidth = Math.max(1, Math.ceil(binWidth));
+        ctx.globalAlpha = 0.78;
+        ctx.fillRect(denseLeft, Math.min(highY, lowY), denseWidth, Math.abs(lowY - highY));
+        ctx.globalAlpha = 1;
         return;
       }
 
-      const denseLeft = Math.floor(clippedX0);
-      const denseWidth = Math.max(1, Math.ceil(binWidth));
-      ctx.globalAlpha = 0.78;
-      ctx.fillRect(denseLeft, Math.min(highY, lowY), denseWidth, Math.abs(lowY - highY));
-      ctx.globalAlpha = 1;
-      return;
-    }
-
-    stablePath.moveTo(clippedX0, y0);
-    stablePath.lineTo(clippedX1, y0);
-  }, firstVisibleBin, lastVisibleBin);
+      stablePath.moveTo(clippedX0, y0);
+      stablePath.lineTo(clippedX1, y0);
+    },
+    firstVisibleBin,
+    lastVisibleBin,
+  );
 
   ctx.stroke(stablePath);
   ctx.stroke(edgePath);
@@ -1625,10 +2182,7 @@ function findChannelNavigation(
   };
 }
 
-function findHoverChannelIndexAtY(
-  layout: ReturnType<typeof getSaleaeGraphChannelLayout>,
-  y: number,
-) {
+function findHoverChannelIndexAtY(layout: ReturnType<typeof getSaleaeGraphChannelLayout>, y: number) {
   for (let index = 0; index < layout.length; index += 1) {
     const row = layout[index];
     const nextTop = layout[index + 1]?.outerTop ?? row.outerTop + row.outerHeight;
@@ -1664,10 +2218,8 @@ function drawHoverMeasurement(
   const periodStartX = xForSample(hover.periodStart, left, right, viewportStart, viewSamples);
   const periodEndX =
     hover.periodEnd == null ? null : xForSample(hover.periodEnd, left, right, viewportStart, viewSamples);
-  const widthSamples =
-    hover.widthEnd == null ? null : Math.max(0, Math.round(hover.widthEnd - hover.widthStart));
-  const periodSamples =
-    hover.periodEnd == null ? null : Math.max(0, Math.round(hover.periodEnd - hover.periodStart));
+  const widthSamples = hover.widthEnd == null ? null : Math.max(0, Math.round(hover.widthEnd - hover.widthStart));
+  const periodSamples = hover.periodEnd == null ? null : Math.max(0, Math.round(hover.periodEnd - hover.periodStart));
 
   ctx.save();
 
@@ -1778,13 +2330,7 @@ function drawDistanceMeasurement(ctx: CanvasRenderingContext2D, args: DistanceMe
   ctx.restore();
 }
 
-function drawMeasurementGuide(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  top: number,
-  bottom: number,
-  dpr: number,
-) {
+function drawMeasurementGuide(ctx: CanvasRenderingContext2D, x: number, top: number, bottom: number, dpr: number) {
   ctx.save();
   ctx.setLineDash([2 * dpr, 3 * dpr]);
   ctx.beginPath();
@@ -1893,8 +2439,14 @@ function drawDigitalExtraData(ctx: CanvasRenderingContext2D, args: DigitalExtraD
       label: "Duty",
       value: `${formatRounded((widthSamples / periodSamples) * 100, 2)} %`,
     });
-    lines.push({ label: "Freq", value: formatFrequency(sampleRateHz / periodSamples) });
-    lines.push({ label: "Period", value: formatDuration(periodSamples, sampleRateHz) });
+    lines.push({
+      label: "Freq",
+      value: formatFrequency(sampleRateHz / periodSamples),
+    });
+    lines.push({
+      label: "Period",
+      value: formatDuration(periodSamples, sampleRateHz),
+    });
   }
   lines.push({
     label: "width",
@@ -1929,21 +2481,11 @@ function drawDigitalExtraData(ctx: CanvasRenderingContext2D, args: DigitalExtraD
 
   ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
   lines.forEach((line, index) =>
-    drawDigitalExtraDataLine(
-      ctx,
-      line,
-      boxX + padding,
-      boxY + padding + (index + 0.78) * lineHeight,
-      dpr,
-    ),
+    drawDigitalExtraDataLine(ctx, line, boxX + padding, boxY + padding + (index + 0.78) * lineHeight, dpr),
   );
 }
 
-function measureDigitalExtraDataLine(
-  ctx: CanvasRenderingContext2D,
-  line: DigitalExtraDataLine,
-  dpr: number,
-) {
+function measureDigitalExtraDataLine(ctx: CanvasRenderingContext2D, line: DigitalExtraDataLine, dpr: number) {
   ctx.font = `${12 * dpr}px Roboto, Helvetica, Arial, sans-serif`;
   let width = ctx.measureText(line.label).width;
   if (line.superscript) {
@@ -1979,25 +2521,50 @@ function collectDigitalEdges(tile: WaveformTile, channelIndex: number): DigitalE
   const cached = digitalEdgeCache.get(channel);
   if (cached) return cached;
   if (channel.rising_edges.length || channel.falling_edges.length) {
-    const edges = [
-      ...channel.rising_edges.map((sample) => ({ sample, kind: "rising" as const })),
-      ...channel.falling_edges.map((sample) => ({ sample, kind: "falling" as const })),
-    ].sort((a, b) => a.sample - b.sample);
+    const edges = mergeDigitalEdges(channel.rising_edges, channel.falling_edges);
     digitalEdgeCache.set(channel, edges);
     return edges;
   }
   const edges: DigitalEdge[] = [];
-  forEachDigitalBin(channel, (binIndex, firstHigh, lastHigh, hasHigh, hasLow, edgeCount, firstEdgeOffset, lastEdgeOffset) => {
-    if (!edgeCount || !(hasHigh && hasLow)) return;
-    const sample0 = tile.start_sample + binIndex * tile.samples_per_pixel;
-    const first = firstEdgeOffset == null ? tile.samples_per_pixel / 2 : firstEdgeOffset;
-    edges.push({ sample: sample0 + first, kind: firstHigh ? "falling" : "rising" });
-    if (edgeCount > 1 && lastEdgeOffset != null && lastEdgeOffset !== firstEdgeOffset) {
-      edges.push({ sample: sample0 + lastEdgeOffset, kind: lastHigh ? "rising" : "falling" });
-    }
-  });
+  forEachDigitalBin(
+    channel,
+    (binIndex, firstHigh, lastHigh, hasHigh, hasLow, edgeCount, firstEdgeOffset, lastEdgeOffset) => {
+      if (!edgeCount || !(hasHigh && hasLow)) return;
+      const sample0 = tile.start_sample + binIndex * tile.samples_per_pixel;
+      const first = firstEdgeOffset == null ? tile.samples_per_pixel / 2 : firstEdgeOffset;
+      edges.push({
+        sample: sample0 + first,
+        kind: firstHigh ? "falling" : "rising",
+      });
+      if (edgeCount > 1 && lastEdgeOffset != null && lastEdgeOffset !== firstEdgeOffset) {
+        edges.push({
+          sample: sample0 + lastEdgeOffset,
+          kind: lastHigh ? "rising" : "falling",
+        });
+      }
+    },
+  );
   edges.sort((a, b) => a.sample - b.sample);
   digitalEdgeCache.set(channel, edges);
+  return edges;
+}
+
+function mergeDigitalEdges(rising: number[], falling: number[]): DigitalEdge[] {
+  const edges: DigitalEdge[] = [];
+  let risingIndex = 0;
+  let fallingIndex = 0;
+  while (risingIndex < rising.length || fallingIndex < falling.length) {
+    if (
+      fallingIndex >= falling.length ||
+      (risingIndex < rising.length && rising[risingIndex] <= falling[fallingIndex])
+    ) {
+      edges.push({ sample: rising[risingIndex], kind: "rising" });
+      risingIndex += 1;
+    } else {
+      edges.push({ sample: falling[fallingIndex], kind: "falling" });
+      fallingIndex += 1;
+    }
+  }
   return edges;
 }
 
@@ -2042,16 +2609,9 @@ function findEdgeHitAtClientPoint(
   if (rejectCrowdedEdges && channel.rising_edges.length === 0 && channel.falling_edges.length === 0) {
     return null;
   }
-  const pointerSample = viewportStart
-    + clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1) * viewportSamples;
+  const pointerSample = viewportStart + clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1) * viewportSamples;
   const samplesPerPixel = viewportSamples / Math.max(1, rect.width);
-  const sample = findNearestEdgeSample(
-    edges.map((edge) => edge.sample),
-    pointerSample,
-    samplesPerPixel,
-    thresholdPx,
-    rejectCrowdedEdges,
-  );
+  const sample = findNearestEdgeSample(edges, pointerSample, samplesPerPixel, thresholdPx, rejectCrowdedEdges);
   return sample == null ? null : { channelIndex, sample };
 }
 
@@ -2093,10 +2653,8 @@ function forEachDigitalBin(
 
   let view = packedDigitalBinCache.get(channel);
   if (!view) {
-    const binary = atob(channel.packed_bins);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    view = new DataView(bytes.buffer);
+    const bytes = channel.packed_bins;
+    view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     packedDigitalBinCache.set(channel, view);
   }
   const count = Math.floor(view.byteLength / packedDigitalBinBytes);
@@ -2120,18 +2678,45 @@ function forEachDigitalBin(
   }
 }
 
-function findPreviousEdge(edges: DigitalEdge[], sample: number) {
-  for (let index = edges.length - 1; index >= 0; index -= 1) {
-    if (edges[index].sample < sample) return edges[index].sample;
+function findNearestEdgeSample(
+  edges: DigitalEdge[],
+  pointerSample: number,
+  samplesPerPixel: number,
+  thresholdPx: number,
+  rejectCrowdedEdges: boolean,
+) {
+  if (edges.length === 0 || samplesPerPixel <= 0) return null;
+  const thresholdSamples = thresholdPx * samplesPerPixel;
+  const rightIndex = lowerBoundDigitalEdge(edges, pointerSample);
+  const leftIndex = rightIndex - 1;
+  const leftDistance = leftIndex >= 0 ? Math.abs(edges[leftIndex].sample - pointerSample) : Number.POSITIVE_INFINITY;
+  const rightDistance =
+    rightIndex < edges.length ? Math.abs(edges[rightIndex].sample - pointerSample) : Number.POSITIVE_INFINITY;
+  const nearestIndex = rightDistance <= leftDistance ? rightIndex : leftIndex;
+  if (nearestIndex < 0 || nearestIndex >= edges.length) return null;
+  if (Math.abs(edges[nearestIndex].sample - pointerSample) > thresholdSamples) return null;
+
+  if (rejectCrowdedEdges) {
+    const previousGap =
+      nearestIndex > 0 ? (edges[nearestIndex].sample - edges[nearestIndex - 1].sample) / samplesPerPixel : 0;
+    const nextGap =
+      nearestIndex + 1 < edges.length
+        ? (edges[nearestIndex + 1].sample - edges[nearestIndex].sample) / samplesPerPixel
+        : Number.POSITIVE_INFINITY;
+    if (previousGap < thresholdPx && nextGap < thresholdPx) return null;
   }
-  return null;
+
+  return edges[nearestIndex].sample;
+}
+
+function findPreviousEdge(edges: DigitalEdge[], sample: number) {
+  const index = lowerBoundDigitalEdge(edges, sample);
+  return index > 0 ? edges[index - 1].sample : null;
 }
 
 function findNextEdgeSample(edges: DigitalEdge[], sample: number) {
-  for (const edge of edges) {
-    if (edge.sample > sample) return edge.sample;
-  }
-  return null;
+  const index = upperBoundDigitalEdge(edges, sample);
+  return index < edges.length ? edges[index].sample : null;
 }
 
 function sameHoverNavigation(left: HoverNavigation | null, right: HoverNavigation | null) {
@@ -2146,10 +2731,41 @@ function sameHoverNavigation(left: HoverNavigation | null, right: HoverNavigatio
 }
 
 function findNextEdge(edges: number[], sample: number) {
-  for (const edge of edges) {
-    if (edge > sample) return edge;
+  const index = upperBoundNumber(edges, sample);
+  return index < edges.length ? edges[index] : null;
+}
+
+function lowerBoundDigitalEdge(edges: DigitalEdge[], sample: number) {
+  let low = 0;
+  let high = edges.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (edges[middle].sample < sample) low = middle + 1;
+    else high = middle;
   }
-  return null;
+  return low;
+}
+
+function upperBoundDigitalEdge(edges: DigitalEdge[], sample: number) {
+  let low = 0;
+  let high = edges.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (edges[middle].sample <= sample) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function upperBoundNumber(samples: number[], sample: number) {
+  let low = 0;
+  let high = samples.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (samples[middle] <= sample) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 function xForSample(sample: number, left: number, right: number, viewStart: number, viewSamples: number) {
@@ -2208,13 +2824,7 @@ function normalizeViewport(
   maximumViewportSamples?: number,
 ) {
   return isLive
-    ? normalizeLiveCaptureViewport(
-        start,
-        samples,
-        totalSamples,
-        sampleRateHz,
-        maximumViewportSamples,
-      )
+    ? normalizeLiveCaptureViewport(start, samples, totalSamples, sampleRateHz, maximumViewportSamples)
     : normalizeCaptureViewport(start, samples, totalSamples, maximumViewportSamples);
 }
 
@@ -2253,7 +2863,12 @@ function drawGridLines(
   const usableWidthCss = usableWidth / dpr;
 
   ctx.save();
-  if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0 || !Number.isFinite(viewportSamples) || viewportSamples <= 0) {
+  if (
+    !Number.isFinite(sampleRateHz) ||
+    sampleRateHz <= 0 ||
+    !Number.isFinite(viewportSamples) ||
+    viewportSamples <= 0
+  ) {
     const fallbackStep = minimumHorizontalTickSpacingPx * dpr;
     for (let x = left; x < right; x += fallbackStep) {
       drawVerticalGridLine(ctx, x, 0, height, "minor", dpr);

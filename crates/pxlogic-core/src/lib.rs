@@ -4,6 +4,7 @@ pub mod decoder_backend;
 pub mod error;
 pub mod fake;
 pub mod models;
+pub mod performance;
 pub mod protocol;
 pub mod pxview_profile;
 pub mod transport;
@@ -32,8 +33,8 @@ pub use decoder_backend::{
     DecoderAnnotation, DecoderAnnotationKind, DecoderBackend, DecoderBackendInfo,
     DecoderBackendIsolation, DecoderBackendKind, DecoderDiagnostic, DecoderField,
     DecoderFieldValue, DecoderMarker, DecoderOutput, DecoderOutputFrame, LegacyRustDecoder,
-    SaleaeNativeDecoder, SigrokDecoderCatalog, SigrokDecoderCatalogItem, SigrokDecoderChannel,
-    SigrokDecoderOption, SigrokNativeDecoder,
+    SaleaeAsyncDecodeStep, SaleaeNativeDecoder, SigrokDecoderCatalog, SigrokDecoderCatalogItem,
+    SigrokDecoderChannel, SigrokDecoderOption, SigrokNativeDecoder,
 };
 pub use error::{CoreError, Result};
 pub use fake::FakeBackend;
@@ -44,6 +45,7 @@ pub use models::{
     HardwareChannelModeInfo, PwmConfiguration, PwmSettings, SparseCaptureData, SparseCaptureView,
     SparseDigitalChannel, SparseDigitalChannelView, WaveformSource,
 };
+pub use performance::{record_performance_event, PerformanceCapture, PerformanceEvent};
 pub use pxview_profile::{
     generic_logic_capture_capabilities, pxlogic_capture_capabilities_from_profile,
     resolve_pxlogic_capture_plan, resolve_pxlogic_device_profile, PxUsbSpeed, PxlogicCapturePlan,

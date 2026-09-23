@@ -12,6 +12,8 @@
 #include <TestAnalyzerData.h>
 #include <TestInstance.h>
 
+#include <algorithm>
+#include <atomic>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -20,7 +22,9 @@
 
 #include <exception>
 #include <cstdlib>
+#include <mutex>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -39,23 +43,66 @@ struct GeneratedChannel
     std::vector<uint64_t> transitions;
 };
 
+struct PublishedLegacyChannel
+{
+    uint32_t channel_index = 0;
+    std::vector<std::string> texts;
+};
+
+struct PublishedLegacyFrame
+{
+    Frame frame;
+    std::vector<PublishedLegacyChannel> channels;
+};
+
 struct sr_session
 {
     using CreateAnalyzerFn = Analyzer* (*)();
     using DestroyAnalyzerFn = void (*)(Analyzer*);
     using GetAnalyzerNameFn = const char* (*)();
 
-    PluginHandle plugin = nullptr;
+    struct LoadedPlugin
+    {
+        PluginHandle handle = nullptr;
+        CreateAnalyzerFn create = nullptr;
+        DestroyAnalyzerFn destroy = nullptr;
+        GetAnalyzerNameFn get_name = nullptr;
+
+        LoadedPlugin() = default;
+        LoadedPlugin(const LoadedPlugin&) = delete;
+        LoadedPlugin& operator=(const LoadedPlugin&) = delete;
+        ~LoadedPlugin()
+        {
+            if(handle)
+#ifdef _WIN32
+                FreeLibrary(handle);
+#else
+                dlclose(handle);
+#endif
+        }
+    };
+
+    std::shared_ptr<LoadedPlugin> plugin;
     Analyzer* analyzer = nullptr;
-    DestroyAnalyzerFn destroy_analyzer = nullptr;
     std::string analyzer_name;
     std::string error;
     AnalyzerTest::Instance cancellation_context;
     std::unordered_map<std::string, std::unique_ptr<AnalyzerTest::MockChannelData>> channel_data;
     std::vector<GeneratedChannel> simulation_channels;
     std::vector<std::string> bubble_text;
+    std::vector<SaleaeCompat::Frame> frame_snapshot;
+    std::vector<uint32_t> configured_channel_indices;
+    std::mutex incremental_results_mutex;
+    std::vector<PublishedLegacyFrame> incremental_results;
+    std::vector<PublishedLegacyFrame> incremental_snapshot;
+    size_t published_legacy_count = 0;
+    bool incremental_results_enabled = false;
+    std::atomic<bool> run_complete{false};
     bool settings_committed = false;
     bool ran = false;
+    // Reported to analyzers through Analyzer::GetTriggerSample(). 0 means "no
+    // trigger", which is what the original reports when it has none.
+    std::uint64_t trigger_sample = 0;
 
     ~sr_session()
     {
@@ -64,15 +111,13 @@ struct sr_session
         {
             auto* results = AnalyzerTest::GetResultsFromAnalyzer(analyzer);
             if(results)
+            {
+                if(auto* legacy = AnalyzerTest::MockResultData::MockFromResults(results))
+                    legacy->SetCommitCallback({});
                 SaleaeCompat::ClearFramesFor(results);
-            destroy_analyzer(analyzer);
+            }
+            plugin->destroy(analyzer);
         }
-        if(plugin)
-#ifdef _WIN32
-            FreeLibrary(plugin);
-#else
-            dlclose(plugin);
-#endif
     }
 };
 
@@ -143,7 +188,19 @@ const std::vector<SaleaeCompat::Frame>& Frames(const sr_session* session)
         static const std::vector<SaleaeCompat::Frame> empty;
         return empty;
     }
-    return SaleaeCompat::FramesFor(AnalyzerTest::GetResultsFromAnalyzer(session->analyzer));
+    if(session->run_complete.load(std::memory_order_acquire))
+        return SaleaeCompat::FramesFor(AnalyzerTest::GetResultsFromAnalyzer(session->analyzer));
+    return session->frame_snapshot;
+}
+
+void RefreshFrames(sr_session* session)
+{
+    if(!session || !session->analyzer || session->run_complete.load(std::memory_order_acquire))
+        return;
+    SaleaeCompat::AppendFramesFor(
+        AnalyzerTest::GetResultsFromAnalyzer(session->analyzer),
+        session->frame_snapshot.size(),
+        session->frame_snapshot);
 }
 
 AnalyzerTest::MockResultData* LegacyResults(const sr_session* session)
@@ -154,6 +211,101 @@ AnalyzerTest::MockResultData* LegacyResults(const sr_session* session)
     return results ? AnalyzerTest::MockResultData::MockFromResults(results) : nullptr;
 }
 
+void PublishCommittedLegacyResults(sr_session* session)
+{
+    if(!session || !session->incremental_results_enabled)
+        return;
+
+    try
+    {
+        auto* results = LegacyResults(session);
+        if(!results)
+            return;
+        const auto frame_count = static_cast<size_t>(results->TotalFrameCount());
+        if(session->published_legacy_count >= frame_count)
+            return;
+
+        std::vector<PublishedLegacyFrame> published;
+        published.reserve(frame_count - session->published_legacy_count);
+        for(size_t frame_index = session->published_legacy_count;
+            frame_index < frame_count;
+            ++frame_index)
+        {
+            PublishedLegacyFrame output;
+            output.frame = results->GetFrame(frame_index);
+            output.channels.reserve(session->configured_channel_indices.size());
+            for(const auto channel_index : session->configured_channel_indices)
+            {
+                PublishedLegacyChannel channel;
+                channel.channel_index = channel_index;
+                if(sr_session_generate_bubble_text(
+                       session,
+                       frame_index,
+                       channel_index,
+                       static_cast<int>(Hexadecimal)) == 0)
+                {
+                    channel.texts = session->bubble_text;
+                }
+                output.channels.push_back(std::move(channel));
+            }
+            published.push_back(std::move(output));
+        }
+        session->published_legacy_count = frame_count;
+
+        std::lock_guard lock(session->incremental_results_mutex);
+        session->incremental_results.insert(
+            session->incremental_results.end(),
+            std::make_move_iterator(published.begin()),
+            std::make_move_iterator(published.end()));
+    }
+    catch(...)
+    {
+        // Bubble text is supplemental; a publication failure must not abort the analyzer.
+    }
+}
+
+void InstallIncrementalCommitCallback(sr_session* session)
+{
+    if(!session || !session->incremental_results_enabled)
+        return;
+    if(auto* results = LegacyResults(session))
+        results->SetCommitCallback([session]() { PublishCommittedLegacyResults(session); });
+}
+
+std::shared_ptr<sr_session::LoadedPlugin> LoadPlugin(const char* plugin_path)
+{
+    static std::mutex mutex;
+    static std::unordered_map<std::string, std::shared_ptr<sr_session::LoadedPlugin>> cache;
+
+    const std::string key(plugin_path);
+    std::lock_guard lock(mutex);
+    if(auto existing = cache.find(key); existing != cache.end())
+        return existing->second;
+
+    auto plugin = std::make_shared<sr_session::LoadedPlugin>();
+#ifdef _WIN32
+    const auto wide_path = Utf8ToWide(plugin_path);
+    plugin->handle = wide_path.empty()
+        ? nullptr
+        : LoadLibraryExW(wide_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if(!plugin->handle)
+        throw std::runtime_error(WindowsErrorMessage());
+#else
+    plugin->handle = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
+    if(!plugin->handle)
+        throw std::runtime_error(dlerror());
+#endif
+
+    plugin->create = LoadSymbol<sr_session::CreateAnalyzerFn>(plugin->handle, "CreateAnalyzer");
+    plugin->destroy = LoadSymbol<sr_session::DestroyAnalyzerFn>(plugin->handle, "DestroyAnalyzer");
+    plugin->get_name = LoadSymbol<sr_session::GetAnalyzerNameFn>(plugin->handle, "GetAnalyzerName");
+    if(!plugin->create || !plugin->destroy || !plugin->get_name)
+        throw std::runtime_error("plugin does not export the Saleae analyzer entry points");
+
+    cache.emplace(key, plugin);
+    return plugin;
+}
+
 } // namespace
 
 extern "C" sr_session* sr_session_create(const char* plugin_path)
@@ -162,38 +314,11 @@ extern "C" sr_session* sr_session_create(const char* plugin_path)
         return nullptr;
 
     auto session = std::make_unique<sr_session>();
-#ifdef _WIN32
-    const auto wide_path = Utf8ToWide(plugin_path);
-    session->plugin = wide_path.empty()
-        ? nullptr
-        : LoadLibraryExW(wide_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if(!session->plugin)
-    {
-        session->error = WindowsErrorMessage();
-        return session.release();
-    }
-#else
-    session->plugin = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
-    if(!session->plugin)
-    {
-        session->error = dlerror();
-        return session.release();
-    }
-#endif
-
-    const auto create = LoadSymbol<sr_session::CreateAnalyzerFn>(session->plugin, "CreateAnalyzer");
-    session->destroy_analyzer = LoadSymbol<sr_session::DestroyAnalyzerFn>(session->plugin, "DestroyAnalyzer");
-    const auto get_name = LoadSymbol<sr_session::GetAnalyzerNameFn>(session->plugin, "GetAnalyzerName");
-    if(!create || !session->destroy_analyzer || !get_name)
-    {
-        session->error = "plugin does not export the Saleae analyzer entry points";
-        return session.release();
-    }
-
     try
     {
-        session->analyzer = create();
-        session->analyzer_name = get_name();
+        session->plugin = LoadPlugin(plugin_path);
+        session->analyzer = session->plugin->create();
+        session->analyzer_name = session->plugin->get_name();
     }
     catch(const std::exception& exception)
     {
@@ -446,6 +571,13 @@ extern "C" int sr_session_add_channel(
         AnalyzerTest::GetDataFromAnalyzer(session->analyzer)->channelData[channel] = data.get();
         SaleaeCompat::RegisterChannelData(session, data.get());
         session->channel_data[setting_title] = std::move(data);
+        if(std::find(
+               session->configured_channel_indices.begin(),
+               session->configured_channel_indices.end(),
+               channel_index) == session->configured_channel_indices.end())
+        {
+            session->configured_channel_indices.push_back(channel_index);
+        }
         return 0;
     }
     catch(const std::exception& exception)
@@ -471,22 +603,46 @@ extern "C" int sr_session_commit_settings(sr_session* session)
     }
 }
 
+extern "C" int sr_session_set_trigger_sample(sr_session* session, uint64_t sample)
+{
+    if(!session)
+        return -1;
+    session->trigger_sample = sample;
+    return 0;
+}
+
 extern "C" int sr_session_run(sr_session* session)
 {
     if(!session || !session->analyzer || !session->settings_committed || session->ran)
         return Fail(session, "session is invalid, unconfigured, or already ran");
 
     session->ran = true;
+    struct RunCompletion
+    {
+        sr_session* session;
+        ~RunCompletion()
+        {
+            session->run_complete.store(true, std::memory_order_release);
+        }
+    } completion{session};
     try
     {
+        // Publish the trigger position before the worker reads it, so analyzers
+        // that render timestamps relative to the trigger get the real one.
+        SaleaeCompat::SetTriggerSample(session->trigger_sample);
         if(auto* analyzer2 = dynamic_cast<Analyzer2*>(session->analyzer))
             analyzer2->SetupResults();
+        InstallIncrementalCommitCallback(session);
         session->analyzer->WorkerThread();
         return Fail(session, "analyzer worker returned unexpectedly");
     }
     catch(const AnalyzerTest::OutOfDataException&)
     {
         return 0;
+    }
+    catch(const AnalyzerTest::CancellationException&)
+    {
+        return Fail(session, "analyzer cancelled");
     }
     catch(const std::exception& exception)
     {
@@ -496,6 +652,36 @@ extern "C" int sr_session_run(sr_session* session)
     {
         return Fail(session, "analyzer worker threw an unknown exception");
     }
+}
+
+extern "C" void sr_session_enable_incremental_results(sr_session* session)
+{
+    if(!session || !session->analyzer || session->ran || session->incremental_results_enabled)
+        return;
+    session->incremental_results_enabled = true;
+}
+
+extern "C" uint64_t sr_session_progress_sample(const sr_session* session)
+{
+    if(!session || !session->analyzer)
+        return 0;
+    const auto* analyzer_data = AnalyzerTest::GetDataFromAnalyzer(session->analyzer);
+    uint64_t progress = analyzer_data->progressSample.load(std::memory_order_relaxed);
+    for(const auto& [title, channel] : session->channel_data)
+    {
+        static_cast<void>(title);
+        progress = std::max(progress, channel->GetCurrentSample());
+    }
+    return progress;
+}
+
+extern "C" void sr_session_cancel(sr_session* session)
+{
+    if(!session || !session->analyzer)
+        return;
+    AnalyzerTest::GetDataFromAnalyzer(session->analyzer)->cancelled.store(
+        true,
+        std::memory_order_relaxed);
 }
 
 extern "C" int sr_session_generate_simulation(sr_session* session, uint64_t sample_count, uint32_t sample_rate_hz)
@@ -616,6 +802,7 @@ extern "C" int sr_session_marker(const sr_session* session, size_t index, sr_mar
 
 extern "C" size_t sr_session_frame_count(const sr_session* session)
 {
+    RefreshFrames(const_cast<sr_session*>(session));
     return Frames(session).size();
 }
 
@@ -669,4 +856,72 @@ extern "C" int sr_session_legacy_frame(const sr_session* session, size_t index, 
     output->type = frame.mType;
     output->flags = frame.mFlags;
     return 0;
+}
+
+extern "C" size_t sr_session_incremental_legacy_frame_count(sr_session* session)
+{
+    if(!session || !session->incremental_results_enabled)
+        return 0;
+    std::lock_guard lock(session->incremental_results_mutex);
+    if(!session->incremental_results.empty())
+    {
+        session->incremental_snapshot.insert(
+            session->incremental_snapshot.end(),
+            std::make_move_iterator(session->incremental_results.begin()),
+            std::make_move_iterator(session->incremental_results.end()));
+        session->incremental_results.clear();
+    }
+    return session->incremental_snapshot.size();
+}
+
+extern "C" int sr_session_incremental_legacy_frame(
+    const sr_session* session,
+    size_t frame_index,
+    sr_incremental_legacy_frame_view* output)
+{
+    if(!session || !output || frame_index >= session->incremental_snapshot.size())
+        return -1;
+    const auto& frame = session->incremental_snapshot[frame_index];
+    output->start_sample = frame.frame.mStartingSampleInclusive;
+    output->end_sample = frame.frame.mEndingSampleInclusive;
+    output->data1 = frame.frame.mData1;
+    output->data2 = frame.frame.mData2;
+    output->type = frame.frame.mType;
+    output->flags = frame.frame.mFlags;
+    output->channel_count = frame.channels.size();
+    return 0;
+}
+
+extern "C" int sr_session_incremental_legacy_channel(
+    const sr_session* session,
+    size_t frame_index,
+    size_t channel_index,
+    sr_incremental_legacy_channel_view* output)
+{
+    if(!session || !output || frame_index >= session->incremental_snapshot.size())
+        return -1;
+    const auto& frame = session->incremental_snapshot[frame_index];
+    if(channel_index >= frame.channels.size())
+        return -1;
+    const auto& channel = frame.channels[channel_index];
+    output->channel_index = channel.channel_index;
+    output->text_count = channel.texts.size();
+    return 0;
+}
+
+extern "C" const char* sr_session_incremental_legacy_text(
+    const sr_session* session,
+    size_t frame_index,
+    size_t channel_index,
+    size_t text_index)
+{
+    if(!session || frame_index >= session->incremental_snapshot.size())
+        return nullptr;
+    const auto& frame = session->incremental_snapshot[frame_index];
+    if(channel_index >= frame.channels.size() ||
+       text_index >= frame.channels[channel_index].texts.size())
+    {
+        return nullptr;
+    }
+    return frame.channels[channel_index].texts[text_index].c_str();
 }

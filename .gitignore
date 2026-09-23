@@ -21,6 +21,13 @@
 
 # Local machine files
 /.DS_Store
+# Unanchored form so Finder's droppings are ignored at every level, not just
+# the repository root (tools/.DS_Store was slipping through).
+.DS_Store
 /.env.local
 /.env.*.local
 *.log
+
+# Vite writes these timestamped config snapshots next to the real config while
+# it reloads; they are temporary and machine-specific.
+vite.config.ts.timestamp-*.mjs

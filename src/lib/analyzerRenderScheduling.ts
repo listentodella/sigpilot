@@ -1,4 +1,4 @@
-import type { AnalyzerTrackWindow } from "./api";
+import type { AnalyzerTrackRequest, AnalyzerTrackWindow } from "./api";
 
 export interface AnalyzerRenderViewport {
   pixels: number;
@@ -50,4 +50,19 @@ export function preserveLiveAnalyzerTracks(
       (candidate) => candidate.channel === track.channel && candidate.role === track.role,
     ) ?? track;
   });
+}
+
+export function analyzerRenderedTracksMatchRequests(
+  renderedTracks: Pick<AnalyzerTrackWindow, "channel" | "role">[],
+  requestedTracks: AnalyzerTrackRequest[],
+) {
+  return (
+    renderedTracks.length === requestedTracks.length &&
+    requestedTracks.every((track) =>
+      renderedTracks.some(
+        (renderedTrack) =>
+          renderedTrack.channel === track.channel && renderedTrack.role === track.role,
+      ),
+    )
+  );
 }

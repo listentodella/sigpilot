@@ -1,5 +1,5 @@
 import { CSSProperties, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AnalyzerBubble, AnalyzerTrackWindow, WaveformTile } from "../lib/api";
+import { AnalyzerFrameRef, AnalyzerTrackWindow, WaveformTile } from "../lib/api";
 import { analyzerBubbleLayout } from "../lib/analyzerBubbleLayout";
 import {
   ANALYZER_BUBBLES_PADDING_PX,
@@ -10,37 +10,75 @@ import {
   analyzerMarkerRoles,
   formatAnalyzerText,
 } from "../lib/analyzers";
+import { useSessionViewport } from "../lib/useSessionViewport";
+import { useSessionFrameState } from "../lib/useFrameState";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
 import {
+  mergeSortedSamples,
+  nearestSortedSample,
   visibleAnalyzerMarkerSamples,
   visibleAnalyzerProtocolMarkers,
 } from "../lib/analyzerMarkers";
+import {
+  analyzerBubbleKey,
+  paddedAnalyzerBubbleRange,
+  type AnalyzerBubbleKeyTrack,
+  visibleAnalyzerBubbleKeys,
+  visibleAnalyzerBubbleRange,
+} from "../lib/analyzerBubbleVisibility";
 import { traceAnalyzerPerformance } from "../lib/analyzerPerformance";
 
 const APPROXIMATE_CHARACTER_WIDTH_PX = 6;
 const BUBBLE_EDGE_ARROW_WIDTH_PX = 3;
 const MAX_MULTI_BUBBLE_COUNT = 99;
 const MAX_MULTI_BUBBLE_TEXT_LENGTH = 200;
+const EMPTY_EDGE_SAMPLES: number[] = [];
+const EMPTY_FORMATTED_BUBBLE_TEXT: string[] = [];
+const FORMATTED_BUBBLE_TEXT_CACHE = new WeakMap<string[], Map<string, string[]>>();
+const MERGED_EDGE_SAMPLE_CACHE = new WeakMap<WaveformTile["channels"][number], number[]>();
+const QUOTED_HEX_LABEL_PATTERN = /^'(.+)'\s+(0x[0-9A-F]+)$/i;
 
 interface AnalyzerBubbleTrack {
-  analyzer: UiAnalyzerInstance;
+  analyzerId: string;
+  color: string;
+  displayRadix: UiAnalyzerInstance["displayRadix"];
+  highlightedFrameIndex: number | null;
   key: string;
   role: AnalyzerChannelRole;
   window: AnalyzerTrackWindow | null;
 }
 
 interface AnalyzerMarkerTrack {
-  analyzer: UiAnalyzerInstance;
+  analyzerId: string;
   edgeType: "rising" | "falling";
   key: string;
   role: AnalyzerChannelRole;
+}
+
+interface AnalyzerProtocolMarkerTrack {
+  analyzerId: string;
+  analyzerTypeKey: string;
+  channel: number;
+  markers: AnalyzerTrackWindow["protocol_markers"];
+  nativeDecoderKey: string;
+}
+
+interface AnalyzerProtocolMarkerSource {
+  analyzerTypeKey: string;
+  nativeDecoderKey: string;
 }
 
 interface AnalyzerBubbleElementBinding {
   endSample: number;
   element: HTMLButtonElement;
   labels: string[];
+  lastDisplay?: string;
+  lastOverflowLeft?: boolean;
+  lastOverflowRight?: boolean;
+  lastText?: string;
+  lastTransform?: string;
+  lastWidthStyle?: string;
   multi: boolean;
   resultCount: number;
   startSample: number;
@@ -51,36 +89,71 @@ interface AnalyzerBubblesOverlayProps {
   analyzers: UiAnalyzerInstance[];
   rowHeights: number[];
   rowTopInsets: number[];
+  sessionId?: string;
   tile: WaveformTile | null;
   viewportSamples: number;
   viewportStart: number;
-  viewportInteracting: boolean;
   visibleChannelIndexes: number[];
-  onGoToFrame: (analyzerId: string, frameIndex: number) => void;
+  onGoToFrame: (analyzerId: string, frameIndex: number, frame?: AnalyzerFrameRef) => void;
   onOpenTableFrame: (analyzerId: string, frameIndex: number) => void;
   onSelectFrame: (analyzerId: string, frameIndex: number) => void;
   onZoomBubble: (analyzerId: string, startSample: number, endSample: number, frameIndex: number) => void;
+}
+
+interface BubbleDomViewport {
+  samples: number;
+  start: number;
 }
 
 export function AnalyzerBubblesOverlay({
   analyzers,
   rowHeights,
   rowTopInsets,
+  sessionId,
   tile,
-  viewportSamples,
-  viewportStart,
-  viewportInteracting,
+  viewportSamples: viewportSamplesProp,
+  viewportStart: viewportStartProp,
   visibleChannelIndexes,
   onGoToFrame,
   onOpenTableFrame,
   onSelectFrame,
   onZoomBubble,
 }: AnalyzerBubblesOverlayProps) {
+  // Once the workbench has wired this session into the backend frame loop, the
+  // analyzer tracks arrive on every frame — already aggregated for the viewport
+  // that frame was rendered for. Reading them from the loop is what keeps the
+  // bubble aggregation in step with a zoom instead of trailing it by a whole
+  // request round trip, which is what made the bubbles look wrong while moving.
+  const frameState = useSessionFrameState(sessionId);
+  const liveFrame = frameState?.ready ? frameState : null;
+  const effectiveAnalyzers = useMemo(() => {
+    if (!liveFrame || liveFrame.analyzers.length === 0) return analyzers;
+    const tracksById = new Map<string, AnalyzerTrackWindow[]>(
+      liveFrame.analyzers.map((result) => [result.analyzer_id, result.tracks] as const),
+    );
+    return analyzers.map((analyzer) => {
+      const tracks = tracksById.get(analyzer.id);
+      return tracks ? { ...analyzer, renderedTracks: tracks } : analyzer;
+    });
+  }, [analyzers, liveFrame]);
+  const effectiveTile = liveFrame?.tile ?? tile;
+
+  // The overlay draws its own lightweight preview while the viewport is moving.
+  // Reading the live viewport keeps that preview locked to the waveform instead
+  // of trailing it by one workbench render.
+  const liveViewport = useSessionViewport(sessionId, viewportStartProp, viewportSamplesProp);
+  const viewportStart = liveFrame ? liveFrame.view.start_sample : liveViewport.start;
+  const viewportSamples = liveFrame ? liveFrame.view.samples : liveViewport.samples;
   const overlayRef = useRef<HTMLDivElement>(null);
   const bubbleElementsRef = useRef(new Map<string, AnalyzerBubbleElementBinding>());
+  const visibleBubbleKeysRef = useRef(new Set<string>());
   const callbacksRef = useRef({ onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble });
   callbacksRef.current = { onGoToFrame, onOpenTableFrame, onSelectFrame, onZoomBubble };
   const [overlayWidth, setOverlayWidth] = useState(1);
+  const [bubbleDomViewport, setBubbleDomViewport] = useState<BubbleDomViewport>(() => ({
+    samples: Math.max(1, viewportSamples),
+    start: viewportStart,
+  }));
   const [hoveredTrackKey, setHoveredTrackKey] = useState<string | null>(null);
   const rowTops = useMemo(() => {
     let top = 0;
@@ -90,36 +163,32 @@ export function AnalyzerBubblesOverlay({
       return current;
     });
   }, [rowHeights]);
-  const bubbleTracks = useMemo<AnalyzerBubbleTrack[]>(
-    () =>
-      analyzers.flatMap((analyzer) =>
-        analyzerBubbleRoles(analyzer).map((role) => ({
-          analyzer,
-          key: `${analyzer.id}:${role.title}:${role.channel}:bubbles`,
-          role,
-          window:
-            analyzer.renderedTracks.find(
-              (track) => track.channel === role.channel && track.role === role.title,
-            ) ?? null,
-        })),
-      ),
-    [analyzers],
-  );
-  const markerTracks = useMemo<AnalyzerMarkerTrack[]>(
-    () =>
-      analyzers.flatMap((analyzer) =>
-        analyzerMarkerRoles(analyzer).map((role) => ({
-          analyzer,
-          edgeType: analyzerMarkerEdgeType(analyzer),
-          key: `${analyzer.id}:${role.title}:${role.channel}:markers`,
-          role,
-        })),
-      ),
-    [analyzers],
-  );
+  const bubbleTracks = useStableAnalyzerBubbleTracks(effectiveAnalyzers);
+  const bubbleTracksByChannel = useMemo(() => {
+    const tracksByChannel = new Map<number, AnalyzerBubbleTrack[]>();
+    bubbleTracks.forEach((track) => {
+      const tracks = tracksByChannel.get(track.role.channel);
+      if (tracks) tracks.push(track);
+      else tracksByChannel.set(track.role.channel, [track]);
+    });
+    return tracksByChannel;
+  }, [bubbleTracks]);
+  const markerTracks = useStableAnalyzerMarkerTracks(effectiveAnalyzers);
+  const protocolMarkerTracks = useStableAnalyzerProtocolMarkerTracks(effectiveAnalyzers);
   const tileChannels = useMemo(
-    () => new Map((tile?.channels ?? []).map((channel) => [channel.channel, channel])),
-    [tile],
+    () => new Map((effectiveTile?.channels ?? []).map((channel) => [channel.channel, channel])),
+    [effectiveTile],
+  );
+  const visibleChannelRows = useMemo(
+    () => new Map(visibleChannelIndexes.map((channel, rowIndex) => [channel, rowIndex])),
+    [visibleChannelIndexes],
+  );
+  const nativeMarkerChannels = useMemo(
+    () =>
+      new Set(
+        protocolMarkerTracks.map((track) => `${track.analyzerId}:${track.channel}`),
+      ),
+    [protocolMarkerTracks],
   );
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -131,6 +200,28 @@ export function AnalyzerBubblesOverlay({
     return () => observer.disconnect();
   }, []);
 
+  // `bubbleDomViewport` decides *which* bubbles have an element, and nothing
+  // else: geometry and text are written imperatively every frame. Rebuilding the
+  // element set is the expensive part, so it is refreshed only once the viewport
+  // leaves the comfortable middle of the current window. Freezing it during a
+  // gesture — as this used to — is what made the DOM reappear one frame with
+  // stale sizes.
+  useEffect(() => {
+    const samples = Math.max(1, viewportSamples);
+    setBubbleDomViewport((current) => {
+      const insideMiddle =
+        viewportStart >= current.start + current.samples * 0.25 &&
+        viewportStart + samples <= current.start + current.samples * 0.75;
+      // The window also has to stay at the right scale. Zooming out widens the
+      // viewport past a window sized for the old zoom, and any bubble beyond it
+      // would have no element until the next refresh — a visible gap.
+      const sameScale = Math.abs(samples * 3 - current.samples) <= current.samples * 0.25;
+      if (insideMiddle && sameScale) return current;
+      // Re-centre with a viewport of padding on each side.
+      return { samples: samples * 3, start: viewportStart - samples };
+    });
+  }, [viewportSamples, viewportStart]);
+
   useEffect(() => {
     if (!hoveredTrackKey) return;
     function handleKeyDown(event: KeyboardEvent) {
@@ -138,15 +229,15 @@ export function AnalyzerBubblesOverlay({
       const track = bubbleTracks.find((item) => item.key === hoveredTrackKey);
       if (!track) return;
       const frameWindow = track.window;
-      const frameIndex =
+      const frame =
         event.key === "ArrowLeft"
-          ? frameWindow?.previous_frame?.frame_id ?? null
+          ? frameWindow?.previous_frame_ref ?? frameWindow?.previous_frame ?? null
           : event.key === "ArrowRight"
-            ? frameWindow?.next_frame?.frame_id ?? null
+            ? frameWindow?.next_frame_ref ?? frameWindow?.next_frame ?? null
             : null;
-      if (frameIndex === null) return;
+      if (frame === null) return;
       event.preventDefault();
-      callbacksRef.current.onGoToFrame(track.analyzer.id, frameIndex);
+      callbacksRef.current.onGoToFrame(track.analyzerId, frame.frame_id, frame);
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
@@ -159,135 +250,150 @@ export function AnalyzerBubblesOverlay({
       if (!overlay) return;
       const width = Math.max(1, overlay.clientWidth);
       const samples = Math.max(1, viewportSamples);
+      const nextVisibleKeys = visibleBubbleElementKeys(
+        bubbleTracksByChannel,
+        visibleChannelIndexes,
+        viewportStart,
+        samples,
+      );
+      const keysToUpdate = new Set(nextVisibleKeys);
+      visibleBubbleKeysRef.current.forEach((key) => keysToUpdate.add(key));
 
-      bubbleElementsRef.current.forEach(({ endSample, element, labels, multi, resultCount, startSample, textElement }) => {
+      keysToUpdate.forEach((key) => {
+        const binding = bubbleElementsRef.current.get(key);
+        if (!binding) return;
+        const { endSample, element, labels, multi, resultCount, startSample, textElement } = binding;
+        if (!nextVisibleKeys.has(key)) {
+          if (binding.lastDisplay !== "none") {
+            element.style.display = "none";
+            binding.lastDisplay = "none";
+          }
+          return;
+        }
         const layout = analyzerBubbleLayout(startSample, endSample, viewportStart, samples, width);
         const { overflowLeft, overflowRight, visible } = layout;
         const display = visible ? "flex" : "none";
-        if (element.style.display !== display) element.style.display = display;
+        if (binding.lastDisplay !== display) {
+          element.style.display = display;
+          binding.lastDisplay = display;
+        }
         if (!visible) return;
         const bubbleWidth = layout.widthPx;
         const transform = `translate3d(${layout.leftPx}px, 0, 0)`;
         const widthStyle = `${bubbleWidth}px`;
-        if (element.style.transform !== transform) element.style.transform = transform;
-        if (element.style.width !== widthStyle) element.style.width = widthStyle;
-        element.classList.toggle("overflowLeft", overflowLeft);
-        element.classList.toggle("overflowRight", overflowRight);
+        if (binding.lastTransform !== transform) {
+          element.style.transform = transform;
+          binding.lastTransform = transform;
+        }
+        if (binding.lastWidthStyle !== widthStyle) {
+          element.style.width = widthStyle;
+          binding.lastWidthStyle = widthStyle;
+        }
+        if (binding.lastOverflowLeft !== overflowLeft) {
+          element.classList.toggle("overflowLeft", overflowLeft);
+          binding.lastOverflowLeft = overflowLeft;
+        }
+        if (binding.lastOverflowRight !== overflowRight) {
+          element.classList.toggle("overflowRight", overflowRight);
+          binding.lastOverflowRight = overflowRight;
+        }
 
-        if (!viewportInteracting) {
-          const arrowWidth =
-            (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
-            (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
-          const nextText = multi
-            ? multiBubbleTextFromValues(labels, resultCount, bubbleWidth - 28)
-            : bestFrameText(labels, bubbleWidth - arrowWidth - 6);
-          if (textElement && textElement.textContent !== nextText) textElement.textContent = nextText;
+        const arrowWidth =
+          (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
+          (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
+        const nextText = multi
+          ? multiBubbleTextFromValues(labels, resultCount, bubbleWidth - 28)
+          : bestFrameText(labels, bubbleWidth - arrowWidth - 6);
+        if (binding.lastText !== nextText) {
+          if (textElement) textElement.textContent = nextText;
+          binding.lastText = nextText;
         }
       });
+      visibleBubbleKeysRef.current = nextVisibleKeys;
       traceAnalyzerPerformance(
         "bubble_dom_update",
         started,
-        `elements=${bubbleElementsRef.current.size} interacting=${viewportInteracting}`,
+        `elements=${bubbleElementsRef.current.size} visible=${nextVisibleKeys.size} updated=${keysToUpdate.size}`,
       );
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [overlayWidth, viewportSamples, viewportStart, viewportInteracting, bubbleTracks]);
+  }, [
+    overlayWidth,
+    viewportSamples,
+    viewportStart,
+    bubbleTracksByChannel,
+    visibleChannelIndexes,
+  ]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-    const started = performance.now();
-    const overlay = overlayRef.current;
-    const canvas = overlay?.querySelector<HTMLCanvasElement>(".analyzerMarkersCanvas");
-    if (!overlay || !canvas) return;
-    const width = Math.max(1, overlay.clientWidth);
-    const height = Math.max(1, overlay.clientHeight);
-    const dpr = window.devicePixelRatio || 1;
-    const pixelWidth = Math.max(1, Math.floor(width * dpr));
-    const pixelHeight = Math.max(1, Math.floor(height * dpr));
-    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-      canvas.width = pixelWidth;
-      canvas.height = pixelHeight;
-    }
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    context.clearRect(0, 0, pixelWidth, pixelHeight);
-    context.save();
-    context.scale(dpr, dpr);
-    context.lineWidth = 1;
-    context.globalAlpha = 0.96;
-    context.shadowColor = "rgba(0, 0, 0, 0.45)";
-    context.shadowBlur = 1;
-    context.shadowOffsetY = 1;
-
-    const viewStart = viewportStart;
-    const viewEnd = viewportStart + Math.max(1, viewportSamples);
-    const nativeMarkerChannels = new Set(
-      analyzers.flatMap((analyzer) =>
-        analyzer.renderedTracks
-          .filter((track) => (track.protocol_markers?.length ?? 0) > 0)
-          .map((track) => `${analyzer.id}:${track.channel}`),
-      ),
-    );
-    markerTracks.forEach((track) => {
-      if (nativeMarkerChannels.has(`${track.analyzer.id}:${track.role.channel}`)) return;
-      const rowIndex = visibleChannelIndexes.indexOf(track.role.channel);
-      if (rowIndex < 0) return;
-      const channel = tileChannels.get(track.role.channel);
-      if (!channel) return;
-      const edgeSamples = track.edgeType === "rising" ? channel.rising_edges : channel.falling_edges;
-      if (edgeSamples.length === 0) return;
-      const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
-      const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
-      const centerY = rowTops[rowIndex] + inset + trackHeight / 2;
-      context.fillStyle = saleaeLegacyChannelColor(track.role.channel);
-      context.strokeStyle = context.fillStyle;
-      const markerSamples = visibleAnalyzerMarkerSamples(
-        edgeSamples,
-        viewStart,
-        viewEnd - viewStart,
-        width,
-      );
-      for (const sample of markerSamples) {
-        const left = ((sample - viewStart) / Math.max(1, viewportSamples)) * width;
-        drawAnalyzerMarker(context, left, centerY, track.edgeType);
+      const started = performance.now();
+      const overlay = overlayRef.current;
+      const canvas = overlay?.querySelector<HTMLCanvasElement>(".analyzerMarkersCanvas");
+      if (!overlay || !canvas) return;
+      const width = Math.max(1, overlay.clientWidth);
+      const height = Math.max(1, overlay.clientHeight);
+      const dpr = window.devicePixelRatio || 1;
+      const pixelWidth = Math.max(1, Math.floor(width * dpr));
+      const pixelHeight = Math.max(1, Math.floor(height * dpr));
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        canvas.width = pixelWidth;
+        canvas.height = pixelHeight;
       }
-    });
-    analyzers.forEach((analyzer) => {
-      analyzer.renderedTracks.forEach((track) => {
-        const markers = track.protocol_markers ?? [];
-        if (markers.length === 0) return;
-        const rowIndex = visibleChannelIndexes.indexOf(track.channel);
-        if (rowIndex < 0) return;
-        const channel = tileChannels.get(track.channel);
-        const allEdgeSamples = channel
-          ? [...channel.rising_edges, ...channel.falling_edges].sort((left, right) => left - right)
-          : [];
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.clearRect(0, 0, pixelWidth, pixelHeight);
+      context.save();
+      context.scale(dpr, dpr);
+      context.lineWidth = 1;
+      context.globalAlpha = 0.96;
+      context.shadowColor = "rgba(0, 0, 0, 0.45)";
+      context.shadowBlur = 1;
+      context.shadowOffsetY = 1;
+
+      const viewStart = viewportStart;
+      const viewSamples = Math.max(1, viewportSamples);
+      // Bubbles are always drawn as DOM. Logic has a single rendering path for
+      // them, and the canvas preview this replaced was the reason the text sat
+      // left-aligned while the viewport moved and snapped to centred once it
+      // stopped: the preview and the DOM disagreed about alignment.
+      markerTracks.forEach((track) => {
+        if (nativeMarkerChannels.has(`${track.analyzerId}:${track.role.channel}`)) return;
+        const rowIndex = visibleChannelRows.get(track.role.channel);
+        if (rowIndex === undefined) return;
+        const channel = tileChannels.get(track.role.channel);
+        if (!channel) return;
+        const edgeSamples = track.edgeType === "rising" ? channel.rising_edges : channel.falling_edges;
+        if (edgeSamples.length === 0) return;
         const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
         const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
         const centerY = rowTops[rowIndex] + inset + trackHeight / 2;
-        for (const marker of visibleAnalyzerProtocolMarkers(
-          markers,
-          viewStart,
-          viewEnd - viewStart,
-          width,
-        )) {
+        context.fillStyle = saleaeLegacyChannelColor(track.role.channel);
+        context.strokeStyle = context.fillStyle;
+        const markerSamples = visibleAnalyzerMarkerSamples(edgeSamples, viewStart, viewSamples, width);
+        for (const sample of markerSamples) {
+          const left = ((sample - viewStart) / viewSamples) * width;
+          drawAnalyzerMarker(context, left, centerY, track.edgeType);
+        }
+      });
+      protocolMarkerTracks.forEach((track) => {
+        const rowIndex = visibleChannelRows.get(track.channel);
+        if (rowIndex === undefined) return;
+        const channel = tileChannels.get(track.channel);
+        const inset = Math.max(0, rowTopInsets[rowIndex] ?? 0);
+        const trackHeight = Math.max(1, rowHeights[rowIndex] - inset);
+        const centerY = rowTops[rowIndex] + inset + trackHeight / 2;
+        for (const marker of visibleAnalyzerProtocolMarkers(track.markers, viewStart, viewSamples, width)) {
           const edgeSamples = protocolMarkerEdgeSamples(
-            analyzer,
+            track,
             marker.kind,
             channel,
-            allEdgeSamples,
           );
-          const sample = snapProtocolMarkerToEdge(
-            marker.kind,
-            marker.sample,
-            edgeSamples,
-          );
-          const left = crispAnalyzerMarkerX(
-            ((sample - viewStart) / Math.max(1, viewportSamples)) * width,
-          );
+          const sample = snapProtocolMarkerToEdge(marker.kind, marker.sample, edgeSamples);
+          const left = crispAnalyzerMarkerX(((sample - viewStart) / viewSamples) * width);
           drawProtocolMarker(
             context,
             left,
@@ -297,16 +403,16 @@ export function AnalyzerBubblesOverlay({
           );
         }
       });
-    });
-    context.restore();
-    traceAnalyzerPerformance("marker_canvas_update", started);
+      context.restore();
+      traceAnalyzerPerformance("marker_canvas_update", started);
     });
     return () => window.cancelAnimationFrame(frame);
   }, [
-    bubbleTracks,
-    analyzers,
+    bubbleTracksByChannel,
     markerTracks,
+    nativeMarkerChannels,
     overlayWidth,
+    protocolMarkerTracks,
     rowHeights,
     rowTopInsets,
     rowTops,
@@ -314,169 +420,223 @@ export function AnalyzerBubblesOverlay({
     viewportSamples,
     viewportStart,
     visibleChannelIndexes,
+    visibleChannelRows,
   ]);
 
   const renderedContent = useMemo(
     () => (
       <>
-      {visibleChannelIndexes.flatMap((channel, rowIndex) => {
-        const channelTracks = bubbleTracks.filter((track) => track.role.channel === channel);
-        return channelTracks.map((track, trackIndex) => {
-          const { analyzer } = track;
-          const frameWindow = track.window;
-          const bubbles = frameWindow?.bubbles ?? [];
-          const previousIndex = frameWindow?.previous_frame?.frame_id ?? null;
-          const nextIndex = frameWindow?.next_frame?.frame_id ?? null;
-          const hovered = hoveredTrackKey === track.key;
+        {visibleChannelIndexes.flatMap((channel, rowIndex) => {
+          const channelTracks = bubbleTracksByChannel.get(channel) ?? [];
+          return channelTracks.map((track, trackIndex) => {
+            const frameWindow = track.window;
+            const bubbles = frameWindow?.bubbles ?? [];
+            // The window already carries a viewport of padding on each side, so
+            // it is used as-is: this decides which bubbles get an element, and
+            // nothing about where they sit.
+            const [renderStartIndex, renderEndIndex] = paddedAnalyzerBubbleRange(
+              bubbles,
+              bubbleDomViewport.start,
+              bubbleDomViewport.samples,
+              0,
+            );
+            const renderedBubbles = bubbles.slice(renderStartIndex, renderEndIndex);
+            const previousFrame = frameWindow?.previous_frame_ref ?? frameWindow?.previous_frame ?? null;
+            const nextFrame = frameWindow?.next_frame_ref ?? frameWindow?.next_frame ?? null;
+            const previousIndex = previousFrame?.frame_id ?? null;
+            const nextIndex = nextFrame?.frame_id ?? null;
+            const hovered = hoveredTrackKey === track.key;
 
-          return (
-            <div
-              className="analyzerBubbleStrip"
-              data-analyzer-track={track.key}
-              data-bubble-count={bubbles.length}
-              data-first-bubble-start={bubbles[0]?.start_sample ?? ""}
-              data-last-bubble-end={bubbles[bubbles.length - 1]?.end_sample ?? ""}
-              data-window-state={frameWindow ? "ready" : "pending"}
-              key={track.key}
-              onMouseEnter={() => setHoveredTrackKey(track.key)}
-              onMouseLeave={() =>
-                setHoveredTrackKey((current) => (current === track.key ? null : current))
-              }
-              style={{
-                top:
-                  rowTops[rowIndex] +
-                  trackIndex * ANALYZER_STRIP_HEIGHT_PX +
-                  ANALYZER_BUBBLES_PADDING_PX,
-              }}
-            >
-              {bubbles.map((bubble) => {
-                const left = ((bubble.start_sample - viewportStart) / Math.max(1, viewportSamples)) * overlayWidth;
-                const originalBubbleWidth =
-                  ((bubble.end_sample - bubble.start_sample) / Math.max(1, viewportSamples)) * overlayWidth;
-                const right = left + originalBubbleWidth;
-                const bubbleWidth = Math.max(
-                  1,
-                  Math.min(originalBubbleWidth + Math.min(0, left), overlayWidth - Math.max(left, 0)),
-                );
-                const overflowLeft = left < 0;
-                const overflowRight = right > overlayWidth;
-                const firstFrameIndex = bubble.frame_id_interval.begin;
-                const multi = bubble.type === "MultiBubble" || bubble.result_count > 1;
-                const highlighted =
-                  analyzer.highlightedFrameIndex !== null &&
-                  analyzer.highlightedFrameIndex >= bubble.frame_id_interval.begin &&
-                  analyzer.highlightedFrameIndex < bubble.frame_id_interval.end;
-                const arrowWidth =
-                  (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
-                  (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
-                const formattedDisplayText = bubble.display_text.map((label) =>
-                  formatAnalyzerText(label, analyzer.displayRadix),
-                );
-                const text = multi
-                  ? multiBubbleText({ ...bubble, display_text: formattedDisplayText }, bubbleWidth - 28)
-                  : bestFrameText(formattedDisplayText, bubbleWidth - arrowWidth - 6);
-                const tooltip = multi ? bubbleTooltipText({ ...bubble, display_text: formattedDisplayText }, text) : formattedDisplayText[0] ?? "";
-                const bubbleKey = `${track.key}:${bubble.start_sample}:${bubble.frame_id_interval.begin}:${bubble.frame_id_interval.end}`;
-
-                function handleClick(event: MouseEvent<HTMLButtonElement>) {
-                  event.stopPropagation();
-                  if (event.metaKey || event.ctrlKey) {
-                    callbacksRef.current.onOpenTableFrame(analyzer.id, firstFrameIndex);
-                  } else {
-                    callbacksRef.current.onSelectFrame(analyzer.id, firstFrameIndex);
-                  }
+            return (
+              <div
+                className="analyzerBubbleStrip"
+                data-analyzer-track={track.key}
+                data-bubble-count={bubbles.length}
+                data-first-bubble-start={bubbles[0]?.start_sample ?? ""}
+                data-last-bubble-end={bubbles[bubbles.length - 1]?.end_sample ?? ""}
+                data-rendered-bubble-count={renderedBubbles.length}
+                data-window-state={frameWindow ? "ready" : "pending"}
+                key={track.key}
+                onMouseEnter={() => setHoveredTrackKey(track.key)}
+                onMouseLeave={() =>
+                  setHoveredTrackKey((current) => (current === track.key ? null : current))
                 }
+                style={{
+                  top:
+                    rowTops[rowIndex] +
+                    trackIndex * ANALYZER_STRIP_HEIGHT_PX +
+                    ANALYZER_BUBBLES_PADDING_PX,
+                }}
+              >
+                {renderedBubbles.map((bubble) => {
+                  // Built against the *live* viewport, not the element window.
+                  // The window is deliberately wider than the screen, so using
+                  // it here would place every bubble at a fraction of its real
+                  // position until the update effect ran — a visible flash on
+                  // every rebuild.
+                  const viewSamples = Math.max(1, viewportSamples);
+                  const left = ((bubble.start_sample - viewportStart) / viewSamples) * overlayWidth;
+                  const originalBubbleWidth =
+                    ((bubble.end_sample - bubble.start_sample) / viewSamples) * overlayWidth;
+                  const right = left + originalBubbleWidth;
+                  const bubbleWidth = Math.max(
+                    1,
+                    Math.min(originalBubbleWidth + Math.min(0, left), overlayWidth - Math.max(left, 0)),
+                  );
+                  const overflowLeft = left < 0;
+                  const overflowRight = right > overlayWidth;
+                  const firstFrameIndex = bubble.frame_id_interval.begin;
+                  const multi = bubble.type === "MultiBubble" || bubble.result_count > 1;
+                  const highlighted =
+                    track.highlightedFrameIndex !== null &&
+                    track.highlightedFrameIndex >= bubble.frame_id_interval.begin &&
+                    track.highlightedFrameIndex < bubble.frame_id_interval.end;
+                  const arrowWidth =
+                    (overflowLeft ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0) +
+                    (overflowRight ? BUBBLE_EDGE_ARROW_WIDTH_PX : 0);
+                  const formattedDisplayText = formattedBubbleDisplayText(
+                    bubble.display_text,
+                    track.displayRadix,
+                  );
+                  const text = multi
+                    ? multiBubbleText(formattedDisplayText, bubble.result_count, bubbleWidth - 28)
+                    : bestFrameText(formattedDisplayText, bubbleWidth - arrowWidth - 6);
+                  const tooltip = multi
+                    ? bubbleTooltipText(formattedDisplayText, bubble.result_count, multi, text)
+                    : formattedDisplayText[0] ?? "";
+                  const bubbleKey = analyzerBubbleKey(track.key, bubble);
 
-                return (
-                  <button
-                    className={`analyzerBubble ${multi ? "multi" : ""} ${highlighted ? "highlighted" : ""} ${overflowLeft ? "overflowLeft" : ""} ${overflowRight ? "overflowRight" : ""}`}
-                    data-bubble-end={bubble.end_sample}
-                    data-bubble-start={bubble.start_sample}
-                    key={bubbleKey}
-                    onClick={handleClick}
-                    onDoubleClick={(event) => {
-                      event.stopPropagation();
-                      callbacksRef.current.onZoomBubble(
-                        analyzer.id,
-                        bubble.start_sample,
-                        bubble.end_sample,
-                        firstFrameIndex,
-                      );
-                    }}
-                    style={{
-                      display: right >= 0 && left <= overlayWidth ? "flex" : "none",
-                      left: 0,
-                      transform: `translate3d(${Math.max(left, 0)}px, 0, 0)`,
-                      width: bubbleWidth,
-                      "--analyzer-color": analyzer.color,
-                    } as CSSProperties}
-                    ref={(element) => {
-                      if (element) {
-                        bubbleElementsRef.current.set(bubbleKey, {
-                          endSample: bubble.end_sample,
-                          element,
-                          labels: formattedDisplayText,
-                          multi,
-                          resultCount: bubble.result_count,
-                          startSample: bubble.start_sample,
-                          textElement: element.querySelector<HTMLElement>(".analyzerBubbleText"),
-                        });
-                      } else {
-                        bubbleElementsRef.current.delete(bubbleKey);
-                      }
-                    }}
-                    title={`${tooltip}\n${navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+click to scroll to table row`}
-                    type="button"
-                  >
-                    {!multi && <span className="analyzerBubbleArrow left" />}
-                    {multi && (
-                      <span className="analyzerBubbleCounter">
-                        {bubble.result_count > MAX_MULTI_BUBBLE_COUNT ? `${MAX_MULTI_BUBBLE_COUNT}+` : bubble.result_count}
-                      </span>
-                    )}
-                    <span className="analyzerBubbleText">{text}</span>
-                    {!multi && <span className="analyzerBubbleArrow right" />}
-                  </button>
-                );
-              })}
+                  function handleClick(event: MouseEvent<HTMLButtonElement>) {
+                    event.stopPropagation();
+                    if (event.metaKey || event.ctrlKey) {
+                      callbacksRef.current.onOpenTableFrame(track.analyzerId, firstFrameIndex);
+                    } else {
+                      callbacksRef.current.onSelectFrame(track.analyzerId, firstFrameIndex);
+                    }
+                  }
 
-              {hovered && previousIndex !== null && (
-                <AnalyzerBubbleNavigationButton
-                  direction="previous"
-                  onClick={() => callbacksRef.current.onGoToFrame(analyzer.id, previousIndex)}
-                />
-              )}
-              {hovered && nextIndex !== null && (
-                <AnalyzerBubbleNavigationButton
-                  direction="next"
-                  onClick={() => callbacksRef.current.onGoToFrame(analyzer.id, nextIndex)}
-                />
-              )}
-            </div>
-          );
-        });
-      })}
+                  return (
+                    <button
+                      className={`analyzerBubble ${multi ? "multi" : ""} ${highlighted ? "highlighted" : ""} ${overflowLeft ? "overflowLeft" : ""} ${overflowRight ? "overflowRight" : ""}`}
+                      data-bubble-end={bubble.end_sample}
+                      data-bubble-start={bubble.start_sample}
+                      key={bubbleKey}
+                      onClick={handleClick}
+                      onDoubleClick={(event) => {
+                        event.stopPropagation();
+                        callbacksRef.current.onZoomBubble(
+                          track.analyzerId,
+                          bubble.start_sample,
+                          bubble.end_sample,
+                          firstFrameIndex,
+                        );
+                      }}
+                      style={{
+                        display: right >= 0 && left <= overlayWidth ? "flex" : "none",
+                        left: 0,
+                        transform: `translate3d(${Math.max(left, 0)}px, 0, 0)`,
+                        width: bubbleWidth,
+                        "--analyzer-color": track.color,
+                      } as CSSProperties}
+                      ref={(element) => {
+                        if (element) {
+                          bubbleElementsRef.current.set(bubbleKey, {
+                            endSample: bubble.end_sample,
+                            element,
+                            labels: formattedDisplayText,
+                            multi,
+                            resultCount: bubble.result_count,
+                            startSample: bubble.start_sample,
+                            textElement: element.querySelector<HTMLElement>(".analyzerBubbleText"),
+                          });
+                        } else {
+                          bubbleElementsRef.current.delete(bubbleKey);
+                        }
+                      }}
+                      title={`${tooltip}\n${navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+click to scroll to table row`}
+                      type="button"
+                    >
+                      {!multi && <span className="analyzerBubbleArrow left" />}
+                      {multi && (
+                        <span className="analyzerBubbleCounter">
+                          {bubble.result_count > MAX_MULTI_BUBBLE_COUNT ? `${MAX_MULTI_BUBBLE_COUNT}+` : bubble.result_count}
+                        </span>
+                      )}
+                      <span className="analyzerBubbleText">{text}</span>
+                      {!multi && <span className="analyzerBubbleArrow right" />}
+                    </button>
+                  );
+                })}
+
+                {hovered && previousIndex !== null && (
+                  <AnalyzerBubbleNavigationButton
+                    direction="previous"
+                    onClick={() =>
+                      callbacksRef.current.onGoToFrame(
+                        track.analyzerId,
+                        previousIndex,
+                        previousFrame ?? undefined,
+                      )
+                    }
+                  />
+                )}
+                {hovered && nextIndex !== null && (
+                  <AnalyzerBubbleNavigationButton
+                    direction="next"
+                    onClick={() =>
+                      callbacksRef.current.onGoToFrame(
+                        track.analyzerId,
+                        nextIndex,
+                        nextFrame ?? undefined,
+                      )
+                    }
+                  />
+                )}
+              </div>
+            );
+          });
+        })}
       </>
     ),
     [
-      bubbleTracks,
+      bubbleTracksByChannel,
+      bubbleDomViewport,
       hoveredTrackKey,
-      overlayWidth,
-      rowHeights,
-      rowTopInsets,
       rowTops,
       visibleChannelIndexes,
+      // `viewportStart` / `viewportSamples` / `overlayWidth` are read above but
+      // deliberately absent here. Listing them would rebuild every bubble
+      // element on every frame of a gesture; the update effect rewrites position,
+      // width and text imperatively, so the values captured at the last rebuild
+      // are only a starting point. They are re-read whenever this memo does run,
+      // which is what keeps a rebuild from flashing stale geometry.
     ],
   );
 
   return (
     <div className="analyzerBubblesOverlay" ref={overlayRef}>
       <canvas className="analyzerMarkersCanvas" aria-hidden="true" />
-      <div className="analyzerOverlayTransformLayer">
-        {renderedContent}
-      </div>
+      <div className="analyzerOverlayTransformLayer">{renderedContent}</div>
     </div>
   );
+}
+
+function visibleBubbleElementKeys(
+  bubbleTracksByChannel: Map<number, AnalyzerBubbleTrack[]>,
+  visibleChannelIndexes: number[],
+  viewportStart: number,
+  viewportSamples: number,
+) {
+  const tracks: AnalyzerBubbleKeyTrack[] = [];
+  for (const channel of visibleChannelIndexes) {
+    for (const track of bubbleTracksByChannel.get(channel) ?? []) {
+      tracks.push({
+        key: track.key,
+        bubbles: track.window?.bubbles ?? [],
+      });
+    }
+  }
+  return visibleAnalyzerBubbleKeys(tracks, viewportStart, viewportSamples);
 }
 
 function multiBubbleTextFromValues(
@@ -484,13 +644,7 @@ function multiBubbleTextFromValues(
   resultCount: number,
   availableWidth: number,
 ) {
-  return multiBubbleText(
-    {
-      display_text: displayText,
-      result_count: resultCount,
-    },
-    availableWidth,
-  );
+  return multiBubbleText(displayText, resultCount, availableWidth);
 }
 
 function drawAnalyzerMarker(
@@ -596,47 +750,37 @@ function snapProtocolMarkerToEdge(
 }
 
 function protocolMarkerEdgeSamples(
-  analyzer: UiAnalyzerInstance,
+  analyzer: AnalyzerProtocolMarkerSource,
   kind: import("../lib/api").AnalyzerProtocolMarker["kind"],
   channel: WaveformTile["channels"][number] | undefined,
-  allEdgeSamples: number[],
 ) {
   if (!channel) return [];
-  const decoderId = analyzer.nativeDecoderId.toLowerCase();
-  const analyzerType = analyzer.type.toLowerCase();
   if (
     (kind === "one" || kind === "zero") &&
-    (decoderId === "swd" || analyzerType === "swd")
+    (analyzer.nativeDecoderKey === "swd" || analyzer.analyzerTypeKey === "swd")
   ) {
-    return allEdgeSamples;
+    return mergedEdgeSamples(channel);
   }
   if (kind === "up_arrow" || kind === "down_arrow") {
     const clockProtocol =
-      decoderId === "spi" ||
-      decoderId === "i2s" ||
-      decoderId === "smbus" ||
-      analyzerType === "spi" ||
-      analyzerType === "i2s" ||
-      analyzerType === "smbus";
+      analyzer.nativeDecoderKey === "spi" ||
+      analyzer.nativeDecoderKey === "i2s" ||
+      analyzer.nativeDecoderKey === "smbus" ||
+      analyzer.analyzerTypeKey === "spi" ||
+      analyzer.analyzerTypeKey === "i2s" ||
+      analyzer.analyzerTypeKey === "smbus";
     if (!clockProtocol) return [];
     return kind === "up_arrow" ? channel.rising_edges : channel.falling_edges;
   }
   return [];
 }
 
-function nearestSortedSample(samples: number[], target: number) {
-  let low = 0;
-  let high = samples.length;
-  while (low < high) {
-    const middle = (low + high) >>> 1;
-    if (samples[middle] < target) low = middle + 1;
-    else high = middle;
-  }
-  const right = samples[low] ?? null;
-  const left = low > 0 ? samples[low - 1] : null;
-  if (left === null) return right;
-  if (right === null) return left;
-  return Math.abs(left - target) <= Math.abs(right - target) ? left : right;
+function mergedEdgeSamples(channel: WaveformTile["channels"][number]) {
+  const cached = MERGED_EDGE_SAMPLE_CACHE.get(channel);
+  if (cached) return cached;
+  const merged = mergeSortedSamples(channel.rising_edges, channel.falling_edges);
+  MERGED_EDGE_SAMPLE_CACHE.set(channel, merged);
+  return merged;
 }
 
 function crispAnalyzerMarkerX(value: number) {
@@ -673,6 +817,135 @@ function analyzerMarkerEdgeType(analyzer: UiAnalyzerInstance): "rising" | "falli
   return "rising";
 }
 
+function useStableAnalyzerBubbleTracks(analyzers: UiAnalyzerInstance[]) {
+  const cacheRef = useRef<AnalyzerBubbleTrack[] | null>(null);
+  return useMemo(() => {
+    const next = analyzers.flatMap((analyzer) => {
+      const renderedTracksByRole = new Map(
+        analyzer.renderedTracks.map((track) => [analyzerTrackRoleKey(track.channel, track.role), track]),
+      );
+      return analyzerBubbleRoles(analyzer).map((role) => ({
+        analyzerId: analyzer.id,
+        color: analyzer.color,
+        displayRadix: analyzer.displayRadix,
+        highlightedFrameIndex: analyzer.highlightedFrameIndex,
+        key: `${analyzer.id}:${role.title}:${role.channel}:bubbles`,
+        role,
+        window: renderedTracksByRole.get(analyzerTrackRoleKey(role.channel, role.title)) ?? null,
+      }));
+    });
+    const cached = cacheRef.current;
+    if (cached && analyzerBubbleTracksEqual(cached, next)) return cached;
+    cacheRef.current = next;
+    return next;
+  }, [analyzers]);
+}
+
+function analyzerTrackRoleKey(channel: number, role: string) {
+  return `${channel}\u0000${role}`;
+}
+
+function useStableAnalyzerMarkerTracks(analyzers: UiAnalyzerInstance[]) {
+  const cacheRef = useRef<AnalyzerMarkerTrack[] | null>(null);
+  return useMemo(() => {
+    const next = analyzers.flatMap((analyzer) =>
+      analyzerMarkerRoles(analyzer).map((role) => ({
+        analyzerId: analyzer.id,
+        edgeType: analyzerMarkerEdgeType(analyzer),
+        key: `${analyzer.id}:${role.title}:${role.channel}:markers`,
+        role,
+      })),
+    );
+    const cached = cacheRef.current;
+    if (cached && analyzerMarkerTracksEqual(cached, next)) return cached;
+    cacheRef.current = next;
+    return next;
+  }, [analyzers]);
+}
+
+function useStableAnalyzerProtocolMarkerTracks(analyzers: UiAnalyzerInstance[]) {
+  const cacheRef = useRef<AnalyzerProtocolMarkerTrack[] | null>(null);
+  return useMemo(() => {
+    const next = analyzers.flatMap((analyzer) =>
+      analyzer.renderedTracks.flatMap((track) => {
+        const markers = track.protocol_markers ?? [];
+        if (markers.length === 0) return [];
+        return [
+          {
+            analyzerId: analyzer.id,
+            analyzerTypeKey: analyzer.type.toLowerCase(),
+            channel: track.channel,
+            markers,
+            nativeDecoderKey: analyzer.nativeDecoderId.toLowerCase(),
+          },
+        ];
+      }),
+    );
+    const cached = cacheRef.current;
+    if (cached && analyzerProtocolMarkerTracksEqual(cached, next)) return cached;
+    cacheRef.current = next;
+    return next;
+  }, [analyzers]);
+}
+
+function analyzerBubbleTracksEqual(left: AnalyzerBubbleTrack[], right: AnalyzerBubbleTrack[]) {
+  if (left.length !== right.length) return false;
+  return left.every((track, index) => {
+    const candidate = right[index];
+    return Boolean(
+      candidate &&
+        track.analyzerId === candidate.analyzerId &&
+        track.color === candidate.color &&
+        track.displayRadix === candidate.displayRadix &&
+        track.highlightedFrameIndex === candidate.highlightedFrameIndex &&
+        track.key === candidate.key &&
+        track.window === candidate.window &&
+        analyzerRolesEqual(track.role, candidate.role),
+    );
+  });
+}
+
+function analyzerMarkerTracksEqual(left: AnalyzerMarkerTrack[], right: AnalyzerMarkerTrack[]) {
+  if (left.length !== right.length) return false;
+  return left.every((track, index) => {
+    const candidate = right[index];
+    return Boolean(
+      candidate &&
+        track.analyzerId === candidate.analyzerId &&
+        track.edgeType === candidate.edgeType &&
+        track.key === candidate.key &&
+        analyzerRolesEqual(track.role, candidate.role),
+    );
+  });
+}
+
+function analyzerProtocolMarkerTracksEqual(
+  left: AnalyzerProtocolMarkerTrack[],
+  right: AnalyzerProtocolMarkerTrack[],
+) {
+  if (left.length !== right.length) return false;
+  return left.every((track, index) => {
+    const candidate = right[index];
+    return Boolean(
+      candidate &&
+        track.analyzerId === candidate.analyzerId &&
+        track.analyzerTypeKey === candidate.analyzerTypeKey &&
+        track.channel === candidate.channel &&
+        track.markers === candidate.markers &&
+        track.nativeDecoderKey === candidate.nativeDecoderKey,
+    );
+  });
+}
+
+function analyzerRolesEqual(left: AnalyzerChannelRole, right: AnalyzerChannelRole) {
+  return (
+    left.channel === right.channel &&
+    left.hasBubbles === right.hasBubbles &&
+    left.hasMarkers === right.hasMarkers &&
+    left.title === right.title
+  );
+}
+
 function AnalyzerBubbleNavigationButton({
   direction,
   onClick,
@@ -705,38 +978,100 @@ function AnalyzerBubbleNavigationButton({
 }
 
 function bestFrameText(displayText: string[], widthPx: number) {
-  const candidates = displayText.flatMap((label) => {
-    const quoted = label.match(/^'(.+)'\s+(0x[0-9A-F]+)$/i);
-    return quoted ? [label, quoted[1], quoted[2]] : [label];
+  let best = "";
+  let bestLength = -1;
+  let shortest = "";
+  let shortestLength = Number.POSITIVE_INFINITY;
+  const visit = (candidate: string) => {
+    const length = candidate.length;
+    if (length * APPROXIMATE_CHARACTER_WIDTH_PX < widthPx && length > bestLength) {
+      best = candidate;
+      bestLength = length;
+    }
+    if (length <= shortestLength) {
+      shortest = candidate;
+      shortestLength = length;
+    }
+  };
+  for (const label of displayText) visitFrameTextCandidates(label, visit);
+  return best || shortest;
+}
+
+function bestSingleFrameText(label: string, widthPx: number) {
+  let best = "";
+  let bestLength = -1;
+  let shortest = "";
+  let shortestLength = Number.POSITIVE_INFINITY;
+  visitFrameTextCandidates(label, (candidate) => {
+    const length = candidate.length;
+    if (length * APPROXIMATE_CHARACTER_WIDTH_PX < widthPx && length > bestLength) {
+      best = candidate;
+      bestLength = length;
+    }
+    if (length <= shortestLength) {
+      shortest = candidate;
+      shortestLength = length;
+    }
   });
-  const sorted = [...candidates].sort((left, right) => right.length - left.length);
-  return (
-    sorted.find((candidate) => candidate.length * APPROXIMATE_CHARACTER_WIDTH_PX < widthPx) ??
-    sorted[sorted.length - 1] ??
-    ""
-  );
+  return best || shortest;
+}
+
+function visitFrameTextCandidates(label: string, visit: (candidate: string) => void) {
+  const quoted = label.match(QUOTED_HEX_LABEL_PATTERN);
+  visit(label);
+  if (quoted) {
+    visit(quoted[1]);
+    visit(quoted[2]);
+  }
 }
 
 function multiBubbleText(
-  bubble: Pick<AnalyzerBubble, "display_text" | "result_count">,
+  displayText: string[],
+  resultCount: number,
   widthPx: number,
 ) {
-  const text = bubble.display_text.map((label) => bestFrameText([label], widthPx)).join("·");
-  const suffix = bubble.display_text.length < bubble.result_count ? "..." : "";
+  let text = "";
+  displayText.forEach((label, index) => {
+    if (index > 0) text += "·";
+    text += bestSingleFrameText(label, widthPx);
+  });
+  const suffix = displayText.length < resultCount ? "..." : "";
   const output = `${text}${suffix}`;
   return output.length > MAX_MULTI_BUBBLE_TEXT_LENGTH
     ? `${output.slice(0, MAX_MULTI_BUBBLE_TEXT_LENGTH)}...`
     : output;
 }
 
-function bubbleTooltipText(bubble: AnalyzerBubble, bubbleText: string) {
-  const text = bubble.display_text.join("·");
+function bubbleTooltipText(
+  displayText: string[],
+  resultCount: number,
+  multi: boolean,
+  bubbleText: string,
+) {
+  const text = displayText.join("·");
   const output = text || bubbleText;
   const clipped = output.length > 80 ? `${output.slice(0, 80)}...` : output;
-  if (bubble.type === "MultiBubble" || bubble.result_count > 1) {
-    return `[${bubble.result_count} results] ${clipped}`;
+  if (multi || resultCount > 1) {
+    return `[${resultCount} results] ${clipped}`;
   }
   return clipped;
+}
+
+function formattedBubbleDisplayText(
+  displayText: string[],
+  displayRadix: UiAnalyzerInstance["displayRadix"],
+) {
+  if (displayText.length === 0) return EMPTY_FORMATTED_BUBBLE_TEXT;
+  let cachedByRadix = FORMATTED_BUBBLE_TEXT_CACHE.get(displayText);
+  if (!cachedByRadix) {
+    cachedByRadix = new Map();
+    FORMATTED_BUBBLE_TEXT_CACHE.set(displayText, cachedByRadix);
+  }
+  const cached = cachedByRadix.get(displayRadix);
+  if (cached) return cached;
+  const formatted = displayText.map((label) => formatAnalyzerText(label, displayRadix));
+  cachedByRadix.set(displayRadix, formatted);
+  return formatted;
 }
 
 function NextBubbleIcon() {

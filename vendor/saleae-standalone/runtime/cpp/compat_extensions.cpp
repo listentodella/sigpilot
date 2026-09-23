@@ -10,8 +10,11 @@
 #include <TestInstance.h>
 
 #include <algorithm>
+#include <atomic>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 struct FrameV2Data
 {
@@ -95,6 +98,26 @@ void Analyzer::UseFrameV2()
 {
 }
 
+namespace SaleaeCompat
+{
+
+namespace
+{
+std::atomic<std::uint64_t> trigger_sample{0};
+} // namespace
+
+std::uint64_t TriggerSample()
+{
+    return trigger_sample.load(std::memory_order_relaxed);
+}
+
+void SetTriggerSample(std::uint64_t sample)
+{
+    trigger_sample.store(sample, std::memory_order_relaxed);
+}
+
+} // namespace SaleaeCompat
+
 bool AnalyzerChannelData::DoMoreTransitionsExistInCurrentData()
 {
     auto* data = reinterpret_cast<AnalyzerTest::MockChannelData*>(this);
@@ -129,17 +152,82 @@ bool AnalyzerChannelData::DoMoreTransitionsExistInCurrentData()
 
 void AnalyzerChannelData::TrackMinimumPulseWidth()
 {
+    // Deliberately empty: the real DigitalChannelData::TrackMinimumPulseWidth is
+    // also a no-op (vtable+80 in libgraph_server_shared is `nullsub`). Tracking
+    // is unconditional in the original — it happens as a side effect of
+    // advancing — so this call is vestigial. See
+    // docs/libanalyzer-ida-analysis.md §9.
 }
+
+namespace
+{
+
+/**
+ * Index of the first real transition.
+ *
+ * The vendored testlib's TestSetInitialBitState pushes a dummy transition at
+ * sample 0 ("insert a dummy sample before the real data, so that the logic in
+ * AdvanceToSample is simpler"). It is not an edge, so counting it would report
+ * a bogus first pulse width of `first_edge - 0`. A genuine edge at sample 0
+ * cannot be expressed through the harness API either —
+ * TestAppendTransitionAtSamples asserts `sample > mCurrentSample`.
+ */
+std::size_t first_real_transition(const std::vector<U64>& transitions)
+{
+    if(transitions.size() > 1 && transitions[0] == 0)
+        return 1;
+    return 0;
+}
+
+} // namespace
 
 U64 AnalyzerChannelData::GetMinimumPulseWidthSoFar()
 {
-    return 0;
+    auto* data = reinterpret_cast<AnalyzerTest::MockChannelData*>(this);
+    // AnalyzerChannelData is a friend of MockChannelData, so the transition list
+    // and cursor are reachable without touching the vendored testlib.
+    const std::vector<U64>& transitions = data->mTransitions;
+    const U64 up_to = data->mCurrentSample;
+
+    // Scanned from scratch on every call. The SDK calls this from
+    // Analyzer::NeedsRerun(), i.e. after the worker thread has finished, so the
+    // scan is paid a handful of times per decode rather than per edge — and
+    // unlike a cursor cached against the channel pointer, it cannot go stale
+    // when a channel object is recycled for a later run.
+    U64 minimum = 0;
+    U64 previous = 0;
+    bool has_previous = false;
+    for(std::size_t index = first_real_transition(transitions); index < transitions.size(); ++index)
+    {
+        const U64 edge = transitions[index];
+        if(edge > up_to)
+            break;
+        if(has_previous)
+        {
+            const U64 gap = edge - previous;
+            if(minimum == 0 || gap < minimum)
+                minimum = gap;
+        }
+        previous = edge;
+        has_previous = true;
+    }
+
+    // `0` means "nothing tracked yet"; the original reports that as -1
+    // (UINT64_MAX). Note the callers compare against 0 to detect a broken
+    // result, so returning UINT64_MAX rather than 0 is what keeps the degenerate
+    // "< 2 edges" case on the existing "computed_bit_rate == 0 -> bail" path
+    // instead of tripping AnalyzerHelpers::Assert.
+    return minimum ? minimum : std::numeric_limits<U64>::max();
 }
 
 U32 AnalyzerChannelData::GetNumberOfTransitionsToAbsPositionMinimumWidth(
     U64 sample_number,
     U64 minimum_width)
 {
+    // The original honours minimum_width when walking to the target; we do not
+    // implement the minimum-width variant yet, so advancing normally is the
+    // closest behaviour. Left explicit rather than silently ignoring the
+    // parameter. See docs/libanalyzer-ida-analysis.md §12 (O3).
     static_cast<void>(minimum_width);
     return AdvanceToAbsPosition(sample_number);
 }
@@ -270,6 +358,18 @@ const std::vector<Frame>& FramesFor(const AnalyzerResults* results)
     std::lock_guard<std::mutex> lock(frame_mutex);
     const auto found = frame_results.find(results);
     return found == frame_results.end() ? empty : found->second;
+}
+
+void AppendFramesFor(
+    const AnalyzerResults* results,
+    std::size_t start_index,
+    std::vector<Frame>& output)
+{
+    std::lock_guard<std::mutex> lock(frame_mutex);
+    const auto found = frame_results.find(results);
+    if(found == frame_results.end() || start_index >= found->second.size())
+        return;
+    output.insert(output.end(), found->second.begin() + start_index, found->second.end());
 }
 
 void ClearFramesFor(const AnalyzerResults* results)
