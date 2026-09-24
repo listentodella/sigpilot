@@ -825,10 +825,16 @@ impl RusbBackend {
                             bytes_read: bytes_read.min(target_raw_len) as u64,
                             bytes_expected: target_raw_bytes,
                             samples_read: samples_read.min(sample_count),
+                            // Report the bytes actually held, not the Vec's
+                            // allocated capacity. Capacity grows by doubling, so
+                            // it overshoots the data (up to ~2x) and made the
+                            // memory readout climb in 32/64/128/256/512/1024 MB
+                            // steps that never lined up with the configured
+                            // limit. `len` is the number the limit is about.
                             sample_memory_bytes: if decode_cross {
-                                decoded_samples.capacity() as u64
+                                decoded_samples.len() as u64
                             } else {
-                                raw.capacity() as u64
+                                raw.len() as u64
                             },
                         });
                     }

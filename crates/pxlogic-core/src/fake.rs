@@ -104,7 +104,7 @@ impl FakeBackend {
                     bytes_read: partial_samples * unitsize,
                     bytes_expected,
                     samples_read: partial_samples,
-                    sample_memory_bytes: samples.capacity() as u64,
+                    sample_memory_bytes: samples.len() as u64,
                 });
                 return Ok(CaptureData {
                     metadata: CaptureMetadata {
@@ -146,7 +146,7 @@ impl FakeBackend {
                 bytes_read: samples_read * unitsize,
                 bytes_expected,
                 samples_read,
-                sample_memory_bytes: samples.capacity() as u64,
+                sample_memory_bytes: samples.len() as u64,
             });
             if cancellation_observed {
                 continue;
