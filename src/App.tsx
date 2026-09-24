@@ -89,7 +89,7 @@ import { WaveformCanvas } from "./components/WaveformCanvas";
 import { resolveWaveformPointerSample } from "./lib/waveformEdgeSnap";
 import { graphTileCanServeViewport } from "./lib/waveformTileCoverage";
 import { virtualListWindow } from "./lib/virtualList";
-import { defaultCaptureViewportSamples } from "./lib/liveViewport";
+import { defaultCaptureViewportSamples, previewCaptureViewportSamples } from "./lib/liveViewport";
 import {
   maximumDataViewportSamples,
   normalizeCaptureViewport,
@@ -979,25 +979,6 @@ function initialCaptureViewport(summary: CaptureSummary) {
   return { viewportMaxSamples, viewportSamples, viewportStart };
 }
 
-function preserveCaptureViewport(session: UiSession, summary: CaptureSummary) {
-  const totalSamples = Math.max(1, summary.metadata.sample_count);
-  const viewportMaxSamples = maximumDataViewportSamples(
-    totalSamples,
-    summary.metadata.sample_rate_hz,
-  );
-  const viewport = normalizeCaptureViewport(
-    session.viewportStart,
-    session.viewportSamples || Math.min(totalSamples, 100_000),
-    totalSamples,
-    Math.max(viewportMaxSamples, session.viewportMaxSamples ?? 0),
-  );
-  return {
-    viewportSamples: viewport.samples,
-    viewportStart: viewport.start,
-    viewportMaxSamples: Math.max(viewportMaxSamples, session.viewportMaxSamples ?? 0),
-  };
-}
-
 function completedCaptureViewport(
   session: UiSession,
   summary: CaptureSummary,
@@ -1025,9 +1006,30 @@ function completedCaptureViewport(
       viewportStart: viewport.start,
     };
   }
+  if (panToTrigger) {
+    return {
+      ...initialCaptureViewport(summary),
+      viewportMaxSamples: dataViewportMaxSamples,
+    };
+  }
+  // The capture just finished and the user never took control of the view, so
+  // show them what they captured rather than leaving them parked on the trailing
+  // window they were following while it streamed in. `preserveCaptureViewport`
+  // used to run here, which kept that trailing window — a finished capture
+  // therefore opened showing only its last second, with no overview of the rest.
+  const preview = normalizeCaptureViewport(
+    0,
+    previewCaptureViewportSamples(
+      summary.metadata.sample_count,
+      summary.metadata.sample_rate_hz,
+    ),
+    totalSamples,
+    dataViewportMaxSamples,
+  );
   return {
-    ...(panToTrigger ? initialCaptureViewport(summary) : preserveCaptureViewport(session, summary)),
     viewportMaxSamples: dataViewportMaxSamples,
+    viewportSamples: preview.samples,
+    viewportStart: preview.start,
   };
 }
 
@@ -2183,6 +2185,47 @@ export default function App() {
     [setGraphViewportInteraction, updateViewport],
   );
 
+  /**
+   * Move the viewport immediately, with no interpolation.
+   *
+   * Saleae splits these two cases the same way: `SetRenderViewState` for direct
+   * manipulation, and the `AnimateViewState*` family when the app moves the view
+   * on the user's behalf. Animating direct input is what produced the twitch —
+   * every keypress restarted an easing curve from wherever the previous one had
+   * reached, so repeated zoom/pan compounded instead of stepping, and each
+   * start/stop also flipped the "interacting" flag the renderer uses to choose
+   * its draw path.
+   */
+  const setViewportImmediately = useCallback(
+    (sessionId: string, start: number, samples: number) => {
+      if (viewportAnimationRef.current !== null) {
+        window.cancelAnimationFrame(viewportAnimationRef.current);
+        viewportAnimationRef.current = null;
+        setGraphViewportInteraction("animation", false);
+      }
+      const session = sessionsRef.current.find((item) => item.id === sessionId);
+      const total = session?.summary?.metadata.sample_count ?? 0;
+      if (!session || total <= 0) return;
+
+      const target = session.busy
+        ? normalizeLiveCaptureViewport(
+            start,
+            samples,
+            total,
+            session.summary!.metadata.sample_rate_hz,
+            session.viewportMaxSamples ?? undefined,
+          )
+        : normalizeCaptureViewport(
+            start,
+            samples,
+            total,
+            session.viewportMaxSamples ?? undefined,
+          );
+      updateViewport(sessionId, target.start, target.samples);
+    },
+    [setGraphViewportInteraction, updateViewport],
+  );
+
   const zoomViewport = useCallback(
     (factor: number) => {
       if (!activeSession?.summary) return;
@@ -2966,9 +3009,18 @@ export default function App() {
       selectedDevice: deviceId,
       settings: nextSettings,
       busy: true,
-      liveViewportMode: "auto",
+      // Carry the user's zoom into the next capture in this session.
+      //
+      // Saleae's free-run/timer preset does the same thing ("ZoomOnly"): the time
+      // scale survives a re-capture and only the pan is reset. Two details matter
+      // here. `liveViewportMode` has to come along too, because otherwise
+      // applyLiveCaptureSummary recomputes the default window from
+      // `defaultCaptureViewportSamples` and silently discards the zoom we just
+      // kept. And the zoom is only carried when the session already holds a
+      // capture — on a first capture there is no user intent to preserve.
+      liveViewportMode: current.summary ? "manual" : "auto",
       viewportStart: 0,
-      viewportSamples: 1,
+      viewportSamples: current.summary ? current.viewportSamples : 1,
       viewportMaxSamples: null,
       progress: null,
       memoryUsage: {
@@ -4683,35 +4735,33 @@ export default function App() {
           event.preventDefault();
           event.stopImmediatePropagation();
           const samples = activeSession.viewportSamples * 0.5;
-          animateViewport(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples, 100);
+          setViewportImmediately(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples);
           return;
         }
         if (key === "arrowdown" || key === "-" || key === "s") {
           event.preventDefault();
           event.stopImmediatePropagation();
           const samples = activeSession.viewportSamples * 2;
-          animateViewport(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples, 100);
+          setViewportImmediately(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples);
           return;
         }
         if (key === "arrowleft" || key === "a") {
           event.preventDefault();
           event.stopImmediatePropagation();
-          animateViewport(
+          setViewportImmediately(
             activeSession.id,
             activeSession.viewportStart - activeSession.viewportSamples / 3,
             activeSession.viewportSamples,
-            100,
           );
           return;
         }
         if (key === "arrowright" || key === "d") {
           event.preventDefault();
           event.stopImmediatePropagation();
-          animateViewport(
+          setViewportImmediately(
             activeSession.id,
             activeSession.viewportStart + activeSession.viewportSamples / 3,
             activeSession.viewportSamples,
-            100,
           );
           return;
         }
