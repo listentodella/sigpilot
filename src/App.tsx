@@ -92,6 +92,7 @@ import { virtualListWindow } from "./lib/virtualList";
 import { defaultCaptureViewportSamples, previewCaptureViewportSamples } from "./lib/liveViewport";
 import {
   maximumDataViewportSamples,
+  minimumViewportSamples,
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
 } from "./lib/captureViewport";
@@ -105,6 +106,7 @@ import { traceAnalyzerPerformance } from "./lib/analyzerPerformance";
 import {
   dispatchSessionViewIntent,
   ensureSessionFrameLoop,
+  hasSessionFrameLoop,
   invalidateSessionFrame,
   readFrameHealth,
   readFrameState,
@@ -112,6 +114,7 @@ import {
   setSessionFrameLive,
   subscribeFrameHealth,
 } from "./lib/frameStore";
+import { ZOOM_ANIMATION_DURATION_MS } from "./lib/wheelZoom";
 import {
   analyzerCanRenderTracksLocally,
   analyzerTrackRequestsForAnalyzer,
@@ -176,6 +179,7 @@ import {
   SigrokDecoderCatalogItem,
   startCapture,
   trimCapture,
+  ViewIntent,
   writeTextFile,
   WaveformTile,
 } from "./lib/api";
@@ -1579,6 +1583,53 @@ export default function App() {
     };
   }, [activeSession?.id]);
 
+  // Only the channel label column scrolls the rows.
+  //
+  // The waveform column and every overlay layered over it — timing markers,
+  // analyzer bubbles, range bands — sit inside this same scroll container, but the
+  // waveform binds its wheel listener to the canvas host. A wheel that landed on an
+  // overlay therefore reached neither of them: it bubbled to the scroller and moved
+  // the rows instead of zooming. Zooming the time axis and scrolling the rows are
+  // separate gestures and must not be reachable from the same place.
+  //
+  // The listener is native rather than `onWheel` because React attaches wheel at
+  // the root as passive, where `preventDefault` does nothing.
+  useEffect(() => {
+    const scroller = graphScrollerRef.current;
+    if (!scroller) return;
+
+    const onWheel = (event: WheelEvent) => {
+      const target = event.target as HTMLElement | null;
+      // Over the label column: leave it alone so the rows scroll.
+      if (target?.closest(".channelLabels")) return;
+      // Anywhere else in the graph: the rows must not move.
+      event.preventDefault();
+      // The host already saw this one and zoomed. An overlay that swallowed it
+      // instead gets the wheel handed on, so the gesture still zooms there.
+      if (target?.closest(".waveformCanvasHost")) return;
+      const host = scroller.querySelector<HTMLElement>(".waveformCanvasHost");
+      if (!host) return;
+      const source = event;
+      host.dispatchEvent(new WheelEvent("wheel", {
+        altKey: source.altKey,
+        bubbles: true,
+        cancelable: true,
+        clientX: source.clientX,
+        clientY: source.clientY,
+        ctrlKey: source.ctrlKey,
+        deltaMode: source.deltaMode,
+        deltaX: source.deltaX,
+        deltaY: source.deltaY,
+        deltaZ: source.deltaZ,
+        metaKey: source.metaKey,
+        shiftKey: source.shiftKey,
+      }));
+    };
+
+    scroller.addEventListener("wheel", onWheel, { passive: false });
+    return () => scroller.removeEventListener("wheel", onWheel);
+  }, [activeSession?.id]);
+
   useEffect(() => {
     return () => {
       if (graphScrollFrameRef.current !== null) {
@@ -2087,24 +2138,43 @@ export default function App() {
         if (!sessionTotalSamples) {
           return { ...session, viewportStart: 0, viewportSamples: 0 };
         }
+        const minimumSamples = minimumViewportSamples(session.summary?.metadata.sample_rate_hz ?? 1);
+        // Widen around the centre the view is *already* at, not around the centre
+        // the request was computed from.
+        //
+        // The requested centre is anchor-derived, so it moves with the pointer.
+        // Widening around it would hold the span at the floor while the start kept
+        // following the anchor — which reads as "zooming turned into panning" every
+        // time a key is held at the limit. The view is already at the floor by then,
+        // so there is nothing to move.
+        const currentCenter = session.viewportStart + session.viewportSamples / 2;
+        const requestedSamples = Math.max(samples, minimumSamples);
+        const requestedStart =
+          samples >= minimumSamples ? start : currentCenter - minimumSamples / 2;
         const viewport = session.busy
           ? normalizeLiveCaptureViewport(
-              start,
-              samples,
+              requestedStart,
+              requestedSamples,
               sessionTotalSamples,
               session.summary!.metadata.sample_rate_hz,
               session.viewportMaxSamples ?? undefined,
             )
           : normalizeCaptureViewport(
-              start,
-              samples,
+              requestedStart,
+              requestedSamples,
               sessionTotalSamples,
               session.viewportMaxSamples ?? undefined,
             );
         return {
           ...session,
-          viewportStart: viewport.start,
-          viewportSamples: viewport.samples,
+          // The last line of defence for the viewport. Every consumer downstream
+          // assumes a finite pair: NaN in `viewportSamples` serialises to `null` in
+          // the frame request (the backend rejects the whole frame and the graph
+          // goes blank) and paints NaN into every width derived from the viewport,
+          // the scrollbar included. Keeping the previous value is the least
+          // surprising thing to do with a value that is not a number.
+          viewportStart: Number.isFinite(viewport.start) ? viewport.start : session.viewportStart,
+          viewportSamples: Number.isFinite(viewport.samples) ? viewport.samples : session.viewportSamples,
           liveViewportMode: session.busy ? "manual" : session.liveViewportMode,
         };
       });
@@ -2186,44 +2256,34 @@ export default function App() {
   );
 
   /**
-   * Move the viewport immediately, with no interpolation.
+   * Apply one discrete viewport step — a keypress — with the same glide a
+   * physical wheel notch gets.
    *
-   * Saleae splits these two cases the same way: `SetRenderViewState` for direct
-   * manipulation, and the `AnimateViewState*` family when the app moves the view
-   * on the user's behalf. Animating direct input is what produced the twitch —
-   * every keypress restarted an easing curve from wherever the previous one had
-   * reached, so repeated zoom/pan compounded instead of stepping, and each
-   * start/stop also flipped the "interacting" flag the renderer uses to choose
-   * its draw path.
+   * A single hard step reads as a jump, which is why it is animated at all.
+   * Continuous input (a touchpad stream) deliberately is not: it already updates
+   * every frame, so interpolating each event would only fight itself. Logic 2
+   * splits its zoom the same way and animates a physical wheel but not a touchpad.
+   *
+   * The backend owns view animations whenever a frame loop is wired, so the
+   * intent goes there and the glide is interpolated against the same clock the
+   * data is rendered with — the reason `apply_view_intent` exists. Without a loop
+   * (the browser preview) the frontend runs the glide itself, with the same
+   * duration so the two paths do not feel different.
    */
-  const setViewportImmediately = useCallback(
-    (sessionId: string, start: number, samples: number) => {
-      if (viewportAnimationRef.current !== null) {
-        window.cancelAnimationFrame(viewportAnimationRef.current);
-        viewportAnimationRef.current = null;
-        setGraphViewportInteraction("animation", false);
+  const stepViewport = useCallback(
+    (
+      sessionId: string,
+      intent: ViewIntent,
+      fallbackStart: number,
+      fallbackSamples: number,
+    ) => {
+      if (hasSessionFrameLoop(sessionId)) {
+        dispatchSessionViewIntent(sessionId, intent);
+        return;
       }
-      const session = sessionsRef.current.find((item) => item.id === sessionId);
-      const total = session?.summary?.metadata.sample_count ?? 0;
-      if (!session || total <= 0) return;
-
-      const target = session.busy
-        ? normalizeLiveCaptureViewport(
-            start,
-            samples,
-            total,
-            session.summary!.metadata.sample_rate_hz,
-            session.viewportMaxSamples ?? undefined,
-          )
-        : normalizeCaptureViewport(
-            start,
-            samples,
-            total,
-            session.viewportMaxSamples ?? undefined,
-          );
-      updateViewport(sessionId, target.start, target.samples);
+      animateViewport(sessionId, fallbackStart, fallbackSamples, ZOOM_ANIMATION_DURATION_MS);
     },
-    [setGraphViewportInteraction, updateViewport],
+    [animateViewport],
   );
 
   const zoomViewport = useCallback(
@@ -2298,7 +2358,16 @@ export default function App() {
         // `pixels` is a CSS-pixel budget, matching what the tile pipeline used to
         // send: the canvas multiplies it by the device pixel ratio when it picks
         // a raster width. Sending device pixels here would make it do that twice.
-        const cssWidth = Math.max(1, Math.round(live?.canvasWidth ?? 1_000));
+        //
+        // Guard the non-finite case: `Math.min(maxPixels, NaN)` is NaN, NaN
+        // serialises to `null`, and the backend then rejects the entire frame with
+        // `invalid type: null, expected u32`. That blanks the graph and nothing but
+        // Fit Capture brings it back, so a bad measurement must not escape here.
+        const measuredWidth = live?.canvasWidth;
+        const cssWidth =
+          typeof measuredWidth === "number" && Number.isFinite(measuredWidth)
+            ? Math.max(1, Math.round(measuredWidth))
+            : 1_000;
         const maxPixels = channels.length > 16 ? 1_800 : 2_600;
         const pixels = Math.max(1, Math.min(maxPixels, cssWidth));
         // Analyzer tracks ride along on the frame, exactly as they do in Logic.
@@ -2326,10 +2395,13 @@ export default function App() {
         // intent protocol ignores `view` and renders this range, and an empty one
         // would be rejected outright. The last known viewport is the closest
         // thing to what we are about to ask for.
-        const rangeStart = state.ready ? Math.max(0, Math.floor(state.view.start_sample)) : 0;
-        const rangeSamples = state.ready
-          ? Math.max(1, Math.ceil(state.view.start_sample + state.view.samples) - rangeStart)
-          : 1;
+        //
+        // Guarded for the same reason as `pixels` — a non-finite value serialises
+        // to `null` and takes the whole frame down with it.
+        const viewStart = state.ready && Number.isFinite(state.view.start_sample) ? state.view.start_sample : 0;
+        const viewSamples = state.ready && Number.isFinite(state.view.samples) ? state.view.samples : 1;
+        const rangeStart = Math.max(0, Math.floor(viewStart));
+        const rangeSamples = Math.max(1, Math.ceil(viewStart + viewSamples) - rangeStart);
         return renderGraphFrame(sessionId, {
           frame_id: frameId,
           waveform: {
@@ -2345,7 +2417,10 @@ export default function App() {
       },
       widthPx: () => {
         const live = currentSession();
-        return Math.max(1, Math.round(live?.canvasWidth ?? 1_000));
+        const measured = live?.canvasWidth;
+        return typeof measured === "number" && Number.isFinite(measured)
+          ? Math.max(1, Math.round(measured))
+          : 1_000;
       },
     });
     return () => releaseSessionFrameLoop(sessionId);
@@ -4735,21 +4810,46 @@ export default function App() {
           event.preventDefault();
           event.stopImmediatePropagation();
           const samples = activeSession.viewportSamples * 0.5;
-          setViewportImmediately(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples);
+          stepViewport(
+            activeSession.id,
+            {
+              anchor_ratio: graphPointerRatioRef.current,
+              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              factor: 0.5,
+              kind: "zoom",
+            },
+            viewportAnchor - samples * graphPointerRatioRef.current,
+            samples,
+          );
           return;
         }
         if (key === "arrowdown" || key === "-" || key === "s") {
           event.preventDefault();
           event.stopImmediatePropagation();
           const samples = activeSession.viewportSamples * 2;
-          setViewportImmediately(activeSession.id, viewportAnchor - samples * graphPointerRatioRef.current, samples);
+          stepViewport(
+            activeSession.id,
+            {
+              anchor_ratio: graphPointerRatioRef.current,
+              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              factor: 2,
+              kind: "zoom",
+            },
+            viewportAnchor - samples * graphPointerRatioRef.current,
+            samples,
+          );
           return;
         }
         if (key === "arrowleft" || key === "a") {
           event.preventDefault();
           event.stopImmediatePropagation();
-          setViewportImmediately(
+          stepViewport(
             activeSession.id,
+            {
+              delta_samples: -activeSession.viewportSamples / 3,
+              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              kind: "pan_samples",
+            },
             activeSession.viewportStart - activeSession.viewportSamples / 3,
             activeSession.viewportSamples,
           );
@@ -4758,8 +4858,13 @@ export default function App() {
         if (key === "arrowright" || key === "d") {
           event.preventDefault();
           event.stopImmediatePropagation();
-          setViewportImmediately(
+          stepViewport(
             activeSession.id,
+            {
+              delta_samples: activeSession.viewportSamples / 3,
+              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              kind: "pan_samples",
+            },
             activeSession.viewportStart + activeSession.viewportSamples / 3,
             activeSession.viewportSamples,
           );
@@ -4811,9 +4916,16 @@ export default function App() {
     };
   });
 
+  // The footer reports the horizontal range — the time the viewport spans — rather
+  // than samples per pixel. "S/px" describes the renderer's sampling, which is not
+  // something the user reasons about; the span is, and it is the number Logic 2
+  // shows in this corner.
   const zoomLabel =
-    activeSession?.summary && activeSession.canvasWidth > 0
-      ? `${formatSamples(Math.max(1, Math.round(activeSession.viewportSamples / activeSession.canvasWidth)))}/px`
+    activeSession?.summary && activeSession.viewportSamples > 0
+      ? formatSeconds(
+          activeSession.viewportSamples /
+            Math.max(1, activeSession.summary.metadata.sample_rate_hz),
+        )
       : "Zoom";
   const analyzerEditSession = analyzerInEdit
     ? sessions.find((session) => session.id === analyzerInEdit.sessionId) ?? null
@@ -5028,7 +5140,13 @@ export default function App() {
                         tile={visibleTile}
                         matchChannelColors={preferences.matchChannelColors}
                         onWidthChange={(width) =>
-                          updateSession(activeSession.id, (session) => ({ ...session, canvasWidth: width }))
+                          updateSession(activeSession.id, (session) => ({
+                            ...session,
+                            // Never let a non-finite measurement reach the frame
+                            // request: it would serialise to `null` and the backend
+                            // would reject every frame, blanking the graph.
+                            canvasWidth: Number.isFinite(width) ? Math.max(1, width) : session.canvasWidth,
+                          }))
                         }
                         sampleRateHz={activeSession.summary?.metadata.sample_rate_hz ?? activeSession.settings.sample_rate_hz}
                         timeOriginSample={activeSession.summary?.metadata.trigger?.sample_index ?? 0}

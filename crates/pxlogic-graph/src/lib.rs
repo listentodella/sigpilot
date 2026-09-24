@@ -24,7 +24,7 @@ pub mod performance_self_test;
 pub mod view_state;
 
 pub use view_state::{
-    default_capture_view_samples, ease_out_cubic, normalize_capture_view,
+    default_capture_view_samples, ease_out_cubic, minimum_view_samples, normalize_capture_view,
     normalize_live_capture_view, SessionView, ViewAnimation, ViewIntent, ViewLimits,
 };
 
@@ -2857,6 +2857,19 @@ impl GraphSession {
     fn normalize_view(&self, view: SessionView) -> SessionView {
         let limits = *self.view_limits.lock();
         let total = self.sample_count();
+        // Widen around the requested centre when the caller asked for a finer span
+        // than the limit allows. Clamping only the span would leave the anchor free
+        // to keep dragging the view sideways while the span no longer changed, so
+        // zooming further would pan instead of stopping.
+        let minimum = minimum_view_samples(limits.sample_rate_hz);
+        let view = if view.samples < minimum {
+            SessionView::new(
+                view.start_sample + view.samples / 2.0 - minimum / 2.0,
+                minimum,
+            )
+        } else {
+            view
+        };
         if limits.live {
             normalize_live_capture_view(
                 view.start_sample,
@@ -2933,6 +2946,57 @@ impl GraphSession {
         if intent.is_passive() {
             return self.session_view();
         }
+
+        // Hold a zoom-in at the finest span worth showing by clamping the *factor*,
+        // not the resulting span.
+        //
+        // Clamping the span afterwards has to widen it around something, and the
+        // only centre available is the anchor-derived one — so every request at the
+        // limit would re-centre the view on the pointer. The span stops changing but
+        // the start keeps moving, which reads as the graph sliding sideways each
+        // time a key is held down. Clamping the factor leaves the anchor arithmetic
+        // intact: at the limit the span simply stops shrinking, so the start stops
+        // moving too.
+        let clamped;
+        let intent = match *intent {
+            ViewIntent::Zoom {
+                factor,
+                anchor_ratio,
+                duration_ms,
+            } if factor < 1.0 => {
+                let current = self.session_view();
+                let sample_rate_hz = self.view_limits.lock().sample_rate_hz;
+                let floor = minimum_view_samples(sample_rate_hz) / current.samples.max(1.0);
+                clamped = ViewIntent::Zoom {
+                    factor: factor.max(floor),
+                    anchor_ratio,
+                    duration_ms,
+                };
+                &clamped
+            }
+            _ => intent,
+        };
+
+        // A gesture that carries a duration glides to the result it would have had
+        // instantly. The target is computed here rather than by the caller so that
+        // a zoom anchors, and a pan shifts, against the view as it is *right now* —
+        // the caller never has to guess a position it may be behind on. The glide
+        // therefore lands exactly where an instant gesture would have; the only
+        // difference is that the user gets to see it move.
+        let gesture_duration_ms = match *intent {
+            ViewIntent::Zoom { duration_ms, .. } | ViewIntent::PanSamples { duration_ms, .. } => {
+                duration_ms
+            }
+            _ => 0.0,
+        };
+        if gesture_duration_ms > 0.0 {
+            let from = self.session_view();
+            let to = self.normalize_view(intent.apply(from));
+            let duration = Duration::from_secs_f64((gesture_duration_ms / 1_000.0).min(60.0));
+            *self.view_animation.lock() = Some(ViewAnimation::new(from, to, duration));
+            return from;
+        }
+
         if let ViewIntent::AnimateTo {
             start_sample,
             samples,
@@ -9344,6 +9408,7 @@ mod tests {
                 view: Some(ViewIntent::Zoom {
                     factor: 0.5,
                     anchor_ratio: 0.5,
+                    duration_ms: 0.0,
                 }),
             })
             .unwrap();
@@ -9351,6 +9416,67 @@ mod tests {
         assert_eq!(zoomed.view.start_sample, 5_250.0);
         assert_eq!(zoomed.tile.start_sample, 5_250);
         assert_eq!(zoomed.tile.sample_count, 500);
+    }
+
+    #[test]
+    fn a_zoom_with_a_duration_glides_instead_of_jumping() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 250_000)).unwrap();
+        session.set_session_view(5_000.0, 1_000.0);
+
+        let request = |frame_id: u64, duration_ms: f64| GraphFrameRequest {
+            frame_id,
+            waveform: WaveformRequest {
+                start_sample: 0,
+                sample_count: 0,
+                pixels: 200,
+                channels: vec![0],
+            },
+            include_tile: true,
+            analyzer_view: None,
+            analyzers: Vec::new(),
+            view: Some(ViewIntent::Zoom {
+                factor: 0.5,
+                anchor_ratio: 0.5,
+                duration_ms,
+            }),
+        };
+
+        // A discrete step — one wheel notch, one keypress — asks for a glide. The
+        // frame reports where the view is *now*, so a glide leaves it near where it
+        // started rather than at the target: the point is that it did not jump.
+        let gliding = session.render_frame(&request(1, 100.0)).unwrap();
+        assert!(
+            gliding.view.samples > 900.0 && gliding.view.samples <= 1_000.0,
+            "a glide should still be near the view it started from, got {}",
+            gliding.view.samples
+        );
+
+        // Retargeting mid-flight must not snap back to where the first glide began,
+        // so a second request keeps the view near the live position rather than
+        // jumping to either endpoint.
+        let retargeted = session.render_frame(&request(2, 100.0)).unwrap();
+        assert!(
+            retargeted.view.samples > 900.0 && retargeted.view.samples <= 1_000.0,
+            "a new glide continues from the live view, got {}",
+            retargeted.view.samples
+        );
+
+        // Without a duration it lands immediately, which is what a touchpad stream
+        // relies on. It anchors on the *live* view rather than the original start,
+        // because a running glide keeps the stored view up to date — so the result
+        // is near the anchored target rather than exactly on it.
+        let immediate = session.render_frame(&request(3, 0.0)).unwrap();
+        assert!(
+            (immediate.view.samples - 500.0).abs() < 5.0,
+            "an instant zoom should land on the anchored result, got {}",
+            immediate.view.samples
+        );
+        assert!(
+            (immediate.view.start_sample - 5_250.0).abs() < 5.0,
+            "an instant zoom should hold the anchor, got {}",
+            immediate.view.start_sample
+        );
     }
 
     #[test]
@@ -9458,6 +9584,7 @@ mod tests {
         // A wheel tick must interrupt a toolbar zoom rather than fight it.
         let cancelled = session.apply_view_intent(&ViewIntent::PanSamples {
             delta_samples: 250.0,
+            duration_ms: 0.0,
         });
         assert_eq!(cancelled.start_sample, 250.0);
         assert_eq!(session.session_view(), cancelled);
@@ -9520,6 +9647,90 @@ mod tests {
         });
         assert_eq!(panned.start_sample, 0.0);
         assert_eq!(session.session_view().start_sample, 0.0);
+    }
+
+    #[test]
+    fn zooming_in_stops_at_the_finest_useful_span() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 4_000_000)).unwrap();
+        session.set_view_limits(ViewLimits {
+            live: false,
+            maximum_samples: None,
+            sample_rate_hz: 100_000_000.0,
+        });
+
+        // At 100 MHz the floor of 5 µs is 500 samples. Asking for a single sample
+        // must widen back to the floor: below it the viewport resolves individual
+        // samples rather than signal edges, which costs the renderer every frame
+        // and tells the user nothing.
+        let view = session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 1_000_000.0,
+            samples: 1.0,
+        });
+        assert!(
+            (view.samples - 500.0).abs() < 0.001,
+            "expected the span to widen to the floor, got {}",
+            view.samples
+        );
+
+        // The floor widens around the requested centre rather than pinning the
+        // start, so the view does not slide sideways once the span stops changing.
+        assert!(
+            (view.start_sample - 999_750.5).abs() < 0.001,
+            "expected the view to widen around its centre, got {}",
+            view.start_sample
+        );
+    }
+
+    #[test]
+    fn zooming_in_at_the_limit_does_not_drift_sideways() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(16, 4_000_000)).unwrap();
+        session.set_view_limits(ViewLimits {
+            live: false,
+            maximum_samples: None,
+            sample_rate_hz: 100_000_000.0,
+        });
+
+        // Zoom in hard through an off-centre anchor until the span reaches the floor.
+        let anchor = 0.75;
+        for _ in 0..20 {
+            session.apply_view_intent(&ViewIntent::Zoom {
+                factor: 0.5,
+                anchor_ratio: anchor,
+                duration_ms: 0.0,
+            });
+        }
+        let at_limit = session.session_view();
+        assert!(
+            (at_limit.samples - 500.0).abs() < 0.001,
+            "the span should sit on the floor, got {}",
+            at_limit.samples
+        );
+
+        // Pressing again must change nothing at all. Clamping the resulting span
+        // instead of the factor would re-centre on the anchor here, so the start
+        // would creep toward it — the sideways drift a held key produces.
+        for _ in 0..10 {
+            session.apply_view_intent(&ViewIntent::Zoom {
+                factor: 0.5,
+                anchor_ratio: anchor,
+                duration_ms: 0.0,
+            });
+        }
+        let after = session.session_view();
+        assert!(
+            (after.samples - at_limit.samples).abs() < 1e-9,
+            "the span moved off the floor: {} -> {}",
+            at_limit.samples,
+            after.samples
+        );
+        assert!(
+            (after.start_sample - at_limit.start_sample).abs() < 1e-9,
+            "the view drifted sideways at the limit: {} -> {}",
+            at_limit.start_sample,
+            after.start_sample
+        );
     }
 
     #[test]

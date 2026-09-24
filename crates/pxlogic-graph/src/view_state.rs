@@ -33,6 +33,20 @@ pub const MINIMUM_DEFAULT_CAPTURE_VIEW_SAMPLES: u64 = 100_000;
 const MAX_ZOOM_FACTOR_PER_INTENT: f64 = 1_000.0;
 const MIN_ZOOM_FACTOR_PER_INTENT: f64 = 0.001;
 
+/// The finest horizontal span worth showing, in seconds.
+///
+/// Below this the viewport stops resolving signal edges and starts resolving
+/// individual samples: the renderer has more per-sample work to do every frame
+/// while showing the user nothing they can act on, and the zoom controls stop
+/// meaning anything. Logic 2 stops at a comparable span. Change this one number
+/// to move the limit.
+pub const MINIMUM_VIEW_SECONDS: f64 = 5e-6;
+
+/// `MINIMUM_VIEW_SECONDS` expressed in samples for a given sample rate.
+pub fn minimum_view_samples(sample_rate_hz: f64) -> f64 {
+    (finite_or(sample_rate_hz, 1.0).max(1.0) * MINIMUM_VIEW_SECONDS).max(1.0)
+}
+
 fn finite_or(value: f64, fallback: f64) -> f64 {
     if value.is_finite() {
         value
@@ -176,11 +190,32 @@ pub enum ViewIntent {
     /// Shift the viewport by a sample delta. The caller owns the gesture sign
     /// convention — dragging and wheel scrolling are opposite — and the backend
     /// only applies and clamps it.
-    PanSamples { delta_samples: f64 },
+    ///
+    /// A delta rather than a destination is what makes this safe to send while a
+    /// glide is running: it is applied to whatever the view is at that moment, so
+    /// the caller never has to guess a position it may be behind on. `duration_ms`
+    /// behaves as it does on `Zoom`.
+    PanSamples {
+        delta_samples: f64,
+        #[serde(default)]
+        duration_ms: f64,
+    },
     /// Multiply the visible span around an anchor expressed as a ratio of the
     /// canvas width (0 = left edge, 1 = right edge). Anchoring is the part that
     /// is easy to get subtly wrong, so it lives here where it can be tested.
-    Zoom { factor: f64, anchor_ratio: f64 },
+    ///
+    /// `duration_ms` above zero glides to the result instead of jumping to it.
+    /// A discrete input — one wheel notch, one keypress — is a single hard step,
+    /// and showing it instantly reads as a jump; the glide is what makes it
+    /// legible. Continuous input (a touchpad stream) leaves this at zero, because
+    /// it already updates every frame and interpolating each event would fight
+    /// itself. This mirrors how Logic 2 splits the two.
+    Zoom {
+        factor: f64,
+        anchor_ratio: f64,
+        #[serde(default)]
+        duration_ms: f64,
+    },
     /// Glide to a viewport over `duration_ms`. The backend owns the animation
     /// and interpolates it per requested frame, so the frontend never runs a
     /// second clock that can drift from the one the data was rendered against.
@@ -213,13 +248,14 @@ impl ViewIntent {
                 start_sample,
                 samples,
             } => SessionView::new(start_sample, samples),
-            ViewIntent::PanSamples { delta_samples } => SessionView::new(
+            ViewIntent::PanSamples { delta_samples, .. } => SessionView::new(
                 current.start_sample + finite_or(delta_samples, 0.0),
                 current.samples,
             ),
             ViewIntent::Zoom {
                 factor,
                 anchor_ratio,
+                ..
             } => {
                 let factor = finite_or(factor, 1.0)
                     .clamp(MIN_ZOOM_FACTOR_PER_INTENT, MAX_ZOOM_FACTOR_PER_INTENT);
@@ -371,6 +407,7 @@ mod tests {
         let zoomed_in = ViewIntent::Zoom {
             factor: 0.5,
             anchor_ratio,
+            duration_ms: 0.0,
         }
         .apply(current);
         assert_close(zoomed_in.samples, 200.0);
@@ -382,6 +419,7 @@ mod tests {
         let zoomed_out = ViewIntent::Zoom {
             factor: 2.0,
             anchor_ratio,
+            duration_ms: 0.0,
         }
         .apply(current);
         assert_close(zoomed_out.samples, 800.0);
@@ -396,6 +434,7 @@ mod tests {
         let current = SessionView::new(100.0, 400.0);
         let panned = ViewIntent::PanSamples {
             delta_samples: -25.0,
+            duration_ms: 0.0,
         }
         .apply(current);
         assert_close(panned.start_sample, 75.0);
@@ -415,6 +454,7 @@ mod tests {
         let tiny = ViewIntent::Zoom {
             factor: f64::MIN_POSITIVE,
             anchor_ratio: 0.5,
+            duration_ms: 0.0,
         }
         .apply(current);
         assert!(tiny.samples >= 1.0);
@@ -422,6 +462,7 @@ mod tests {
         let huge = ViewIntent::Zoom {
             factor: f64::MAX,
             anchor_ratio: 0.5,
+            duration_ms: 0.0,
         }
         .apply(current);
         assert_close(huge.samples, 1_000.0 * MAX_ZOOM_FACTOR_PER_INTENT);

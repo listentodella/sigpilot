@@ -20,6 +20,29 @@ import type { AnalyzerRenderRequest, AnalyzerRenderResult, GraphFrameResponse, S
 
 export const KEEP_CURRENT: ViewIntent = { kind: "keep_current" };
 
+/**
+ * How long this intent's glide runs for, in milliseconds. Zero means it lands
+ * immediately.
+ *
+ * Discrete input carries a duration — one wheel notch or one keypress is a single
+ * hard step, so the backend glides to it — while continuous input (a touchpad
+ * stream) leaves it at zero. Anything with a duration needs frames pumped at it
+ * until it finishes, so this has to cover every intent that can glide rather than
+ * just `animate_to`.
+ */
+function intentAnimationMs(intent: ViewIntent): number {
+  switch (intent.kind) {
+    case "animate_to":
+      return Math.max(0, intent.duration_ms);
+    case "zoom":
+      return Math.max(0, intent.duration_ms ?? 0);
+    case "pan_samples":
+      return Math.max(0, intent.duration_ms ?? 0);
+    default:
+      return 0;
+  }
+}
+
 export interface FrameLoopState {
   /** The authoritative viewport, straight from the backend. */
   view: SessionView;
@@ -128,10 +151,18 @@ export class SessionFrameLoop {
   /** Records a gesture. Coalesces: only the newest un-sent intent survives. */
   dispatch(intent: ViewIntent) {
     this.pendingIntent = intent;
-    if (intent.kind === "animate_to") {
+    const animationMs = intentAnimationMs(intent);
+    if (animationMs > 0) {
       // The backend owns the glide; keep asking for frames until it is due to
       // finish so the animation actually advances.
-      this.animatingUntilMs = this.deps.now() + Math.max(0, intent.duration_ms) + 50;
+      //
+      // Any intent that carries a duration glides, not just `animate_to`. A glide
+      // that is not registered here lets the loop fall to "idle" and stop
+      // requesting frames, and since the backend only advances an animation when
+      // it is asked for a frame, the view freezes part-way through. The next
+      // frame then samples an animation that has been running on the clock the
+      // whole time and jumps — which reads as markers and the trace disagreeing.
+      this.animatingUntilMs = this.deps.now() + animationMs + 50;
     }
     if (intent.kind !== "keep_current") this.revisionDirty = true;
     this.start();

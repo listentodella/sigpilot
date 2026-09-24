@@ -1,6 +1,31 @@
 export const MIN_CAPTURE_DATA_VISIBLE_RATIO = 0.4;
 export const LIVE_CAPTURE_RESERVED_VIEW_SECONDS = 500;
 
+/**
+ * The finest horizontal span worth showing, in seconds.
+ *
+ * Below this the viewport stops resolving signal edges and starts resolving
+ * individual samples: the renderer has more per-sample work to do every frame
+ * while showing the user nothing they can act on. Mirrors
+ * `MINIMUM_VIEW_SECONDS` in `crates/pxlogic-graph/src/view_state.rs`, which is
+ * the authority when the backend owns the viewport.
+ */
+export const MINIMUM_VIEW_SECONDS = 5e-6;
+
+/**
+ * `MINIMUM_VIEW_SECONDS` expressed in samples for a given sample rate.
+ *
+ * Must stay finite for any input. `Math.max(1, NaN)` is NaN, not 1, so a session
+ * whose sample rate is missing or not a number would otherwise put NaN into
+ * `viewportSamples` — which then serialises to `null` in the frame request (the
+ * backend rejects the whole frame) and paints NaN into every width derived from
+ * the viewport.
+ */
+export function minimumViewportSamples(sampleRateHz: number) {
+  const rate = Number.isFinite(sampleRateHz) && sampleRateHz > 0 ? sampleRateHz : 1;
+  return Math.max(1, rate * MINIMUM_VIEW_SECONDS);
+}
+
 export interface CaptureViewport {
   samples: number;
   start: number;

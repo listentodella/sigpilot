@@ -5,6 +5,7 @@ import {
   maximumCaptureViewportSamples,
   maximumDataViewportSamples,
   maximumLiveCaptureViewportSamples,
+  minimumViewportSamples,
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
 } from "../src/lib/captureViewport.ts";
@@ -87,4 +88,22 @@ test("backend data windows exclude viewport whitespace", () => {
     samples: 400,
     start: 0,
   });
+});
+
+test("the minimum span stays finite for any sample rate", () => {
+  // `Math.max(1, NaN)` is NaN, not 1. A non-finite rate used to put NaN straight
+  // into `viewportSamples`, which serialises to `null` in the frame request (the
+  // backend rejects the whole frame) and paints NaN into every width derived from
+  // the viewport, the scrollbar included.
+  for (const rate of [Number.NaN, 0, -1, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    const minimum = minimumViewportSamples(rate);
+    assert.ok(Number.isFinite(minimum), `expected a finite minimum for rate ${rate}, got ${minimum}`);
+    assert.ok(minimum >= 1, `expected a minimum of at least one sample for rate ${rate}, got ${minimum}`);
+  }
+
+  // A real rate still scales: 5 µs at 100 MHz is 500 samples. Compared with a
+  // tolerance because 100_000_000 * 5e-6 is 500.00000000000006 in binary floating
+  // point, which is not the interesting part of this test.
+  const scaled = minimumViewportSamples(100_000_000);
+  assert.ok(Math.abs(scaled - 500) < 1e-6, `expected ~500 samples at 100 MHz, got ${scaled}`);
 });

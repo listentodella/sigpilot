@@ -3,7 +3,7 @@ import { measureDigitalPoint, type WaveformTile } from "../lib/api";
 import { normalizeCaptureViewport, normalizeLiveCaptureViewport } from "../lib/captureViewport";
 import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "../lib/saleaeGraphLayout";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
-import { wheelZoomFactor } from "../lib/wheelZoom";
+import { isPhysicalWheelZoom, wheelZoomFactor, ZOOM_ANIMATION_DURATION_MS } from "../lib/wheelZoom";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
@@ -790,6 +790,10 @@ export function WaveformCanvas({
         anchor_ratio: xRatio,
         factor,
         kind: "zoom",
+        // One wheel notch is a single hard step, so it glides; a touchpad streams
+        // and would only fight itself if each event were interpolated. Logic 2
+        // makes the same split.
+        duration_ms: isPhysicalWheelZoom(event) ? ZOOM_ANIMATION_DURATION_MS : 0,
       });
       if (edgeJumpRef.current) updateEdgeJumpAt(event.clientX, event.clientY);
       return;
@@ -2823,6 +2827,11 @@ function normalizeViewport(
   sampleRateHz: number,
   maximumViewportSamples?: number,
 ) {
+  // No floor here. This result is handed to the workbench's `updateViewport`,
+  // which applies it against the viewport the session is already at — the only
+  // place that knows where the view is, and therefore the only place that can
+  // widen the span without sliding the view sideways. Applying it twice would
+  // widen around this call's anchor-derived centre first and carry that drift in.
   return isLive
     ? normalizeLiveCaptureViewport(start, samples, totalSamples, sampleRateHz, maximumViewportSamples)
     : normalizeCaptureViewport(start, samples, totalSamples, maximumViewportSamples);

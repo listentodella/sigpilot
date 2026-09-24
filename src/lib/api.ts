@@ -554,8 +554,19 @@ export type ViewIntent =
    * no new gesture arrived, which keeps an in-flight glide running. */
   | { kind: "keep_current" }
   | { kind: "set"; start_sample: number; samples: number }
-  | { kind: "pan_samples"; delta_samples: number }
-  | { kind: "zoom"; factor: number; anchor_ratio: number }
+  /** Shift the viewport by a delta. A delta rather than a destination is what
+   * makes this safe while a glide is running: the backend applies it to whatever
+   * the view is at that moment, so the caller never has to guess a position it
+   * may be behind on. `duration_ms` behaves as it does on `zoom`. */
+  | { kind: "pan_samples"; delta_samples: number; duration_ms?: number }
+  /** Multiply the visible span around `anchor_ratio`. `duration_ms` above zero
+   * glides to the result instead of jumping to it; the backend computes the
+   * anchored target either way, so the anchor arithmetic stays in one place.
+   *
+   * Discrete input (one wheel notch, one keypress) passes a duration because a
+   * single hard step reads as a jump. Continuous input (a touchpad stream)
+   * leaves it at zero — it already updates every frame. */
+  | { kind: "zoom"; factor: number; anchor_ratio: number; duration_ms?: number }
   /** Glide to a viewport over `duration_ms`. The backend owns the animation. */
   | { kind: "animate_to"; start_sample: number; samples: number; duration_ms: number };
 

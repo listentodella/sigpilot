@@ -182,6 +182,49 @@ test("a backend-owned animation keeps asking until it is due to finish", async (
   assert.equal(h.queuedFrames(), 0);
 });
 
+test("a gliding zoom keeps the loop pumping frames too", async () => {
+  const h = harness();
+  // A wheel notch or a keypress carries a duration exactly like `animate_to`, and
+  // the backend owns that glide the same way. Registering only `animate_to` here
+  // let the loop fall to "idle" part-way through, and because the backend advances
+  // an animation only when asked for a frame, the view froze mid-glide; the next
+  // frame then sampled an animation that had been running on the clock all along
+  // and jumped, leaving markers and the trace disagreeing.
+  h.loop.dispatch({ anchor_ratio: 0.5, duration_ms: 300, factor: 0.5, kind: "zoom" });
+  h.runFrame();
+  h.requests[0].resolve(frame(1, { samples: 200, start_sample: 0 }, { samples: 200, start_sample: 0 }));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  h.advance(100);
+  assert.equal(h.queuedFrames(), 1);
+  h.runFrame();
+  assert.equal(h.requests.length, 2, "a gliding zoom must keep asking for frames");
+
+  h.requests[1].resolve(frame(2, { samples: 200, start_sample: 0 }, { samples: 200, start_sample: 0 }));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  h.advance(400);
+  h.runFrame();
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.queuedFrames(), 0);
+});
+
+test("a gliding pan keeps the loop pumping frames too", async () => {
+  const h = harness();
+  h.loop.dispatch({ delta_samples: 25, duration_ms: 300, kind: "pan_samples" });
+  h.runFrame();
+  h.requests[0].resolve(frame(1, { samples: 200, start_sample: 0 }, { samples: 200, start_sample: 0 }));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  h.advance(100);
+  assert.equal(h.queuedFrames(), 1);
+  h.runFrame();
+  assert.equal(h.requests.length, 2, "a gliding pan must keep asking for frames");
+});
+
 test("a failed frame reports the error and keeps the loop alive", async () => {
   const h = harness();
   h.loop.dispatch({ delta_samples: 5, kind: "pan_samples" });
