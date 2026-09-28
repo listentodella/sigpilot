@@ -7,9 +7,20 @@ SOURCE_DIR="$ROOT_DIR/native/saleae-analyzer-sidecar"
 RUNTIME_SOURCE_DIR="$ROOT_DIR/vendor/saleae-standalone/runtime"
 HOST_OS="$(uname -s)"
 HOST_ARCH="$(uname -m)"
-CACHE_DIR="${PXLOGIC_NATIVE_CACHE_DIR:-$ROOT_DIR/target/native-cache}"
-JSON_DIR="$CACHE_DIR/json"
-JSON_COMMIT="9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03"
+# nlohmann/json 3.11.3, vendored at the commit this build used to check out:
+# 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03. See vendor/nlohmann-json/README.md.
+#
+# This used to clone upstream into target/native-cache/json. That made a
+# disposable directory the home of a network-fetched dependency: `cargo clean`
+# wiped it, so the next build re-fetched 304 MB (287 MB of it git history) to
+# obtain this one 900 KB header, and the build could not run offline.
+JSON_INCLUDE_DIR="${PXLOGIC_NLOHMANN_JSON_INCLUDE:-$ROOT_DIR/vendor/nlohmann-json/single_include}"
+if [[ ! -f "$JSON_INCLUDE_DIR/nlohmann/json.hpp" ]]; then
+  printf 'nlohmann/json was not found at %s.\n' "$JSON_INCLUDE_DIR" >&2
+  printf 'It is vendored at vendor/nlohmann-json/single_include; restore it, or point\n' >&2
+  printf 'PXLOGIC_NLOHMANN_JSON_INCLUDE at another single_include directory.\n' >&2
+  exit 1
+fi
 
 case "$HOST_OS" in
   Darwin)
@@ -40,7 +51,7 @@ esac
 BUILD_DIR="${PXLOGIC_SALEAE_BUILD_DIR:-$ROOT_DIR/target/native/saleae-analyzer-sidecar-$PLATFORM_ID}"
 RUNTIME_BUILD_DIR="${PXLOGIC_SALEAE_RUNTIME_BUILD_DIR:-$ROOT_DIR/target/native/saleae-standalone-runtime-$PLATFORM_ID}"
 
-mkdir -p "$CACHE_DIR" "$BUILD_DIR" "$RUNTIME_BUILD_DIR"
+mkdir -p "$BUILD_DIR" "$RUNTIME_BUILD_DIR"
 
 set -- -DCMAKE_BUILD_TYPE=Release
 case "$HOST_OS" in
@@ -53,14 +64,6 @@ case "$HOST_OS" in
 esac
 cmake -S "$RUNTIME_SOURCE_DIR" -B "$RUNTIME_BUILD_DIR" -G Ninja "$@" >&2
 cmake --build "$RUNTIME_BUILD_DIR" >&2 || exit $?
-
-if [[ ! -d "$JSON_DIR/.git" ]]; then
-  git clone https://github.com/nlohmann/json.git "$JSON_DIR"
-fi
-if ! git -C "$JSON_DIR" cat-file -e "$JSON_COMMIT^{commit}" 2>/dev/null; then
-  git -C "$JSON_DIR" fetch --quiet origin "$JSON_COMMIT"
-fi
-git -C "$JSON_DIR" checkout --quiet --detach "$JSON_COMMIT"
 
 if [[ -n "${CXX:-}" ]]; then
   CXX_COMMAND=("$CXX")
@@ -75,7 +78,7 @@ COMMON_FLAGS=(
   "$PXLOGIC_SALEAE_SIDECAR_OPT_LEVEL"
   -DNDEBUG
   -I"$RUNTIME_SOURCE_DIR/include"
-  -I"$JSON_DIR/single_include"
+  -I"$JSON_INCLUDE_DIR"
 )
 LINKER_FLAGS=(-L"$RUNTIME_BUILD_DIR/lib" -lsaleae_compat)
 case "$HOST_OS" in
