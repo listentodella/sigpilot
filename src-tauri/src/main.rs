@@ -11,8 +11,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use parking_lot::{Mutex, RwLock};
-use sigpilot_core::{
+use parking_lot::{Mutex, RwLock};use sigpilot_core::{
     build_pxview_pwm0_register_script, AnalyzerDecodeSettings, CaptureMetadata, CaptureProgress,
     CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind,
     DemoAnalyzerSettings, DeviceInfo, DeviceRegistry, DiagnosticEvent, DiagnosticLevel,
@@ -403,6 +402,17 @@ async fn configure_pwm(
             .map_err(to_string);
     }
 
+    // The Kingst LA series has PWM outputs, but this driver does not implement
+    // them. Falling through to the PXLogic path below would resolve a PXLogic
+    // profile for a Kingst device and fail with "unsupported PXLogic device",
+    // which points at the wrong thing entirely.
+    if sigpilot_core::kingst_la2016::owns(&device_id) {
+        tracing::warn!(device_id, "PWM requested for a Kingst device, which does not implement it");
+        return Err("PWM output is not implemented for Kingst LA series devices".to_string());
+    }
+
+    tracing::debug!(device_id, frequency_hz = settings.frequency_hz, "configure_pwm");
+
     #[cfg(feature = "rusb-transport")]
     {
         let app_state = state.inner().clone();
@@ -433,6 +443,22 @@ async fn start_capture(
     settings: CaptureSettings,
     demo_analyzers: Option<Vec<DemoAnalyzerSettings>>,
 ) -> CommandResult<CaptureSummary> {
+    // The entry log is what makes a failed capture explainable after the fact:
+    // it records which device was asked for and with what configuration, so a
+    // later error can be attributed to the request rather than guessed at.
+    tracing::info!(
+        session_id,
+        device_id = %settings.device_id,
+        sample_rate_hz = settings.sample_rate_hz,
+        channel_count = settings.channel_count,
+        enabled_channels = ?settings.enabled_channels,
+        duration_ms = settings.duration_ms,
+        threshold_volts = settings.threshold_volts,
+        mode = ?settings.mode,
+        trigger_enabled = settings.trigger_enabled,
+        "start_capture requested"
+    );
+
     state.cancel.store(false, Ordering::Release);
     let cancel = state.cancel.clone();
     let graph = state.session(&session_id);
@@ -562,6 +588,15 @@ async fn start_capture(
         // (`capture_with_trace_streaming`) have genuinely different entry points.
         // Unifying them means moving capture onto `DeviceDriver` with a shared
         // `CaptureSink`, which touches the hot path and is deferred.
+        let route = if settings.device_id == FakeBackend::DEVICE_ID {
+            "demo"
+        } else if sigpilot_core::kingst_la2016::owns(&settings.device_id) {
+            "kingst"
+        } else {
+            "pxlogic"
+        };
+        tracing::debug!(route, device_id = %settings.device_id, "capture route selected");
+
         let capture = if settings.device_id == FakeBackend::DEVICE_ID {
             FakeBackend::default().capture_streaming_with_analyzers(
                 &settings,
@@ -571,6 +606,29 @@ async fn start_capture(
                 &mut started,
                 &mut samples,
             )
+        } else if sigpilot_core::kingst_la2016::owns(&settings.device_id) {
+            // The Kingst LA series samples into its own SDRAM and is downloaded
+            // afterwards, so it hands back a complete capture instead of
+            // streaming through `samples`. `started` still has to run, because
+            // that is what tells the graph session a capture began.
+            #[cfg(feature = "rusb-transport")]
+            {
+                sigpilot_core::kingst_la2016::capture(
+                    &settings.device_id,
+                    &settings,
+                    &cancel,
+                    &mut diagnostics,
+                    &mut progress,
+                )
+                .map(|capture| {
+                    started(&capture.metadata);
+                    capture
+                })
+            }
+            #[cfg(not(feature = "rusb-transport"))]
+            {
+                Err(sigpilot_core::CoreError::UnsupportedDevice)
+            }
         } else {
             #[cfg(feature = "rusb-transport")]
             {
@@ -604,6 +662,15 @@ async fn start_capture(
         match capture {
             Ok(capture) => {
                 *active_capture.lock() = None;
+                tracing::info!(
+                    source_device = %capture.metadata.source_device,
+                    sample_count = capture.metadata.sample_count,
+                    channel_count = capture.metadata.channel_count,
+                    unitsize = capture.metadata.unitsize,
+                    sample_rate_hz = capture.metadata.sample_rate_hz,
+                    bytes = capture.samples.len(),
+                    "capture finished"
+                );
                 if let Some(error) = graph_error.lock().take() {
                     return Err(error);
                 }
@@ -631,6 +698,11 @@ async fn start_capture(
                     app_state.forget_prepared_device(&settings.device_id);
                 }
                 let message = error.to_string();
+                tracing::error!(
+                    device_id = %settings.device_id,
+                    error = %message,
+                    "capture failed"
+                );
                 let _ = app.emit(
                     "usb_diagnostic",
                     &DiagnosticEvent {
@@ -1998,7 +2070,19 @@ fn warm_sigrok_native_catalog_async(delay: Duration) {
         });
 }
 
+mod logging;
+
 fn main() {
+    // Install the log sink before anything else, so a failure during start-up
+    // is recorded too. Losing logs is much better than losing the app, so a
+    // failure here is not fatal.
+    match logging::init() {
+        Some(path) => tracing::info!("SigPilot starting, log file {}", path.display()),
+        None => tracing::warn!(
+            "SigPilot starting without a log file; set SIGPILOT_LOG to control the level"
+        ),
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())

@@ -12,6 +12,8 @@ pub mod pxview_profile;
 pub mod transport;
 
 #[cfg(feature = "rusb-transport")]
+pub mod kingst_la2016;
+#[cfg(feature = "rusb-transport")]
 pub mod rusb_backend;
 
 pub use capture::{

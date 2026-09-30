@@ -4,7 +4,12 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
-    #[error("unsupported PXLogic device")]
+    /// No registered driver claims the device id.
+    ///
+    /// Deliberately vendor-neutral: every driver can return this, and naming a
+    /// single vendor here sends debugging in the wrong direction. The device id
+    /// is in the log line that accompanies the failure.
+    #[error("no driver claims this device")]
     UnsupportedDevice,
     #[error("invalid channel count: {0}")]
     InvalidChannelCount(u8),

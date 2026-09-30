@@ -191,6 +191,8 @@ impl DeviceRegistry {
             Arc::new(crate::fake::FakeDriver::new()),
             #[cfg(feature = "rusb-transport")]
             Arc::new(crate::rusb_backend::PxlogicDriver::new()),
+            #[cfg(feature = "rusb-transport")]
+            Arc::new(crate::kingst_la2016::KingstLa2016Driver::new()),
         ];
         Self { drivers }
     }
