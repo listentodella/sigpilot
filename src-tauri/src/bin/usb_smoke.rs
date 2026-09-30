@@ -13,14 +13,14 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use pxlogic_core::{
+use sigpilot_core::{
     capture::{decode_cross_data_with_map, read_sample_word},
     enabled_channel_mask, resolve_enabled_channels, CaptureBackend, CaptureMode, CaptureProgress,
     CaptureSettings, CaptureTriggerKind, CaptureTriggerMetadata, DeviceInfo, DiagnosticEvent,
     DiagnosticLevel, ExternalTriggerMode, PwmSettings, RusbBackend,
 };
-use pxlogic_graph::{GraphFrameRequest, GraphSession};
-use pxlogic_waveform::WaveformRequest;
+use sigpilot_graph::{GraphFrameRequest, GraphSession};
+use sigpilot_waveform::WaveformRequest;
 
 #[derive(Debug)]
 struct Options {
@@ -278,7 +278,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let graph_error = RefCell::new(None::<String>);
         let streamed_chunks = Cell::new(0u64);
         let streamed_bytes = Cell::new(0u64);
-        let mut started = |metadata: &pxlogic_core::CaptureMetadata| {
+        let mut started = |metadata: &sigpilot_core::CaptureMetadata| {
             if let Err(error) = graph.begin_capture(metadata.clone()) {
                 *graph_error.borrow_mut() = Some(error.to_string());
             }
@@ -352,7 +352,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let raw_byte_offset = total_raw_byte_length;
             let current_window = window_index;
             let first_window = current_window == 0;
-            let mut started = |metadata: &pxlogic_core::CaptureMetadata| {
+            let mut started = |metadata: &sigpilot_core::CaptureMetadata| {
                 let event_type = if first_window { "started" } else { "window" };
                 emit_live_event(serde_json::json!({
                     "type": event_type,
@@ -510,7 +510,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        pxlogic_file::save_pxcap(&output, &capture)?;
+        sigpilot_file::save_pxcap(&output, &capture)?;
         println!("saved: {}", output.display());
     }
 
@@ -674,7 +674,7 @@ fn print_help() {
 
 fn verify_graph_smoke(
     graph: &GraphSession,
-    capture: &pxlogic_core::CaptureData,
+    capture: &sigpilot_core::CaptureData,
 ) -> Result<(), Box<dyn Error>> {
     let graph_metadata = graph.metadata().ok_or("graph metadata is missing")?;
     if graph_metadata.enabled_channels != capture.metadata.enabled_channels {
@@ -879,7 +879,7 @@ fn default_output_path() -> PathBuf {
         .unwrap_or_else(|_| env::temp_dir().join(file_name))
 }
 
-fn print_sample_summary(capture: &pxlogic_core::CaptureData) {
+fn print_sample_summary(capture: &sigpilot_core::CaptureData) {
     print_decoded_summary(
         &capture.samples,
         capture.metadata.unitsize,
@@ -944,7 +944,7 @@ struct MappingCandidate {
     reverse_bits: bool,
 }
 
-fn compare_cross_mappings(capture: &pxlogic_core::CaptureData) -> Result<(), Box<dyn Error>> {
+fn compare_cross_mappings(capture: &sigpilot_core::CaptureData) -> Result<(), Box<dyn Error>> {
     let channel_count = capture.metadata.channel_count;
     let enabled_channels = resolve_enabled_channels(
         capture.metadata.channel_count,

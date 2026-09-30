@@ -1,6 +1,6 @@
 use std::{env, process::ExitCode};
 
-use pxlogic_graph::performance_self_test::{
+use sigpilot_graph::performance_self_test::{
     human_summary, run, validate_config, write_report, ScenarioKind, ScenarioSelection,
     SelfTestConfig, DEFAULT_POLL_INTERVAL_MS,
 };
@@ -13,20 +13,20 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(error) => {
-            eprintln!("pxlogic-perf-self-test: {error}");
+            eprintln!("sigpilot-perf-self-test: {error}");
             print_usage();
             return ExitCode::from(2);
         }
     };
     if let Err(error) = validate_config(&args, cfg!(not(debug_assertions))) {
-        eprintln!("pxlogic-perf-self-test: {error}");
+        eprintln!("sigpilot-perf-self-test: {error}");
         return ExitCode::from(2);
     }
 
     let report = run(&args);
     eprintln!("{}", human_summary(&report));
     if let Err(error) = write_report(&report, args.output.as_deref()) {
-        eprintln!("pxlogic-perf-self-test: failed to write report: {error}");
+        eprintln!("sigpilot-perf-self-test: failed to write report: {error}");
         return ExitCode::from(1);
     }
     if report
@@ -144,7 +144,7 @@ fn parse_scenario(value: &str) -> Result<ScenarioSelection, String> {
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo run --release -p pxlogic-graph --bin pxlogic-perf-self-test -- [options]\n\
+        "Usage: cargo run --release -p sigpilot-graph --bin sigpilot-perf-self-test -- [options]\n\
          Defaults: all 250K/2.5M/25M x UART/I2C/SPI/I2C+SPI, 1 warmup, 10 measured runs.\n\
          Options: --scenario 2.5m-i2c-spi --samples 250000,2500000 --warmups 1 \
          --iterations 10 --poll-ms {DEFAULT_POLL_INTERVAL_MS} --output report.json"

@@ -8,14 +8,14 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
-use pxlogic_core::{
+use sigpilot_core::{
     resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData, CaptureMetadata,
     CaptureTriggerMetadata, DecodedChannelValue, DecodedFrame, DecodedProtocolMarker,
     DecoderBackend, DecoderBackendKind, I2cDecodeSettings, SaleaeAsyncDecodeStep,
     SaleaeNativeDecoder, SigrokNativeDecoder, SparseCaptureData, SparseCaptureView,
     SparseDigitalChannel, SparseDigitalChannelView, SpiDecodeSettings, UartDecodeSettings,
 };
-use pxlogic_waveform::{ChannelTile, DigitalSegment, WaveformBin, WaveformRequest, WaveformTile};
+use sigpilot_waveform::{ChannelTile, DigitalSegment, WaveformBin, WaveformRequest, WaveformTile};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -54,22 +54,22 @@ const MAX_PARALLEL_ANALYZER_RENDERS: usize = 4;
 const MAX_DEFAULT_PARALLEL_NATIVE_WINDOW_DECODES: usize = 4;
 const MAX_PARALLEL_NATIVE_BACKGROUND_STEPS: usize = 4;
 const MAX_PARALLEL_ANALYZER_TRACK_RENDERS: usize = 4;
-const NATIVE_WINDOW_DECODE_WORKERS_ENV: &str = "PXLOGIC_NATIVE_WINDOW_DECODE_WORKERS";
+const NATIVE_WINDOW_DECODE_WORKERS_ENV: &str = "SIGPILOT_NATIVE_WINDOW_DECODE_WORKERS";
 static NEXT_GRAPH_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 fn trace_graph_timing(stage: &str, started: Instant, detail: &str) {
     let elapsed = started.elapsed();
     let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
-    pxlogic_core::record_performance_event("graph", None, stage, elapsed, detail);
+    sigpilot_core::record_performance_event("graph", None, stage, elapsed, detail);
     tracing::debug!(
-        target: "pxlogic::decoder_performance",
+        target: "sigpilot::decoder_performance",
         component = "graph",
         stage,
         elapsed_ms,
         detail
     );
-    if std::env::var_os("PXLOGIC_DECODER_TIMING").is_some() {
-        eprintln!("[pxlogic-graph] stage={stage} elapsed_ms={elapsed_ms:.3} {detail}");
+    if sigpilot_core::product_env("SIGPILOT_DECODER_TIMING").is_some() {
+        eprintln!("[sigpilot-graph] stage={stage} elapsed_ms={elapsed_ms:.3} {detail}");
     }
 }
 
@@ -1790,7 +1790,7 @@ impl GraphSession {
                 let capture = graph
                     .as_ref()
                     .ok_or_else(|| {
-                        pxlogic_core::CoreError::Decode("capture graph is empty".to_string())
+                        sigpilot_core::CoreError::Decode("capture graph is empty".to_string())
                     })?
                     .sparse_view();
                 decoder.decode_sparse_view(&capture, settings)
@@ -4211,7 +4211,7 @@ fn offset_decoded_frame_samples(frame: &mut DecodedFrame, offset: u64) {
 }
 
 fn native_window_frames_from_output(
-    output: pxlogic_core::DecoderOutput,
+    output: sigpilot_core::DecoderOutput,
     offset: u64,
 ) -> Arc<Vec<DecodedFrame>> {
     let mut frames = output.into_decoded_frames();
@@ -6705,7 +6705,7 @@ mod tests {
     };
 
     use chrono::Utc;
-    use pxlogic_core::{
+    use sigpilot_core::{
         capture::generate_sample_words_with_count, decode_analyzer, CaptureSettings,
         SparseCaptureData, SparseDigitalChannel,
     };
@@ -6810,7 +6810,7 @@ mod tests {
             },
         ] {
             let indexed = graph.build_tile(&request).unwrap();
-            let scanned = pxlogic_waveform::build_tile(&capture, &request).unwrap();
+            let scanned = sigpilot_waveform::build_tile(&capture, &request).unwrap();
             assert_eq!(indexed.start_sample, scanned.start_sample);
             assert_eq!(indexed.sample_count, scanned.sample_count);
             assert_eq!(indexed.pixels, scanned.pixels);
@@ -7042,7 +7042,7 @@ mod tests {
             .into_iter()
             .flat_map(u64::to_le_bytes)
             .collect::<Vec<_>>();
-        let interleaved = pxlogic_core::decode_cross_data_to_physical_channels(
+        let interleaved = sigpilot_core::decode_cross_data_to_physical_channels(
             32,
             &enabled_channels,
             &packed,
@@ -7136,7 +7136,7 @@ mod tests {
         let trigger = CaptureTriggerMetadata {
             sample_index: 2_048,
             channel: 1,
-            kind: pxlogic_core::CaptureTriggerKind::Rising,
+            kind: sigpilot_core::CaptureTriggerKind::Rising,
         };
         session.set_trigger(trigger.clone()).unwrap();
         assert_eq!(session.metadata().unwrap().trigger, Some(trigger.clone()));
@@ -8225,7 +8225,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_spi_decodes_through_graph_session() {
         let capture = demo_capture(16, 250_000);
         let sample_count = capture.metadata.sample_count;
@@ -8287,7 +8287,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_full_decode_batch_populates_shared_analyzer_cache() {
         let capture = demo_capture(16, 250_000);
         let session = GraphSession::default();
@@ -8322,7 +8322,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_async_background_decode_matches_one_shot_and_reports_monotonic_progress() {
         let capture = demo_capture(16, 2_500_000);
         let settings = vec![
@@ -8385,7 +8385,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_i2c_and_spi_decode_in_parallel_through_shared_edge_index() {
         let capture = demo_capture(16, 2_500_000);
         let sample_count = capture.metadata.sample_count;
@@ -8444,10 +8444,10 @@ mod tests {
     #[test]
     #[ignore = "requires a GraphServer manifest and both native analyzer sidecars"]
     fn imported_saleae_capture_restores_native_bubbles_and_table_frames() {
-        let manifest = std::env::var_os("PXLOGIC_SALEAE_MANIFEST")
+        let manifest = sigpilot_core::product_env("SIGPILOT_SALEAE_MANIFEST")
             .map(std::path::PathBuf::from)
-            .expect("PXLOGIC_SALEAE_MANIFEST");
-        let imported = pxlogic_file::open_saleae_transition_session(manifest).unwrap();
+            .expect("SIGPILOT_SALEAE_MANIFEST");
+        let imported = sigpilot_file::open_saleae_transition_session(manifest).unwrap();
         let analyzer = imported
             .session
             .analyzers
@@ -8690,7 +8690,7 @@ mod tests {
             value: 0,
             channel_values: Vec::new(),
             protocol_markers: (1..=1_000)
-                .map(|sample| pxlogic_core::DecodedProtocolMarker {
+                .map(|sample| sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample,
                     kind: "dot".to_string(),
@@ -8722,22 +8722,22 @@ mod tests {
             value: 0,
             channel_values: Vec::new(),
             protocol_markers: vec![
-                pxlogic_core::DecodedProtocolMarker {
+                sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 80,
                     kind: "stop".to_string(),
                 },
-                pxlogic_core::DecodedProtocolMarker {
+                sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 10,
                     kind: "start".to_string(),
                 },
-                pxlogic_core::DecodedProtocolMarker {
+                sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 10,
                     kind: "start".to_string(),
                 },
-                pxlogic_core::DecodedProtocolMarker {
+                sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 50,
                     kind: "dot".to_string(),
@@ -8783,7 +8783,7 @@ mod tests {
                 texts: vec!["0x12".to_string()],
                 value: 0x12,
             }],
-            protocol_markers: vec![pxlogic_core::DecodedProtocolMarker {
+            protocol_markers: vec![sigpilot_core::DecodedProtocolMarker {
                 channel: Some(0),
                 sample: 150,
                 kind: "up_arrow".to_string(),
@@ -8829,7 +8829,7 @@ mod tests {
                 texts: vec!["0x12".to_string()],
                 value: 0x12,
             }],
-            protocol_markers: vec![pxlogic_core::DecodedProtocolMarker {
+            protocol_markers: vec![sigpilot_core::DecodedProtocolMarker {
                 channel: Some(1),
                 sample: 150,
                 kind: "dot".to_string(),
@@ -8942,7 +8942,7 @@ mod tests {
                 texts: vec!["0x12".to_string()],
                 value: 0x12,
             }],
-            protocol_markers: vec![pxlogic_core::DecodedProtocolMarker {
+            protocol_markers: vec![sigpilot_core::DecodedProtocolMarker {
                 channel: Some(0),
                 sample: 15,
                 kind: "up_arrow".to_string(),
@@ -9167,12 +9167,12 @@ mod tests {
                     value: 0x11,
                 }],
                 protocol_markers: vec![
-                    pxlogic_core::DecodedProtocolMarker {
+                    sigpilot_core::DecodedProtocolMarker {
                         channel: Some(1),
                         sample: 32,
                         kind: "up_arrow".to_string(),
                     },
-                    pxlogic_core::DecodedProtocolMarker {
+                    sigpilot_core::DecodedProtocolMarker {
                         channel: Some(2),
                         sample: 33,
                         kind: "dot".to_string(),

@@ -1,21 +1,21 @@
 [package]
-name = "pxlogic-desktop"
+name = "sigpilot-desktop"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 build = "build.rs"
-default-run = "pxlogic-desktop"
+default-run = "sigpilot-desktop"
 
 [features]
 default = ["rusb-transport"]
-rusb-transport = ["pxlogic-core/rusb-transport"]
+rusb-transport = ["sigpilot-core/rusb-transport"]
 
 [dependencies]
 base64.workspace = true
-pxlogic-core = { path = "../crates/pxlogic-core" }
-pxlogic-file = { path = "../crates/pxlogic-file" }
-pxlogic-graph = { path = "../crates/pxlogic-graph" }
-pxlogic-waveform = { path = "../crates/pxlogic-waveform" }
+sigpilot-core = { path = "../crates/sigpilot-core" }
+sigpilot-file = { path = "../crates/sigpilot-file" }
+sigpilot-graph = { path = "../crates/sigpilot-graph" }
+sigpilot-waveform = { path = "../crates/sigpilot-waveform" }
 parking_lot.workspace = true
 rayon.workspace = true
 serde.workspace = true

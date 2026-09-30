@@ -153,21 +153,21 @@ fn trace_decoder_timing(backend: &str, stage: &str, started: Instant, detail: &s
         elapsed_ms,
         detail
     );
-    if std::env::var_os("PXLOGIC_DECODER_TIMING").is_some() {
+    if crate::product_env("SIGPILOT_DECODER_TIMING").is_some() {
         eprintln!(
-            "[pxlogic-decoder] backend={backend} stage={stage} elapsed_ms={elapsed_ms:.3} {detail}"
+            "[sigpilot-decoder] backend={backend} stage={stage} elapsed_ms={elapsed_ms:.3} {detail}"
         );
     }
 }
 
 #[cfg(windows)]
-const SIGROK_SIDECAR_EXECUTABLE: &str = "pxlogic-sigrok-sidecar.exe";
+const SIGROK_SIDECAR_EXECUTABLE: &str = "sigpilot-sigrok-sidecar.exe";
 #[cfg(not(windows))]
-const SIGROK_SIDECAR_EXECUTABLE: &str = "pxlogic-sigrok-sidecar";
+const SIGROK_SIDECAR_EXECUTABLE: &str = "sigpilot-sigrok-sidecar";
 #[cfg(windows)]
-const SALEAE_SIDECAR_EXECUTABLE: &str = "pxlogic-saleae-analyzer-sidecar.exe";
+const SALEAE_SIDECAR_EXECUTABLE: &str = "sigpilot-saleae-analyzer-sidecar.exe";
 #[cfg(not(windows))]
-const SALEAE_SIDECAR_EXECUTABLE: &str = "pxlogic-saleae-analyzer-sidecar";
+const SALEAE_SIDECAR_EXECUTABLE: &str = "sigpilot-saleae-analyzer-sidecar";
 
 /// Stable host-side contract. External implementations may live in a native
 /// sidecar; the input remains the same packed capture representation used by
@@ -514,8 +514,8 @@ static SALEAE_FROM_ENV_CACHE: OnceLock<std::result::Result<SaleaeNativeDecoder, 
 
 const MAX_DEFAULT_SALEAE_PERSISTENT_WORKERS: usize = 4;
 const MAX_DEFAULT_SALEAE_SIDECAR_WORKERS: usize = 4;
-const SALEAE_PERSISTENT_WORKERS_ENV: &str = "PXLOGIC_SALEAE_WORKERS";
-const SALEAE_WINDOW_BATCH_ENV: &str = "PXLOGIC_SALEAE_WINDOW_BATCH";
+const SALEAE_PERSISTENT_WORKERS_ENV: &str = "SIGPILOT_SALEAE_WORKERS";
+const SALEAE_WINDOW_BATCH_ENV: &str = "SIGPILOT_SALEAE_WINDOW_BATCH";
 const SALEAE_FRAMED_BINARY_TRANSPORT: &str = "framed_binary_v1";
 const SALEAE_FRAMED_BINARY_MAGIC: &[u8; 5] = b"PXLF1";
 const MAX_SALEAE_FRAMED_HEADER_BYTES: usize = 64 * 1024 * 1024;
@@ -1814,7 +1814,7 @@ impl SaleaePersistentWorker {
         runtime_root: PathBuf,
         internal_worker_count: usize,
     ) -> Result<Self> {
-        let stderr = if std::env::var_os("PXLOGIC_DECODER_TIMING").is_some() {
+        let stderr = if crate::product_env("SIGPILOT_DECODER_TIMING").is_some() {
             Stdio::inherit()
         } else {
             Stdio::null()
@@ -1827,15 +1827,15 @@ impl SaleaePersistentWorker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr);
-        if std::env::var_os("PXLOGIC_SALEAE_BATCH_WORKERS").is_none() {
+        if crate::product_env("SIGPILOT_SALEAE_BATCH_WORKERS").is_none() {
             command.env(
-                "PXLOGIC_SALEAE_BATCH_WORKERS",
+                "SIGPILOT_SALEAE_BATCH_WORKERS",
                 internal_worker_count.to_string(),
             );
         }
-        if std::env::var_os("PXLOGIC_SALEAE_WINDOW_BATCH_WORKERS").is_none() {
+        if crate::product_env("SIGPILOT_SALEAE_WINDOW_BATCH_WORKERS").is_none() {
             command.env(
-                "PXLOGIC_SALEAE_WINDOW_BATCH_WORKERS",
+                "SIGPILOT_SALEAE_WINDOW_BATCH_WORKERS",
                 internal_worker_count.to_string(),
             );
         }
@@ -2357,21 +2357,21 @@ impl SaleaeNativeDecoder {
     }
 
     pub fn from_env() -> Result<Self> {
-        let sidecar_path = std::env::var_os("PXLOGIC_SALEAE_SIDECAR")
+        let sidecar_path = crate::product_env("SIGPILOT_SALEAE_SIDECAR")
             .map(PathBuf::from)
             .or_else(discover_workspace_saleae_sidecar)
             .ok_or_else(|| {
                 CoreError::Decode(
-                    "PXLOGIC_SALEAE_SIDECAR is not configured and no bundled or workspace sidecar was found"
+                    "SIGPILOT_SALEAE_SIDECAR is not configured and no bundled or workspace sidecar was found"
                         .to_string(),
                 )
             })?;
-        let runtime_root = std::env::var_os("PXLOGIC_SALEAE_RUNTIME_ROOT")
+        let runtime_root = crate::product_env("SIGPILOT_SALEAE_RUNTIME_ROOT")
             .map(PathBuf::from)
             .or_else(discover_saleae_runtime_root)
             .ok_or_else(|| {
                 CoreError::Decode(
-                    "PXLOGIC_SALEAE_RUNTIME_ROOT is not configured and Logic 2.4.43 was not found"
+                    "SIGPILOT_SALEAE_RUNTIME_ROOT is not configured and Logic 2.4.43 was not found"
                         .to_string(),
                 )
             })?;
@@ -3144,7 +3144,7 @@ impl DecoderBackend for SaleaeNativeDecoder {
 
 fn saleae_persistent_sidecar_enabled() -> bool {
     saleae_persistent_sidecar_enabled_value(
-        &std::env::var("PXLOGIC_SALEAE_PERSISTENT_SIDECAR").unwrap_or_default(),
+        &crate::product_env_string("SIGPILOT_SALEAE_PERSISTENT_SIDECAR").unwrap_or_default(),
     )
 }
 
@@ -3328,25 +3328,25 @@ impl SigrokNativeDecoder {
     }
 
     pub fn from_env() -> Result<Self> {
-        let sidecar_path = std::env::var_os("PXLOGIC_SIGROK_SIDECAR")
+        let sidecar_path = crate::product_env("SIGPILOT_SIGROK_SIDECAR")
             .map(PathBuf::from)
             .or_else(|| discover_workspace_sigrok_path(SIGROK_SIDECAR_EXECUTABLE))
             .ok_or_else(|| {
                 CoreError::Decode(
-                    "PXLOGIC_SIGROK_SIDECAR is not configured and no bundled or workspace sidecar was found"
+                    "SIGPILOT_SIGROK_SIDECAR is not configured and no bundled or workspace sidecar was found"
                         .to_string(),
                 )
             })?;
-        let decoder_root = std::env::var_os("PXLOGIC_SIGROK_DECODER_ROOT")
+        let decoder_root = crate::product_env("SIGPILOT_SIGROK_DECODER_ROOT")
             .map(PathBuf::from)
             .or_else(|| discover_workspace_sigrok_path("decoders/c_decoders"))
             .ok_or_else(|| {
                 CoreError::Decode(
-                    "PXLOGIC_SIGROK_DECODER_ROOT is not configured and no bundled or workspace decoder root was found"
+                    "SIGPILOT_SIGROK_DECODER_ROOT is not configured and no bundled or workspace decoder root was found"
                         .to_string(),
                 )
             })?;
-        let python_decoder_root = std::env::var_os("PXLOGIC_SIGROK_PYTHON_DECODER_ROOT")
+        let python_decoder_root = crate::product_env("SIGPILOT_SIGROK_PYTHON_DECODER_ROOT")
             .map(PathBuf::from)
             .or_else(discover_workspace_sigrok_python_decoder_root);
         Ok(Self::new_with_python_decoder_root(
@@ -5043,7 +5043,7 @@ mod tests {
             &mut paths,
             &contents_dir,
             "saleae-analyzer-sidecar",
-            "pxlogic-saleae-analyzer-sidecar",
+            "sigpilot-saleae-analyzer-sidecar",
         );
 
         assert!(paths.contains(
@@ -5052,7 +5052,7 @@ mod tests {
                 .join("resources")
                 .join("native")
                 .join("saleae-analyzer-sidecar")
-                .join("pxlogic-saleae-analyzer-sidecar")
+                .join("sigpilot-saleae-analyzer-sidecar")
         ));
 
         let mut runtime_paths = Vec::new();
@@ -5455,7 +5455,7 @@ mod tests {
     #[test]
     fn native_backend_fallback_info_keeps_external_protocol_catalog_visible() {
         let saleae = SaleaeNativeDecoder::new(
-            "/definitely/missing/pxlogic-saleae-analyzer-sidecar",
+            "/definitely/missing/sigpilot-saleae-analyzer-sidecar",
             "/definitely/missing/saleae-runtime",
         )
         .info();
@@ -5466,7 +5466,7 @@ mod tests {
         assert!(!saleae.protocols.contains(&"CAN-FD".to_string()));
 
         let sigrok = SigrokNativeDecoder::new(
-            "/definitely/missing/pxlogic-sigrok-sidecar",
+            "/definitely/missing/sigpilot-sigrok-sidecar",
             "/definitely/missing/sigrok-decoders",
         )
         .info();
@@ -6408,7 +6408,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_native_sidecar_decodes_mode_zero_fixture() {
         let (capture, settings) = mode_zero_capture_and_settings();
 
@@ -6427,7 +6427,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_native_sidecar_decodes_sparse_fixture_beyond_u32() {
         let (capture, settings) = sparse_mode_zero_capture_and_settings();
         let output = SaleaeNativeDecoder::from_env()
@@ -6440,7 +6440,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_native_sidecar_decodes_uart_and_i2c_fixtures() {
         let (uart_capture, uart_settings) = uart_capture_and_settings();
         let uart = SaleaeNativeDecoder::from_env()
@@ -6593,7 +6593,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_uart_sparse_fixture_preserves_u64_indexes() {
         const OFFSET: u64 = 49_000_000_000;
         let capture = sparse_transition_capture(
@@ -6620,7 +6620,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_native_sidecar_decodes_i2s_packed_and_sparse_fixtures() {
         let decoder = SaleaeNativeDecoder::from_env().unwrap();
         let packed = decoder.decode(&i2s_capture(), &i2s_settings()).unwrap();
@@ -6642,7 +6642,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_native_sidecar_decodes_can_packed_and_sparse_fixtures() {
         let decoder = SaleaeNativeDecoder::from_env().unwrap();
         let packed = decoder
@@ -6668,7 +6668,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_native_sidecar_decodes_lin_packed_and_sparse_fixtures() {
         let decoder = SaleaeNativeDecoder::from_env().unwrap();
         let packed = decoder.decode(&lin_capture(), &lin_settings()).unwrap();
@@ -6689,7 +6689,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_official_generators_round_trip_core_native_protocols() {
         let decoder = SaleaeNativeDecoder::from_env().unwrap();
         let settings = [
@@ -6843,7 +6843,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_SIDECAR and PXLOGIC_SALEAE_RUNTIME_ROOT"]
+    #[ignore = "requires SIGPILOT_SALEAE_SIDECAR and SIGPILOT_SALEAE_RUNTIME_ROOT"]
     fn saleae_official_generators_round_trip_entire_catalog() {
         let decoder = SaleaeNativeDecoder::from_env().unwrap();
         let catalog = decoder.decoder_catalog().unwrap();
@@ -7019,7 +7019,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR and SIGPILOT_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_mode_zero_fixture() {
         let (capture, settings) = mode_zero_capture_and_settings();
         let output = SigrokNativeDecoder::from_env()
@@ -7031,7 +7031,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR, PXLOGIC_SIGROK_DECODER_ROOT, and PXLOGIC_SIGROK_PYTHON_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR, SIGPILOT_SIGROK_DECODER_ROOT, and SIGPILOT_SIGROK_PYTHON_DECODER_ROOT"]
     fn sigrok_native_sidecar_catalog_enumerates_pxview_c_and_python_decoders() {
         let probe = SigrokNativeDecoder::from_env()
             .unwrap()
@@ -7072,7 +7072,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR, PXLOGIC_SIGROK_DECODER_ROOT, and PXLOGIC_SIGROK_PYTHON_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR, SIGPILOT_SIGROK_DECODER_ROOT, and SIGPILOT_SIGROK_PYTHON_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_generic_sparse_python_pwm() {
         let capture = sparse_transition_capture(
             "sigrok-python-pwm-test",
@@ -7110,7 +7110,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR and SIGPILOT_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_sparse_fixture_beyond_u32() {
         let (capture, settings) = sparse_mode_zero_capture_and_settings();
         let output = SigrokNativeDecoder::from_env()
@@ -7123,7 +7123,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR and SIGPILOT_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_uart_and_i2c_fixtures() {
         let (uart_capture, uart_settings) = uart_capture_and_settings();
         let uart = SigrokNativeDecoder::from_env()
@@ -7150,7 +7150,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR and SIGPILOT_SIGROK_DECODER_ROOT"]
     fn sigrok_uart_and_i2c_sparse_fixtures_preserve_u64_indexes() {
         const OFFSET: u64 = 49_000_000_000;
         let uart_capture = sparse_transition_capture(
@@ -7199,7 +7199,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR and SIGPILOT_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_i2s_packed_and_sparse_fixtures() {
         let decoder = SigrokNativeDecoder::from_env().unwrap();
         let packed = decoder.decode(&i2s_capture(), &i2s_settings()).unwrap();
@@ -7221,7 +7221,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR and SIGPILOT_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_can_and_can_fd_packed_and_sparse_fixtures() {
         let decoder = SigrokNativeDecoder::from_env().unwrap();
         for (decoder_id, protocol_name) in [("can", "CAN"), ("can_fd", "CAN-FD")] {
@@ -7246,7 +7246,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SIGROK_SIDECAR and PXLOGIC_SIGROK_DECODER_ROOT"]
+    #[ignore = "requires SIGPILOT_SIGROK_SIDECAR and SIGPILOT_SIGROK_DECODER_ROOT"]
     fn sigrok_native_sidecar_decodes_lin_packed_and_sparse_fixtures() {
         let decoder = SigrokNativeDecoder::from_env().unwrap();
         let packed = decoder.decode(&lin_capture(), &lin_settings()).unwrap();

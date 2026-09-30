@@ -1,6 +1,8 @@
 pub mod capture;
 pub mod decode;
 pub mod decoder_backend;
+pub mod device;
+pub mod env;
 pub mod error;
 pub mod fake;
 pub mod models;
@@ -36,7 +38,9 @@ pub use decoder_backend::{
     SaleaeAsyncDecodeStep, SaleaeNativeDecoder, SigrokDecoderCatalog, SigrokDecoderCatalogItem,
     SigrokDecoderChannel, SigrokDecoderOption, SigrokNativeDecoder,
 };
+pub use device::{DeviceDescriptor, DeviceDriver, DeviceRegistry, DriverIsolation};
 pub use error::{CoreError, Result};
+pub use env::{product_env, product_env_string, ENV_PREFIX, LEGACY_ENV_PREFIX};
 pub use fake::FakeBackend;
 pub use models::{
     Bitstreams, CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings,

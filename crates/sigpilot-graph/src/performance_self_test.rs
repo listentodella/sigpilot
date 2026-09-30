@@ -6,12 +6,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use pxlogic_core::{
+use sigpilot_core::{
     generate_sample_words_with_count, AnalyzerDecodeSettings, CaptureData, CaptureSettings,
     DecoderBackendKind, I2cDecodeSettings, PerformanceCapture, PerformanceEvent,
     SaleaeNativeDecoder, SpiDecodeSettings, UartDecodeSettings,
 };
-use pxlogic_waveform::WaveformRequest;
+use sigpilot_waveform::WaveformRequest;
 use serde::{Deserialize, Serialize};
 
 use crate::{AnalyzerRenderRequest, AnalyzerTrackRequest, GraphFrameRequest, GraphSession};
@@ -24,7 +24,7 @@ pub const DEFAULT_MEASURED_ITERATIONS: usize = 10;
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 16;
 pub const FIXTURE_CHANNEL_COUNT: u8 = 32;
 pub const FIXTURE_SAMPLE_RATE_HZ: u64 = 25_000_000;
-pub const FIXTURE_ID_PREFIX: &str = "pxlogic-demo-v1-32ch";
+pub const FIXTURE_ID_PREFIX: &str = "sigpilot-demo-v1-32ch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -920,7 +920,7 @@ fn base_report(config: &SelfTestConfig, build: BuildInfo) -> PerformanceReport {
         },
         fixture: FixtureInfo {
             id_prefix: FIXTURE_ID_PREFIX.to_string(),
-            generator: "pxlogic-core::generate_sample_words_with_count".to_string(),
+            generator: "sigpilot-core::generate_sample_words_with_count".to_string(),
             sample_rate_hz: FIXTURE_SAMPLE_RATE_HZ,
             channel_count: FIXTURE_CHANNEL_COUNT,
             sample_sizes: config.sample_sizes.clone(),

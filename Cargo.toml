@@ -1,10 +1,10 @@
 [workspace]
 exclude = ["vendor/saleae-standalone/runtime/rust"]
 members = [
-    "crates/pxlogic-core",
-    "crates/pxlogic-file",
-    "crates/pxlogic-graph",
-    "crates/pxlogic-waveform",
+    "crates/sigpilot-core",
+    "crates/sigpilot-file",
+    "crates/sigpilot-graph",
+    "crates/sigpilot-waveform",
     "src-tauri",
 ]
 resolver = "2"
@@ -42,11 +42,11 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # The capture hot path processes hundreds of millions of samples per second.
 # Keeping these workspace crates at opt-level 0 makes `tauri dev` saturate a
 # core even though packaged builds are smooth, which masks frontend regressions.
-[profile.dev.package.pxlogic-core]
+[profile.dev.package.sigpilot-core]
 opt-level = 3
 
-[profile.dev.package.pxlogic-graph]
+[profile.dev.package.sigpilot-graph]
 opt-level = 3
 
-[profile.dev.package.pxlogic-waveform]
+[profile.dev.package.sigpilot-waveform]
 opt-level = 3

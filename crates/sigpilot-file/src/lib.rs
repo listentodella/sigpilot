@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::Utc;
-use pxlogic_core::{
+use sigpilot_core::{
     capture::read_sample_word, resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData,
     CaptureMetadata, DecoderBackendKind, I2cDecodeSettings, NativeDecodeSettings,
     NativeOptionValue, SparseCaptureData, SparseDigitalChannel, SpiDecodeSettings,
@@ -1220,7 +1220,7 @@ fn vcd_identifier(channel: u8) -> String {
 mod tests {
     use std::{collections::BTreeMap, fs, path::PathBuf};
 
-    use pxlogic_core::{
+    use sigpilot_core::{
         capture::generate_sample_words, CaptureSettings, CaptureTriggerKind, CaptureTriggerMetadata,
     };
 
@@ -1476,7 +1476,7 @@ mod tests {
     #[test]
     fn opens_saleae_transition_manifest_without_expanding_samples() {
         let directory =
-            std::env::temp_dir().join(format!("pxlogic-saleae-manifest-{}", std::process::id()));
+            std::env::temp_dir().join(format!("sigpilot-saleae-manifest-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         let binary_path = directory.join("digital_3.bin");
         let mut binary = Vec::new();
@@ -1869,11 +1869,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires PXLOGIC_SALEAE_MANIFEST from the native GraphServer sidecar"]
+    #[ignore = "requires SIGPILOT_SALEAE_MANIFEST from the native GraphServer sidecar"]
     fn opens_native_saleae_graphserver_export() {
-        let manifest = std::env::var_os("PXLOGIC_SALEAE_MANIFEST")
+        let manifest = sigpilot_core::product_env("SIGPILOT_SALEAE_MANIFEST")
             .map(PathBuf::from)
-            .expect("PXLOGIC_SALEAE_MANIFEST");
+            .expect("SIGPILOT_SALEAE_MANIFEST");
         let imported = open_saleae_transition_session(manifest).unwrap();
         let capture = imported.capture;
         assert!(capture.metadata.sample_count > u64::from(u32::MAX));
@@ -1953,11 +1953,11 @@ mod tests {
     }
 
     fn temp_file(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("pxlogic-file-{}-{name}", std::process::id()))
+        std::env::temp_dir().join(format!("sigpilot-file-{}-{name}", std::process::id()))
     }
 
     fn temp_directory(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("pxlogic-file-{}-{name}", std::process::id()))
+        std::env::temp_dir().join(format!("sigpilot-file-{}-{name}", std::process::id()))
     }
 
     fn read_u64_file(path: impl AsRef<Path>) -> Vec<u64> {

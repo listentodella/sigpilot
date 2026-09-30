@@ -11,10 +11,11 @@ use crate::{
         sample_count_from_duration, sample_count_from_settings, unitsize_for_channel_count,
         DemoAnalyzerSettings, DemoSampleGenerator,
     },
+    device::{DeviceDescriptor, DeviceDriver, DriverIsolation},
     error::{CoreError, Result},
     models::{
         CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings, DeviceInfo,
-        DeviceKind,
+        DeviceKind, HardwareCaptureCapabilities,
     },
     protocol::{PXLOGIC_WCH_PID, PXLOGIC_WCH_VID},
     transport::CaptureBackend,
@@ -24,7 +25,7 @@ use crate::{
 pub struct FakeBackend;
 
 impl FakeBackend {
-    pub const DEVICE_ID: &'static str = "fake:pxlogic-demo";
+    pub const DEVICE_ID: &'static str = "fake:sigpilot-demo";
 
     pub fn capture_streaming_with_analyzers(
         &self,
@@ -179,14 +180,14 @@ impl CaptureBackend for FakeBackend {
             pid: PXLOGIC_WCH_PID,
             bus: None,
             address: None,
-            label: "PXLogic Demo Source".to_string(),
+            label: "SigPilot Demo Source".to_string(),
             ready: true,
-            manufacturer: Some("PXLogic".to_string()),
+            manufacturer: Some("SigPilot".to_string()),
             product: Some("Demo Device".to_string()),
             serial_number: None,
             usb_speed: None,
             logic_mode: None,
-            profile_model: Some("PXLogic Demo Source".to_string()),
+            profile_model: Some("SigPilot Demo Source".to_string()),
             probe_error: None,
         }])
     }
@@ -221,6 +222,62 @@ impl CaptureBackend for FakeBackend {
         on_samples: &mut dyn FnMut(&[u8]),
     ) -> Result<CaptureData> {
         self.capture_streaming_generated(settings, &[], cancel, progress, started, on_samples)
+    }
+}
+
+/// [`DeviceDriver`] adapter for the built-in demo source.
+///
+/// This exists so the workbench has a driver that works with no hardware
+/// attached, and so the registry has a second implementation exercising the same
+/// contract as the real PXLogic driver.
+#[derive(Debug, Clone)]
+pub struct FakeDriver {
+    descriptor: DeviceDescriptor,
+}
+
+impl FakeDriver {
+    /// Stable driver identifier.
+    pub const DRIVER_ID: &'static str = "fake";
+    /// Device-id scheme owned by this driver (`fake:<...>`).
+    pub const ID_SCHEME: &'static str = "fake";
+
+    pub fn new() -> Self {
+        Self {
+            descriptor: DeviceDescriptor {
+                driver_id: Self::DRIVER_ID.to_string(),
+                display_name: "Demo source".to_string(),
+                protocol_version: DeviceDescriptor::PROTOCOL_VERSION,
+                vendor: None,
+                isolation: DriverIsolation::InProcess,
+                id_schemes: vec![Self::ID_SCHEME.to_string()],
+            },
+        }
+    }
+}
+
+impl Default for FakeDriver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeviceDriver for FakeDriver {
+    fn descriptor(&self) -> &DeviceDescriptor {
+        &self.descriptor
+    }
+
+    fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
+        FakeBackend::default().list_devices()
+    }
+
+    fn capabilities(&self, device_id: &str) -> Result<HardwareCaptureCapabilities> {
+        if device_id != FakeBackend::DEVICE_ID {
+            return Err(CoreError::UnsupportedDevice);
+        }
+        Ok(crate::pxview_profile::generic_logic_capture_capabilities(
+            device_id,
+            "SigPilot Preview Device",
+        ))
     }
 }
 

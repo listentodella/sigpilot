@@ -1,9 +1,10 @@
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        OnceLock,
+        Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -19,16 +20,18 @@ use crate::{
         pxview_cross_raw_byte_count, pxview_trigger_position, resolve_enabled_channels,
         sample_count_from_settings, unitsize_for_channel_count,
     },
+    device::{DeviceDescriptor as DriverDescriptor, DeviceDriver, DriverIsolation},
     error::{CoreError, Result},
     models::{
         Bitstreams, CaptureData, CaptureMetadata, CaptureMode, CaptureProgress, CaptureSettings,
         CaptureTriggerMetadata, DeviceInfo, DeviceKind, DiagnosticEvent, DiagnosticLevel,
-        PwmConfiguration, PwmSettings,
+        HardwareCaptureCapabilities, PwmConfiguration, PwmSettings,
     },
     protocol,
     pxview_profile::{
-        resolve_pxlogic_capture_plan, resolve_pxlogic_device_profile, PxUsbSpeed,
-        PxlogicDeviceProfile, PXLOGIC_32_CHANNEL_HARDWARE_DEPTH_BITS,
+        pxlogic_capture_capabilities_from_profile, resolve_pxlogic_capture_plan,
+        resolve_pxlogic_device_profile, PxUsbSpeed, PxlogicDeviceProfile,
+        PXLOGIC_32_CHANNEL_HARDWARE_DEPTH_BITS,
     },
     transport::CaptureBackend,
 };
@@ -208,8 +211,8 @@ impl RusbBackend {
     }
 
     pub fn load_bitstreams_from_env() -> Result<Option<Bitstreams>> {
-        let reset = env::var_os("PXLOGIC_FPGA_RESET").map(PathBuf::from);
-        let main = env::var_os("PXLOGIC_FPGA_MAIN").map(PathBuf::from);
+        let reset = crate::product_env("SIGPILOT_FPGA_RESET").map(PathBuf::from);
+        let main = crate::product_env("SIGPILOT_FPGA_MAIN").map(PathBuf::from);
         match (reset, main) {
             (Some(reset), Some(main)) => Ok(Some(Bitstreams {
                 reset: fs::read(reset)?,
@@ -227,7 +230,7 @@ impl RusbBackend {
     /// firmware is intentionally a separate, explicit operation because the
     /// device disconnects and re-enumerates immediately after the reset.
     pub fn load_mcu_firmware() -> Result<Option<Vec<u8>>> {
-        if let Some(path) = env::var_os("PXLOGIC_MCU_FIRMWARE") {
+        if let Some(path) = crate::product_env("SIGPILOT_MCU_FIRMWARE") {
             return Ok(Some(fs::read(path)?));
         }
 
@@ -1666,6 +1669,52 @@ fn px_usb_speed_from_rusb(speed: rusb::Speed) -> Option<PxUsbSpeed> {
     }
 }
 
+/// Case-insensitive prefix test that is safe on multi-byte boundaries.
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+/// Human-readable device name.
+///
+/// Prefers what the device itself reports over what our profile table guesses:
+/// the firmware's own string descriptors are what the OS and tools such as
+/// `cyme` show, so the UI should agree with them instead of inventing a second
+/// name for the same hardware. The profile table is only a fallback, for devices
+/// whose string descriptors cannot be read (permission denied, no `iProduct`).
+///
+/// The manufacturer is only prepended when the product string does not already
+/// carry it. PXLogic firmware bakes the vendor into the product string
+/// (`iProduct` = "PX USB3.0 Logic 32"), so an unconditional
+/// `"{manufacturer} {product}"` renders "PX PX USB3.0 Logic 32".
+///
+/// VID/PID/bus/address used to be appended here. They are debug detail rather
+/// than a device name and made every row unreadable; they remain available on
+/// `DeviceInfo` for the UI to surface in a tooltip.
+fn device_label(identity: &UsbIdentityProbe, vid: u16, pid: u16) -> String {
+    let trimmed = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+
+    if let Some(product) = trimmed(identity.product.as_deref()) {
+        return match trimmed(identity.manufacturer.as_deref()) {
+            Some(manufacturer) if !starts_with_ignore_case(&product, &manufacturer) => {
+                format!("{manufacturer} {product}")
+            }
+            _ => product,
+        };
+    }
+
+    if let Some(profile) = identity.profile {
+        return format!("{} {}", profile.vendor, profile.model);
+    }
+
+    format!("PXLogic USB {vid:04x}:{pid:04x}")
+}
+
 fn usb_speed_label(speed: rusb::Speed) -> &'static str {
     match speed {
         rusb::Speed::Unknown => "unknown",
@@ -1708,14 +1757,7 @@ impl CaptureBackend for RusbBackend {
             let address = device.address();
             let speed = device.speed();
             let identity = Self::probe_usb_identity(&device, &desc);
-            let label = if let Some(profile) = identity.profile {
-                format!(
-                    "{} {} {vid:04x}:{pid:04x} bus {bus} addr {address}",
-                    profile.vendor, profile.model
-                )
-            } else {
-                format!("PXLogic USB {vid:04x}:{pid:04x} bus {bus} addr {address}")
-            };
+            let label = device_label(&identity, vid, pid);
             let profile_model = identity.profile.map(|profile| profile.model.to_string());
             devices.push(DeviceInfo {
                 id: usb_device_id(vid, pid, bus, address),
@@ -1795,7 +1837,7 @@ fn load_bitstreams_from_dir(dir: &Path) -> Result<Option<Bitstreams>> {
 fn bitstream_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Some(dir) = env::var_os("PXLOGIC_BITSTREAM_DIR") {
+    if let Some(dir) = crate::product_env("SIGPILOT_BITSTREAM_DIR") {
         dirs.push(PathBuf::from(dir));
     }
 
@@ -1889,11 +1931,216 @@ fn bulk_read_exact(
     Ok(())
 }
 
+/// [`DeviceDriver`] adapter for PXLogic USB hardware.
+///
+/// Owns the FPGA prepare cache that previously lived in the Tauri command layer,
+/// so "is this device already prepared?" is answered by the driver that actually
+/// prepared it. That cache is process-wide and keyed by device id, which is what
+/// lets `prepare` be called before every capture without re-flashing the FPGA.
+pub struct PxlogicDriver {
+    descriptor: DriverDescriptor,
+    prepared: Mutex<HashSet<String>>,
+    prepare_lock: Mutex<()>,
+}
+
+impl PxlogicDriver {
+    /// Stable driver identifier.
+    pub const DRIVER_ID: &'static str = "pxlogic";
+    /// Device-id scheme owned by this driver (`usb:<vid>:<pid>:<bus>:<addr>`).
+    ///
+    /// The PXLogic driver owns the whole `usb` scheme because it is currently the
+    /// only USB driver. A second USB driver will need a vendor-scoped scheme.
+    pub const ID_SCHEME: &'static str = "usb";
+
+    pub fn new() -> Self {
+        Self {
+            descriptor: DriverDescriptor {
+                driver_id: Self::DRIVER_ID.to_string(),
+                display_name: "PXLogic".to_string(),
+                protocol_version: DriverDescriptor::PROTOCOL_VERSION,
+                vendor: Some("PX_Tool".to_string()),
+                isolation: DriverIsolation::InProcess,
+                id_schemes: vec![Self::ID_SCHEME.to_string()],
+            },
+            prepared: Mutex::new(HashSet::new()),
+            prepare_lock: Mutex::new(()),
+        }
+    }
+
+    /// Drop the cached "already prepared" state for one device.
+    ///
+    /// Call this after a USB error or a device unplug, so the next `prepare`
+    /// re-flashes the FPGA instead of trusting a stale cache entry.
+    pub fn forget_prepared(&self, device_id: &str) {
+        if let Ok(mut prepared) = self.prepared.lock() {
+            prepared.remove(device_id);
+        }
+    }
+}
+
+impl Default for PxlogicDriver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Map a USB device's reported speed onto the profile table's notion of speed.
+fn px_usb_speed_from_device_info(device: &DeviceInfo) -> Option<PxUsbSpeed> {
+    match device.usb_speed.as_deref() {
+        Some("high") => Some(PxUsbSpeed::High),
+        Some("super" | "super-plus") => Some(PxUsbSpeed::Super),
+        _ => None,
+    }
+}
+
+impl DeviceDriver for PxlogicDriver {
+    fn descriptor(&self) -> &DriverDescriptor {
+        &self.descriptor
+    }
+
+    fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
+        RusbBackend::default().list_devices()
+    }
+
+    fn capabilities(&self, device_id: &str) -> Result<HardwareCaptureCapabilities> {
+        let devices = self.list_devices()?;
+        let device = devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .ok_or(CoreError::UnsupportedDevice)?;
+        let speed = px_usb_speed_from_device_info(device).ok_or_else(|| {
+            CoreError::Decode(format!(
+                "device {device_id} does not report a PXView-supported USB speed"
+            ))
+        })?;
+        let profile =
+            resolve_pxlogic_device_profile(device.vid, device.pid, speed, device.logic_mode)
+                .ok_or_else(|| {
+                    CoreError::Decode(format!("no PXView profile matched device {device_id}"))
+                })?;
+        Ok(pxlogic_capture_capabilities_from_profile(
+            device.id.clone(),
+            profile,
+        ))
+    }
+
+    fn prepare(&self, device_id: &str, sink: &mut dyn FnMut(DiagnosticEvent)) -> Result<()> {
+        // Serialise prepares: two concurrent captures on the same FPGA would
+        // interleave register writes.
+        let _guard = self
+            .prepare_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self
+            .prepared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(device_id)
+        {
+            trace(
+                sink,
+                "prepare",
+                format!("FPGA already prepared for {device_id}; reusing process cache"),
+            );
+            return Ok(());
+        }
+
+        trace(sink, "prepare", format!("preparing FPGA for {device_id}"));
+        let backend = RusbBackend::default();
+        let bitstreams = RusbBackend::load_bitstreams()?;
+        backend.prepare_device_with_trace(device_id, bitstreams.as_ref(), sink)?;
+        self.prepared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(device_id.to_string());
+        trace(sink, "prepare", "FPGA configuration complete");
+        Ok(())
+    }
+
+    fn invalidate(&self, device_id: &str) {
+        self.forget_prepared(device_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn device_label_prefers_the_device_strings_over_the_profile_table() {
+        // 0x16c0/0x05dc is the legacy PXLogic pair the profile table knows as
+        // "PX_Tool / PX-Logic U3 channel 32". The device reports something better,
+        // and that is what the OS and `cyme` show, so it must win.
+        let identity = UsbIdentityProbe {
+            manufacturer: Some("PX".to_string()),
+            product: Some("USB3.0 Logic 32".to_string()),
+            ..UsbIdentityProbe::default()
+        };
+        assert_eq!(
+            device_label(
+                &identity,
+                protocol::PXLOGIC_LEGACY_VID,
+                protocol::PXLOGIC_LEGACY_PID
+            ),
+            "PX USB3.0 Logic 32"
+        );
+    }
+
+    #[test]
+    fn device_label_does_not_repeat_a_vendor_already_in_the_product_string() {
+        // PXLogic firmware sets iProduct to "PX USB3.0 Logic 32", so prepending
+        // the manufacturer would render "PX PX USB3.0 Logic 32".
+        let identity = UsbIdentityProbe {
+            manufacturer: Some("PX".to_string()),
+            product: Some("PX USB3.0 Logic 32".to_string()),
+            ..UsbIdentityProbe::default()
+        };
+        assert_eq!(
+            device_label(
+                &identity,
+                protocol::PXLOGIC_LEGACY_VID,
+                protocol::PXLOGIC_LEGACY_PID
+            ),
+            "PX USB3.0 Logic 32"
+        );
+    }
+
+    #[test]
+    fn device_label_still_prepends_a_vendor_that_is_missing_from_the_product() {
+        let identity = UsbIdentityProbe {
+            manufacturer: Some("Acme".to_string()),
+            product: Some("LA-1000".to_string()),
+            ..UsbIdentityProbe::default()
+        };
+        assert_eq!(
+            device_label(&identity, 0x1234, 0x5678),
+            "Acme LA-1000"
+        );
+    }
+
+    #[test]
+    fn device_label_falls_back_from_product_to_profile_to_ids() {
+        let (vid, pid) = (protocol::PXLOGIC_LEGACY_VID, protocol::PXLOGIC_LEGACY_PID);
+
+        let product_only = UsbIdentityProbe {
+            product: Some("USB3.0 Logic 32".to_string()),
+            ..UsbIdentityProbe::default()
+        };
+        assert_eq!(device_label(&product_only, vid, pid), "USB3.0 Logic 32");
+
+        // Blank strings must not produce a label made of spaces.
+        let blank = UsbIdentityProbe {
+            manufacturer: Some("   ".to_string()),
+            product: Some(String::new()),
+            ..UsbIdentityProbe::default()
+        };
+        assert_eq!(
+            device_label(&blank, vid, pid),
+            format!("PXLogic USB {vid:04x}:{pid:04x}")
+        );
+    }
 
     #[test]
     fn retries_only_transient_windows_usb_access_errors() {
@@ -1960,7 +2207,7 @@ mod tests {
 
     #[test]
     fn loads_bitstreams_from_directory() {
-        let dir = env::temp_dir().join(format!("pxlogic-bitstreams-{}", std::process::id()));
+        let dir = env::temp_dir().join(format!("sigpilot-bitstreams-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("hspi_ddr_RST.bin"), [1, 2, 3]).unwrap();
         fs::write(dir.join("hspi_ddr.bin"), [4, 5, 6]).unwrap();

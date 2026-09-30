@@ -1,4 +1,4 @@
-use pxlogic_core::{capture::read_sample_word, CaptureData};
+use sigpilot_core::{capture::read_sample_word, CaptureData};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -570,7 +570,7 @@ fn build_exact_digital_data(
 
 #[cfg(test)]
 mod tests {
-    use pxlogic_core::{capture::generate_sample_words, CaptureSettings};
+    use sigpilot_core::{capture::generate_sample_words, CaptureSettings};
 
     use super::*;
 

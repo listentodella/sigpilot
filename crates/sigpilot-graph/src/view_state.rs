@@ -1,7 +1,7 @@
 //! Session view state.
 //!
 //! Saleae keeps the viewport on the graph backend: the frontend sends gesture
-//! intents and the backend owns the authoritative view. pxlogic used to do the
+//! intents and the backend owns the authoritative view. SigPilot used to do the
 //! opposite, which forced the frontend to *also* own level-of-detail selection,
 //! request rate limiting, raster caching and staleness guards — every one of
 //! which is a place where the graph can end up in a state the user has to nudge

@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
-  "productName": "PXLogic Studio",
+  "productName": "SigPilot",
   "version": "0.1.0",
-  "identifier": "dev.pxlogic.studio",
+  "identifier": "dev.sigpilot.app",
   "build": {
     "beforeDevCommand": "node scripts/prepare-tauri-resources.mjs && pnpm dev",
     "beforeBuildCommand": "pnpm build && node scripts/prepare-tauri-resources.mjs",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "PXLogic Studio",
+        "title": "SigPilot",
         "width": 1320,
         "height": 840,
         "minWidth": 1024,

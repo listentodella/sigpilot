@@ -1,5 +1,5 @@
 [package]
-name = "pxlogic-graph"
+name = "sigpilot-graph"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -7,8 +7,8 @@ version.workspace = true
 [dependencies]
 chrono.workspace = true
 parking_lot.workspace = true
-pxlogic-core = { path = "../pxlogic-core", default-features = false }
-pxlogic-waveform = { path = "../pxlogic-waveform" }
+sigpilot-core = { path = "../sigpilot-core", default-features = false }
+sigpilot-waveform = { path = "../sigpilot-waveform" }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,4 +16,4 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-pxlogic-file = { path = "../pxlogic-file" }
+sigpilot-file = { path = "../sigpilot-file" }

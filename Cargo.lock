@@ -2495,81 +2495,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
-name = "pxlogic-core"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "rusb",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "pxlogic-desktop"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "block2",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "objc2-web-kit",
- "parking_lot",
- "pxlogic-core",
- "pxlogic-file",
- "pxlogic-graph",
- "pxlogic-waveform",
- "rayon",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tracing",
-]
-
-[[package]]
-name = "pxlogic-file"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "pxlogic-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "zip",
-]
-
-[[package]]
-name = "pxlogic-graph"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "parking_lot",
- "pxlogic-core",
- "pxlogic-file",
- "pxlogic-waveform",
- "rayon",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "pxlogic-waveform"
-version = "0.1.0"
-dependencies = [
- "pxlogic-core",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3071,6 +2996,81 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "sigpilot-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "rusb",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "sigpilot-desktop"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
+ "parking_lot",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sigpilot-core",
+ "sigpilot-file",
+ "sigpilot-graph",
+ "sigpilot-waveform",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tracing",
+]
+
+[[package]]
+name = "sigpilot-file"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sigpilot-core",
+ "thiserror 2.0.18",
+ "zip",
+]
+
+[[package]]
+name = "sigpilot-graph"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "parking_lot",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sigpilot-core",
+ "sigpilot-file",
+ "sigpilot-waveform",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "sigpilot-waveform"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sigpilot-core",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "simd-adler32"

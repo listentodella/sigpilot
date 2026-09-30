@@ -11,10 +11,10 @@
 //! cannot catch a readout that reports the wrong quantity — see the note in
 //! `rusb_backend.rs` about reporting `len` rather than `capacity`.
 
-use pxlogic_core::capture::{
+use sigpilot_core::capture::{
     pxview_cross_raw_byte_count, sample_count_from_settings, unitsize_for_channel_count,
 };
-use pxlogic_core::{CaptureMode, CaptureSettings};
+use sigpilot_core::{CaptureMode, CaptureSettings};
 
 const MIB: u64 = 1024 * 1024;
 

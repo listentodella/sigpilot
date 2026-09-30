@@ -1891,7 +1891,7 @@ mod tests {
             }),
         };
         let settings = CaptureSettings {
-            device_id: "fake:pxlogic-demo".to_string(),
+            device_id: "fake:sigpilot-demo".to_string(),
             sample_rate_hz: 25_000_000,
             channel_count: 8,
             enabled_channels: (0..8).collect(),

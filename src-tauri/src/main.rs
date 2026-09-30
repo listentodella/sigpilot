@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::Path,
     path::PathBuf,
@@ -12,21 +12,19 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use parking_lot::{Mutex, RwLock};
-use pxlogic_core::{
-    build_pxview_pwm0_register_script, generic_logic_capture_capabilities,
-    pxlogic_capture_capabilities_from_profile, resolve_pxlogic_device_profile,
-    AnalyzerDecodeSettings, CaptureBackend, CaptureMetadata, CaptureProgress, CaptureSettings,
-    CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind, DemoAnalyzerSettings, DeviceInfo,
-    DeviceKind, DiagnosticEvent, DiagnosticLevel, ExportFormat, FakeBackend,
-    HardwareCaptureCapabilities, PwmConfiguration, PwmSettings, PxUsbSpeed, SaleaeNativeDecoder,
-    SigrokDecoderCatalog, SigrokNativeDecoder, SparseCaptureData,
+use sigpilot_core::{
+    build_pxview_pwm0_register_script, AnalyzerDecodeSettings, CaptureMetadata, CaptureProgress,
+    CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind,
+    DemoAnalyzerSettings, DeviceInfo, DeviceRegistry, DiagnosticEvent, DiagnosticLevel,
+    ExportFormat, FakeBackend, HardwareCaptureCapabilities, PwmConfiguration, PwmSettings,
+    SaleaeNativeDecoder, SigrokDecoderCatalog, SigrokNativeDecoder, SparseCaptureData,
 };
-use pxlogic_graph::{
+use sigpilot_graph::{
     AnalyzerFrameTableRequest, AnalyzerFrameTableWindow, CaptureMemoryUsage,
     DigitalPointMeasurement, GraphFrameRequest, GraphFrameResponse, GraphSession,
     NativeAnalyzerDecodeProgress, NearestDigitalTransition, SessionView, ViewIntent, ViewLimits,
 };
-use pxlogic_waveform::{
+use sigpilot_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
 use rayon::prelude::*;
@@ -34,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(feature = "rusb-transport")]
-use pxlogic_core::RusbBackend;
+use sigpilot_core::RusbBackend;
 
 type CommandResult<T> = Result<T, String>;
 
@@ -48,10 +46,10 @@ struct PackedBinRange {
 struct BinaryChannelTile<'a> {
     channel: u8,
     label: &'a str,
-    bins: &'a [pxlogic_waveform::WaveformBin],
+    bins: &'a [sigpilot_waveform::WaveformBin],
     #[serde(skip_serializing_if = "Option::is_none")]
     packed_bins: Option<PackedBinRange>,
-    segments: &'a [pxlogic_waveform::DigitalSegment],
+    segments: &'a [sigpilot_waveform::DigitalSegment],
     rising_edges: &'a [u64],
     falling_edges: &'a [u64],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,7 +73,7 @@ struct BinaryGraphFrameResponse<'a> {
     revision: u64,
     sample_count: u64,
     tile: BinaryWaveformTile<'a>,
-    analyzers: &'a [pxlogic_graph::AnalyzerRenderResult],
+    analyzers: &'a [sigpilot_graph::AnalyzerRenderResult],
 }
 
 fn encode_graph_frame_response(frame: GraphFrameResponse) -> CommandResult<tauri::ipc::Response> {
@@ -136,13 +134,25 @@ fn encode_graph_frame_bytes(mut frame: GraphFrameResponse) -> CommandResult<Vec<
     Ok(output)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct AppState {
     sessions: Arc<RwLock<HashMap<String, Arc<GraphSession>>>>,
     cancel: Arc<AtomicBool>,
     active_capture: Arc<Mutex<Option<ActiveCapture>>>,
-    prepared_devices: Arc<Mutex<HashSet<String>>>,
-    prepare_lock: Arc<Mutex<()>>,
+    /// Hardware-agnostic device drivers. Every device-id lookup goes through this,
+    /// so adding a vendor is a registration change rather than a command-layer change.
+    devices: Arc<DeviceRegistry>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            sessions: Arc::default(),
+            cancel: Arc::default(),
+            active_capture: Arc::default(),
+            devices: Arc::new(DeviceRegistry::with_builtin_drivers()),
+        }
+    }
 }
 
 impl AppState {
@@ -165,8 +175,10 @@ impl AppState {
             .ok_or_else(|| format!("session {session_id} has no capture data"))
     }
 
+    /// Drop any cached device state, e.g. after a USB error invalidated the FPGA
+    /// configuration. The owning driver decides what "cached" means.
     fn forget_prepared_device(&self, device_id: &str) {
-        self.prepared_devices.lock().remove(device_id);
+        self.devices.invalidate(device_id);
     }
 }
 
@@ -185,7 +197,7 @@ struct CaptureSummary {
 #[derive(Debug, Clone, Serialize)]
 struct OpenCaptureResult {
     summary: CaptureSummary,
-    saleae_session: Option<pxlogic_file::SaleaeSessionMetadata>,
+    saleae_session: Option<sigpilot_file::SaleaeSessionMetadata>,
 }
 
 fn sparse_capture_summary(capture: &SparseCaptureData) -> CaptureSummary {
@@ -322,108 +334,34 @@ struct ExtensionPackage {
 }
 
 #[tauri::command]
-fn list_devices() -> CommandResult<Vec<DeviceInfo>> {
-    let fake = FakeBackend::default();
-    let mut devices = fake.list_devices().map_err(to_string)?;
-
-    #[cfg(feature = "rusb-transport")]
-    {
-        let real = RusbBackend::default();
-        if let Ok(mut usb_devices) = real.list_devices() {
-            devices.append(&mut usb_devices);
-        }
-    }
-
-    Ok(devices)
+fn list_devices(state: State<'_, AppState>) -> CommandResult<Vec<DeviceInfo>> {
+    Ok(state.devices.list_devices())
 }
 
 #[tauri::command]
-fn device_capabilities(device_id: String) -> CommandResult<HardwareCaptureCapabilities> {
-    if device_id == FakeBackend::DEVICE_ID {
-        return Ok(generic_logic_capture_capabilities(
-            device_id,
-            "PXLogic Preview Device",
-        ));
-    }
-
-    let devices = list_devices()?;
-    let device = devices
-        .iter()
-        .find(|device| device.id == device_id)
-        .ok_or_else(|| format!("device {device_id} is not currently connected"))?;
-    capture_capabilities_for_device(device)
-}
-
-fn capture_capabilities_for_device(
-    device: &DeviceInfo,
+fn device_capabilities(
+    state: State<'_, AppState>,
+    device_id: String,
 ) -> CommandResult<HardwareCaptureCapabilities> {
-    if device.kind == DeviceKind::Fake {
-        return Ok(generic_logic_capture_capabilities(
-            device.id.clone(),
-            device
-                .profile_model
-                .clone()
-                .unwrap_or_else(|| device.label.clone()),
-        ));
-    }
-
-    let speed = px_usb_speed_from_device_info(device).ok_or_else(|| {
-        format!(
-            "device {} does not report a PXView-supported USB speed",
-            device.id
-        )
-    })?;
-    let profile = resolve_pxlogic_device_profile(device.vid, device.pid, speed, device.logic_mode)
-        .ok_or_else(|| format!("no PXView profile matched device {}", device.id))?;
-    Ok(pxlogic_capture_capabilities_from_profile(
-        device.id.clone(),
-        profile,
-    ))
+    state
+        .devices
+        .capabilities(&device_id)
+        .map_err(|error| format!("device {device_id} is not currently connected ({error})"))
 }
 
-fn px_usb_speed_from_device_info(device: &DeviceInfo) -> Option<PxUsbSpeed> {
-    match device.usb_speed.as_deref() {
-        Some("high") => Some(PxUsbSpeed::High),
-        Some("super" | "super-plus") => Some(PxUsbSpeed::Super),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "rusb-transport")]
-fn prepare_real_device_cached(
+/// Prepare any device, whichever driver owns it.
+///
+/// The owning driver owns the prepare cache, so "already prepared?" is answered
+/// by whoever actually flashed the FPGA.
+fn prepare_device_cached(
     state: &AppState,
     device_id: &str,
     sink: &mut dyn FnMut(DiagnosticEvent),
-) -> pxlogic_core::Result<()> {
-    let _prepare_guard = state.prepare_lock.lock();
-    if state.prepared_devices.lock().contains(device_id) {
-        sink(DiagnosticEvent {
-            phase: "prepare".to_string(),
-            level: DiagnosticLevel::Info,
-            message: format!("FPGA already prepared for {device_id}; reusing process cache"),
-        });
-        return Ok(());
-    }
-
-    sink(DiagnosticEvent {
-        phase: "prepare".to_string(),
-        level: DiagnosticLevel::Info,
-        message: format!("preparing FPGA for {device_id}"),
-    });
-    let result = (|| {
-        let real = RusbBackend::default();
-        let bitstreams = RusbBackend::load_bitstreams()?;
-        real.prepare_device_with_trace(device_id, bitstreams.as_ref(), sink)
-    })();
-    if result.is_ok() {
-        state.prepared_devices.lock().insert(device_id.to_string());
-        sink(DiagnosticEvent {
-            phase: "prepare".to_string(),
-            level: DiagnosticLevel::Info,
-            message: format!("FPGA prepared for {device_id}; future captures will skip upload"),
-        });
-    } else {
-        state.forget_prepared_device(device_id);
+) -> sigpilot_core::Result<()> {
+    let result = state.devices.prepare(device_id, sink);
+    if result.is_err() {
+        // A failed prepare must not leave a stale "already prepared" answer behind.
+        state.devices.invalidate(device_id);
     }
     result
 }
@@ -434,28 +372,16 @@ async fn prepare_device(
     state: State<'_, AppState>,
     device_id: String,
 ) -> CommandResult<()> {
-    if device_id == FakeBackend::DEVICE_ID {
-        return FakeBackend::default()
-            .prepare_device(&device_id, None)
-            .map_err(to_string);
-    }
-
-    #[cfg(feature = "rusb-transport")]
-    {
-        let app_state = state.inner().clone();
-        return tauri::async_runtime::spawn_blocking(move || {
-            let diagnostics_app = app.clone();
-            let mut diagnostics = |event: DiagnosticEvent| {
-                let _ = diagnostics_app.emit("usb_diagnostic", &event);
-            };
-            prepare_real_device_cached(&app_state, &device_id, &mut diagnostics).map_err(to_string)
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    }
-
-    #[allow(unreachable_code)]
-    Err("real USB backend is not enabled in this build".to_string())
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let diagnostics_app = app.clone();
+        let mut diagnostics = |event: DiagnosticEvent| {
+            let _ = diagnostics_app.emit("usb_diagnostic", &event);
+        };
+        prepare_device_cached(&app_state, &device_id, &mut diagnostics).map_err(to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -486,7 +412,7 @@ async fn configure_pwm(
             let mut diagnostics = |event: DiagnosticEvent| {
                 let _ = diagnostics_app.emit("usb_diagnostic", &event);
             };
-            prepare_real_device_cached(&app_state, &device_id, &mut diagnostics)
+            prepare_device_cached(&app_state, &device_id, &mut diagnostics)
                 .map_err(to_string)?;
             real.configure_pwm0_with_trace(&device_id, &settings, &mut diagnostics)
                 .map_err(to_string)
@@ -629,6 +555,13 @@ async fn start_capture(
             );
         };
 
+        // TODO(capture-path): this branch is the last place the command layer still
+        // knows which driver it is talking to. Enumeration, capability resolution and
+        // `prepare` all go through `DeviceRegistry` now; capture does not, because the
+        // demo source (`capture_streaming_with_analyzers`) and real hardware
+        // (`capture_with_trace_streaming`) have genuinely different entry points.
+        // Unifying them means moving capture onto `DeviceDriver` with a shared
+        // `CaptureSink`, which touches the hot path and is deferred.
         let capture = if settings.device_id == FakeBackend::DEVICE_ID {
             FakeBackend::default().capture_streaming_with_analyzers(
                 &settings,
@@ -647,7 +580,7 @@ async fn start_capture(
                     level: DiagnosticLevel::Info,
                     message: "auto prepare before capture".to_string(),
                 });
-                match prepare_real_device_cached(&app_state, &settings.device_id, &mut diagnostics)
+                match prepare_device_cached(&app_state, &settings.device_id, &mut diagnostics)
                 {
                     Ok(()) => real.capture_with_trace_streaming(
                         &settings,
@@ -664,7 +597,7 @@ async fn start_capture(
             }
             #[cfg(not(feature = "rusb-transport"))]
             {
-                Err(pxlogic_core::CoreError::UnsupportedDevice)
+                Err(sigpilot_core::CoreError::UnsupportedDevice)
             }
         };
 
@@ -693,7 +626,7 @@ async fn start_capture(
                 *active_capture.lock() = None;
                 #[cfg(feature = "rusb-transport")]
                 if settings.device_id != FakeBackend::DEVICE_ID
-                    && matches!(error, pxlogic_core::CoreError::Usb(_))
+                    && matches!(error, sigpilot_core::CoreError::Usb(_))
                 {
                     app_state.forget_prepared_device(&settings.device_id);
                 }
@@ -750,9 +683,9 @@ fn open_capture(
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pxl"))
     {
-        let project = pxlogic_file::open_pxl(source_path).map_err(to_string)?;
+        let project = sigpilot_file::open_pxl(source_path).map_err(to_string)?;
         let summary = match project.capture {
-            pxlogic_file::PxlogicProjectCapture::Packed(capture) => {
+            sigpilot_file::PxlogicProjectCapture::Packed(capture) => {
                 let summary = CaptureSummary {
                     metadata: capture.metadata.clone(),
                     bytes: capture.samples.len(),
@@ -763,7 +696,7 @@ fn open_capture(
                     .map_err(to_string)?;
                 summary
             }
-            pxlogic_file::PxlogicProjectCapture::Sparse(capture) => {
+            sigpilot_file::PxlogicProjectCapture::Sparse(capture) => {
                 let summary = sparse_capture_summary(&capture);
                 state
                     .session(&session_id)
@@ -778,7 +711,7 @@ fn open_capture(
         });
     }
 
-    let capture = pxlogic_file::open_pxcap(source_path).map_err(to_string)?;
+    let capture = sigpilot_file::open_pxcap(source_path).map_err(to_string)?;
     let summary = CaptureSummary {
         metadata: capture.metadata.clone(),
         bytes: capture.samples.len(),
@@ -797,7 +730,7 @@ fn open_capture(
 fn save_capture(
     session_id: String,
     path: String,
-    saleae_session: Option<pxlogic_file::SaleaeSessionMetadata>,
+    saleae_session: Option<sigpilot_file::SaleaeSessionMetadata>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     let session = state.existing_session(&session_id)?;
@@ -809,10 +742,10 @@ fn save_capture(
     {
         let metadata = saleae_session.unwrap_or_default();
         if let Some(capture) = session.capture() {
-            return pxlogic_file::save_pxl_packed(path, &capture, &metadata).map_err(to_string);
+            return sigpilot_file::save_pxl_packed(path, &capture, &metadata).map_err(to_string);
         }
         if let Some(capture) = session.sparse_capture() {
-            return pxlogic_file::save_pxl_sparse(path, &capture, &metadata).map_err(to_string);
+            return sigpilot_file::save_pxl_sparse(path, &capture, &metadata).map_err(to_string);
         }
         return Err("no capture is loaded".to_string());
     }
@@ -820,7 +753,7 @@ fn save_capture(
     let capture = session
         .capture()
         .ok_or_else(|| "this save format requires a packed capture".to_string())?;
-    pxlogic_file::save_pxcap(path, &capture).map_err(to_string)
+    sigpilot_file::save_pxcap(path, &capture).map_err(to_string)
 }
 
 #[tauri::command]
@@ -835,9 +768,9 @@ fn export_capture(
         .capture()
         .ok_or_else(|| "this export format requires a packed capture".to_string())?;
     match format {
-        ExportFormat::Pxcap => pxlogic_file::save_pxcap(PathBuf::from(path), &capture),
-        ExportFormat::Sr => pxlogic_file::export_sr(PathBuf::from(path), &capture),
-        ExportFormat::Vcd => pxlogic_file::export_vcd(PathBuf::from(path), &capture),
+        ExportFormat::Pxcap => sigpilot_file::save_pxcap(PathBuf::from(path), &capture),
+        ExportFormat::Sr => sigpilot_file::export_sr(PathBuf::from(path), &capture),
+        ExportFormat::Vcd => sigpilot_file::export_vcd(PathBuf::from(path), &capture),
     }
     .map_err(to_string)
 }
@@ -1181,7 +1114,7 @@ mod screenshot_tests {
     #[test]
     fn screenshot_writer_decodes_data_urls_and_rejects_unknown_extensions() {
         let path = std::env::temp_dir().join(format!(
-            "pxlogic-screenshot-{}-{}.png",
+            "sigpilot-screenshot-{}-{}.png",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
@@ -1206,7 +1139,7 @@ mod screenshot_tests {
     #[test]
     fn analyzer_text_writer_allows_csv_and_txt_only() {
         let path = std::env::temp_dir().join(format!(
-            "pxlogic-analyzer-export-{}-{}.csv",
+            "sigpilot-analyzer-export-{}-{}.csv",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
@@ -1296,7 +1229,7 @@ async fn measure_digital_range(
         .capture()
         .ok_or_else(|| "no capture is loaded".to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        pxlogic_waveform::measure_digital_range(&capture, &request).map_err(to_string)
+        sigpilot_waveform::measure_digital_range(&capture, &request).map_err(to_string)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1620,7 +1553,7 @@ fn decode_analyzer_batch_summary_item(
 
 #[cfg(test)]
 mod analyzer_decode_batch_tests {
-    use pxlogic_core::{
+    use sigpilot_core::{
         capture::generate_sample_words_with_count, CaptureSettings, I2cDecodeSettings,
         SpiDecodeSettings,
     };
@@ -1719,7 +1652,7 @@ mod graph_frame_ipc_tests {
                 sample_count: 64,
                 pixels: 4,
                 samples_per_pixel: 16.0,
-                channels: vec![pxlogic_waveform::ChannelTile {
+                channels: vec![sigpilot_waveform::ChannelTile {
                     channel: 2,
                     label: "D2".to_string(),
                     bins: Vec::new(),
@@ -1898,7 +1831,7 @@ fn create_extension_template(request: ExtensionTemplateRequest) -> CommandResult
     let readme_path = directory.join("README.md");
     let python_path = directory.join(format!("{}.py", request.extension_type));
     let readme = format!(
-        "# {title}\n\n## Getting started\n\n1. Update the generated Python entry point for your needs.\n2. Test the extension in PXLogic.\n3. Update this README.\n4. Publish the extension when it is ready.\n"
+        "# {title}\n\n## Getting started\n\n1. Update the generated Python entry point for your needs.\n2. Test the extension in SigPilot.\n3. Update this README.\n4. Publish the extension when it is ready.\n"
     );
     let python = extension_python_template(&request.extension_type)?;
     fs::write(
@@ -1970,44 +1903,44 @@ fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
     let native_dir = bundled_native_dir;
     let sigrok_dir = native_dir.join("sigrok-analyzer-sidecar");
     #[cfg(target_os = "windows")]
-    let sigrok_executable = "pxlogic-sigrok-sidecar.exe";
+    let sigrok_executable = "sigpilot-sigrok-sidecar.exe";
     #[cfg(not(target_os = "windows"))]
-    let sigrok_executable = "pxlogic-sigrok-sidecar";
+    let sigrok_executable = "sigpilot-sigrok-sidecar";
 
     set_bundled_path(
-        "PXLOGIC_BITSTREAM_DIR",
+        "SIGPILOT_BITSTREAM_DIR",
         resource_dir.join("bitstreams"),
         true,
     );
     set_bundled_path(
-        "PXLOGIC_SIGROK_SIDECAR",
+        "SIGPILOT_SIGROK_SIDECAR",
         sigrok_dir.join(sigrok_executable),
         false,
     );
     set_bundled_path(
-        "PXLOGIC_SIGROK_DECODER_ROOT",
+        "SIGPILOT_SIGROK_DECODER_ROOT",
         sigrok_dir.join("decoders/c_decoders"),
         true,
     );
     set_bundled_path(
-        "PXLOGIC_SIGROK_PYTHON_DECODER_ROOT",
+        "SIGPILOT_SIGROK_PYTHON_DECODER_ROOT",
         sigrok_dir.join("decoders/python_decoders"),
         true,
     );
 
     #[cfg(windows)]
-    let saleae_executable = "pxlogic-saleae-analyzer-sidecar.exe";
+    let saleae_executable = "sigpilot-saleae-analyzer-sidecar.exe";
     #[cfg(not(windows))]
-    let saleae_executable = "pxlogic-saleae-analyzer-sidecar";
+    let saleae_executable = "sigpilot-saleae-analyzer-sidecar";
     set_bundled_path(
-        "PXLOGIC_SALEAE_SIDECAR",
+        "SIGPILOT_SALEAE_SIDECAR",
         native_dir
             .join("saleae-analyzer-sidecar")
             .join(saleae_executable),
         false,
     );
     set_bundled_path(
-        "PXLOGIC_SALEAE_RUNTIME_ROOT",
+        "SIGPILOT_SALEAE_RUNTIME_ROOT",
         native_dir.join("saleae-analyzer-sidecar").join("runtime"),
         true,
     );
@@ -2032,7 +1965,7 @@ fn warm_saleae_native_sidecar_async(decoder: Option<SaleaeNativeDecoder>, delay:
                 }
                 Err(error) => {
                     tracing::debug!(
-                        target: "pxlogic::decoder_performance",
+                        target: "sigpilot::decoder_performance",
                         component = "tauri",
                         stage = "saleae_native_warmup_unavailable",
                         detail = %error
@@ -2055,7 +1988,7 @@ fn warm_sigrok_native_catalog_async(delay: Duration) {
                 }
                 Err(error) => {
                     tracing::debug!(
-                        target: "pxlogic::decoder_performance",
+                        target: "sigpilot::decoder_performance",
                         component = "tauri",
                         stage = "sigrok_native_warmup_unavailable",
                         detail = %error
@@ -2112,5 +2045,5 @@ fn main() {
             create_extension_template,
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run PXLogic Studio");
+        .expect("failed to run SigPilot");
 }

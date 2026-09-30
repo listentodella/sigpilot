@@ -1,5 +1,5 @@
 [package]
-name = "pxlogic-core"
+name = "sigpilot-core"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

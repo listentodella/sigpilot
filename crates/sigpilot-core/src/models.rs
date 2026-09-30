@@ -115,7 +115,7 @@ pub struct PwmConfiguration {
 impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
-            device_id: "fake:pxlogic-demo".to_string(),
+            device_id: "fake:sigpilot-demo".to_string(),
             sample_rate_hz: 25_000_000,
             channel_count: 8,
             enabled_channels: Vec::new(),
