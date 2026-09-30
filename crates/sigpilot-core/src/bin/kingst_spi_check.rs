@@ -69,8 +69,23 @@ fn run_capture(id: &str, settings: &CaptureSettings) -> Option<CaptureData> {
         }
     };
     let mut progress = |_update: sigpilot_core::models::CaptureProgress| {};
-    let cancel = std::sync::atomic::AtomicBool::new(false);
-    match kingst_la2016::capture(id, settings, &cancel, &mut diagnostics, &mut progress) {
+
+    // A stream runs until cancelled, which is what the client relies on: it
+    // cancels when its capture buffer fills. Stand in for that with a timer so
+    // this tool still terminates.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timer = {
+        let cancel = cancel.clone();
+        let after = std::time::Duration::from_millis(settings.duration_ms.max(1));
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        })
+    };
+
+    let result = kingst_la2016::capture(id, settings, &cancel, &mut diagnostics, &mut progress);
+    let _ = timer.join();
+    match result {
         Ok(capture) => Some(capture),
         Err(error) => {
             eprintln!("  capture failed: {error}");

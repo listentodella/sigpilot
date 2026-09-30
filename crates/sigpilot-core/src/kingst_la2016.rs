@@ -1026,8 +1026,11 @@ fn capture_to_memory(
 
 /// Stream samples straight to the host, bypassing the device's SDRAM.
 ///
-/// Runs until the sample limit implied by `duration_ms` is reached, or until
-/// `cancel` is set. A `duration_ms` of zero means "until cancelled".
+/// Runs until `cancel` is set. A stream is deliberately open-ended, matching
+/// how the real-hardware backends behave: the caller stops it, and the app does
+/// so when its capture buffer fills. `duration_ms` does not bound a stream —
+/// only the demo backend treats it as a limit, and honouring it here would cut
+/// every capture off after the client's default of a few milliseconds.
 ///
 /// The run mode is set as late as possible, immediately before the first read:
 /// the reference notes that a pause between starting the run mode and receiving
@@ -1042,7 +1045,7 @@ fn capture_streaming(
     diagnostics: &mut dyn FnMut(DiagnosticEvent),
 ) -> Result<(Vec<u8>, u64)> {
     let stream = StreamLayout::for_model(model, enabled_channels);
-    let target = sample_count_from_duration(settings.sample_rate_hz, settings.duration_ms);
+    let unit_size = stream.entity_size as u64;
 
     // USB 2.0 high speed carries roughly 40 MB/s, and the reference warns above
     // 200 Mbps. Exceeding the budget does not fail: the device throttles and
@@ -1071,15 +1074,10 @@ fn capture_streaming(
         phase: "kingst-capture".to_string(),
         level: DiagnosticLevel::Info,
         message: format!(
-            "streaming {} channels, {} bytes per block of {} samples, target {}",
+            "streaming {} channels, {} bytes per block of {} samples, until cancelled",
             stream.channel_masks.len(),
             stream.block_bytes(),
             StreamLayout::SAMPLES_PER_BLOCK,
-            if target == 0 {
-                "unlimited".to_string()
-            } else {
-                target.to_string()
-            }
         ),
     });
 
@@ -1094,7 +1092,7 @@ fn capture_streaming(
     let mut last_data = Instant::now();
 
     loop {
-        if cancel.load(Ordering::Acquire) || (target > 0 && samples_read >= target) {
+        if cancel.load(Ordering::Acquire) {
             break;
         }
         // Empty transfers are legal while a stream is running, but a long gap
@@ -1121,12 +1119,15 @@ fn capture_streaming(
                 samples_read +=
                     expand_stream_chunk(&buffer[..got], &stream, &mut parser, &mut samples)?;
                 progress(CaptureProgress {
-                    bytes_read: samples_read * stream.block_bytes() as u64
-                        / StreamLayout::SAMPLES_PER_BLOCK as u64,
-                    bytes_expected: target * stream.block_bytes() as u64
-                        / StreamLayout::SAMPLES_PER_BLOCK as u64,
+                    bytes_read: samples_read * unit_size,
+                    // A stream has no planned length; the caller decides when to
+                    // stop, so report what has arrived as the expectation too.
+                    bytes_expected: samples_read * unit_size,
                     samples_read,
-                    sample_memory_bytes: samples_read,
+                    // Bytes, not samples: the caller accounts capture memory in
+                    // bytes, and reporting samples here makes the buffer limit
+                    // take `unit_size` times too long to trip.
+                    sample_memory_bytes: samples_read * unit_size,
                 });
             }
             // A timeout is how an empty transfer surfaces; keep waiting.
