@@ -611,7 +611,7 @@ export const isTauriRuntime = () =>
 let previewCapture: CaptureSummary = {
   metadata: {
     version: 1,
-    source_device: "PXLogic Preview",
+    source_device: "SigPilot Preview",
     sample_rate_hz: 25_000_000,
     channel_count: 8,
     enabled_channels: Array.from({ length: 8 }, (_, index) => index),
@@ -1018,20 +1018,20 @@ export function listDevices(): Promise<DeviceInfo[]> {
   if (!isTauriRuntime()) {
     return Promise.resolve([
       {
-        id: "fake:pxlogic-demo",
+        id: "fake:sigpilot-demo",
         kind: "Fake",
         vid: 0x1209,
         pid: 0x7100,
         bus: null,
         address: null,
-        label: "PXLogic Preview Device",
+        label: "SigPilot Preview Device",
         ready: true,
-        manufacturer: "PXLogic",
+        manufacturer: "SigPilot",
         product: "Preview Device",
         serial_number: null,
         usb_speed: null,
         logic_mode: null,
-        profile_model: "PXLogic Preview Device",
+        profile_model: "SigPilot Preview Device",
         probe_error: null,
       },
     ]);
@@ -1084,7 +1084,7 @@ function previewDeviceCapabilities(deviceId: string): HardwareCaptureCapabilitie
   return {
     device_id: deviceId,
     profile_vendor: null,
-    profile_model: "PXLogic Preview Device",
+    profile_model: "SigPilot Preview Device",
     usb_speed: null,
     logic_mode: null,
     max_channels: 32,
@@ -2427,7 +2427,7 @@ function findPreviewFrame(
   return null;
 }
 
-const PREVIEW_UART_MESSAGE = Array.from(new TextEncoder().encode("PXLogic demo\n"));
+const PREVIEW_UART_MESSAGE = Array.from(new TextEncoder().encode("SigPilot demo\n"));
 const PREVIEW_UART_LEAD_IDLE_BITS = 4;
 const PREVIEW_UART_TRAIL_IDLE_BITS = 8;
 const PREVIEW_UART_CYCLE_BITS =
@@ -2517,7 +2517,7 @@ function buildPreviewExtensionPackage(request: UiExtensionTemplateRequest): UiEx
       version: "0.0.1",
     },
     path: request.path,
-    readme: `# ${featureName}\n\nGenerated PXLogic extension template for ${extensionTypeName(request.type)}.`,
+    readme: `# ${featureName}\n\nGenerated SigPilot extension template for ${extensionTypeName(request.type)}.`,
   };
 }
 

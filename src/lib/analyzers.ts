@@ -1150,7 +1150,7 @@ export const ANALYZER_CATALOG_GROUPS: AnalyzerCatalogGroup[] = [
   },
   {
     backend: "sigrok_native",
-    label: "Sigrok Native (PXView)",
+    label: "Sigrok Native",
     analyzers: catalogAnalyzersForBackend("sigrok_native"),
   },
 ];

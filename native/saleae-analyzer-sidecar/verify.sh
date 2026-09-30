@@ -3,13 +3,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ZIP_PATH="${1:-${PXLOGIC_SALEAE_LOGIC_ZIP:-}}"
+ZIP_PATH="${1:-${SIGPILOT_SALEAE_LOGIC_ZIP:-}}"
 if [[ -z "$ZIP_PATH" && -n "${HOME:-}" && -f "$HOME/Downloads/Logic-2.4.43-macos-arm64.zip" ]]; then
   ZIP_PATH="$HOME/Downloads/Logic-2.4.43-macos-arm64.zip"
 fi
 if [[ -z "$ZIP_PATH" ]]; then
   printf 'Usage: %s /path/to/Logic-2.4.43-macos-arm64.zip\n' "$0" >&2
-  printf 'Or set PXLOGIC_SALEAE_LOGIC_ZIP to the local Logic 2.4.43 zip.\n' >&2
+  printf 'Or set SIGPILOT_SALEAE_LOGIC_ZIP to the local Logic 2.4.43 zip.\n' >&2
   exit 1
 fi
 EXTRACT_DIR="$ROOT_DIR/target/native/saleae-runtime-extracted"
@@ -77,6 +77,6 @@ jq '.cases[0]' "$ROOT_DIR/testdata/decoders/parallel-conformance-v1.json" \
       and ([.frames[].channel_values[] | select(.role == "Data") | .value] == [0, 3, 0, 3])
     '
 
-PXLOGIC_SALEAE_SIDECAR="$SIDECAR" \
-PXLOGIC_SALEAE_RUNTIME_ROOT="$RUNTIME_DIR" \
-  cargo test -p pxlogic-core decoder_backend::tests::saleae_ -- --include-ignored
+SIGPILOT_SALEAE_SIDECAR="$SIDECAR" \
+SIGPILOT_SALEAE_RUNTIME_ROOT="$RUNTIME_DIR" \
+  cargo test -p sigpilot-core decoder_backend::tests::saleae_ -- --include-ignored

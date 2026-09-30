@@ -105,7 +105,7 @@ jobs:
       }}
     runs-on: [self-hosted, Windows, X64]
     env:
-      PXLOGIC_SIGROK_BUILD_DIR: C:/pxlogic-native-cache/sigrok-ucrt64
+      SIGPILOT_SIGROK_BUILD_DIR: C:/pxlogic-native-cache/sigrok-ucrt64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -205,7 +205,7 @@ jobs:
       - name: Prepare and probe bundled resources
         shell: msys2 {0}
         env:
-          PXLOGIC_REUSE_SIGROK_BUILD: "1"
+          SIGPILOT_REUSE_SIGROK_BUILD: "1"
         run: |
           scripts/prepare-tauri-resources.sh
           sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar.exe"
@@ -235,7 +235,7 @@ jobs:
         shell: pwsh
         env:
           TAURI_SKIP_DEVTOOLS_CHECK: true
-          PXLOGIC_REUSE_SIGROK_BUILD: "1"
+          SIGPILOT_REUSE_SIGROK_BUILD: "1"
         run: pnpm tauri build --target x86_64-pc-windows-msvc --no-bundle --ci
 
       - name: Stage Windows portable bundle
@@ -316,8 +316,8 @@ jobs:
       }}
     runs-on: [self-hosted, Linux, X64]
     env:
-      PXLOGIC_COPY_NATIVE_DEPS: "1"
-      PXLOGIC_SIGROK_BUILD_DIR: /tmp/pxlogic-native-cache/sigrok-linux-x64
+      SIGPILOT_COPY_NATIVE_DEPS: "1"
+      SIGPILOT_SIGROK_BUILD_DIR: /tmp/pxlogic-native-cache/sigrok-linux-x64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -393,7 +393,7 @@ jobs:
 
       - name: Prepare and probe bundled resources
         env:
-          PXLOGIC_REUSE_SIGROK_BUILD: "1"
+          SIGPILOT_REUSE_SIGROK_BUILD: "1"
         run: |
           scripts/prepare-tauri-resources.sh
           sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar"
@@ -522,7 +522,7 @@ jobs:
 
       - name: Build Tauri app bundle
         env:
-          PXLOGIC_MACOS_ARCH: ${{ matrix.native_arch }}
+          SIGPILOT_MACOS_ARCH: ${{ matrix.native_arch }}
         run: pnpm tauri build --target ${{ matrix.target }} --bundles app --ci --no-sign
 
       - name: Verify bundled Saleae decoder

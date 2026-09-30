@@ -145,7 +145,7 @@ steps.push({ label: "after capture", canvases: (await evaluate(CANVAS_INK)).valu
 
 
 steps.push({ label: "frame state", value: (await evaluate(`(() => {
-  const f = window.__PXLOGIC_FRAMES__;
+  const f = window.__SIGPILOT_FRAMES__;
   if (!f) return "no hook";
   const ids = f.sessions();
   return { health: f.health(), ids, states: ids.map((id) => [id, f.state(id)]) };

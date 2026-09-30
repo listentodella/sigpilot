@@ -14,33 +14,33 @@ HOST_ARCH="$(uname -m)"
 # disposable directory the home of a network-fetched dependency: `cargo clean`
 # wiped it, so the next build re-fetched 304 MB (287 MB of it git history) to
 # obtain this one 900 KB header, and the build could not run offline.
-JSON_INCLUDE_DIR="${PXLOGIC_NLOHMANN_JSON_INCLUDE:-$ROOT_DIR/vendor/nlohmann-json/single_include}"
+JSON_INCLUDE_DIR="${SIGPILOT_NLOHMANN_JSON_INCLUDE:-$ROOT_DIR/vendor/nlohmann-json/single_include}"
 if [[ ! -f "$JSON_INCLUDE_DIR/nlohmann/json.hpp" ]]; then
   printf 'nlohmann/json was not found at %s.\n' "$JSON_INCLUDE_DIR" >&2
   printf 'It is vendored at vendor/nlohmann-json/single_include; restore it, or point\n' >&2
-  printf 'PXLOGIC_NLOHMANN_JSON_INCLUDE at another single_include directory.\n' >&2
+  printf 'SIGPILOT_NLOHMANN_JSON_INCLUDE at another single_include directory.\n' >&2
   exit 1
 fi
 
 case "$HOST_OS" in
   Darwin)
-    TARGET_ARCH="${PXLOGIC_MACOS_ARCH:-$HOST_ARCH}"
+    TARGET_ARCH="${SIGPILOT_MACOS_ARCH:-$HOST_ARCH}"
     case "$TARGET_ARCH" in
       arm64|x86_64) ;;
       *) printf 'Unsupported macOS architecture: %s\n' "$TARGET_ARCH" >&2; exit 1 ;;
     esac
     PLATFORM_ID="macos-$TARGET_ARCH"
-    EXECUTABLE_NAME="pxlogic-saleae-analyzer-sidecar"
+    EXECUTABLE_NAME="sigpilot-saleae-analyzer-sidecar"
     ;;
   Linux)
     TARGET_ARCH="$HOST_ARCH"
     PLATFORM_ID="linux-$TARGET_ARCH"
-    EXECUTABLE_NAME="pxlogic-saleae-analyzer-sidecar"
+    EXECUTABLE_NAME="sigpilot-saleae-analyzer-sidecar"
     ;;
   MINGW*|MSYS*|CYGWIN*)
     TARGET_ARCH="$HOST_ARCH"
     PLATFORM_ID="windows-$TARGET_ARCH"
-    EXECUTABLE_NAME="pxlogic-saleae-analyzer-sidecar.exe"
+    EXECUTABLE_NAME="sigpilot-saleae-analyzer-sidecar.exe"
     ;;
   *)
     printf 'Unsupported Saleae sidecar host: %s\n' "$HOST_OS" >&2
@@ -48,8 +48,8 @@ case "$HOST_OS" in
     ;;
 esac
 
-BUILD_DIR="${PXLOGIC_SALEAE_BUILD_DIR:-$ROOT_DIR/target/native/saleae-analyzer-sidecar-$PLATFORM_ID}"
-RUNTIME_BUILD_DIR="${PXLOGIC_SALEAE_RUNTIME_BUILD_DIR:-$ROOT_DIR/target/native/saleae-standalone-runtime-$PLATFORM_ID}"
+BUILD_DIR="${SIGPILOT_SALEAE_BUILD_DIR:-$ROOT_DIR/target/native/saleae-analyzer-sidecar-$PLATFORM_ID}"
+RUNTIME_BUILD_DIR="${SIGPILOT_SALEAE_RUNTIME_BUILD_DIR:-$ROOT_DIR/target/native/saleae-standalone-runtime-$PLATFORM_ID}"
 
 mkdir -p "$BUILD_DIR" "$RUNTIME_BUILD_DIR"
 
@@ -72,10 +72,10 @@ elif [[ "$HOST_OS" == "Darwin" ]]; then
 else
   CXX_COMMAND=(c++)
 fi
-PXLOGIC_SALEAE_SIDECAR_OPT_LEVEL="${PXLOGIC_SALEAE_SIDECAR_OPT_LEVEL:--O3}"
+SIGPILOT_SALEAE_SIDECAR_OPT_LEVEL="${SIGPILOT_SALEAE_SIDECAR_OPT_LEVEL:--O3}"
 COMMON_FLAGS=(
   -std=c++17
-  "$PXLOGIC_SALEAE_SIDECAR_OPT_LEVEL"
+  "$SIGPILOT_SALEAE_SIDECAR_OPT_LEVEL"
   -DNDEBUG
   -I"$RUNTIME_SOURCE_DIR/include"
   -I"$JSON_INCLUDE_DIR"

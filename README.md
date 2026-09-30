@@ -1,15 +1,36 @@
-# PXLogic Studio
+# SigPilot
 
-Saleae-style desktop frontend for PXLogic logic analyzers.
+A Saleae Logic 2 inspired, hardware-agnostic desktop workbench for logic analyzers.
+
+SigPilot is an independent, non-commercial project. It is **not affiliated with,
+endorsed by, or derived from Saleae LLC**, and it is unrelated to the SignalPilot
+data platform or to Seica's PILOT test systems.
+
+> **Renamed from PXLogic Studio.** The product was renamed to reflect that the
+> workbench is not tied to a single hardware vendor.
+>
+> - Product-level environment variables moved from `PXLOGIC_*` to `SIGPILOT_*`.
+>   The legacy names still work but log a deprecation warning.
+> - Frontend persistence keys moved from `pxlogic.*` to `sigpilot.*`; existing
+>   values are migrated on first access.
+> - **Unchanged**: capture/project formats (`.pxcap`, `.pxl`), the sidecar wire
+>   protocol identifiers (`pxlogic.decoder.*`, `pxlogic.project.v1`), and the
+>   `pxlogic` hardware driver namespace (device profiles, USB IDs, firmware).
+>
+> See `docs/rename-plan.md` for the full mapping.
 
 ## Layout
 
-- `crates/pxlogic-core`: capture core, protocol constants, fake backend, optional `rusb` backend.
-- `crates/pxlogic-file`: `.pxcap`, `.sr`, VCD, and sparse `.sal` file adapters.
-- `crates/pxlogic-waveform`: viewport tile generation for waveform rendering.
+- `crates/sigpilot-core`: capture core, protocol constants, fake backend, optional `rusb` backend.
+- `crates/sigpilot-file`: `.pxcap`, `.sr`, VCD, and sparse `.sal` file adapters.
+- `crates/sigpilot-waveform`: viewport tile generation for waveform rendering.
+- `crates/sigpilot-graph`: the native graph kernel (edge indexes, packed viewport tiles, analyzer caches).
 - `native`: isolated Saleae Graph/Analyzer and PXView libsigrokdecode sidecars.
 - `src-tauri`: Tauri command/event adapter only.
 - `src`: React workbench UI.
+
+The `pxlogic` name is retained for the PXLogic hardware driver: device profiles,
+USB IDs, FPGA bitstreams and MCU firmware all still refer to `pxlogic`.
 
 The UI shell is intentionally thin so it can be replaced by GPUI or another renderer later without rewriting capture, file, or waveform logic.
 
@@ -54,15 +75,15 @@ The demo source works without hardware. For real PXLogic USB prepare/capture, bi
 You can override the defaults with either a directory:
 
 ```bash
-export PXLOGIC_BITSTREAM_DIR=/path/to/bitstreams
+export SIGPILOT_BITSTREAM_DIR=/path/to/bitstreams
 pnpm tauri dev
 ```
 
 or explicit files:
 
 ```bash
-export PXLOGIC_FPGA_RESET=/path/to/hspi_ddr_RST.bin
-export PXLOGIC_FPGA_MAIN=/path/to/hspi_ddr.bin
+export SIGPILOT_FPGA_RESET=/path/to/hspi_ddr_RST.bin
+export SIGPILOT_FPGA_MAIN=/path/to/hspi_ddr.bin
 pnpm tauri dev
 ```
 

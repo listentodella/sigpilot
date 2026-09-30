@@ -3,10 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SIDECAR_DIR="$ROOT_DIR/native/sigrok-analyzer-sidecar"
-BUILD_DIR="${PXLOGIC_SIGROK_BUILD_DIR:-$SIDECAR_DIR/target}"
+BUILD_DIR="${SIGPILOT_SIGROK_BUILD_DIR:-$SIDECAR_DIR/target}"
 
-if [[ -n "${PXLOGIC_SIGROK_SOURCE_ROOT:-}" ]]; then
-  PXVIEW_ROOT="$PXLOGIC_SIGROK_SOURCE_ROOT"
+if [[ -n "${SIGPILOT_SIGROK_SOURCE_ROOT:-}" ]]; then
+  PXVIEW_ROOT="$SIGPILOT_SIGROK_SOURCE_ROOT"
 elif [[ -d "$ROOT_DIR/vendor/pxview-sigrokdecode/libsigrokdecode" ]]; then
   PXVIEW_ROOT="$ROOT_DIR/vendor/pxview-sigrokdecode"
 else
@@ -34,7 +34,7 @@ case "$(uname -s)" in
     python_executable="$(command -v python3)"
     python_root="$(cd "$(dirname "$python_executable")/.." && pwd)"
     python_fingerprint="$(cygpath -am "$python_executable")|$(cygpath -am "$python_root")"
-    fingerprint_file="$BUILD_DIR/.pxlogic-python-toolchain"
+    fingerprint_file="$BUILD_DIR/.sigpilot-python-toolchain"
     cached_fingerprint="$(cat "$fingerprint_file" 2>/dev/null || true)"
     if [[ -z "$cached_fingerprint" && -f "$BUILD_DIR/CMakeCache.txt" ]]; then
       cached_python="$(sed -n 's/^Python3_EXECUTABLE:[^=]*=//p' "$BUILD_DIR/CMakeCache.txt" | head -n 1)"
@@ -63,7 +63,7 @@ fi
   -DPXVIEW_ROOT="$PXVIEW_ROOT" \
   "$@"
 if [[ -n "$python_fingerprint" ]]; then
-  printf '%s\n' "$python_fingerprint" > "$BUILD_DIR/.pxlogic-python-toolchain"
+  printf '%s\n' "$python_fingerprint" > "$BUILD_DIR/.sigpilot-python-toolchain"
 fi
 "$CMAKE_BIN" --build "$BUILD_DIR" --config Release --parallel
 
@@ -77,7 +77,7 @@ case "$(uname -s)" in
       cp -f "$dependency" "$BUILD_DIR/$(basename "$dependency")"
     done < <(
       {
-        ldd "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" 2>/dev/null || true
+        ldd "$BUILD_DIR/sigpilot-sigrok-sidecar.exe" 2>/dev/null || true
         if [[ -d "$python_dynload" ]]; then
           while IFS= read -r -d '' extension; do
             ldd "$extension" 2>/dev/null || true
@@ -88,7 +88,7 @@ case "$(uname -s)" in
 
     # MSYS2 ldd does not reliably report dependencies for Python .pyd files.
     # Walk their PE import tables and recursively collect matching UCRT DLLs.
-    declare -a pe_queue=("$BUILD_DIR/pxlogic-sigrok-sidecar.exe")
+    declare -a pe_queue=("$BUILD_DIR/sigpilot-sigrok-sidecar.exe")
     if [[ -d "$python_dynload" ]]; then
       while IFS= read -r -d '' extension; do
         pe_queue+=("$extension")
@@ -114,8 +114,8 @@ case "$(uname -s)" in
     ;;
 esac
 
-if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
-  echo "$BUILD_DIR/pxlogic-sigrok-sidecar.exe"
+if [[ -f "$BUILD_DIR/sigpilot-sigrok-sidecar.exe" ]]; then
+  echo "$BUILD_DIR/sigpilot-sigrok-sidecar.exe"
 else
-  echo "$BUILD_DIR/pxlogic-sigrok-sidecar"
+  echo "$BUILD_DIR/sigpilot-sigrok-sidecar"
 fi

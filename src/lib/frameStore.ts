@@ -160,7 +160,7 @@ export function hasSessionFrameLoop(sessionId: string) {
 // Dev-only inspection hook. The frame pipeline is deliberately outside React, so
 // there is otherwise no way to see what it is holding from the console.
 if (import.meta.env?.DEV && typeof window !== "undefined") {
-  (window as unknown as { __PXLOGIC_FRAMES__?: unknown }).__PXLOGIC_FRAMES__ = {
+  (window as unknown as { __SIGPILOT_FRAMES__?: unknown }).__SIGPILOT_FRAMES__ = {
     health: () => Object.fromEntries(healthValues),
     sessions: () => [...entries.keys()],
     state: (sessionId: string) => {

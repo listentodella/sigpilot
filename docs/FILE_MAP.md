@@ -77,12 +77,20 @@
 - `src/lib/timingMarkers.ts`
   - Timing Marker / Pair 状态类型、原版 markerColors、label/value 规则和 1ns 分辨率时间/频率格式算法。
 
+## 启动页视觉资源（自有）
+
+- `src/assets/start-screen/device-pattern.png`
+  - 启动页设备图案，1920×1280，深色底平铺的等轴测设备线稿（四周出血）。
+  - 自有资源，替换了原先的 Saleae `logicDarkTheme.png`。
+  - 在 `src/styles.css` 的 `.devicePrompt img` 里以 `inset: 0` + `object-fit: cover` 铺满卡片。
+  - **注意**：图案中仍含 `Saleae` 字标，发布前需替换（见下）。
+
 ## 已搬入的小型 Saleae 视觉资源
 
-- `src/assets/saleae/logicDarkTheme.png`
-  - 启动页 Logic 设备图。
-- `src/assets/saleae/logicMsoDarkTheme.png`
-  - 启动页 Logic Pro / MSO 设备图。
+> ⚠️ 这批资源从 Saleae 发布包中提取/反解，`docs/reuse-vs-rebuild-decision.md` 的结论是
+> **发布它们没有授权依据**；`docs/saleae-ecosystem-integration.md` 另指出**不可使用其商标**。
+> 若要公开发布，这批资源需要全部替换为自有资源。**当前仍在代码中被引用。**
+
 - `src/assets/saleae/empty_measurement.svg`
   - 右侧 Measurements 面板空状态插图，直接复制自 Logic 2.4.43 asset。
 - `src/assets/saleae/sidebar/devices.svg`
@@ -93,6 +101,19 @@
 - `src/assets/saleae/sidebar/timingMarkers.svg`
 - `src/assets/saleae/sidebar/extensions.svg`
 - `src/assets/saleae/sidebar/notes.svg`
+- `src/assets/saleae/trigger/rising.svg`
+- `src/assets/saleae/trigger/falling.svg`
+- `src/assets/saleae/trigger/pulse-high.svg`
+- `src/assets/saleae/trigger/pulse-low.svg`
+
+### 已脱离代码引用（可删除）
+
+- `src/assets/saleae/logicDarkTheme.png`
+  - 原启动页 Logic 设备图。已被 `src/assets/start-screen/device-pattern.png` 取代，
+    **代码中已无引用**。
+- `src/assets/saleae/logicMsoDarkTheme.png`
+  - 原 Logic Pro / MSO 设备图，**从未被任何代码引用**。
+
 
 ## Tauri 与后端
 
@@ -116,13 +137,13 @@
 
 ## Rust crates
 
-- `crates/pxlogic-core`
+- `crates/sigpilot-core`
   - 捕获核心、真实 USB backend、demo backend、协议常量、UART decode、数据模型。
-- `crates/pxlogic-file`
+- `crates/sigpilot-file`
   - `.pxcap`、`.sr`、VCD 读写。
-- `crates/pxlogic-waveform`
+- `crates/sigpilot-waveform`
   - 波形 tile 生成和数字 range measurement scanner。
-- `crates/pxlogic-graph`
+- `crates/sigpilot-graph`
   - 参考 Logic 2 Graph Server 职责实现的原生 32 通道 graph kernel。
   - 包含增量 edge index、packed viewport tile、UART/I2C/SPI analyzer cache 和 protocol bubble aggregation。
 

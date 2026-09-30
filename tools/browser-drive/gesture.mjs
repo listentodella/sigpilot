@@ -122,7 +122,7 @@ await sleep(6000);
 note(`capture stop: ${(await evaluate(`(() => { const b = document.querySelector(".saleaeCaptureButton"); if (!b) return "no capture button"; b.click(); return "clicked"; })()`)).value}`);
 await sleep(2500);
 
-const probePresent = (await evaluate("typeof window.__PXLOGIC_DRAW__")).value;
+const probePresent = (await evaluate("typeof window.__SIGPILOT_DRAW__")).value;
 if (probePresent !== "object") {
   console.log(JSON.stringify({ error: `draw probe missing (got ${probePresent})`, notes }, null, 2));
   process.exit(1);
@@ -159,7 +159,7 @@ const summary = async (label) => {
   // Read the raw records rather than the page's summary: the max alone cannot
   // distinguish "one bad frame while a render was in flight" from "every frame
   // of the gesture was wrong", and those call for different fixes.
-  const records = (await evaluate("window.__PXLOGIC_DRAW__.recent()")).value ?? [];
+  const records = (await evaluate("window.__SIGPILOT_DRAW__.recent()")).value ?? [];
   const byPath = new Map();
   for (const record of records) {
     if (!byPath.has(record.path)) byPath.set(record.path, []);
@@ -186,37 +186,37 @@ const phases = [];
 
 // 2. Zoom in hard. This is what drives the tile raster coarser than the viewport,
 //    which is the branch the stale-raster fallback lives in.
-await evaluate("window.__PXLOGIC_DRAW__.reset()");
+await evaluate("window.__SIGPILOT_DRAW__.reset()");
 await wheel(-120, 40, 90);
 await sleep(900);
 phases.push(await summary("zoom in (40 wheel steps)"));
 
 // 3. Pan at that zoom: the viewport leaves the cached viewport raster's coverage,
 //    which is the condition the fallback is meant to cover.
-await evaluate("window.__PXLOGIC_DRAW__.reset()");
+await evaluate("window.__SIGPILOT_DRAW__.reset()");
 await drag(900, 300, 24, 40);
 await sleep(900);
 phases.push(await summary("pan left at zoom"));
 
 // 4. Zoom back out, the gesture the user described as the trigger.
-await evaluate("window.__PXLOGIC_DRAW__.reset()");
+await evaluate("window.__SIGPILOT_DRAW__.reset()");
 await wheel(120, 40, 90);
 await sleep(900);
 phases.push(await summary("zoom out (40 wheel steps)"));
 
 // 5. Round trip: out to the far end and back in, which is the reported repro.
-await evaluate("window.__PXLOGIC_DRAW__.reset()");
+await evaluate("window.__SIGPILOT_DRAW__.reset()");
 await wheel(120, 60, 60);
 await sleep(600);
 const farOut = await summary("zoomed far out");
-await evaluate("window.__PXLOGIC_DRAW__.reset()");
+await evaluate("window.__SIGPILOT_DRAW__.reset()");
 await wheel(-120, 60, 60);
 await sleep(1200);
 phases.push(farOut, await summary("back in after far out"));
 
-const recent = (await evaluate("window.__PXLOGIC_DRAW__.recent().filter((r) => r.path.startsWith('stale')).slice(-25)")).value;
+const recent = (await evaluate("window.__SIGPILOT_DRAW__.recent().filter((r) => r.path.startsWith('stale')).slice(-25)")).value;
 const state = (await evaluate(`(() => {
-  const f = window.__PXLOGIC_FRAMES__;
+  const f = window.__SIGPILOT_FRAMES__;
   if (!f) return "no hook";
   const ids = f.sessions();
   return { health: f.health(), states: ids.map((id) => [id, f.state(id)]) };
@@ -225,7 +225,7 @@ const state = (await evaluate(`(() => {
 // 6. Steady state, no input at all. The scale gate that stops a zoom-in from
 //    reusing one raster must not reject a raster that is already correct, or
 //    every idle frame would re-request a render the worker has already done.
-await evaluate("window.__PXLOGIC_DRAW__.reset()");
+await evaluate("window.__SIGPILOT_DRAW__.reset()");
 await sleep(2500);
 const steady = await summary("steady state, no input");
 

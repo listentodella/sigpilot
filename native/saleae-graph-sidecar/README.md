@@ -8,7 +8,7 @@ PXLogic.
 Build and verify against an installed or extracted Logic 2.4.43 runtime:
 
 ```sh
-export PXLOGIC_SALEAE_RUNTIME_ROOT="/path/to/Saleae Logic.app/Contents/Resources/macos-arm64"
+export SIGPILOT_SALEAE_RUNTIME_ROOT="/path/to/Saleae Logic.app/Contents/Resources/macos-arm64"
 native/saleae-graph-sidecar/verify.sh
 native/saleae-graph-sidecar/verify-sal-roundtrip.sh
 ```
@@ -22,7 +22,7 @@ Convert a `.sal` capture to a sparse transition manifest:
 
 ```sh
 target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar \
-  --runtime-root "$PXLOGIC_SALEAE_RUNTIME_ROOT" \
+  --runtime-root "$SIGPILOT_SALEAE_RUNTIME_ROOT" \
   --convert-sal input.sal output-directory
 ```
 
@@ -34,7 +34,7 @@ Create a Logic 2 `.sal` from a PXLogic transition manifest:
 
 ```sh
 target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar \
-  --runtime-root "$PXLOGIC_SALEAE_RUNTIME_ROOT" \
+  --runtime-root "$SIGPILOT_SALEAE_RUNTIME_ROOT" \
   --create-sal input-manifest.json output.sal
 ```
 

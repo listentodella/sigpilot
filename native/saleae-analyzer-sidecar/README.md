@@ -14,8 +14,8 @@ Set these variables to use the Rust `SaleaeNativeDecoder` adapter:
 
 ```bash
 sidecar="$(native/saleae-analyzer-sidecar/build.sh)"
-export PXLOGIC_SALEAE_SIDECAR="$sidecar"
-export PXLOGIC_SALEAE_RUNTIME_ROOT="$(dirname "$sidecar")/runtime"
+export SIGPILOT_SALEAE_SIDECAR="$sidecar"
+export SIGPILOT_SALEAE_RUNTIME_ROOT="$(dirname "$sidecar")/runtime"
 ```
 
 Rust transports captures and normalizes sidecar output; protocol state machines remain in the vendored Saleae analyzer plugins.

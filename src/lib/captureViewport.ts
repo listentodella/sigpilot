@@ -7,7 +7,7 @@ export const LIVE_CAPTURE_RESERVED_VIEW_SECONDS = 500;
  * Below this the viewport stops resolving signal edges and starts resolving
  * individual samples: the renderer has more per-sample work to do every frame
  * while showing the user nothing they can act on. Mirrors
- * `MINIMUM_VIEW_SECONDS` in `crates/pxlogic-graph/src/view_state.rs`, which is
+ * `MINIMUM_VIEW_SECONDS` in `crates/sigpilot-graph/src/view_state.rs`, which is
  * the authority when the backend owns the viewport.
  */
 export const MINIMUM_VIEW_SECONDS = 5e-6;

@@ -1,3 +1,5 @@
+import { migrateLegacyKey } from "./legacyStorage.ts";
+
 export type UiExtensionSource = "BuiltIn" | "Local" | "Marketplace";
 export type UiExtensionFeatureType = "HighLevelAnalyzer" | "DigitalMeasurement" | "AnalogMeasurement";
 
@@ -43,7 +45,8 @@ export interface UiExtensionPackage {
   readme?: string;
 }
 
-const EXTENSIONS_STORAGE_KEY = "pxlogic.extensions.v1";
+const EXTENSIONS_STORAGE_KEY = "sigpilot.extensions.v1";
+const LEGACY_EXTENSIONS_STORAGE_KEY = "pxlogic.extensions.v1";
 
 const builtInExtensions: UiExtensionRecord[] = [
   {
@@ -117,6 +120,7 @@ export function defaultUiExtensions(): UiExtensionRecord[] {
 export function loadUiExtensions(): UiExtensionRecord[] {
   if (typeof window === "undefined") return defaultUiExtensions();
   try {
+    migrateLegacyKey(window.localStorage, EXTENSIONS_STORAGE_KEY, LEGACY_EXTENSIONS_STORAGE_KEY);
     const stored = window.localStorage.getItem(EXTENSIONS_STORAGE_KEY);
     if (!stored) return defaultUiExtensions();
     const parsed = JSON.parse(stored) as UiExtensionRecord[];

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUNTIME_ROOT="${PXLOGIC_SALEAE_RUNTIME_ROOT:-}"
+RUNTIME_ROOT="${SIGPILOT_SALEAE_RUNTIME_ROOT:-}"
 if [[ -z "$RUNTIME_ROOT" ]]; then
   for candidate in \
     "$ROOT_DIR/resources/native/saleae-runtime-2.4.43" \
@@ -24,7 +24,7 @@ if [[ -z "$RUNTIME_ROOT" ]]; then
   done
 fi
 if [[ -z "$RUNTIME_ROOT" ]]; then
-  printf 'Saleae GraphServer runtime not found; run scripts/prepare-tauri-resources.sh or set PXLOGIC_SALEAE_RUNTIME_ROOT.\n' >&2
+  printf 'Saleae GraphServer runtime not found; run scripts/prepare-tauri-resources.sh or set SIGPILOT_SALEAE_RUNTIME_ROOT.\n' >&2
   exit 1
 fi
 SIDECAR="$($ROOT_DIR/native/saleae-graph-sidecar/build.sh)"

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SIDECAR_DIR="$ROOT_DIR/native/sigrok-analyzer-sidecar"
-BUILD_DIR="${PXLOGIC_SIGROK_BUILD_DIR:-$SIDECAR_DIR/target}"
+BUILD_DIR="${SIGPILOT_SIGROK_BUILD_DIR:-$SIDECAR_DIR/target}"
 FIXTURES="${1:-$ROOT_DIR/testdata/decoders/spi-conformance-v1.json}"
 NATIVE_FIXTURES="${2:-$ROOT_DIR/testdata/decoders/sigrok-native-conformance-v1.json}"
 CAN_FIXTURES="${3:-$ROOT_DIR/testdata/decoders/can-conformance-v1.json}"
@@ -12,10 +12,10 @@ PARALLEL_FIXTURES="${5:-$ROOT_DIR/testdata/decoders/parallel-conformance-v1.json
 
 "$SIDECAR_DIR/build.sh" >/dev/null
 
-if [[ -f "$BUILD_DIR/pxlogic-sigrok-sidecar.exe" ]]; then
-  SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar.exe"
+if [[ -f "$BUILD_DIR/sigpilot-sigrok-sidecar.exe" ]]; then
+  SIDECAR="$BUILD_DIR/sigpilot-sigrok-sidecar.exe"
 else
-  SIDECAR="$BUILD_DIR/pxlogic-sigrok-sidecar"
+  SIDECAR="$BUILD_DIR/sigpilot-sigrok-sidecar"
 fi
 DECODER_ROOT="$BUILD_DIR/decoders/c_decoders"
 if [[ -d "$ROOT_DIR/vendor/pxview-sigrokdecode/libsigrokdecode/decoders" ]]; then

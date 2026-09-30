@@ -44,14 +44,14 @@ Core dependencies available on all platforms:
 - `rusb`: USB device access
 - `tauri`: Cross-platform desktop framework
 - `serde`, `serde_json`: Serialization
-- All `pxlogic-*` workspace crates
+- All `sigpilot-*` workspace crates
 
 ## Platform Feature Matrix
 
 | Feature | Implementation | Platform Support |
 |---------|----------------|------------------|
 | USB Device Detection | `rusb` | All |
-| Capture | `pxlogic-core` | All |
+| Capture | `sigpilot-core` | All |
 | Sigrok Decoders | Native sidecar | All |
 | Saleae native runtime | macOS dylib | macOS only |
 | Native Screenshot | WKWebView API | macOS only |

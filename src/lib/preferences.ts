@@ -1,3 +1,5 @@
+import { migrateLegacyKey } from "./legacyStorage.ts";
+
 export interface UiPreferences {
   matchChannelColors: boolean;
   panToTrigger: boolean;
@@ -7,9 +9,11 @@ export interface UiPreferences {
 interface PreferenceStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
-const UI_PREFERENCES_KEY = "pxlogic.preferences.v1";
+const UI_PREFERENCES_KEY = "sigpilot.preferences.v1";
+const LEGACY_UI_PREFERENCES_KEY = "pxlogic.preferences.v1";
 
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   matchChannelColors: true,
@@ -38,6 +42,7 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
 
 export function loadUiPreferences(storage = browserPreferenceStorage()): UiPreferences {
   if (!storage) return { ...DEFAULT_UI_PREFERENCES };
+  migrateLegacyKey(storage, UI_PREFERENCES_KEY, LEGACY_UI_PREFERENCES_KEY);
   try {
     return normalizeUiPreferences(JSON.parse(storage.getItem(UI_PREFERENCES_KEY) ?? "null"));
   } catch {

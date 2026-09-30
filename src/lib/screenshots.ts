@@ -2,6 +2,7 @@ import { Image as TauriImage } from "@tauri-apps/api/image";
 import { invoke } from "@tauri-apps/api/core";
 import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { migrateLegacyKey } from "./legacyStorage.ts";
 
 export type ScreenshotDestination = "File" | "Clipboard";
 
@@ -29,7 +30,8 @@ export interface TakeScreenshotResult {
   message?: string;
 }
 
-const SCREENSHOT_SETTINGS_KEY = "pxlogic.screenshot-settings.v1";
+const SCREENSHOT_SETTINGS_KEY = "sigpilot.screenshot-settings.v1";
+const LEGACY_SCREENSHOT_SETTINGS_KEY = "pxlogic.screenshot-settings.v1";
 const SCREENSHOT_BACKGROUND = "#131316";
 
 export const SCREENSHOT_DELAY_MS = 300;
@@ -37,6 +39,7 @@ export const DEFAULT_SCREENSHOT_SETTINGS: ScreenshotSettings = { destination: "F
 
 export function loadScreenshotSettings(): ScreenshotSettings {
   try {
+    migrateLegacyKey(window.localStorage, SCREENSHOT_SETTINGS_KEY, LEGACY_SCREENSHOT_SETTINGS_KEY);
     const parsed = JSON.parse(window.localStorage.getItem(SCREENSHOT_SETTINGS_KEY) ?? "null") as
       | Partial<ScreenshotSettings>
       | null;

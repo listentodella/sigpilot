@@ -47,6 +47,6 @@ for (const candidate of bashCandidates()) {
 }
 
 console.error(
-  "bash is required to prepare PXLogic native resources. Install Git Bash or MSYS2 and ensure it is on PATH.",
+  "bash is required to prepare SigPilot native resources. Install Git Bash or MSYS2 and ensure it is on PATH.",
 );
 process.exit(1);

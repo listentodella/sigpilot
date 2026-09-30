@@ -181,7 +181,7 @@ struct BubbleTextKeyHash
 
 bool TimingEnabled()
 {
-    return std::getenv("PXLOGIC_DECODER_TIMING") != nullptr;
+    return std::getenv("SIGPILOT_DECODER_TIMING") != nullptr;
 }
 
 bool FramedBinaryTransportRequested(const json& input)
@@ -320,12 +320,12 @@ size_t DefaultSidecarWorkerCount()
 
 size_t SaleaeBatchWorkerCount(size_t decoder_count)
 {
-    return ConfiguredWorkerCount("PXLOGIC_SALEAE_BATCH_WORKERS", decoder_count, DefaultSidecarWorkerCount());
+    return ConfiguredWorkerCount("SIGPILOT_SALEAE_BATCH_WORKERS", decoder_count, DefaultSidecarWorkerCount());
 }
 
 size_t SaleaeWindowBatchWorkerCount(size_t window_count)
 {
-    return ConfiguredWorkerCount("PXLOGIC_SALEAE_WINDOW_BATCH_WORKERS", window_count, DefaultSidecarWorkerCount());
+    return ConfiguredWorkerCount("SIGPILOT_SALEAE_WINDOW_BATCH_WORKERS", window_count, DefaultSidecarWorkerCount());
 }
 
 void TraceTiming(const char* stage, Clock::time_point started, const std::string& detail = {})

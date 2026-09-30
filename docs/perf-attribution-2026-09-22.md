@@ -6,8 +6,8 @@
 ## 0. 方法
 
 ```sh
-export PXLOGIC_SALEAE_SIDECAR="$PWD/target/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"
-export PXLOGIC_SALEAE_RUNTIME_ROOT="$PWD/target/native/saleae-analyzer-sidecar/runtime"
+export SIGPILOT_SALEAE_SIDECAR="$PWD/target/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"
+export SIGPILOT_SALEAE_RUNTIME_ROOT="$PWD/target/native/saleae-analyzer-sidecar/runtime"
 cargo run --release -p pxlogic-graph --bin pxlogic-perf-self-test -- \
   --scenario 2.5m-i2c-spi --warmups 1 --iterations 10 \
   --output /tmp/pxlogic-perf-2.5m-i2c-spi.json
@@ -299,7 +299,7 @@ p50，2.5M×32ch I2C+SPI：
 
 **两条结论：**
 
-1. **把 `PXLOGIC_NATIVE_WINDOW_DECODE_WORKERS` 从 4 提到 8 有约 10% 收益**
+1. **把 `SIGPILOT_NATIVE_WINDOW_DECODE_WORKERS` 从 4 提到 8 有约 10% 收益**
    （6.955 → 6.25 ms），且 max 也下降（7.449 → 6.543）。
    再提到 10 没有额外收益——**说明窗口解码不是并行度受限**，
    剩下 ~6.2 ms 是串行部分（窗口规划 / 归一化 / sidecar 内的串行段）。
@@ -313,7 +313,7 @@ p50，2.5M×32ch I2C+SPI：
 
 | 动作 | 收益 | 风险 |
 | --- | --- | --- |
-| `PXLOGIC_NATIVE_WINDOW_DECODE_WORKERS=8` | ~10%（6.96→6.25 ms） | 低，但需真机确认 |
+| `SIGPILOT_NATIVE_WINDOW_DECODE_WORKERS=8` | ~10%（6.96→6.25 ms） | 低，但需真机确认 |
 | 调大 `SALEAE_WINDOW_BATCH_WORKERS` | **负收益** | 高 |
 | 三个一起调大 | **严重负收益** | 极高 |
 

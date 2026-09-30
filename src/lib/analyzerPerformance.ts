@@ -1,4 +1,9 @@
+import { migrateLegacyKey } from "./legacyStorage.ts";
+
 let analyzerTimingEnabled: boolean | null = null;
+
+const DECODER_TIMING_KEY = "sigpilot:decoder-timing";
+const LEGACY_DECODER_TIMING_KEY = "pxlogic:decoder-timing";
 
 export function traceAnalyzerPerformance(
   stage: string,
@@ -7,7 +12,8 @@ export function traceAnalyzerPerformance(
 ) {
   if (analyzerTimingEnabled === null) {
     try {
-      analyzerTimingEnabled = window.localStorage.getItem("pxlogic:decoder-timing") === "1";
+      migrateLegacyKey(window.localStorage, DECODER_TIMING_KEY, LEGACY_DECODER_TIMING_KEY);
+      analyzerTimingEnabled = window.localStorage.getItem(DECODER_TIMING_KEY) === "1";
     } catch {
       analyzerTimingEnabled = false;
     }
@@ -15,6 +21,6 @@ export function traceAnalyzerPerformance(
   if (!analyzerTimingEnabled) return;
   const elapsedMs = performance.now() - startedAt;
   console.debug(
-    `[pxlogic-analyzer] stage=${stage} elapsed_ms=${elapsedMs.toFixed(3)}${detail ? ` ${detail}` : ""}`,
+    `[sigpilot-analyzer] stage=${stage} elapsed_ms=${elapsedMs.toFixed(3)}${detail ? ` ${detail}` : ""}`,
   );
 }

@@ -118,8 +118,8 @@ function startPxlogicFeeder(options, host, captureSettings) {
     cwd: path.dirname(options.pxlogicHelper),
     env: {
       ...process.env,
-      PXLOGIC_BITSTREAM_DIR: options.bitstreams,
-      PXLOGIC_MCU_FIRMWARE: options.firmware,
+      SIGPILOT_BITSTREAM_DIR: options.bitstreams,
+      SIGPILOT_MCU_FIRMWARE: options.firmware,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: process.platform === 'win32',

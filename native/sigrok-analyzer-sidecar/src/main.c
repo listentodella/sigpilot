@@ -2324,7 +2324,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (!should_decode)
-        fatal("usage: pxlogic-sigrok-sidecar --decoder-root PATH [--python-decoder-root PATH] (--probe|--decode)");
+        fatal("usage: sigpilot-sigrok-sidecar --decoder-root PATH [--python-decoder-root PATH] (--probe|--decode)");
 
     char *input = read_stdin();
     cJSON *request = cJSON_Parse(input);

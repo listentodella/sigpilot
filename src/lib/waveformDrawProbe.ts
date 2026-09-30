@@ -75,7 +75,7 @@ export function waveformDrawSummary() {
 }
 
 if (enabled && typeof window !== "undefined") {
-  (window as unknown as { __PXLOGIC_DRAW__?: unknown }).__PXLOGIC_DRAW__ = {
+  (window as unknown as { __SIGPILOT_DRAW__?: unknown }).__SIGPILOT_DRAW__ = {
     recent: () => [...recent],
     reset: resetWaveformDrawProbe,
     summary: waveformDrawSummary,

@@ -1,12 +1,12 @@
 // The per-frame pipeline.
 //
 // Saleae drives its graph backend once per animation frame with a FrameStartEvent
-// and lets the backend decide what to send back. pxlogic used to do the opposite:
+// and lets the backend decide what to send back. SigPilot used to do the opposite:
 // the frontend decided the level of detail, rate limited its own requests, cached
 // rasters and guarded against staleness. Every one of those decisions was a place
 // where the graph could end up in a state the user had to nudge back.
 //
-// This module is the pxlogic side of the Saleae arrangement:
+// This module is the SigPilot side of the Saleae arrangement:
 //   * one request per animation frame, carrying a gesture (or "keep current"),
 //   * at most one request in flight, so a slow backend throttles itself instead
 //     of piling up work — back pressure replaces the frame queue,

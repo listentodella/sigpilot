@@ -1,4 +1,4 @@
-# PXLogic Sigrok Analyzer Sidecar
+# SigPilot Sigrok Analyzer Sidecar
 
 This GPL-2.0-or-later executable hosts PXView's `libsigrokdecode` fork outside
 the Tauri process. The build uses the vendored
@@ -18,9 +18,9 @@ native/sigrok-analyzer-sidecar/verify.sh
 Runtime environment for the Rust adapter:
 
 ```sh
-export PXLOGIC_SIGROK_SIDECAR="$PWD/native/sigrok-analyzer-sidecar/target/pxlogic-sigrok-sidecar"
-export PXLOGIC_SIGROK_DECODER_ROOT="$PWD/native/sigrok-analyzer-sidecar/target/decoders/c_decoders"
-export PXLOGIC_SIGROK_PYTHON_DECODER_ROOT="$PWD/vendor/pxview-sigrokdecode/libsigrokdecode/decoders"
+export SIGPILOT_SIGROK_SIDECAR="$PWD/native/sigrok-analyzer-sidecar/target/sigpilot-sigrok-sidecar"
+export SIGPILOT_SIGROK_DECODER_ROOT="$PWD/native/sigrok-analyzer-sidecar/target/decoders/c_decoders"
+export SIGPILOT_SIGROK_PYTHON_DECODER_ROOT="$PWD/vendor/pxview-sigrokdecode/libsigrokdecode/decoders"
 ```
 
 The executable accepts `--probe` and `--decode`. `--probe` is fast and reports

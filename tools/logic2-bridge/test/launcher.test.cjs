@@ -53,13 +53,13 @@ test('waits for the launched Logic window before maximizing it on Windows', () =
 });
 
 test('accepts a bounded native GraphServer startup timeout override', () => {
-  assert.equal(nativeGraphStartupTimeoutMs({ PXLOGIC_GRAPH_START_TIMEOUT_MS: '45000' }), 45000);
+  assert.equal(nativeGraphStartupTimeoutMs({ SIGPILOT_GRAPH_START_TIMEOUT_MS: '45000' }), 45000);
   assert.equal(
-    nativeGraphStartupTimeoutMs({ PXLOGIC_GRAPH_START_TIMEOUT_MS: 'invalid' }),
+    nativeGraphStartupTimeoutMs({ SIGPILOT_GRAPH_START_TIMEOUT_MS: 'invalid' }),
     process.platform === 'win32' ? 60000 : 15000,
   );
   assert.equal(
-    nativeGraphStartupTimeoutMs({ PXLOGIC_GRAPH_START_TIMEOUT_MS: '999999' }),
+    nativeGraphStartupTimeoutMs({ SIGPILOT_GRAPH_START_TIMEOUT_MS: '999999' }),
     process.platform === 'win32' ? 60000 : 15000,
   );
 });

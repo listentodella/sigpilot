@@ -56,15 +56,15 @@ sigrok_source_root() {
 
 sigrok_executable_name() {
   case "$HOST_OS" in
-    MINGW*|MSYS*|CYGWIN*) printf 'pxlogic-sigrok-sidecar.exe\n' ;;
-    *) printf 'pxlogic-sigrok-sidecar\n' ;;
+    MINGW*|MSYS*|CYGWIN*) printf 'sigpilot-sigrok-sidecar.exe\n' ;;
+    *) printf 'sigpilot-sigrok-sidecar\n' ;;
   esac
 }
 
 saleae_executable_name() {
   case "$HOST_OS" in
-    MINGW*|MSYS*|CYGWIN*) printf 'pxlogic-saleae-analyzer-sidecar.exe\n' ;;
-    *) printf 'pxlogic-saleae-analyzer-sidecar\n' ;;
+    MINGW*|MSYS*|CYGWIN*) printf 'sigpilot-saleae-analyzer-sidecar.exe\n' ;;
+    *) printf 'sigpilot-saleae-analyzer-sidecar\n' ;;
   esac
 }
 
@@ -84,7 +84,7 @@ copy_shared_dependencies() {
       done < <(ldd "$binary" 2>/dev/null || true)
       ;;
     Linux)
-      [[ "${PXLOGIC_COPY_NATIVE_DEPS:-0}" == "1" ]] || return 0
+      [[ "${SIGPILOT_COPY_NATIVE_DEPS:-0}" == "1" ]] || return 0
       command -v ldd >/dev/null 2>&1 || return 0
       while IFS= read -r line; do
         dep="$(printf '%s\n' "$line" | awk '{print $3}')"
@@ -163,8 +163,8 @@ case "$HOST_OS" in
 esac
 
 if sigrok_root="$(sigrok_source_root)"; then
-  if [[ "${PXLOGIC_REUSE_SIGROK_BUILD:-0}" == "1" ]]; then
-    sigrok_build_dir="${PXLOGIC_SIGROK_BUILD_DIR:-$ROOT_DIR/native/sigrok-analyzer-sidecar/target}"
+  if [[ "${SIGPILOT_REUSE_SIGROK_BUILD:-0}" == "1" ]]; then
+    sigrok_build_dir="${SIGPILOT_SIGROK_BUILD_DIR:-$ROOT_DIR/native/sigrok-analyzer-sidecar/target}"
     sigrok_sidecar="$sigrok_build_dir/$(sigrok_executable_name)"
     if [[ ! -f "$sigrok_sidecar" ]]; then
       printf 'Reusable Sigrok sidecar was not found at %s.\n' "$sigrok_sidecar" >&2

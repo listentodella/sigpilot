@@ -75,7 +75,7 @@ export function AnalyzerLibraryMenu({
           autoComplete="off"
           autoCorrect="off"
           inputMode="search"
-          name="pxlogic-analyzer-library-search"
+          name="sigpilot-analyzer-library-search"
           placeholder="Search decoders"
           spellCheck={false}
           type="search"

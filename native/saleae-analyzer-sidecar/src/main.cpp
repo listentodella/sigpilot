@@ -212,7 +212,7 @@ RuntimePaths LocateRuntime(const std::optional<fs::path>& explicit_root)
     if (explicit_root.has_value()) {
         return ValidateRuntimeRoot(*explicit_root);
     }
-    if (const char* environment_root = std::getenv("PXLOGIC_SALEAE_RUNTIME_ROOT")) {
+    if (const char* environment_root = std::getenv("SIGPILOT_SALEAE_RUNTIME_ROOT")) {
         return ValidateRuntimeRoot(environment_root);
     }
 
@@ -237,7 +237,7 @@ RuntimePaths LocateRuntime(const std::optional<fs::path>& explicit_root)
         }
     }
     throw std::runtime_error(
-        "Saleae Logic runtime was not found; pass --runtime-root or PXLOGIC_SALEAE_RUNTIME_ROOT");
+        "Saleae Logic runtime was not found; pass --runtime-root or SIGPILOT_SALEAE_RUNTIME_ROOT");
 }
 
 class Plugin
@@ -1336,7 +1336,7 @@ int main(int argc, char** argv)
         std::cout << output.dump(2) << '\n';
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "pxlogic-saleae-analyzer-sidecar: " << error.what() << '\n';
+        std::cerr << "sigpilot-saleae-analyzer-sidecar: " << error.what() << '\n';
         return 1;
     }
 }

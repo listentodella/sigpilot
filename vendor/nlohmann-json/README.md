@@ -53,10 +53,10 @@ generated amalgamation, not the split headers under `include/`.
 
 ## Overriding
 
-Set `PXLOGIC_NLOHMANN_JSON_INCLUDE` to point at a different `single_include`
+Set `SIGPILOT_NLOHMANN_JSON_INCLUDE` to point at a different `single_include`
 directory (for example a full clone) if you need to build against another
 version:
 
 ```sh
-set -x PXLOGIC_NLOHMANN_JSON_INCLUDE /path/to/json/single_include
+set -x SIGPILOT_NLOHMANN_JSON_INCLUDE /path/to/json/single_include
 ```

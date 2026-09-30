@@ -82,7 +82,7 @@ export function isPhysicalWheelZoom(event: WheelZoomInput): boolean {
  * So: count notches for clicky wheels, where one notch is always the same
  * step, and fall back to the pixel curve for smooth input. That is exactly what
  * Logic 2 does. Both sides treat the factor as a multiplier on the visible
- * span, so `factor < 1` zooms in on both: the direction stays pxlogic's
+ * span, so `factor < 1` zooms in on both: the direction stays SigPilot's
  * existing one, taken from the sign of the normalised delta, and only the
  * magnitude changes.
  *

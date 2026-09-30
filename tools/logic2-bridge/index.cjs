@@ -26,7 +26,7 @@ function parseArguments(argv) {
     appPath: process.env.SALEAE_LOGIC_APP,
     port: 0,
     backendPort: undefined,
-    pxlogicHelper: process.env.PXLOGIC_USB_SMOKE ||
+    pxlogicHelper: process.env.SIGPILOT_USB_SMOKE ||
       path.join(
         pxlogicRoot,
         'target',
@@ -34,9 +34,9 @@ function parseArguments(argv) {
         process.platform === 'win32' ? 'usb_smoke.exe' : 'usb_smoke',
       ),
     pxlogicDevice: undefined,
-    bitstreams: process.env.PXLOGIC_BITSTREAM_DIR ||
+    bitstreams: process.env.SIGPILOT_BITSTREAM_DIR ||
       path.join(pxlogicRoot, 'resources', 'bitstreams'),
-    firmware: process.env.PXLOGIC_MCU_FIRMWARE ||
+    firmware: process.env.SIGPILOT_MCU_FIRMWARE ||
       path.join(pxlogicRoot, 'resources', 'firmware', 'SCI_LOGIC.bin'),
     enabledChannels: [0, 1, 2, 3],
     sampleRateHz: 25_000_000,
@@ -396,7 +396,7 @@ function logicProcessEnvironment(environment = process.env) {
 }
 
 function nativeGraphStartupTimeoutMs(environment = process.env) {
-  const configured = Number(environment.PXLOGIC_GRAPH_START_TIMEOUT_MS);
+  const configured = Number(environment.SIGPILOT_GRAPH_START_TIMEOUT_MS);
   if (Number.isInteger(configured) && configured >= 1000 && configured <= 300000) {
     return configured;
   }

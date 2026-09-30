@@ -1,17 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(pxlogic_sigrok_analyzer_sidecar C)
+project(sigpilot_sigrok_analyzer_sidecar C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-get_filename_component(PXLOGIC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
-set(PXVIEW_VENDOR_ROOT "${PXLOGIC_ROOT}/vendor/pxview-sigrokdecode")
+get_filename_component(SIGPILOT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+set(PXVIEW_VENDOR_ROOT "${SIGPILOT_ROOT}/vendor/pxview-sigrokdecode")
 if(EXISTS "${PXVIEW_VENDOR_ROOT}/libsigrokdecode")
     set(PXVIEW_DEFAULT_ROOT "${PXVIEW_VENDOR_ROOT}")
 else()
-    set(PXVIEW_DEFAULT_ROOT "${PXLOGIC_ROOT}/pxview-fork")
+    set(PXVIEW_DEFAULT_ROOT "${SIGPILOT_ROOT}/pxview-fork")
 endif()
 set(PXVIEW_ROOT "${PXVIEW_DEFAULT_ROOT}" CACHE PATH "PXView source tree")
 
@@ -76,22 +76,22 @@ foreach(decoder_source IN LISTS PXVIEW_C_DECODER_SOURCES)
     add_pxview_c_decoder("${decoder_protocol}")
 endforeach()
 
-add_executable(pxlogic-sigrok-sidecar src/main.c)
-set_target_properties(pxlogic-sigrok-sidecar PROPERTIES
+add_executable(sigpilot-sigrok-sidecar src/main.c)
+set_target_properties(sigpilot-sigrok-sidecar PROPERTIES
     BUILD_RPATH "$ORIGIN"
 )
-target_compile_definitions(pxlogic-sigrok-sidecar PRIVATE CJSON_IMPLEMENTATION)
-target_include_directories(pxlogic-sigrok-sidecar PRIVATE
+target_compile_definitions(sigpilot-sigrok-sidecar PRIVATE CJSON_IMPLEMENTATION)
+target_include_directories(sigpilot-sigrok-sidecar PRIVATE
     ${PXVIEW_ROOT}
     ${PXVIEW_ROOT}/libsigrokdecode
     ${PXVIEW_ROOT}/libsigrokdecode/tests
     ${PXVIEW_ROOT}/common
 )
-target_link_libraries(pxlogic-sigrok-sidecar PRIVATE
+target_link_libraries(sigpilot-sigrok-sidecar PRIVATE
     pxview_sigrokdecode
     PkgConfig::GLIB
     Python3::Python
 )
-add_dependencies(pxlogic-sigrok-sidecar
+add_dependencies(sigpilot-sigrok-sidecar
     ${PXVIEW_C_DECODER_TARGETS}
 )

@@ -1,5 +1,5 @@
 {
-  "name": "pxlogic-logic2-bridge-client",
+  "name": "sigpilot-logic2-bridge-client",
   "version": "0.2.0",
   "description": "Desktop launcher for the PXLogic Logic 2 live bridge",
   "author": "PXLogic Project",
@@ -17,7 +17,7 @@
     "electron-builder": "26.15.3"
   },
   "build": {
-    "appId": "io.pxlogic.logic2bridge",
+    "appId": "io.sigpilot.logic2bridge",
     "productName": "PXLogic Bridge",
     "artifactName": "PXLogic-Bridge-${version}-macos-${arch}.${ext}",
     "asar": true,

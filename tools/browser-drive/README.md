@@ -39,16 +39,16 @@ waveform canvas with an ink count in the low thousands is drawing gridlines and
 separators only — that is what "the waveform is invisible" looks like
 numerically.
 
-The `frame state` step reads `window.__PXLOGIC_FRAMES__`, a dev-only hook
+The `frame state` step reads `window.__SIGPILOT_FRAMES__`, a dev-only hook
 installed by `src/lib/frameStore.ts`. It reports the viewport, the tile range and
 the tile pixel width the frame pipeline is holding, which is the fastest way to
 tell a wrong viewport from a broken renderer. The same hook is available in the
 Tauri devtools console:
 
 ```js
-__PXLOGIC_FRAMES__.sessions()
-__PXLOGIC_FRAMES__.state("session-...")
-__PXLOGIC_FRAMES__.health()
+__SIGPILOT_FRAMES__.sessions()
+__SIGPILOT_FRAMES__.state("session-...")
+__SIGPILOT_FRAMES__.health()
 ```
 
 ## Limits
@@ -73,7 +73,7 @@ so this drives real wheel-zoom and drag-pan input through the DevTools Protocol
 and reports what each frame did.
 
 It needs the probe in `src/lib/waveformDrawProbe.ts`, which installs
-`window.__PXLOGIC_DRAW__` in dev builds only.
+`window.__SIGPILOT_DRAW__` in dev builds only.
 
 ### Reading the output
 

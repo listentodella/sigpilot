@@ -25,7 +25,7 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 
 const MAX_LOG_LINES: usize = 500;
-const NODE_PROBE_MARKER: &str = "PXLOGIC_NODE_OK:";
+const NODE_PROBE_MARKER: &str = "SIGPILOT_NODE_OK:";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -217,7 +217,7 @@ fn legacy_settings_path() -> Option<PathBuf> {
     {
         std::env::var_os("HOME").map(|home| {
             PathBuf::from(home)
-                .join("Library/Application Support/pxlogic-logic2-bridge-client/settings.json")
+                .join("Library/Application Support/sigpilot-logic2-bridge-client/settings.json")
         })
     }
     #[cfg(not(target_os = "macos"))]
@@ -885,7 +885,7 @@ fn probe_logic_node(executable: &Path, timeout: Duration) -> Result<NodeVersions
     let script = concat!(
         "const v={node:process.versions.node,electron:process.versions.electron};",
         "require('node:net');require('node:child_process');",
-        "console.log('PXLOGIC_NODE_OK:'+JSON.stringify(v));"
+        "console.log('SIGPILOT_NODE_OK:'+JSON.stringify(v));"
     );
     let mut child = Command::new(executable)
         .args(["-e", script])

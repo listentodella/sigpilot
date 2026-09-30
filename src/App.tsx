@@ -473,7 +473,7 @@ interface ScreenshotNotification {
 
 const ANALYZER_FRAME_ROW_SEARCH_TEXT_CACHE = new WeakMap<DecodedFrame, Map<string, string>>();
 
-const DEFAULT_DEVICE_ID = "fake:pxlogic-demo";
+const DEFAULT_DEVICE_ID = "fake:sigpilot-demo";
 const DEFAULT_BUFFER_SIZE_MB = 1024;
 const DEFAULT_DEMO_BUFFER_SIZE_MB = 4096;
 const SCREENSHOT_CONTEXT_MENU_CLOSE_DELAY_MS = 300;
@@ -3762,7 +3762,7 @@ export default function App() {
       const path = await saveDialog({
         defaultPath: `${activeSession.name || "capture"}.pxl`,
         filters: [
-          { name: "PXLogic Project", extensions: ["pxl"] },
+          { name: "SigPilot Project", extensions: ["pxl"] },
           { name: "Sigrok Session", extensions: ["sr"] },
           { name: "Value Change Dump", extensions: ["vcd"] },
         ],
@@ -4937,7 +4937,7 @@ export default function App() {
         <header className="logic-windowbar">
           <div className="product-mark">
             <Activity size={15} />
-            <span>PXLogic</span>
+            <span>SigPilot</span>
           </div>
           <div className="window-status">
             <span>{activeMessage}</span>
@@ -8400,7 +8400,7 @@ function DeviceSettingsPanel({
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
           <span>Hardware I/O</span>
-          <small>PXLogic</small>
+          <small>SigPilot</small>
         </div>
         <label className="stack-field">
           <span>Ext Trigger Mode</span>
