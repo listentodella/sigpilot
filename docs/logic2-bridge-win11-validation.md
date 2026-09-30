@@ -1,5 +1,14 @@
 # Logic 2 Bridge: Windows 11 实机验证
 
+> **注意：本文描述的 bridge 代码已从本仓库迁出。**
+>
+> `tools/logic2-bridge/` 与 `.github/workflows/build-logic2-bridge.yml` 已删除
+> ——bridge 已独立成一个项目并单独上库。本文保留为**历史验证记录**，
+> 其中的 `tools/logic2-bridge/...` 路径与 `node tools/logic2-bridge/...` 命令
+> 在当前仓库中**均已不存在**，不要照抄执行。
+>
+> 如需查看迁出前的代码，从本仓库删除该目录之前的提交检出即可。
+
 本文用于在 Windows 11 上继续验证 PXLogic Logic 2 Bridge。目标是让独立
 native host 正确启动官方 GraphServer，再将 PXLogic 数据注入
 GraphServer 的 `OnDataBuffer` 回调。
