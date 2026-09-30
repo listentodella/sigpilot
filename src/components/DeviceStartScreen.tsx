@@ -1,6 +1,7 @@
-import { Download, RefreshCw, Usb } from "lucide-react";
-import logicDarkTheme from "../assets/saleae/logicDarkTheme.png";
+import { Download, RefreshCw } from "lucide-react";
+import devicePattern from "../assets/start-screen/device-pattern.png";
 import { DeviceInfo } from "../lib/api";
+import { UsbSpeedIcon, usbSpeedFromLinkSpeed, usbSpeedLabel } from "./UsbSpeedIcon";
 
 interface DeviceStartScreenProps {
   busy: boolean;
@@ -28,7 +29,7 @@ export function DeviceStartScreen({
   return (
     <div className="sessionPlaceholder">
       <div className="devicePrompts single">
-        <DevicePromptCard deviceName="Logic" imageSrc={logicDarkTheme}>
+        <DevicePromptCard imageSrc={devicePattern}>
           <DeviceList
             busy={busy}
             devices={physicalDevices}
@@ -72,15 +73,13 @@ export function DeviceStartScreen({
 
 interface DevicePromptCardProps {
   children: React.ReactNode;
-  deviceName: string;
   imageSrc: string;
 }
 
-function DevicePromptCard({ children, deviceName, imageSrc }: DevicePromptCardProps) {
+function DevicePromptCard({ children, imageSrc }: DevicePromptCardProps) {
   return (
-    <section className="devicePrompt connect">
+    <section className="devicePrompt">
       <img alt="" src={imageSrc} />
-      <div className="devicePromptTitle">Connect {deviceName}</div>
       <div className="devicePromptContent">{children}</div>
     </section>
   );
@@ -94,6 +93,22 @@ interface DeviceListProps {
   onRefreshDevices: () => void;
   onCreateSessionWithDevice: (deviceId: string) => void;
   onSelectDevice: (deviceId: string) => void;
+}
+
+/**
+ * Bus, address and serial number are how you tell two identical instruments
+ * apart, but they made every row unreadable when they were part of the label.
+ * Keep them reachable on hover instead.
+ */
+function deviceLocation(device: DeviceInfo): string {
+  const parts = [device.label];
+  if (device.bus != null && device.address != null) {
+    parts.push(`USB bus ${device.bus}, address ${device.address}`);
+  }
+  if (device.serial_number) {
+    parts.push(`S/N ${device.serial_number}`);
+  }
+  return parts.join(" · ");
 }
 
 function DeviceList({
@@ -121,6 +136,7 @@ function DeviceList({
     <div className="realDeviceList">
       {devices.map((device) => {
         const isSelected = device.id === selectedDevice;
+        const usbSpeed = usbSpeedFromLinkSpeed(device.usb_speed);
         return (
           <button
             className={`realDeviceOption ${isSelected ? "selected" : ""}`}
@@ -130,9 +146,10 @@ function DeviceList({
               onSelectDevice(device.id);
               onCreateSessionWithDevice(device.id);
             }}
+            title={deviceLocation(device)}
             type="button"
           >
-            <Usb size={14} />
+            <UsbSpeedIcon speed={usbSpeed} title={usbSpeedLabel(usbSpeed)} />
             <span>{device.label}</span>
             <small>{device.ready ? "Ready" : "Found"}</small>
           </button>

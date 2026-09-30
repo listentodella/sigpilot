@@ -904,58 +904,40 @@ button:disabled {
   flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: space-between;
-  position: relative;
+  /* The card is a fixed height while `.devicePromptContent` is `flex: none`, so a
+     long device list grows past the card. `clip` keeps that spill inside the
+     border instead of letting it paint over the "Load a Capture File" block. */
   overflow: clip;
   border: 1px solid var(--border-20);
   background: var(--background-10);
-  padding: 24px 24px 56px;
 }
 
+/* The start-page artwork is a bleeding device pattern. It gets its own band
+   above the controls instead of sitting behind them: the pattern draws
+   pure-white lines (luminance 255), brighter than the 74%-white body text, so
+   any overlap costs legibility however the content is positioned. */
 .devicePrompt img {
-  width: 934px;
-  height: 900px;
-  position: absolute;
-  left: 50%;
-  bottom: 50%;
-  margin-left: -172px;
-  margin-bottom: -199px;
+  display: block;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  object-fit: cover;
+  object-position: center;
   pointer-events: none;
   user-select: none;
 }
 
-.devicePromptTitle {
-  order: 1;
-  flex-grow: 1;
-  display: flex;
-  align-items: center;
-  position: relative;
-  z-index: 1;
-  color: var(--on-background-0);
-  font-size: 21px;
-  font-weight: 500;
-  line-height: 1;
-  text-align: center;
-}
-
-.devicePrompt.connect::before {
-  content: "";
-  order: 2;
-  flex-grow: 1;
-  height: 153px;
-}
-
 .devicePromptContent {
-  order: 3;
-  width: min(100%, 280px);
+  flex: none;
+  align-self: center;
+  box-sizing: border-box;
+  width: min(100%, 328px);
   min-height: 39px;
-  position: relative;
-  z-index: 1;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
+  padding: 20px 24px 24px;
 }
 
 .devicePromptEmpty {
@@ -1015,6 +997,17 @@ button:disabled {
   width: 100%;
 }
 
+/* Link generation colours. The superscript digit carries the same information,
+   so colour is a secondary cue and the icon still reads for anyone who cannot
+   distinguish it. */
+.usbSpeedIconUsb2 {
+  color: var(--positive);
+}
+
+.usbSpeedIconUsb3 {
+  color: var(--lightBlue);
+}
+
 .realDeviceList {
   display: flex;
   flex-direction: column;
@@ -1024,7 +1017,7 @@ button:disabled {
 .realDeviceOption {
   min-height: 34px;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border-20);
