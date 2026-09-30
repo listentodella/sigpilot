@@ -191,6 +191,8 @@ fn main() {
             &id,
             &settings,
             &std::sync::atomic::AtomicBool::new(false),
+            &mut |_metadata: &sigpilot_core::models::CaptureMetadata| {},
+            &mut |_chunk: &[u8]| {},
             &mut diagnostics,
             &mut progress,
         ) {

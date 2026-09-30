@@ -83,7 +83,17 @@ fn run_capture(id: &str, settings: &CaptureSettings) -> Option<CaptureData> {
         })
     };
 
-    let result = kingst_la2016::capture(id, settings, &cancel, &mut diagnostics, &mut progress);
+    let mut started = |_metadata: &sigpilot_core::models::CaptureMetadata| {};
+    let mut on_samples = |_chunk: &[u8]| {};
+    let result = kingst_la2016::capture(
+        id,
+        settings,
+        &cancel,
+        &mut started,
+        &mut on_samples,
+        &mut diagnostics,
+        &mut progress,
+    );
     let _ = timer.join();
     match result {
         Ok(capture) => Some(capture),

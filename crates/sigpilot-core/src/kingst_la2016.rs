@@ -934,6 +934,7 @@ pub fn read_live_pin_state(device_id: &str) -> Result<u16> {
 fn capture_to_memory(
     handle: &rusb::DeviceHandle<rusb::Context>,
     layout: &TransferLayout,
+    on_samples: &mut dyn FnMut(&[u8]),
     progress: &mut dyn FnMut(CaptureProgress),
     diagnostics: &mut dyn FnMut(DiagnosticEvent),
 ) -> Result<(Vec<u8>, u64)> {
@@ -1021,6 +1022,11 @@ fn capture_to_memory(
         ),
     });
 
+    // Capture-to-memory is atomic from the device's point of view, so the
+    // samples only exist once the download is done. Hand them over in one go;
+    // there is nothing incremental to report.
+    on_samples(&samples);
+
     Ok((samples, samples_read))
 }
 
@@ -1041,6 +1047,7 @@ fn capture_streaming(
     enabled_channels: &[u8],
     settings: &CaptureSettings,
     cancel: &AtomicBool,
+    on_samples: &mut dyn FnMut(&[u8]),
     progress: &mut dyn FnMut(CaptureProgress),
     diagnostics: &mut dyn FnMut(DiagnosticEvent),
 ) -> Result<(Vec<u8>, u64)> {
@@ -1116,8 +1123,12 @@ fn capture_streaming(
                     let take = (64 - raw_preview.len()).min(got);
                     raw_preview.extend_from_slice(&buffer[..take]);
                 }
+                // Publish only what this chunk added, so the graph grows live
+                // instead of the whole capture landing at the end.
+                let before = samples.len();
                 samples_read +=
                     expand_stream_chunk(&buffer[..got], &stream, &mut parser, &mut samples)?;
+                on_samples(&samples[before..]);
                 progress(CaptureProgress {
                     bytes_read: samples_read * unit_size,
                     // A stream has no planned length; the caller decides when to
@@ -1161,6 +1172,39 @@ fn capture_streaming(
     Ok((samples, samples_read))
 }
 
+/// Build the capture metadata.
+///
+/// Used twice: once with a zero count to announce the capture before any data
+/// exists, and once with the achieved count for the result.
+fn capture_metadata(
+    settings: &CaptureSettings,
+    effective_rate: u64,
+    channel_count: u8,
+    enabled_channels: &[u8],
+    unitsize: u8,
+    sample_count: u64,
+) -> CaptureMetadata {
+    CaptureMetadata {
+        version: 1,
+        // The app treats `source_device` as the device *id*, not a label: after a
+        // capture it feeds this value back in as the session's device and passes
+        // it to the next command. Every other driver stores the device id here,
+        // so a friendly name makes the session stop resolving and every later
+        // capture fails.
+        source_device: settings.device_id.clone(),
+        sample_rate_hz: effective_rate,
+        channel_count,
+        enabled_channels: enabled_channels.to_vec(),
+        unitsize,
+        sample_count,
+        captured_at: chrono::Utc::now(),
+        labels: (0..channel_count)
+            .map(|channel| format!("D{channel}"))
+            .collect(),
+        trigger: None,
+    }
+}
+
 /// Capture samples and return them in SigPilot's packed format.
 ///
 /// Two acquisition modes, matching [`CaptureMode`]:
@@ -1178,6 +1222,8 @@ pub fn capture(
     device_id: &str,
     settings: &CaptureSettings,
     cancel: &AtomicBool,
+    started: &mut dyn FnMut(&CaptureMetadata),
+    on_samples: &mut dyn FnMut(&[u8]),
     diagnostics: &mut dyn FnMut(DiagnosticEvent),
     progress: &mut dyn FnMut(CaptureProgress),
 ) -> Result<CaptureData> {
@@ -1232,9 +1278,22 @@ pub fn capture(
         configure_sampling(&handle, model, settings.sample_rate_hz, sample_count)?;
     ctrl_out(&handle, CMD_BULK_RESET, 0x00, &[])?;
 
+    // Announce the capture before any data exists, exactly as the other
+    // backends do. The graph session has to be open before samples can be
+    // appended, and appending as they arrive is what makes the waveform grow
+    // live instead of appearing all at once when the capture ends.
+    started(&capture_metadata(
+        settings,
+        effective_rate,
+        channel_count,
+        &enabled_channels,
+        layout.unit_size as u8,
+        0,
+    ));
+
     let (mut samples, mut samples_read) = match settings.mode {
         crate::models::CaptureMode::Buffer => {
-            capture_to_memory(&handle, &layout, progress, diagnostics)?
+            capture_to_memory(&handle, &layout, on_samples, progress, diagnostics)?
         }
         crate::models::CaptureMode::Stream => capture_streaming(
             &handle,
@@ -1242,6 +1301,7 @@ pub fn capture(
             &enabled_channels,
             settings,
             cancel,
+            on_samples,
             progress,
             diagnostics,
         )?,
@@ -1258,27 +1318,16 @@ pub fn capture(
     }
 
     Ok(CaptureData {
-        metadata: CaptureMetadata {
-            version: 1,
-            // The app treats `source_device` as the device *id*, not a label:
-            // after a capture it feeds this value back in as the session's
-            // device and passes it to the next command. Every other driver
-            // stores the device id here, so a friendly name makes the session
-            // stop resolving and every later capture fails.
-            source_device: settings.device_id.clone(),
-            sample_rate_hz: effective_rate,
+        // The achieved count can fall short of the request when the device runs
+        // out of sample memory.
+        metadata: capture_metadata(
+            settings,
+            effective_rate,
             channel_count,
-            enabled_channels,
-            unitsize: layout.unit_size as u8,
-            // The achieved count, which can fall short of the request when the
-            // device runs out of sample memory.
-            sample_count: samples_read,
-            captured_at: chrono::Utc::now(),
-            labels: (0..channel_count)
-                .map(|channel| format!("D{channel}"))
-                .collect(),
-            trigger: None,
-        },
+            &enabled_channels,
+            layout.unit_size as u8,
+            samples_read,
+        ),
         samples,
     })
 }

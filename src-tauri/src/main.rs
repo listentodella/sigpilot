@@ -621,17 +621,19 @@ async fn start_capture(
             // that is what tells the graph session a capture began.
             #[cfg(feature = "rusb-transport")]
             {
+                // `started` opens the graph session and `samples` feeds it, so
+                // the waveform grows while the capture runs instead of landing
+                // in one piece at the end. `capture` calls `started` itself,
+                // before any data exists.
                 sigpilot_core::kingst_la2016::capture(
                     &settings.device_id,
                     &settings,
                     &cancel,
+                    &mut started,
+                    &mut samples,
                     &mut diagnostics,
                     &mut progress,
                 )
-                .map(|capture| {
-                    started(&capture.metadata);
-                    capture
-                })
             }
             #[cfg(not(feature = "rusb-transport"))]
             {

@@ -81,6 +81,11 @@ fn main() {
             &device_id,
             &settings,
             &std::sync::atomic::AtomicBool::new(false),
+            &mut |metadata: &sigpilot_core::models::CaptureMetadata| {
+                // The client opens the graph session here, before any samples.
+                println!("  begin_capture: {} channels", metadata.channel_count);
+            },
+            &mut |_chunk: &[u8]| {},
             &mut diagnostics,
             &mut progress,
         ) {
