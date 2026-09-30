@@ -21,7 +21,7 @@ deserialize Logic 2 capture data without expanding the complete sample stream.
 Convert a `.sal` capture to a sparse transition manifest:
 
 ```sh
-target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar \
+target/native/saleae-graph-sidecar/sigpilot-saleae-graph-sidecar \
   --runtime-root "$SIGPILOT_SALEAE_RUNTIME_ROOT" \
   --convert-sal input.sal output-directory
 ```
@@ -33,7 +33,7 @@ after parsing the transition indexes.
 Create a Logic 2 `.sal` from a PXLogic transition manifest:
 
 ```sh
-target/native/saleae-graph-sidecar/pxlogic-saleae-graph-sidecar \
+target/native/saleae-graph-sidecar/sigpilot-saleae-graph-sidecar \
   --runtime-root "$SIGPILOT_SALEAE_RUNTIME_ROOT" \
   --create-sal input-manifest.json output.sal
 ```

@@ -27,5 +27,5 @@ mkdir -p "$BUILD_DIR"
 xcrun clang++ -std=c++17 -O2 -g \
   -I"$JSON_INCLUDE_DIR" \
   "$SOURCE_DIR/src/main.cpp" \
-  -o "$BUILD_DIR/pxlogic-saleae-graph-sidecar"
-printf '%s\n' "$BUILD_DIR/pxlogic-saleae-graph-sidecar"
+  -o "$BUILD_DIR/sigpilot-saleae-graph-sidecar"
+printf '%s\n' "$BUILD_DIR/sigpilot-saleae-graph-sidecar"

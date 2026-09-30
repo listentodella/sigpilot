@@ -1275,7 +1275,7 @@ fn demo_uart_level(
     sample_rate_hz: u64,
     settings: &UartDecodeSettings,
 ) -> Option<bool> {
-    const MESSAGE: &[u8] = b"PXLogic demo\n";
+    const MESSAGE: &[u8] = b"SigPilot demo\n";
     const LEAD_IDLE_BITS: u64 = 4;
     const TRAIL_IDLE_BITS: u64 = 8;
 

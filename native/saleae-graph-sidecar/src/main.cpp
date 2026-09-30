@@ -137,7 +137,7 @@ class GraphRuntime
         // The original direct graph-interface addon uses a null port pointer.
         // A live int pointer selects the separate WebSocket server mode, whose
         // event loop does not consume DriveRequest calls from this process.
-        const fs::path log_file = fs::temp_directory_path() / "pxlogic-saleae-graph-sidecar.log";
+        const fs::path log_file = fs::temp_directory_path() / "sigpilot-saleae-graph-sidecar.log";
         set_log_file_name_(log_file.c_str());
         server_ = create_(nullptr, 100, false);
         if (server_ == nullptr) {

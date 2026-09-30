@@ -147,7 +147,7 @@ fn trace_decoder_timing(backend: &str, stage: &str, started: Instant, detail: &s
     let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
     crate::performance::record_performance_event("decoder", Some(backend), stage, elapsed, detail);
     tracing::debug!(
-        target: "pxlogic::decoder_performance",
+        target: "sigpilot::decoder_performance",
         backend,
         stage,
         elapsed_ms,

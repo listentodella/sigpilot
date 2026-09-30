@@ -716,7 +716,7 @@ mod tests {
             .iter()
             .map(|frame| frame.value as u8 as char)
             .collect();
-        assert!(text.starts_with("PXLogic"));
+        assert!(text.starts_with("SigPilot"));
     }
 
     #[test]
