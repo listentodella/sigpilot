@@ -71,6 +71,12 @@ struct BinaryGraphFrameResponse<'a> {
     frame_id: u64,
     revision: u64,
     sample_count: u64,
+    /// The frontend's frame loop discards a frame that has no viewport, because
+    /// drawing against `undefined` would take the canvas tree down with it. The
+    /// binary transport has to carry both viewports exactly as the JSON
+    /// response does; leaving them out makes every frame unusable.
+    view: &'a sigpilot_graph::SessionView,
+    data_view: &'a sigpilot_graph::SessionView,
     tile: BinaryWaveformTile<'a>,
     analyzers: &'a [sigpilot_graph::AnalyzerRenderResult],
 }
@@ -115,6 +121,8 @@ fn encode_graph_frame_bytes(mut frame: GraphFrameResponse) -> CommandResult<Vec<
         frame_id: frame.frame_id,
         revision: frame.revision,
         sample_count: frame.sample_count,
+        view: &frame.view,
+        data_view: &frame.data_view,
         tile: BinaryWaveformTile {
             start_sample: frame.tile.start_sample,
             sample_count: frame.tile.sample_count,
@@ -1751,6 +1759,47 @@ mod graph_frame_ipc_tests {
             packed.len()
         );
         assert_eq!(&encoded[binary_start..], packed);
+    }
+
+    #[test]
+    fn graph_frame_binary_transport_carries_both_viewports() {
+        // Regression: the binary transport shipped `tile` and `analyzers` but
+        // dropped `view` and `data_view`. The frontend's frame loop rejects a
+        // response without them — it cannot draw against an undefined viewport
+        // — so every frame was discarded with "frame response is missing its
+        // viewport" and no waveform ever appeared.
+        let frame = GraphFrameResponse {
+            frame_id: 1,
+            revision: 1,
+            sample_count: 128,
+            view: SessionView::new(32.0, 64.0),
+            data_view: SessionView::new(16.0, 64.0),
+            tile: WaveformTile {
+                start_sample: 0,
+                sample_count: 128,
+                pixels: 4,
+                samples_per_pixel: 32.0,
+                channels: Vec::new(),
+            },
+            analyzers: Vec::new(),
+        };
+
+        let encoded = encode_graph_frame_bytes(frame).unwrap();
+        let header_length = u64::from_le_bytes(encoded[5..13].try_into().unwrap()) as usize;
+        let header: serde_json::Value =
+            serde_json::from_slice(&encoded[13..13 + header_length]).unwrap();
+
+        assert!(
+            header.get("view").is_some_and(|view| !view.is_null()),
+            "binary frame response must carry the authoritative viewport"
+        );
+        assert!(
+            header.get("data_view").is_some_and(|view| !view.is_null()),
+            "binary frame response must carry the data viewport"
+        );
+        // The two are distinct on purpose: the frame loop stretches the gap
+        // between them while a gesture is in flight.
+        assert_ne!(header["view"], header["data_view"]);
     }
 }
 
