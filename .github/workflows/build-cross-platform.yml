@@ -105,7 +105,7 @@ jobs:
       }}
     runs-on: [self-hosted, Windows, X64]
     env:
-      SIGPILOT_SIGROK_BUILD_DIR: C:/pxlogic-native-cache/sigrok-ucrt64
+      SIGPILOT_SIGROK_BUILD_DIR: C:/sigpilot-native-cache/sigrok-ucrt64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -208,11 +208,11 @@ jobs:
           SIGPILOT_REUSE_SIGROK_BUILD: "1"
         run: |
           scripts/prepare-tauri-resources.sh
-          sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar.exe"
+          sidecar="resources/native/sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar.exe"
           decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
           python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
           python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
-          saleae_sidecar="resources/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar.exe"
+          saleae_sidecar="resources/native/saleae-analyzer-sidecar/sigpilot-saleae-analyzer-sidecar.exe"
           saleae_runtime="resources/native/saleae-analyzer-sidecar/runtime"
           test -f resources/bitstreams/hspi_ddr.bin
           test -f resources/bitstreams/hspi_ddr_RST.bin
@@ -242,24 +242,24 @@ jobs:
         shell: pwsh
         run: |
           $releaseRoot = "target/x86_64-pc-windows-msvc/release"
-          $executable = Join-Path $releaseRoot "pxlogic-desktop.exe"
+          $executable = Join-Path $releaseRoot "sigpilot-desktop.exe"
           $portableRoot = Join-Path $releaseRoot "portable"
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
             throw "Tauri did not produce $executable"
           }
           Remove-Item -LiteralPath $portableRoot -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $portableRoot | Out-Null
-          Copy-Item -LiteralPath $executable -Destination (Join-Path $portableRoot "PXLogic Studio.exe")
+          Copy-Item -LiteralPath $executable -Destination (Join-Path $portableRoot "SigPilot.exe")
           Copy-Item -LiteralPath "resources" -Destination $portableRoot -Recurse
 
           $requiredPaths = @(
             "resources/bitstreams/hspi_ddr.bin",
             "resources/bitstreams/hspi_ddr_RST.bin",
-            "resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar.exe",
+            "resources/native/sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar.exe",
             "resources/native/sigrok-analyzer-sidecar/decoders/c_decoders",
             "resources/native/sigrok-analyzer-sidecar/decoders/python_decoders",
             "resources/native/sigrok-analyzer-sidecar/python-runtime",
-            "resources/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar.exe",
+            "resources/native/saleae-analyzer-sidecar/sigpilot-saleae-analyzer-sidecar.exe",
             "resources/native/saleae-analyzer-sidecar/runtime"
           )
           foreach ($relativePath in $requiredPaths) {
@@ -275,15 +275,15 @@ jobs:
           sigrok_root="$portable_root/resources/native/sigrok-analyzer-sidecar"
           PYTHONHOME="$sigrok_root/python-runtime" \
             native/sigrok-analyzer-sidecar/smoke-packaged.sh \
-              "$sigrok_root/pxlogic-sigrok-sidecar.exe" \
+              "$sigrok_root/sigpilot-sigrok-sidecar.exe" \
               "$sigrok_root/decoders/c_decoders" \
               "$sigrok_root/decoders/python_decoders"
           saleae_root="$portable_root/resources/native/saleae-analyzer-sidecar"
-          "$saleae_root/pxlogic-saleae-analyzer-sidecar.exe" \
+          "$saleae_root/sigpilot-saleae-analyzer-sidecar.exe" \
             --runtime-root "$saleae_root/runtime" --probe \
             | jq -e '.available == true and (.protocols | index("SPI") != null)'
           jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
-            | "$saleae_root/pxlogic-saleae-analyzer-sidecar.exe" \
+            | "$saleae_root/sigpilot-saleae-analyzer-sidecar.exe" \
                 --runtime-root "$saleae_root/runtime" --decode \
             | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
 
@@ -293,7 +293,7 @@ jobs:
           $releaseRoot = "target/x86_64-pc-windows-msvc/release"
           $portableRoot = Join-Path $releaseRoot "portable"
           $bundleRoot = Join-Path $releaseRoot "bundle"
-          $archive = Join-Path $bundleRoot "pxlogic-studio-windows-x64-portable.zip"
+          $archive = Join-Path $bundleRoot "sigpilot-windows-x64-portable.zip"
           New-Item -ItemType Directory -Path $bundleRoot -Force | Out-Null
           Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
           Compress-Archive -Path "$portableRoot/*" -DestinationPath $archive -CompressionLevel Optimal
@@ -301,8 +301,8 @@ jobs:
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: pxlogic-windows-x64-portable
-          path: target/x86_64-pc-windows-msvc/release/bundle/pxlogic-studio-windows-x64-portable.zip
+          name: sigpilot-windows-x64-portable
+          path: target/x86_64-pc-windows-msvc/release/bundle/sigpilot-windows-x64-portable.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -317,7 +317,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     env:
       SIGPILOT_COPY_NATIVE_DEPS: "1"
-      SIGPILOT_SIGROK_BUILD_DIR: /tmp/pxlogic-native-cache/sigrok-linux-x64
+      SIGPILOT_SIGROK_BUILD_DIR: /tmp/sigpilot-native-cache/sigrok-linux-x64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -396,11 +396,11 @@ jobs:
           SIGPILOT_REUSE_SIGROK_BUILD: "1"
         run: |
           scripts/prepare-tauri-resources.sh
-          sidecar="resources/native/sigrok-analyzer-sidecar/pxlogic-sigrok-sidecar"
+          sidecar="resources/native/sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar"
           decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
           python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
           python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
-          saleae_sidecar="resources/native/saleae-analyzer-sidecar/pxlogic-saleae-analyzer-sidecar"
+          saleae_sidecar="resources/native/saleae-analyzer-sidecar/sigpilot-saleae-analyzer-sidecar"
           saleae_runtime="resources/native/saleae-analyzer-sidecar/runtime"
           test -f resources/bitstreams/hspi_ddr.bin
           test -f resources/bitstreams/hspi_ddr_RST.bin
@@ -430,14 +430,14 @@ jobs:
           deb="$(find "$bundle_root/deb" -maxdepth 1 -name '*.deb' -print -quit)"
           test -n "$appimage"
           test -n "$deb"
-          cp "$appimage" "$bundle_root/pxlogic-studio-linux-x64.AppImage"
-          cp "$deb" "$bundle_root/pxlogic-studio-linux-x64.deb"
-          chmod 755 "$bundle_root/pxlogic-studio-linux-x64.AppImage"
+          cp "$appimage" "$bundle_root/sigpilot-linux-x64.AppImage"
+          cp "$deb" "$bundle_root/sigpilot-linux-x64.deb"
+          chmod 755 "$bundle_root/sigpilot-linux-x64.AppImage"
 
           extract_dir="$(mktemp -d)"
           cd "$extract_dir"
-          "$GITHUB_WORKSPACE/$bundle_root/pxlogic-studio-linux-x64.AppImage" --appimage-extract >/dev/null
-          packaged_sidecar="$(find squashfs-root -type f -name pxlogic-sigrok-sidecar -print -quit)"
+          "$GITHUB_WORKSPACE/$bundle_root/sigpilot-linux-x64.AppImage" --appimage-extract >/dev/null
+          packaged_sidecar="$(find squashfs-root -type f -name sigpilot-sigrok-sidecar -print -quit)"
           test -n "$packaged_sidecar"
           packaged_root="$(dirname "$packaged_sidecar")"
           test -f "$(find squashfs-root -type f -name hspi_ddr.bin -print -quit)"
@@ -446,7 +446,7 @@ jobs:
             "$packaged_sidecar" \
             "$packaged_root/decoders/c_decoders" \
             "$packaged_root/decoders/python_decoders"
-          packaged_saleae="$(find squashfs-root -type f -name pxlogic-saleae-analyzer-sidecar -print -quit)"
+          packaged_saleae="$(find squashfs-root -type f -name sigpilot-saleae-analyzer-sidecar -print -quit)"
           test -n "$packaged_saleae"
           packaged_saleae_runtime="$(dirname "$packaged_saleae")/runtime"
           "$packaged_saleae" --runtime-root "$packaged_saleae_runtime" --probe \
@@ -458,10 +458,10 @@ jobs:
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: pxlogic-linux-x64
+          name: sigpilot-linux-x64
           path: |
-            target/x86_64-unknown-linux-gnu/release/bundle/pxlogic-studio-linux-x64.AppImage
-            target/x86_64-unknown-linux-gnu/release/bundle/pxlogic-studio-linux-x64.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/sigpilot-linux-x64.AppImage
+            target/x86_64-unknown-linux-gnu/release/bundle/sigpilot-linux-x64.deb
           if-no-files-found: error
           retention-days: 30
 
@@ -532,7 +532,7 @@ jobs:
           app="$(find "$bundle_root/macos" -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$app"
           sidecar="$(find "$app/Contents/Resources" -type f \
-            -name pxlogic-saleae-analyzer-sidecar -print -quit)"
+            -name sigpilot-saleae-analyzer-sidecar -print -quit)"
           test -n "$sidecar"
           runtime_root="$(dirname "$sidecar")/runtime"
           test -f "$runtime_root/libsaleae_compat.dylib"
@@ -550,13 +550,13 @@ jobs:
           app="$(find "$bundle_root/macos" -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$app"
           ditto -c -k --sequesterRsrc --keepParent \
-            "$app" "$bundle_root/pxlogic-studio-macos-${{ matrix.arch }}.app.zip"
+            "$app" "$bundle_root/sigpilot-macos-${{ matrix.arch }}.app.zip"
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
         with:
-          name: pxlogic-macos-${{ matrix.arch }}
-          path: target/${{ matrix.target }}/release/bundle/pxlogic-studio-macos-${{ matrix.arch }}.app.zip
+          name: sigpilot-macos-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/bundle/sigpilot-macos-${{ matrix.arch }}.app.zip
           if-no-files-found: error
           retention-days: 30
 
