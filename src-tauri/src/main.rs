@@ -565,6 +565,15 @@ async fn start_capture(
             }
             last_update = Instant::now();
             if let Some(metadata) = metadata {
+                // The viewport is clamped to the count the client is told, so a
+                // waveform that stops growing on screen while the capture
+                // continues means this number is wrong. Record it rather than
+                // guessing which layer lost it.
+                tracing::debug!(
+                    sample_count = metadata.sample_count,
+                    graph_sample_count = samples_graph.sample_count(),
+                    "capture_updated"
+                );
                 let summary = CaptureSummary {
                     bytes: usize::try_from(metadata.sample_count)
                         .unwrap_or(usize::MAX)
