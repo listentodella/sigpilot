@@ -2306,9 +2306,19 @@ export default function App() {
             activeSession.viewportMaxSamples ?? undefined,
           ).samples;
       if (nextSamples === Math.round(activeSession.viewportSamples)) return;
-      updateViewport(activeSession.id, anchor - nextSamples / 2, nextSamples);
+      // While a capture is backend-driven the frame loop owns the viewport, and
+      // the backend's `view` is authoritative. Writing the session store
+      // directly is overwritten by the next frame, which is what made the zoom
+      // buttons appear to do nothing or to fight the display. Dispatch the
+      // intent, exactly as the keyboard path does.
+      stepViewport(
+        activeSession.id,
+        { anchor_ratio: 0.5, duration_ms: ZOOM_ANIMATION_DURATION_MS, factor, kind: "zoom" },
+        anchor - nextSamples / 2,
+        nextSamples,
+      );
     },
-    [activeSession, updateViewport],
+    [activeSession, stepViewport],
   );
 
   const fitViewport = useCallback(() => {

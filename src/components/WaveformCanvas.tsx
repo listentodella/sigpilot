@@ -17,7 +17,7 @@ import {
   waveformTileRequiresDirectDraw,
 } from "../lib/waveformTileCoverage";
 import { clearSessionViewport, writeSessionViewport } from "../lib/viewportStore";
-import { dispatchSessionViewIntent } from "../lib/frameStore";
+import { dispatchSessionViewIntent, hasSessionFrameLoop } from "../lib/frameStore";
 import { useSessionFrameState } from "../lib/useFrameState";
 import { recordWaveformDraw } from "../lib/waveformDrawProbe";
 import {
@@ -786,7 +786,11 @@ function handleWheel(event: WheelEvent) {
     if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY) * 1.2) {
       const deltaPixels = normalizeWheelDelta(event.deltaX || event.deltaY, event.deltaMode);
       const deltaSamples = (deltaPixels / Math.max(1, rect.width)) * current.samples;
-      if (backendDriven) {
+      // The keyboard's `stepViewport` decides by whether a frame loop exists,
+      // not by whether it has produced a ready frame yet, and the two must agree
+      // — otherwise a gesture right after capture starts takes a different path
+      // from the keyboard for the same gesture.
+      if (hasSessionFrameLoop(sessionIdRef.current)) {
         dispatchSessionViewIntent(sessionIdRef.current, {
           delta_samples: deltaSamples,
           kind: "pan_samples",
@@ -801,7 +805,7 @@ function handleWheel(event: WheelEvent) {
     const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
     const factor = wheelZoomFactor(event, delta);
     logWheelDiagnostics(event, factor, backendDriven);
-    if (backendDriven) {
+    if (hasSessionFrameLoop(sessionIdRef.current)) {
       // The backend owns the anchor arithmetic and the zoom limits, so the wheel
       // handler no longer pre-computes a clamped sample count it would have to
       // throw away when the answer came back.
