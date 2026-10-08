@@ -661,10 +661,6 @@ const BULK_TIMEOUT: Duration = Duration::from_millis(500);
 /// How long a stream may produce nothing before it is treated as stalled.
 /// Empty transfers are normal; a gap this long is not.
 const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(10);
-/// Streaming bandwidth the USB link can actually sustain, in Mbps. Above this
-/// the device throttles and drops samples. Matches the reference's warning
-/// threshold.
-const STREAM_MBPS_MAX: u64 = 200;
 
 /// Byte-level layout of one transfer in device memory.
 ///
@@ -1144,9 +1140,11 @@ fn capture_streaming(
     // 200 Mbps. Exceeding the budget does not fail: the device throttles and
     // samples are lost, so the capture just looks slow and short. Say so rather
     // than letting the user conclude the driver is broken.
+    // Measured against the same budget the advertised rates come from, so a
+    // configuration the UI offers is not warned about as if it were a mistake.
     let megabits = settings.sample_rate_hz.saturating_mul(stream.channel_masks.len() as u64)
         / 1_000_000;
-    if megabits > STREAM_MBPS_MAX {
+    if megabits > STREAM_BITS_PER_SECOND_MAX / 1_000_000 {
         // Through the diagnostic sink rather than `tracing`, because this has to
         // reach the UI and the command-line tools, not just the log file.
         diagnostics(DiagnosticEvent {
@@ -1638,6 +1636,61 @@ fn expand_stream_chunk(
     Ok(emitted)
 }
 
+/// Sample rates the hardware offers, in the 1/2/5 steps the reference driver
+/// uses.
+///
+/// The device divides its base clock, so not every rate is reachable, and this
+/// series is what both the reference driver and the vendor client expose. The
+/// old list here was the base clock divided by ten each time — 200, 20 and 2 MHz
+/// — which silently omitted 100, 50, 10, 5 and 1 MHz that the hardware supports
+/// and the vendor client offers.
+fn model_sample_rates(max_hz: u64) -> Vec<u64> {
+    const SERIES_MHZ: [u64; 9] = [500, 200, 100, 50, 20, 10, 5, 2, 1];
+    SERIES_MHZ
+        .iter()
+        .map(|mhz| mhz * 1_000_000)
+        .filter(|rate| *rate <= max_hz)
+        .collect()
+}
+
+/// What USB 2.0 can carry while streaming, in bits per second.
+///
+/// Taken from the vendor client's own brackets, which are all about this figure:
+/// three channels at 100 MHz, six at 50 and sixteen at 20 come to 300, 300 and
+/// 320 Mbps. Streaming does not compress, so the limit is the channel-and-rate
+/// product; the reference driver says as much and only warns, while the vendor
+/// client caps the rate instead. Capping is what a user of that client expects,
+/// and a capture that silently drops samples is worse than one the UI will not
+/// let you ask for.
+const STREAM_BITS_PER_SECOND_MAX: u64 = 320_000_000;
+
+/// Channel counts that get their own streaming ceiling.
+///
+/// The vendor client brackets at 3, 6 and all channels; those are the boundaries
+/// where the rate it offers steps down.
+fn stream_channel_brackets(device_channels: u8) -> Vec<u8> {
+    let mut brackets = vec![3u8, 6, device_channels];
+    brackets.retain(|channels| *channels <= device_channels);
+    brackets.sort_unstable();
+    brackets.dedup();
+    brackets
+}
+
+/// Rates a stream may be run at with `channels` channels enabled.
+///
+/// The budget is a limit on the channel-and-rate product, not a rate, so the
+/// answer is the fastest rate in the series that stays under it. Advertising the
+/// raw quotient would put 106 MHz in the channel list, which is not a rate the
+/// hardware has.
+fn stream_rates(model_max_hz: u64, channels: u8) -> Vec<u64> {
+    let budget = STREAM_BITS_PER_SECOND_MAX / u64::from(channels.max(1));
+    let ceiling = model_max_hz.min(budget);
+    model_sample_rates(model_max_hz)
+        .into_iter()
+        .filter(|rate| *rate <= ceiling)
+        .collect()
+}
+
 /// Samples for a duration, matching how the rest of the app derives limits.
 fn sample_count_from_duration(sample_rate_hz: u64, duration_ms: u64) -> u64 {
     if duration_ms == 0 {
@@ -1941,12 +1994,7 @@ impl DeviceDriver for KingstLa2016Driver {
         let identity = read_identity(&handle)?;
         let model = identity.model();
 
-        let mut rates = Vec::new();
-        let mut rate = model.samplerate;
-        while rate >= 1_000_000 {
-            rates.push(rate);
-            rate /= 10;
-        }
+        let rates = model_sample_rates(model.samplerate);
 
         let depth_samples = (model.memory_bits as u64)
             .saturating_mul(1024 * 1024 * 1024)
@@ -1965,17 +2013,18 @@ impl DeviceDriver for KingstLa2016Driver {
             default_sample_rate_hz: rates.first().copied().unwrap_or(model.samplerate),
             sample_rates: rates.clone(),
             threshold_volts: THRESHOLD_VOLTS.to_vec(),
-            channel_modes: vec![
-                HardwareChannelModeInfo {
+            channel_modes: {
+                let min_rate = rates.last().copied().unwrap_or(model.samplerate);
+                // Capture-to-memory is bounded by the device's SDRAM and not by
+                // the link, so it offers the whole rate table at every channel
+                // count — which is what the vendor client does too.
+                let mut modes = vec![HardwareChannelModeInfo {
                     id: format!("KINGST_BUFFER{}", model.channels),
-                    // Capture-to-memory: the device fills its own SDRAM and the
-                    // host downloads it afterwards. Deep at high rates, and
-                    // bounded by that SDRAM.
                     stream: false,
                     channels: model.channels,
                     default_sample_rate_hz: model.samplerate,
                     default_sample_limit: depth_samples,
-                    min_sample_rate_hz: rates.last().copied().unwrap_or(model.samplerate),
+                    min_sample_rate_hz: min_rate,
                     max_sample_rate_hz: model.samplerate,
                     sample_rates: rates.clone(),
                     description: format!(
@@ -1983,36 +2032,36 @@ impl DeviceDriver for KingstLa2016Driver {
                         model.channels,
                         model.samplerate / 1_000_000
                     ),
-                },
-                HardwareChannelModeInfo {
-                    id: format!("KINGST_STREAM{}", model.channels),
-                    // Streaming: samples go straight to the host, so the depth is
-                    // the client's memory budget rather than the device's, and the
-                    // bound is USB 2.0 rather than the SDRAM. `capture_streaming`
-                    // warns when the requested rate needs more than the link
-                    // carries.
-                    //
-                    // This entry used to be missing, and that was not cosmetic: the
-                    // client chooses a channel mode by matching this flag against
-                    // the capture mode it is about to run, and the UI's "Looping"
-                    // mode is `CaptureMode::Stream`. With no streaming entry the
-                    // match came back empty, so the channel-count and sample-rate
-                    // options fell back to generic defaults instead of the
-                    // device's own.
-                    stream: true,
-                    channels: model.channels,
-                    default_sample_rate_hz: model.samplerate,
-                    default_sample_limit: 0,
-                    min_sample_rate_hz: rates.last().copied().unwrap_or(model.samplerate),
-                    max_sample_rate_hz: model.samplerate,
-                    sample_rates: rates,
-                    description: format!(
-                        "Use {} Channels (Max {}MHz, streamed)",
-                        model.channels,
-                        model.samplerate / 1_000_000
-                    ),
-                },
-            ],
+                }];
+                // Streaming is bounded by what the link carries, so it gets one
+                // entry per bracket and the client's `channels >= count` filter
+                // then picks the right ceiling for however many channels are
+                // enabled. The entries used to be a single one, which is not
+                // merely coarser: the client selects a channel mode by matching
+                // `stream` against the capture mode it is about to run, and the
+                // UI's "Looping" mode is `CaptureMode::Stream`, so with no
+                // streaming entry at all the rate and channel options fell back
+                // to generic defaults instead of the device's own.
+                for channels in stream_channel_brackets(model.channels) {
+                    let bracket_rates = stream_rates(model.samplerate, channels);
+                    let fastest = bracket_rates.first().copied().unwrap_or(model.samplerate);
+                    modes.push(HardwareChannelModeInfo {
+                        id: format!("KINGST_STREAM{channels}"),
+                        stream: true,
+                        channels,
+                        default_sample_rate_hz: fastest,
+                        default_sample_limit: 0,
+                        min_sample_rate_hz: min_rate,
+                        max_sample_rate_hz: fastest,
+                        sample_rates: bracket_rates,
+                        description: format!(
+                            "Use {channels} Channels (Max {}MHz, streamed)",
+                            fastest / 1_000_000
+                        ),
+                    });
+                }
+                modes
+            },
         })
     }
 
@@ -2202,6 +2251,58 @@ mod tests {
         }
 
         assert_eq!(blocks.into_vec(), expected);
+    }
+
+    #[test]
+    fn offers_the_rates_the_hardware_actually_has() {
+        // The vendor client and the reference driver both expose the 1/2/5
+        // series. This used to be the base clock divided by ten, which offered
+        // 200, 20 and 2 MHz and silently omitted everything between.
+        let rates = model_sample_rates(200_000_000);
+        assert_eq!(
+            rates,
+            vec![
+                200_000_000,
+                100_000_000,
+                50_000_000,
+                20_000_000,
+                10_000_000,
+                5_000_000,
+                2_000_000,
+                1_000_000,
+            ]
+        );
+        // A model whose ceiling is lower stops at its own ceiling.
+        assert_eq!(model_sample_rates(100_000_000).first(), Some(&100_000_000));
+        assert!(!model_sample_rates(100_000_000).contains(&200_000_000));
+    }
+
+    #[test]
+    fn streams_the_rate_the_vendor_client_streams_at_each_channel_count() {
+        // The brackets measured from the Kingst client on an LA2016: three
+        // channels reach 100 MHz, six reach 50, all sixteen reach 20. Each is
+        // about 320 Mbps, which is what the link carries, so the ceiling has to
+        // come out of the budget rather than out of a table that would only ever
+        // be right for this one model.
+        assert_eq!(stream_channel_brackets(16), vec![3, 6, 16]);
+        for (channels, expected) in [(3u8, 100_000_000u64), (6, 50_000_000), (16, 20_000_000)] {
+            assert_eq!(
+                stream_rates(200_000_000, channels).first().copied(),
+                Some(expected),
+                "{channels} channels should top out at {expected} Hz"
+            );
+        }
+        // Every advertised rate has to be one the hardware actually has, not the
+        // raw quotient of the budget.
+        for rate in stream_rates(200_000_000, 3) {
+            assert!(model_sample_rates(200_000_000).contains(&rate));
+        }
+    }
+
+    #[test]
+    fn never_brackets_a_device_at_more_channels_than_it_has() {
+        assert_eq!(stream_channel_brackets(4), vec![3, 4]);
+        assert_eq!(stream_channel_brackets(2), vec![2]);
     }
 
     #[test]
