@@ -1,4 +1,7 @@
 pub mod capture;
+/// Concurrent bulk-IN transfers for devices with small endpoint buffering.
+#[cfg(feature = "rusb-transport")]
+pub mod bulk_in_pool;
 pub mod decode;
 pub mod decoder_backend;
 pub mod device;

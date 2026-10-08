@@ -26,6 +26,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKSnapshotConfiguration", "WKWebView"] }
 parking_lot = "0.12"
 rayon = "1"
+libc = "0.2"
+# The bulk-IN pool drives libusb's asynchronous transfers directly; rusb does not
+# expose them. Same crate rusb links against, so `vendored` is shared.
+libusb1-sys = { version = "0.7", features = ["vendored"] }
 rusb = { version = "0.9", features = ["vendored"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

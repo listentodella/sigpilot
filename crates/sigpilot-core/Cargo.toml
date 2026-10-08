@@ -6,11 +6,13 @@ version.workspace = true
 
 [features]
 default = ["rusb-transport"]
-rusb-transport = ["dep:rusb"]
+rusb-transport = ["dep:rusb", "dep:libusb1-sys", "dep:libc"]
 
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+libc = { workspace = true, optional = true }
+libusb1-sys = { workspace = true, optional = true }
 rusb = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

@@ -3018,6 +3018,8 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "libc",
+ "libusb1-sys",
  "rusb",
  "serde",
  "serde_json",

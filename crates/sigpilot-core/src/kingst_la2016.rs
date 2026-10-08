@@ -59,6 +59,7 @@ use std::time::{Duration, Instant};
 use rusb::UsbContext;
 
 use crate::{
+    bulk_in_pool::{self, BulkInPool},
     capture::{pxview_capture_transfer_size, resolve_enabled_channels},
     device::{DeviceDescriptor, DeviceDriver, DriverIsolation},
     error::{CoreError, Result},
@@ -641,13 +642,17 @@ const BULK_CHUNK: usize = 512 * 1024;
 const STREAM_CHUNK_MIN: usize = 32 * 1024;
 /// Timeout for one streaming read. Sized against `STREAM_CHUNK`: the buffer has
 /// to fill well inside it, which at the measured ~15 MB/s is 17 ms.
-/// Timeout for one stream read.
+/// Transfers kept in flight on the sample endpoint.
 ///
-/// A poll interval rather than a deadline: reads are sized to fill in about ten
-/// milliseconds, so this is a wide margin over a read that is going to complete
-/// at all, and a timeout just means the device had nothing ready. The PXLogic
-/// backend polls at 250 ms for the same reason.
-const STREAM_TIMEOUT: Duration = Duration::from_millis(250);
+/// This is the number that decides whether the capture survives a busy host. The
+/// device tolerates about two milliseconds of stall before its stream dies and
+/// cannot be restarted; eight transfers of ten milliseconds each give it roughly
+/// eighty milliseconds of queue to write into instead.
+const POOL_DEPTH: usize = bulk_in_pool::DEFAULT_POOL_DEPTH;
+
+/// How long one service call may wait for data before returning, so the caller
+/// can notice a cancellation promptly.
+const SERVICE_SLICE: Duration = Duration::from_millis(100);
 /// How long to wait for the device to finish sampling before giving up.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPTURE_POLL: Duration = Duration::from_millis(20);
@@ -1173,7 +1178,6 @@ fn capture_streaming(
     )
     .unwrap_or(STREAM_CHUNK_MIN)
     .max(STREAM_CHUNK_MIN);
-    let mut buffer = vec![0u8; stream_chunk];
 
     diagnostics(DiagnosticEvent {
         phase: "kingst-capture".to_string(),
@@ -1214,7 +1218,13 @@ fn capture_streaming(
     let mut stall_probe: Option<u64> = (stall_probe_ms > 0).then_some(stall_probe_ms);
     let mut stall_at: Option<u64> = None;
 
+    // The pool is what keeps this capture alive. A single transfer in flight is
+    // not enough for a device that tolerates two milliseconds of host stall;
+    // eight give it a queue to write into while the host is busy elsewhere.
+    let mut pool = BulkInPool::start(handle, EP_CAPTURE_DATA, stream_chunk, POOL_DEPTH)?;
+
     let mut stalled = false;
+    let mut failure: Option<CoreError> = None;
     loop {
         if cancel.load(Ordering::Acquire) {
             break;
@@ -1237,61 +1247,76 @@ fn capture_streaming(
             stall_at = Some(samples_read);
             std::thread::sleep(Duration::from_millis(ms));
         }
-        let read_started = Instant::now();
-        match handle.read_bulk(EP_CAPTURE_DATA, &mut buffer, STREAM_TIMEOUT) {
-            Ok(0) => continue,
-            Ok(got) => {
-                let gap = read_started.elapsed();
-                if gap > worst_gap {
-                    worst_gap = gap;
-                }
-                last_data = Instant::now();
-                if raw_preview.len() < 64 {
-                    let take = (64 - raw_preview.len()).min(got);
-                    raw_preview.extend_from_slice(&buffer[..take]);
-                }
-                // Publish only what this chunk added, so the graph grows live
-                // instead of the whole capture landing at the end.
-                expanded.clear();
-                samples_read +=
-                    expand_stream_chunk(&buffer[..got], &stream, &mut parser, &mut expanded)?;
-                on_samples(blocks.extend(&expanded));
-                if rate_window.elapsed() >= Duration::from_secs(1) {
-                    let elapsed = rate_window.elapsed();
-                    diagnostics(DiagnosticEvent {
-                        phase: "kingst-capture".to_string(),
-                        level: DiagnosticLevel::Info,
-                        message: format!(
-                            "stream rate: {:.2} Ms/s over {:.2} s ({} samples so far, worst read gap {:.1} ms)",
-                            (samples_read - rate_mark) as f64 / elapsed.as_secs_f64() / 1e6,
-                            elapsed.as_secs_f64(),
-                            samples_read,
-                            worst_gap.as_secs_f64() * 1000.0
-                        ),
-                    });
-                    rate_mark = samples_read;
-                    rate_window = Instant::now();
-                }
-                progress(CaptureProgress {
-                    bytes_read: samples_read * unit_size,
-                    // A stream has no planned length; the caller decides when to
-                    // stop, so report what has arrived as the expectation too.
-                    bytes_expected: samples_read * unit_size,
-                    samples_read,
-                    // Bytes, not samples: the caller accounts capture memory in
-                    // bytes, and reporting samples here makes the buffer limit
-                    // take `unit_size` times too long to trip.
-                    sample_memory_bytes: samples_read * unit_size,
-                });
+
+        let serviced_at = Instant::now();
+        let serviced = pool.service(SERVICE_SLICE, &mut |chunk: &[u8]| {
+            if raw_preview.len() < 64 {
+                let take = (64 - raw_preview.len()).min(chunk.len());
+                raw_preview.extend_from_slice(&chunk[..take]);
             }
-            // A timeout is how an empty transfer surfaces; keep waiting.
-            Err(rusb::Error::Timeout) => continue,
+            // Publish only what this chunk added, so the graph grows live
+            // instead of the whole capture landing at the end.
+            expanded.clear();
+            samples_read += expand_stream_chunk(chunk, &stream, &mut parser, &mut expanded)?;
+            on_samples(blocks.extend(&expanded));
+            if rate_window.elapsed() >= Duration::from_secs(1) {
+                let elapsed = rate_window.elapsed();
+                diagnostics(DiagnosticEvent {
+                    phase: "kingst-capture".to_string(),
+                    level: DiagnosticLevel::Info,
+                    message: format!(
+                        "stream rate: {:.2} Ms/s over {:.2} s ({} samples so far, worst read gap {:.1} ms)",
+                        (samples_read - rate_mark) as f64 / elapsed.as_secs_f64() / 1e6,
+                        elapsed.as_secs_f64(),
+                        samples_read,
+                        worst_gap.as_secs_f64() * 1000.0
+                    ),
+                });
+                rate_mark = samples_read;
+                rate_window = Instant::now();
+            }
+            progress(CaptureProgress {
+                bytes_read: samples_read * unit_size,
+                // A stream has no planned length; the caller decides when to
+                // stop, so report what has arrived as the expectation too.
+                bytes_expected: samples_read * unit_size,
+                samples_read,
+                // Bytes, not samples: the caller accounts capture memory in
+                // bytes, and reporting samples here makes the buffer limit
+                // take `unit_size` times too long to trip.
+                sample_memory_bytes: samples_read * unit_size,
+            });
+            Ok(())
+        });
+
+        match serviced {
+            Ok(delivered) => {
+                if delivered.bytes > 0 {
+                    last_data = Instant::now();
+                    let gap = serviced_at.elapsed();
+                    if gap > worst_gap {
+                        worst_gap = gap;
+                    }
+                }
+            }
             Err(error) => {
-                return Err(CoreError::Usb(format!(
-                    "Kingst stream read failed after {samples_read} samples: {error}"
-                )))
+                failure = Some(error);
+                break;
             }
         }
+        if pool.device_gone() {
+            failure = Some(CoreError::Usb(
+                "the Kingst device disappeared during a stream".to_string(),
+            ));
+            break;
+        }
+    }
+
+    // Cancel before halting: the device must not be told to stop while the host
+    // still has reads queued against it.
+    pool.stop();
+    if let Some(error) = failure {
+        return Err(error);
     }
 
     // Always halt, including on the cancel path, or the device keeps streaming
