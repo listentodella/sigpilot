@@ -631,10 +631,12 @@ const BULK_CHUNK: usize = 512 * 1024;
 /// therefore has to fill comfortably inside the read timeout — at 512 KiB the
 /// device never filled it, so every read timed out and threw its bytes away.
 ///
-/// It also has to be large enough that the per-read overhead is negligible: at
-/// 32 KiB the reader managed only ~73% of the rate the device produces, so the
-/// FX2 FIFO overflowed continuously and the stream gave up after ten seconds.
-const STREAM_CHUNK: usize = 256 * 1024;
+/// Bigger is not better, which is the trap here: 256 KiB makes the device stop
+/// delivering after the first transfer, and 64 KiB reached only 55% of the
+/// rate against 32 KiB's 80-83%. The FX2 does not cope with large transfers.
+/// Sustained throughput stays below the device's maximum either way, which is
+/// what the reference driver's pool of concurrent transfers is for.
+const STREAM_CHUNK: usize = 32 * 1024;
 /// Timeout for one streaming read. Sized against `STREAM_CHUNK`: the buffer has
 /// to fill well inside it, which at the measured ~15 MB/s is 17 ms.
 const STREAM_TIMEOUT: Duration = Duration::from_millis(1000);
