@@ -49,15 +49,18 @@ export const TOUCHPAD_MAX_DELTA = 800;
  * This is a scale rather than a bare number so the feel stays adjustable without
  * editing the logic, mirroring Logic 2's "Animation Scale" developer option.
  *
- * TEMPORARILY 0 — diagnostic bisect, not a tuning choice.
+ * Re-enabled at 1 after a spell at 0.
  *
- * Markers and the trace were reported drifting after a zoom, intermittently.
- * Setting this to zero takes the glide out of the picture entirely: every zoom
- * becomes instantaneous and no view animation runs at all. If the drift survives
- * that, it is not the animation; if it goes away, it is. Restore to 1 once the
- * answer is known.
+ * It was pinned to 0 to isolate a report of markers and the trace drifting
+ * intermittently after a zoom, but the glide that report was about is the
+ * frontend `animateViewport` rAF loop, which this constant does not control —
+ * so the bisect settled nothing. This backend glide (zoom and pan_samples
+ * carrying `duration_ms` into a `ViewAnimation`) had never run in a build until
+ * now, and wants hardware verification: a timing marker must stay pinned to the
+ * trace through the glide and after it settles, and repeated keypresses
+ * mid-glide must retarget from the current view instead of compounding.
  */
-export const ZOOM_ANIMATION_DURATION_SCALE = 0;
+export const ZOOM_ANIMATION_DURATION_SCALE = 1;
 export const ZOOM_ANIMATION_DURATION_MS = 100 * ZOOM_ANIMATION_DURATION_SCALE;
 
 /**
