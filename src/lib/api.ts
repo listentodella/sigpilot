@@ -889,6 +889,18 @@ function previewBitMask(bits: number) {
   return 2 ** Math.max(1, bits) - 1;
 }
 
+/**
+ * Writes a line into the application log from the webview.
+ *
+ * Frontend problems are otherwise invisible in the file the backend writes: an
+ * event that never arrived and a handler that declined to act look identical.
+ * Fire-and-forget, because a diagnostic must never break the thing it measures.
+ */
+export function frontendLog(message: string, level: "info" | "warn" | "error" = "info") {
+  if (!isTauriRuntime()) return;
+  void invoke("frontend_log", { level, message }).catch(() => {});
+}
+
 async function callBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauriRuntime()) {
     throw new Error("Tauri runtime is not available");

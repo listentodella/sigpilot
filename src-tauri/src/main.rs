@@ -445,6 +445,20 @@ async fn configure_pwm(
     Err("real USB backend is not enabled in this build".to_string())
 }
 
+/// Writes a line from the webview into the application log.
+///
+/// Without this the log file is backend-only, which makes a frontend problem
+/// undiagnosable from it: an event that never arrived and a handler that decided
+/// not to act leave exactly the same trace, which is none.
+#[tauri::command]
+fn frontend_log(level: Option<String>, message: String) {
+    match level.as_deref() {
+        Some("warn") => tracing::warn!(target: "sigpilot_webview", "{message}"),
+        Some("error") => tracing::error!(target: "sigpilot_webview", "{message}"),
+        _ => tracing::info!(target: "sigpilot_webview", "{message}"),
+    }
+}
+
 /// Publishes capture UI updates from a thread of its own.
 ///
 /// The capture thread must never wait on the webview. `emit` serialises the
@@ -2233,6 +2247,7 @@ fn main() {
         })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            frontend_log,
             list_devices,
             device_capabilities,
             prepare_device,

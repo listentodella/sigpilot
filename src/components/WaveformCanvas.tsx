@@ -1,5 +1,5 @@
 import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useState } from "react";
-import { measureDigitalPoint, type WaveformTile } from "../lib/api";
+import { frontendLog, measureDigitalPoint, type WaveformTile } from "../lib/api";
 import { normalizeCaptureViewport, normalizeLiveCaptureViewport } from "../lib/captureViewport";
 import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "../lib/saleaeGraphLayout";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
@@ -740,7 +740,26 @@ export function WaveformCanvas({
     animateViewportTo(edgeSample - offset, current.samples);
   }
 
-  function handleWheel(event: WheelEvent) {
+  // The wheel is reported not to zoom during a capture while the keyboard does,
+// and both end up dispatching the same view intent — so the difference is
+// upstream of that, in whether the zoom factor is meaningful at all. Which of
+// the fields it depends on actually exists is not something the documentation
+// settles (`wheelDeltaY` is a WebKit property, but deprecated), so record the
+// first few events and let the log answer it.
+let wheelDiagnosticsLogged = 0;
+
+function logWheelDiagnostics(event: WheelEvent, factor: number, backendDriven: boolean) {
+  if (wheelDiagnosticsLogged >= 5) return;
+  wheelDiagnosticsLogged += 1;
+  const legacy = event as WheelEvent & { wheelDeltaY?: number };
+  frontendLog(
+    `wheel deltaY=${event.deltaY} deltaMode=${event.deltaMode} ` +
+      `wheelDeltaY=${String(legacy.wheelDeltaY)} ctrl=${event.ctrlKey} meta=${event.metaKey} ` +
+      `shift=${event.shiftKey} factor=${factor} backendDriven=${backendDriven}`,
+  );
+}
+
+function handleWheel(event: WheelEvent) {
     if (!totalSamplesRef.current) return;
     event.preventDefault();
     setViewportInteractionActive(true);
@@ -781,6 +800,7 @@ export function WaveformCanvas({
 
     const delta = normalizeWheelDelta(event.deltaY, event.deltaMode);
     const factor = wheelZoomFactor(event, delta);
+    logWheelDiagnostics(event, factor, backendDriven);
     if (backendDriven) {
       // The backend owns the anchor arithmetic and the zoom limits, so the wheel
       // handler no longer pre-computes a clamped sample count it would have to
