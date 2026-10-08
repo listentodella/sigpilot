@@ -11,7 +11,9 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use parking_lot::{Mutex, RwLock};use sigpilot_core::{
+use parking_lot::{Mutex, RwLock};
+use std::sync::mpsc;
+use sigpilot_core::{
     build_pxview_pwm0_register_script, AnalyzerDecodeSettings, CaptureMetadata, CaptureProgress,
     CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind,
     DemoAnalyzerSettings, DeviceInfo, DeviceRegistry, DiagnosticEvent, DiagnosticLevel,
@@ -443,6 +445,67 @@ async fn configure_pwm(
     Err("real USB backend is not enabled in this build".to_string())
 }
 
+/// Publishes capture UI updates from a thread of its own.
+///
+/// The capture thread must never wait on the webview. `emit` serialises the
+/// payload and hands it to the IPC channel, and when the webview is busy that
+/// takes milliseconds; for those milliseconds no USB read is in flight, the
+/// device's FIFO overflows and the stream stops. That is the same failure mode
+/// as a buffer reallocation, and it fired thirty times a second from inside the
+/// read loop.
+#[derive(Clone)]
+struct UiPublisher {
+    sender: mpsc::SyncSender<UiMessage>,
+}
+
+enum UiMessage {
+    Progress(CaptureProgress, CaptureMemoryUpdatedEvent),
+    Updated(CaptureUpdatedEvent),
+    Diagnostic(DiagnosticEvent),
+}
+
+impl UiMessage {
+    fn emit(self, app: &AppHandle) {
+        match self {
+            UiMessage::Progress(progress, memory) => {
+                let _ = app.emit("capture_progress", &progress);
+                let _ = app.emit("capture_memory_updated", &memory);
+            }
+            UiMessage::Updated(event) => {
+                let _ = app.emit("capture_updated", &event);
+            }
+            UiMessage::Diagnostic(event) => {
+                let _ = app.emit("usb_diagnostic", &event);
+            }
+        }
+    }
+}
+
+impl UiPublisher {
+    fn new(app: AppHandle) -> Self {
+        // Capacity one, and `try_send` rather than `send`: a full queue drops the
+        // incoming update instead of waiting for room. The queue drains within one
+        // update interval, so the cost is showing a progress value one tick old —
+        // not worth blocking a USB read for. The worker exits when the last
+        // publisher handle goes away and the channel closes.
+        let (sender, receiver) = mpsc::sync_channel::<UiMessage>(1);
+        std::thread::Builder::new()
+            .name("sigpilot-ui".to_string())
+            .spawn(move || {
+                while let Ok(message) = receiver.recv() {
+                    message.emit(&app);
+                }
+            })
+            .ok();
+        Self { sender }
+    }
+
+    /// Hands over an update without waiting for the webview.
+    fn send(&self, message: UiMessage) {
+        let _ = self.sender.try_send(message);
+    }
+}
+
 #[tauri::command]
 async fn start_capture(
     app: AppHandle,
@@ -481,7 +544,8 @@ async fn start_capture(
             session_id: session_id.clone(),
         });
         let buffer_bytes = settings.buffer_size_mb.saturating_mul(1024 * 1024);
-        let progress_app = app.clone();
+        let publisher = UiPublisher::new(app.clone());
+        let progress_app = publisher.clone();
         let progress_graph = graph.clone();
         let progress_session_id = session_id.clone();
         let progress_cancel = cancel.clone();
@@ -512,18 +576,17 @@ async fn start_capture(
                 return;
             }
             last_progress_emit = Instant::now();
-            let _ = progress_app.emit("capture_progress", &event);
-            let _ = progress_app.emit(
-                "capture_memory_updated",
-                &CaptureMemoryUpdatedEvent {
+            progress_app.send(UiMessage::Progress(
+                event,
+                CaptureMemoryUpdatedEvent {
                     session_id: progress_session_id.clone(),
                     usage,
                 },
-            );
+            ));
         };
-        let diagnostics_app = app.clone();
+        let diagnostics_app = publisher.clone();
         let mut diagnostics = |event: DiagnosticEvent| {
-            let _ = diagnostics_app.emit("usb_diagnostic", &event);
+            diagnostics_app.send(UiMessage::Diagnostic(event));
         };
         let graph_error = Arc::new(Mutex::new(None::<String>));
         // Cross-lane packing is a PXLogic wire format, and `decode_cross`
@@ -544,7 +607,7 @@ async fn start_capture(
         };
         let samples_graph = graph.clone();
         let samples_error = graph_error.clone();
-        let update_app = app.clone();
+        let update_app = publisher.clone();
         let update_session_id = session_id.clone();
         let mut last_update = Instant::now()
             .checked_sub(Duration::from_secs(1))
@@ -580,13 +643,10 @@ async fn start_capture(
                         .saturating_mul(usize::from(metadata.unitsize)),
                     metadata,
                 };
-                let _ = update_app.emit(
-                    "capture_updated",
-                    &CaptureUpdatedEvent {
-                        session_id: update_session_id.clone(),
-                        summary,
-                    },
-                );
+                update_app.send(UiMessage::Updated(CaptureUpdatedEvent {
+                    session_id: update_session_id.clone(),
+                    summary,
+                }));
             }
         };
         let cross_graph = graph.clone();
