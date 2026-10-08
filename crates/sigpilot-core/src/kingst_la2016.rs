@@ -624,6 +624,16 @@ const DEFAULT_THRESHOLD_VOLTS: f64 = 3.3;
 /// Bulk read size. The reference uses 512 KiB with an 8-deep transfer pool;
 /// a single synchronous reader is enough here.
 const BULK_CHUNK: usize = 512 * 1024;
+/// Read size for streaming.
+///
+/// A bulk IN transfer that reaches its timeout is cancelled, and the
+/// synchronous API drops whatever the transfer had already received. The buffer
+/// therefore has to fill comfortably inside `BULK_TIMEOUT`: at 512 KiB a
+/// streaming device never filled it, so every read timed out and threw its
+/// bytes away. That is what capped streaming at a fraction of the requested
+/// rate — the device was producing data, and the host was discarding it one
+/// timeout at a time.
+const STREAM_CHUNK: usize = 32 * 1024;
 /// How long to wait for the device to finish sampling before giving up.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPTURE_POLL: Duration = Duration::from_millis(20);
@@ -1094,7 +1104,7 @@ fn capture_streaming(
     let mut parser = StreamParser::default();
     let mut samples = Vec::new();
     let mut samples_read = 0u64;
-    let mut buffer = vec![0u8; BULK_CHUNK];
+    let mut buffer = vec![0u8; STREAM_CHUNK];
     let mut raw_preview: Vec<u8> = Vec::new();
     let mut last_data = Instant::now();
 
