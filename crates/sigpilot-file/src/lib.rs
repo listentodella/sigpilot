@@ -74,7 +74,7 @@ pub struct SaleaeSessionMetadata {
 impl Default for SaleaeSessionMetadata {
     fn default() -> Self {
         Self {
-            name: "PXLogic Capture".to_string(),
+            name: "SigPilot Capture".to_string(),
             notes: String::new(),
             analyzers: Vec::new(),
         }
@@ -341,7 +341,7 @@ fn write_saleae_export_manifest(
     let manifest = SaleaeExportManifest {
         format: "pxlogic.saleae-export.v1",
         name: if session.name.trim().is_empty() {
-            "PXLogic Capture".to_string()
+            "SigPilot Capture".to_string()
         } else {
             session.name.clone()
         },

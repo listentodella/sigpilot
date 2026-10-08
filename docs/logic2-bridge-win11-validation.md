@@ -126,9 +126,9 @@ proxy 和 PXLogic feeder 均沿用 macOS 已成功验证的路径。只有在该
 拉取当前分支：
 
 ```powershell
-git clone git@github.com:listentodella/pxlogic.git
-Set-Location pxlogic
-git checkout codex/graph-server-32ch
+git clone git@github.com:listentodella/sigpilot.git
+Set-Location sigpilot
+git checkout main
 ```
 
 至少应包含这些修复提交：
