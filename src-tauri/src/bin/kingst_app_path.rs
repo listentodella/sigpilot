@@ -68,7 +68,13 @@ fn main() {
     // trip is what broke: a friendly name stored there made the session stop
     // resolving and every later capture failed with "no driver claims this
     // device".
-    let mut device_id = id.clone();
+    // The stale-id case: after a re-enumeration the caller still holds an
+    // address that no longer exists. The driver has to find the device anyway,
+    // or the session stays stuck until the caller re-lists devices.
+    let mut device_id = std::env::var("SIGPILOT_STALE_ID")
+        .unwrap_or_else(|_| id.clone());
+    println!("starting from device_id = {device_id}");
+    println!();
     for channel_count in [8u8, 16] {
         println!("--- capture with channel_count = {channel_count}, device_id = {device_id} ---");
         let settings = settings_for(&device_id, channel_count);

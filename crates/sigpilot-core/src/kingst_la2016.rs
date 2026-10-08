@@ -887,10 +887,9 @@ pub fn owns(device_id: &str) -> bool {
 /// live reading never changes, the DAC is not being applied.
 pub fn set_input_threshold(device_id: &str, volts: f64) -> Result<()> {
     let driver = KingstLa2016Driver::new();
-    let handle = match driver.open_device(device_id) {
-        Ok(handle) => handle,
-        Err(_) => driver.open_device(&driver.prepared_device_id()?)?,
-    };
+    // A previous `prepare` may have made the device re-enumerate, so the
+    // caller's id can be stale; resolve it rather than trusting it.
+    let handle = driver.open_device(&driver.resolve_device_id(device_id)?)?;
     ctrl_out(&handle, CMD_FPGA_SPI, REG_PWM_EN, &[0u8])?;
     set_threshold_voltage(&handle, volts)
 }
@@ -902,10 +901,9 @@ pub fn set_input_threshold(device_id: &str, volts: f64) -> Result<()> {
 /// its spew log level.
 pub fn dump_fpga_registers(device_id: &str) -> Result<Vec<u8>> {
     let driver = KingstLa2016Driver::new();
-    let handle = match driver.open_device(device_id) {
-        Ok(handle) => handle,
-        Err(_) => driver.open_device(&driver.prepared_device_id()?)?,
-    };
+    // A previous `prepare` may have made the device re-enumerate, so the
+    // caller's id can be stale; resolve it rather than trusting it.
+    let handle = driver.open_device(&driver.resolve_device_id(device_id)?)?;
     let mut registers = [0u8; 0x80];
     ctrl_in(&handle, CMD_FPGA_SPI, 0, &mut registers)?;
     Ok(registers.to_vec())
@@ -920,10 +918,9 @@ pub fn dump_fpga_registers(device_id: &str) -> Result<Vec<u8>> {
 /// the capture path is at fault.
 pub fn read_live_pin_state(device_id: &str) -> Result<u16> {
     let driver = KingstLa2016Driver::new();
-    let handle = match driver.open_device(device_id) {
-        Ok(handle) => handle,
-        Err(_) => driver.open_device(&driver.prepared_device_id()?)?,
-    };
+    // A previous `prepare` may have made the device re-enumerate, so the
+    // caller's id can be stale; resolve it rather than trusting it.
+    let handle = driver.open_device(&driver.resolve_device_id(device_id)?)?;
     let mut buf = [0u8; 2];
     ctrl_in(&handle, CMD_FPGA_SPI, REG_PIN_STATE, &mut buf)?;
     Ok(u16::from_le_bytes(buf))
@@ -1187,7 +1184,7 @@ fn capture_streaming(
 /// Used twice: once with a zero count to announce the capture before any data
 /// exists, and once with the achieved count for the result.
 fn capture_metadata(
-    settings: &CaptureSettings,
+    device_id: &str,
     effective_rate: u64,
     channel_count: u8,
     enabled_channels: &[u8],
@@ -1201,7 +1198,7 @@ fn capture_metadata(
         // it to the next command. Every other driver stores the device id here,
         // so a friendly name makes the session stop resolving and every later
         // capture fails.
-        source_device: settings.device_id.clone(),
+        source_device: device_id.to_string(),
         sample_rate_hz: effective_rate,
         channel_count,
         enabled_channels: enabled_channels.to_vec(),
@@ -1240,10 +1237,11 @@ pub fn capture(
     let driver = KingstLa2016Driver::new();
     driver.bring_up(device_id, diagnostics)?;
 
-    let handle = match driver.open_device(device_id) {
-        Ok(handle) => handle,
-        Err(_) => driver.open_device(&driver.prepared_device_id()?)?,
-    };
+    // `bring_up` may have just made the device re-enumerate, so resolve again
+    // rather than trusting the caller's id. Reporting the resolved id back in
+    // the metadata is what lets the caller adopt it and heal a stale session.
+    let device_id = driver.resolve_device_id(device_id)?;
+    let handle = driver.open_device(&device_id)?;
     let identity = read_identity(&handle)?;
     let model = identity.model();
     let layout = TransferLayout::for_model(model);
@@ -1293,7 +1291,7 @@ pub fn capture(
     // appended, and appending as they arrive is what makes the waveform grow
     // live instead of appearing all at once when the capture ends.
     started(&capture_metadata(
-        settings,
+        &device_id,
         effective_rate,
         channel_count,
         &enabled_channels,
@@ -1334,7 +1332,7 @@ pub fn capture(
         // The achieved count can fall short of the request when the device runs
         // out of sample memory.
         metadata: capture_metadata(
-            settings,
+            &device_id,
             effective_rate,
             channel_count,
             &enabled_channels,
@@ -1522,6 +1520,31 @@ impl KingstLa2016Driver {
     /// re-derives it. It assumes a single Kingst device is attached — with two,
     /// the re-enumeration cannot be attributed without port paths, which libusb
     /// only exposes through `libusb_get_port_numbers`.
+    /// Resolve which device to actually talk to.
+    ///
+    /// A device id embeds the USB bus and address, and both change whenever the
+    /// device re-enumerates: once when the FX2 firmware is uploaded, and again
+    /// when it is unplugged and replugged. A caller holding an id from an
+    /// earlier enumeration therefore has a stale one, and refusing to work with
+    /// it would leave the session stuck until the caller re-listed devices.
+    ///
+    /// A programmed device is preferred, since it is the one already running.
+    /// Failing that, any Kingst device will do: `bring_up` exists precisely to
+    /// program an unprogrammed one.
+    fn resolve_device_id(&self, device_id: &str) -> Result<String> {
+        if self.open_device(device_id).is_ok() {
+            return Ok(device_id.to_string());
+        }
+        if let Ok(prepared) = self.prepared_device_id() {
+            return Ok(prepared);
+        }
+        self.list_devices()?
+            .into_iter()
+            .next()
+            .map(|device| device.id)
+            .ok_or(CoreError::UnsupportedDevice)
+    }
+
     fn prepared_device_id(&self) -> Result<String> {
         let context = Self::context()?;
         for device in context.devices()?.iter() {
@@ -1552,17 +1575,8 @@ impl KingstLa2016Driver {
         })?;
 
         // The caller's id embeds bus and address, and a previous `prepare` may
-        // have made the FX2 re-enumerate, so the id it holds can be stale. Fall
-        // back to whichever Kingst device is actually present.
-        let mut device_id = match self.open_device(device_id) {
-            Ok(handle) => {
-                drop(handle);
-                device_id.to_string()
-            }
-            Err(_) => self
-                .prepared_device_id()
-                .unwrap_or_else(|_| device_id.to_string()),
-        };
+        // have made the FX2 re-enumerate, so the id it holds can be stale.
+        let mut device_id = self.resolve_device_id(device_id)?;
 
         // Step 1: get the MCU firmware running. A device that answers the
         // EEPROM request is already running it.
