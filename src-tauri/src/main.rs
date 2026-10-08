@@ -462,6 +462,7 @@ async fn start_capture(
         enabled_channels = ?settings.enabled_channels,
         decode_cross = settings.decode_cross,
         duration_ms = settings.duration_ms,
+        buffer_size_mb = settings.buffer_size_mb,
         threshold_volts = settings.threshold_volts,
         mode = ?settings.mode,
         trigger_enabled = settings.trigger_enabled,
@@ -491,6 +492,16 @@ async fn start_capture(
             let usage =
                 progress_graph.capture_memory_usage(buffer_bytes, Some(event.sample_memory_bytes));
             if usage.total_bytes >= buffer_bytes {
+                // The only thing that stops a capture from this side, so record
+                // the numbers when it fires: "it stopped early" is otherwise
+                // impossible to tell from "the device went quiet".
+                tracing::info!(
+                    samples_read = event.samples_read,
+                    sample_memory_bytes = event.sample_memory_bytes,
+                    total_bytes = usage.total_bytes,
+                    buffer_bytes,
+                    "capture buffer limit reached; stopping"
+                );
                 progress_cancel.store(true, Ordering::Release);
             }
             // Capture values are informational UI state. Publishing every USB

@@ -1105,6 +1105,7 @@ fn capture_streaming(
     let mut raw_preview: Vec<u8> = Vec::new();
     let mut last_data = Instant::now();
 
+    let mut stalled = false;
     loop {
         if cancel.load(Ordering::Acquire) {
             break;
@@ -1112,6 +1113,7 @@ fn capture_streaming(
         // Empty transfers are legal while a stream is running, but a long gap
         // means the device stopped producing rather than merely being idle.
         if last_data.elapsed() > STREAM_STALL_TIMEOUT {
+            stalled = true;
             diagnostics(DiagnosticEvent {
                 phase: "kingst-capture".to_string(),
                 level: DiagnosticLevel::Warn,
@@ -1166,7 +1168,12 @@ fn capture_streaming(
         phase: "kingst-capture".to_string(),
         level: DiagnosticLevel::Info,
         message: format!(
-            "stream stopped after {samples_read} samples; raw head ({} bytes): {}",
+            "stream stopped after {samples_read} samples ({}); raw head ({} bytes): {}",
+            if stalled {
+                "the device went quiet"
+            } else {
+                "cancelled by the caller"
+            },
             raw_preview.len(),
             raw_preview
                 .iter()
