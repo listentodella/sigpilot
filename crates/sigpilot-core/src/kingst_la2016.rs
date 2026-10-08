@@ -1202,6 +1202,17 @@ fn capture_streaming(
     // stopped, or trickled from the start.
     let mut rate_window = Instant::now();
     let mut rate_mark = 0u64;
+    // Experiment, not a feature: hold the reader still for a chosen number of
+    // milliseconds, once, after data has started arriving. Whatever the device
+    // does next is a direct measurement of how much host jitter its buffering
+    // absorbs — the slack that decides whether a stray scheduling delay ends the
+    // capture. Set by the check tool; absent in normal operation.
+    let stall_probe_ms: u64 = std::env::var("SIGPILOT_KINGST_STALL_PROBE_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let mut stall_probe: Option<u64> = (stall_probe_ms > 0).then_some(stall_probe_ms);
+    let mut stall_at: Option<u64> = None;
 
     let mut stalled = false;
     loop {
@@ -1222,6 +1233,10 @@ fn capture_streaming(
             break;
         }
 
+        if let Some(ms) = stall_probe.take() {
+            stall_at = Some(samples_read);
+            std::thread::sleep(Duration::from_millis(ms));
+        }
         let read_started = Instant::now();
         match handle.read_bulk(EP_CAPTURE_DATA, &mut buffer, STREAM_TIMEOUT) {
             Ok(0) => continue,
@@ -1328,6 +1343,17 @@ fn capture_streaming(
             worst_gap.as_secs_f64() * 1000.0
         ),
     });
+    if let Some(at) = stall_at {
+        diagnostics(DiagnosticEvent {
+            phase: "kingst-capture".to_string(),
+            level: DiagnosticLevel::Info,
+            message: format!(
+                "stall probe: held the reader for {} ms at {at} samples; {} samples arrived afterwards",
+                stall_probe_ms,
+                samples_read.saturating_sub(at)
+            ),
+        });
+    }
 
     Ok((blocks.into_vec(), samples_read))
 }
