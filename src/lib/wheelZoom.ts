@@ -22,9 +22,9 @@ export const WEBKIT_WHEEL_DELTA_PER_LINE = 3;
 /**
  * Most notches a single event may count as.
  *
- * macOS accelerates wheel scrolling, so a fast spin arrives as many lines in one
- * event — the client logged deltas of 30, 39 and 54 lines. Counting those as
- * notches uncapped would zoom by 2^15 on one flick.
+ * Chromium can coalesce two notches into one event, and its fixed ±120 per
+ * notch makes that visible, so the count is taken from the delta — but capped,
+ * because nothing legitimate reports dozens.
  */
 export const MAX_NOTCHES_PER_EVENT = 3;
 
@@ -143,10 +143,19 @@ export function wheelZoomFactor(
   const unit = wheelNotchUnit(event);
   if (unit !== null) {
     const legacy = (event.nativeEvent ?? event) as WheelEvent & { wheelDeltaY?: number };
-    const notches = Math.min(
-      MAX_NOTCHES_PER_EVENT,
-      Math.max(1, Math.abs(legacy.wheelDeltaY as number) / unit),
-    );
+    const notches =
+      unit === WHEEL_NOTCH_DELTA
+        ? // Chromium: a fixed ±120 per notch, so the delta counts notches.
+          Math.min(
+            MAX_NOTCHES_PER_EVENT,
+            Math.max(1, Math.abs(legacy.wheelDeltaY as number) / WHEEL_NOTCH_DELTA),
+          )
+        : // WebKit: `deltaY` is how far macOS decided the scroll should go, not how
+          // many ticks the wheel made. One flick arrives as a run of events with
+          // rising deltas — the client logged 1, 7, 14, 22, 27 — and counting
+          // those as notches zoomed by about ninety times per flick. The tick
+          // count is the event count.
+          1;
     const direction = normalizedDelta < 0 ? -1 : 1;
     return Math.pow(2, direction * WHEEL_ZOOM_PER_NOTCH_POW2 * scale * notches);
   }

@@ -26,10 +26,29 @@ test("a WebKit wheel notch is a notch, not a 0.15% nudge", () => {
   assert.equal(wheelZoomFactor(event, -1), Math.pow(2, -WHEEL_ZOOM_PER_NOTCH_POW2));
 });
 
-test("a fast WebKit spin is capped instead of zooming by 2^15", () => {
-  // macOS accelerates wheel scrolling: the client logged deltas of 30, 39, 54.
-  const factor = wheelZoomFactor(webkitWheel(30), -1);
-  assert.equal(factor, Math.pow(2, -WHEEL_ZOOM_PER_NOTCH_POW2 * 3));
+test("one WebKit event is one notch, however far macOS accelerated it", () => {
+  // The client logged a single flick as deltaY 1, 7, 14, 22, 27 — macOS
+  // accelerating the scroll. Counting those as notches zoomed about ninety
+  // times per flick, which is worse than the bug it replaced.
+  for (const deltaY of [1, 7, 14, 22, 27]) {
+    assert.equal(
+      wheelZoomFactor(webkitWheel(deltaY), -1),
+      Math.pow(2, -WHEEL_ZOOM_PER_NOTCH_POW2),
+      `deltaY=${deltaY} should still be one notch`,
+    );
+  }
+  // So one flick of five events is five notches, not ninety times that. The
+  // factor is a multiplier on the visible span, so the magnification is its
+  // reciprocal.
+  const span = [1, 7, 14, 22, 27].reduce(
+    (span, deltaY) => span * wheelZoomFactor(webkitWheel(deltaY), -1),
+    1,
+  );
+  const magnification = 1 / span;
+  assert.ok(
+    magnification > 5 && magnification < 6,
+    `a five-event flick should magnify about 5.7x, got ${magnification}`,
+  );
 });
 
 test("a Chromium wheel still uses its fixed 120-per-notch unit", () => {
