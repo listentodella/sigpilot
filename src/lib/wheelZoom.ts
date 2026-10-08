@@ -9,6 +9,26 @@
 export const WHEEL_NOTCH_DELTA = 120;
 
 /**
+ * WebKit reports a line-granular wheel as `wheelDeltaY = -3 * deltaY`.
+ *
+ * Which means the ±120 test below can never match on macOS, where the webview is
+ * WKWebView — every wheel event fell through to the touchpad curve. Measured on
+ * the running client, one notch arrives as `deltaY=1, wheelDeltaY=-3`, and the
+ * touchpad curve turns that into 1.0015: a 0.15% zoom per notch, which reads as
+ * "the wheel does nothing".
+ */
+export const WEBKIT_WHEEL_DELTA_PER_LINE = 3;
+
+/**
+ * Most notches a single event may count as.
+ *
+ * macOS accelerates wheel scrolling, so a fast spin arrives as many lines in one
+ * event — the client logged deltas of 30, 39 and 54 lines. Counting those as
+ * notches uncapped would zoom by 2^15 on one flick.
+ */
+export const MAX_NOTCHES_PER_EVENT = 3;
+
+/**
  * Zoom per notch, as a power of two. Matches Logic 2: one notch is
  * `2^0.5` ≈ 1.41, i.e. ±41% on the visible span.
  */
@@ -66,9 +86,33 @@ export function isPhysicalWheelZoom(event: WheelZoomInput): boolean {
   // macOS pinch gestures set ctrlKey *and* report wheelDeltaY of ±120, exactly
   // like a clicky wheel. Deciding pinch first stops a pinch becoming a notch.
   if (event.ctrlKey) return false;
+  return wheelNotchUnit(event) !== null;
+}
+
+/**
+ * How many legacy `wheelDeltaY` units one notch is on this platform, or `null`
+ * when the event is not a discrete wheel at all.
+ *
+ * Two conventions have to be told apart. Chromium reports a fixed ±120 per notch
+ * whatever the speed; WebKit reports `-3 * deltaY`, where `deltaY` is a whole
+ * number of lines that macOS accelerates with how fast the wheel is turned.
+ */
+function wheelNotchUnit(event: WheelZoomInput): number | null {
   const legacy = (event.nativeEvent ?? event) as WheelEvent & { wheelDeltaY?: number };
   const wheelDeltaY = typeof legacy?.wheelDeltaY === "number" ? legacy.wheelDeltaY : 0;
-  return wheelDeltaY !== 0 && Math.abs(wheelDeltaY % WHEEL_NOTCH_DELTA) === 0;
+  if (wheelDeltaY === 0) return null;
+  if (Math.abs(wheelDeltaY % WHEEL_NOTCH_DELTA) === 0) return WHEEL_NOTCH_DELTA;
+  // The WebKit shape: a whole number of lines, and a delta that is exactly the
+  // documented multiple of it. A smooth trackpad reports neither.
+  const deltaY = legacy.deltaY;
+  if (
+    Number.isInteger(deltaY) &&
+    deltaY !== 0 &&
+    Math.abs(wheelDeltaY) === WEBKIT_WHEEL_DELTA_PER_LINE * Math.abs(deltaY)
+  ) {
+    return WEBKIT_WHEEL_DELTA_PER_LINE;
+  }
+  return null;
 }
 
 /**
@@ -96,9 +140,13 @@ export function wheelZoomFactor(
   normalizedDelta: number,
   scale: number = 1,
 ): number {
-  if (isPhysicalWheelZoom(event)) {
+  const unit = wheelNotchUnit(event);
+  if (unit !== null) {
     const legacy = (event.nativeEvent ?? event) as WheelEvent & { wheelDeltaY?: number };
-    const notches = Math.abs(legacy.wheelDeltaY as number) / WHEEL_NOTCH_DELTA;
+    const notches = Math.min(
+      MAX_NOTCHES_PER_EVENT,
+      Math.max(1, Math.abs(legacy.wheelDeltaY as number) / unit),
+    );
     const direction = normalizedDelta < 0 ? -1 : 1;
     return Math.pow(2, direction * WHEEL_ZOOM_PER_NOTCH_POW2 * scale * notches);
   }
