@@ -460,6 +460,7 @@ async fn start_capture(
         sample_rate_hz = settings.sample_rate_hz,
         channel_count = settings.channel_count,
         enabled_channels = ?settings.enabled_channels,
+        decode_cross = settings.decode_cross,
         duration_ms = settings.duration_ms,
         threshold_volts = settings.threshold_volts,
         mode = ?settings.mode,
@@ -514,8 +515,15 @@ async fn start_capture(
             let _ = diagnostics_app.emit("usb_diagnostic", &event);
         };
         let graph_error = Arc::new(Mutex::new(None::<String>));
-        let use_packed_graph =
-            settings.device_id != FakeBackend::DEVICE_ID && settings.decode_cross;
+        // Cross-lane packing is a PXLogic wire format, and `decode_cross`
+        // defaults to true in the client, so gating on it alone routes every
+        // Kingst capture down the packed path. That path expects
+        // `append_cross_lanes`, which the Kingst driver never produces, so the
+        // graph received nothing while the capture ran — no live waveform — and
+        // only got the samples when `finish_capture` replaced the capture.
+        let use_packed_graph = settings.device_id != FakeBackend::DEVICE_ID
+            && !sigpilot_core::kingst_la2016::owns(&settings.device_id)
+            && settings.decode_cross;
         let started_graph = graph.clone();
         let started_error = graph_error.clone();
         let mut started = move |metadata: &CaptureMetadata| {
