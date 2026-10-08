@@ -628,12 +628,16 @@ const BULK_CHUNK: usize = 512 * 1024;
 ///
 /// A bulk IN transfer that reaches its timeout is cancelled, and the
 /// synchronous API drops whatever the transfer had already received. The buffer
-/// therefore has to fill comfortably inside `BULK_TIMEOUT`: at 512 KiB a
-/// streaming device never filled it, so every read timed out and threw its
-/// bytes away. That is what capped streaming at a fraction of the requested
-/// rate — the device was producing data, and the host was discarding it one
-/// timeout at a time.
-const STREAM_CHUNK: usize = 32 * 1024;
+/// therefore has to fill comfortably inside the read timeout — at 512 KiB the
+/// device never filled it, so every read timed out and threw its bytes away.
+///
+/// It also has to be large enough that the per-read overhead is negligible: at
+/// 32 KiB the reader managed only ~73% of the rate the device produces, so the
+/// FX2 FIFO overflowed continuously and the stream gave up after ten seconds.
+const STREAM_CHUNK: usize = 256 * 1024;
+/// Timeout for one streaming read. Sized against `STREAM_CHUNK`: the buffer has
+/// to fill well inside it, which at the measured ~15 MB/s is 17 ms.
+const STREAM_TIMEOUT: Duration = Duration::from_millis(1000);
 /// How long to wait for the device to finish sampling before giving up.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPTURE_POLL: Duration = Duration::from_millis(20);
@@ -641,7 +645,7 @@ const CAPTURE_POLL: Duration = Duration::from_millis(20);
 const BULK_TIMEOUT: Duration = Duration::from_millis(500);
 /// How long a stream may produce nothing before it is treated as stalled.
 /// Empty transfers are normal; a gap this long is not.
-const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(2);
+const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Streaming bandwidth the USB link can actually sustain, in Mbps. Above this
 /// the device throttles and drops samples. Matches the reference's warning
 /// threshold.
@@ -1124,7 +1128,7 @@ fn capture_streaming(
             break;
         }
 
-        match handle.read_bulk(EP_CAPTURE_DATA, &mut buffer, BULK_TIMEOUT) {
+        match handle.read_bulk(EP_CAPTURE_DATA, &mut buffer, STREAM_TIMEOUT) {
             Ok(0) => continue,
             Ok(got) => {
                 last_data = Instant::now();
@@ -1163,6 +1167,21 @@ fn capture_streaming(
     // Always halt, including on the cancel path, or the device keeps streaming
     // into a FIFO nobody is draining.
     set_run_mode(handle, RUNMODE_HALT)?;
+
+    // Both the log file and the diagnostic sink: the sink reaches the UI, which
+    // is no help when reading a log after the fact, and this is the one line
+    // that explains a capture that ended earlier than the caller expected.
+    let reason = if stalled {
+        "the device went quiet"
+    } else {
+        "cancelled by the caller"
+    };
+    tracing::info!(
+        samples = samples_read,
+        bytes = samples_read * unit_size,
+        reason,
+        "Kingst stream finished"
+    );
 
     diagnostics(DiagnosticEvent {
         phase: "kingst-capture".to_string(),
