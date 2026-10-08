@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 use rusb::UsbContext;
 
 use crate::{
-    capture::resolve_enabled_channels,
+    capture::{pxview_capture_transfer_size, resolve_enabled_channels},
     device::{DeviceDescriptor, DeviceDriver, DriverIsolation},
     error::{CoreError, Result},
     models::{
@@ -636,10 +636,18 @@ const BULK_CHUNK: usize = 512 * 1024;
 /// rate against 32 KiB's 80-83%. The FX2 does not cope with large transfers.
 /// Sustained throughput stays below the device's maximum either way, which is
 /// what the reference driver's pool of concurrent transfers is for.
-const STREAM_CHUNK: usize = 32 * 1024;
+/// Fallback read size when the rate cannot be turned into one, which only
+/// happens for a degenerate configuration.
+const STREAM_CHUNK_MIN: usize = 32 * 1024;
 /// Timeout for one streaming read. Sized against `STREAM_CHUNK`: the buffer has
 /// to fill well inside it, which at the measured ~15 MB/s is 17 ms.
-const STREAM_TIMEOUT: Duration = Duration::from_millis(1000);
+/// Timeout for one stream read.
+///
+/// A poll interval rather than a deadline: reads are sized to fill in about ten
+/// milliseconds, so this is a wide margin over a read that is going to complete
+/// at all, and a timeout just means the device had nothing ready. The PXLogic
+/// backend polls at 250 ms for the same reason.
+const STREAM_TIMEOUT: Duration = Duration::from_millis(250);
 /// How long to wait for the device to finish sampling before giving up.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const CAPTURE_POLL: Duration = Duration::from_millis(20);
@@ -1150,14 +1158,32 @@ fn capture_streaming(
         });
     }
 
+    // Size each read the way the PXLogic backend does — about ten milliseconds
+    // of data per enabled channel, rounded up to a page, capped by what USB 2.0
+    // carries in the same ten milliseconds. A fixed size cannot be right for
+    // every rate: 32 KiB fills in 1.6 ms at 20 MHz across 8 channels and in
+    // 131 ms at 2 MHz. Too small and the per-read overhead eats the slack that
+    // keeps the device's FIFO from overflowing; too large and the read outlives
+    // the poll interval. Only the enabled channels are transmitted in stream
+    // mode, so those are what the size is computed from.
+    let stream_chunk = pxview_capture_transfer_size(
+        settings.sample_rate_hz,
+        stream.channel_masks.len() as u8,
+        false,
+    )
+    .unwrap_or(STREAM_CHUNK_MIN)
+    .max(STREAM_CHUNK_MIN);
+    let mut buffer = vec![0u8; stream_chunk];
+
     diagnostics(DiagnosticEvent {
         phase: "kingst-capture".to_string(),
         level: DiagnosticLevel::Info,
         message: format!(
-            "streaming {} channels, {} bytes per block of {} samples, until cancelled",
+            "streaming {} channels, {} bytes per block of {} samples, {} KiB per read, until cancelled",
             stream.channel_masks.len(),
             stream.block_bytes(),
             StreamLayout::SAMPLES_PER_BLOCK,
+            stream_chunk / 1024,
         ),
     });
 
@@ -1168,7 +1194,6 @@ fn capture_streaming(
     let mut blocks = SampleBlocks::new(SAMPLE_BLOCK);
     let mut expanded: Vec<u8> = Vec::new();
     let mut samples_read = 0u64;
-    let mut buffer = vec![0u8; STREAM_CHUNK];
     let mut raw_preview: Vec<u8> = Vec::new();
     let mut last_data = Instant::now();
     let mut worst_gap = Duration::ZERO;
