@@ -1054,6 +1054,66 @@ fn capture_to_memory(
 /// The run mode is set as late as possible, immediately before the first read:
 /// the reference notes that a pause between starting the run mode and receiving
 /// data stalls the stream, because the FX2 FIFO overflows in the meantime.
+/// Block size that streaming accumulates samples in.
+///
+/// Blocks rather than one `Vec`, because a `Vec` grows by doubling and every
+/// doubling copies everything captured so far. Tens of megabytes in, that copy
+/// runs for milliseconds, and for those milliseconds no USB read is in flight:
+/// the FX2 FIFO overflows and the device stops sending. Captures were observed
+/// ending just past 2, 8, 13, 16, 32, 62 and 64 MB — the doubling points of
+/// exactly such a `Vec`, which is what pointed at this.
+const SAMPLE_BLOCK: usize = 4 * 1024 * 1024;
+
+/// Stream samples, accumulated in fixed-size blocks.
+///
+/// Appending never moves bytes already in a block, so the hot path stops
+/// allocating once the blocks are warm. The blocks are flattened once at the
+/// end, after the device has been halted and a long copy can no longer starve
+/// the reader.
+struct SampleBlocks {
+    blocks: Vec<Vec<u8>>,
+    open: Vec<u8>,
+}
+
+impl SampleBlocks {
+    fn new(block_bytes: usize) -> Self {
+        let mut open = Vec::new();
+        open.reserve_exact(block_bytes);
+        Self {
+            blocks: Vec::new(),
+            open,
+        }
+    }
+
+    /// Appends `bytes` and returns exactly what was appended, as one slice.
+    ///
+    /// The slice is contiguous because a block is closed only *before* an append
+    /// that would not fit, never in the middle of one.
+    fn extend(&mut self, bytes: &[u8]) -> &[u8] {
+        if !self.open.is_empty() && self.open.len() + bytes.len() > SAMPLE_BLOCK {
+            let full = std::mem::replace(&mut self.open, Vec::new());
+            self.blocks.push(full);
+            self.open.reserve_exact(SAMPLE_BLOCK);
+        }
+        let before = self.open.len();
+        self.open.extend_from_slice(bytes);
+        &self.open[before..]
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        if self.blocks.is_empty() {
+            return self.open;
+        }
+        let total = self.blocks.iter().map(Vec::len).sum::<usize>() + self.open.len();
+        let mut flat = Vec::with_capacity(total);
+        for block in &self.blocks {
+            flat.extend_from_slice(block);
+        }
+        flat.extend_from_slice(&self.open);
+        flat
+    }
+}
+
 fn capture_streaming(
     handle: &rusb::DeviceHandle<rusb::Context>,
     model: &KingstModel,
@@ -1105,11 +1165,13 @@ fn capture_streaming(
     ctrl_out(handle, CMD_BULK_START, 0x00, &[])?;
 
     let mut parser = StreamParser::default();
-    let mut samples = Vec::new();
+    let mut blocks = SampleBlocks::new(SAMPLE_BLOCK);
+    let mut expanded: Vec<u8> = Vec::new();
     let mut samples_read = 0u64;
     let mut buffer = vec![0u8; STREAM_CHUNK];
     let mut raw_preview: Vec<u8> = Vec::new();
     let mut last_data = Instant::now();
+    let mut worst_gap = Duration::ZERO;
 
     let mut stalled = false;
     loop {
@@ -1130,9 +1192,14 @@ fn capture_streaming(
             break;
         }
 
+        let read_started = Instant::now();
         match handle.read_bulk(EP_CAPTURE_DATA, &mut buffer, STREAM_TIMEOUT) {
             Ok(0) => continue,
             Ok(got) => {
+                let gap = read_started.elapsed();
+                if gap > worst_gap {
+                    worst_gap = gap;
+                }
                 last_data = Instant::now();
                 if raw_preview.len() < 64 {
                     let take = (64 - raw_preview.len()).min(got);
@@ -1140,10 +1207,10 @@ fn capture_streaming(
                 }
                 // Publish only what this chunk added, so the graph grows live
                 // instead of the whole capture landing at the end.
-                let before = samples.len();
+                expanded.clear();
                 samples_read +=
-                    expand_stream_chunk(&buffer[..got], &stream, &mut parser, &mut samples)?;
-                on_samples(&samples[before..]);
+                    expand_stream_chunk(&buffer[..got], &stream, &mut parser, &mut expanded)?;
+                on_samples(blocks.extend(&expanded));
                 progress(CaptureProgress {
                     bytes_read: samples_read * unit_size,
                     // A stream has no planned length; the caller decides when to
@@ -1204,7 +1271,19 @@ fn capture_streaming(
         ),
     });
 
-    Ok((samples, samples_read))
+    // The worst gap in the read loop is the number that explains a capture which
+    // ended earlier than the caller expected: a gap long enough for the device's
+    // FIFO to overflow is what stops the stream, and it is otherwise invisible.
+    diagnostics(DiagnosticEvent {
+        phase: "kingst-capture".to_string(),
+        level: DiagnosticLevel::Info,
+        message: format!(
+            "stream read statistics: {samples_read} samples, worst read gap {:.1} ms",
+            worst_gap.as_secs_f64() * 1000.0
+        ),
+    });
+
+    Ok((blocks.into_vec(), samples_read))
 }
 
 /// Build the capture metadata.
@@ -1976,6 +2055,25 @@ mod tests {
         let mut parser = StreamParser::default();
         let mut samples = Vec::new();
         assert!(expand_stream_chunk(&[0u8; 3], &layout, &mut parser, &mut samples).is_err());
+    }
+
+    #[test]
+    fn block_accumulation_returns_the_appended_bytes_and_the_whole_capture() {
+        // The published slice has to be exactly what this call appended, because
+        // the caller forwards it to the graph as new samples; and the flattened
+        // result has to equal the concatenation, because that is the capture.
+        let mut blocks = SampleBlocks::new(8);
+        let mut expected: Vec<u8> = Vec::new();
+
+        // Deliberately not block-aligned: the interesting case is an append that
+        // straddles a block boundary, which must still come back contiguous.
+        for chunk in [&[1u8, 2, 3, 4, 5][..], &[6, 7, 8][..], &[9, 10, 11, 12, 13, 14][..]] {
+            let added = blocks.extend(chunk);
+            assert_eq!(added, chunk);
+            expected.extend_from_slice(chunk);
+        }
+
+        assert_eq!(blocks.into_vec(), expected);
     }
 
     #[test]
