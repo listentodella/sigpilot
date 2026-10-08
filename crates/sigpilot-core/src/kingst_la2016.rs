@@ -1307,9 +1307,12 @@ pub fn capture(
         )?,
     };
 
-    // The device stops on a packet boundary, so the last packet's repeat count
-    // can push the total past the requested limit. Trim to what was asked for.
-    if sample_count > 0 {
+    // Capture-to-memory stops on a packet boundary, so the last packet's repeat
+    // count can push the total past the requested limit. Trim to what was asked
+    // for — but only there: a stream is bounded by `cancel`, not by
+    // `duration_ms`, and trimming it to the duration would throw away everything
+    // the device sent after the first few milliseconds.
+    if matches!(settings.mode, crate::models::CaptureMode::Buffer) && sample_count > 0 {
         let wanted = sample_count as usize * layout.unit_size;
         if samples.len() > wanted {
             samples.truncate(wanted);
