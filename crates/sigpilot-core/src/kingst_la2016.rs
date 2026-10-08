@@ -1889,23 +1889,54 @@ impl DeviceDriver for KingstLa2016Driver {
             default_sample_rate_hz: rates.first().copied().unwrap_or(model.samplerate),
             sample_rates: rates.clone(),
             threshold_volts: THRESHOLD_VOLTS.to_vec(),
-            channel_modes: vec![HardwareChannelModeInfo {
-                id: format!("KINGST_BUFFER{}", model.channels),
-                // The LA series captures into its own SDRAM and is downloaded
-                // afterwards; it does not stream to the host.
-                stream: false,
-                channels: model.channels,
-                default_sample_rate_hz: model.samplerate,
-                default_sample_limit: depth_samples,
-                min_sample_rate_hz: rates.last().copied().unwrap_or(model.samplerate),
-                max_sample_rate_hz: model.samplerate,
-                sample_rates: rates,
-                description: format!(
-                    "Use {} Channels (Max {}MHz)",
-                    model.channels,
-                    model.samplerate / 1_000_000
-                ),
-            }],
+            channel_modes: vec![
+                HardwareChannelModeInfo {
+                    id: format!("KINGST_BUFFER{}", model.channels),
+                    // Capture-to-memory: the device fills its own SDRAM and the
+                    // host downloads it afterwards. Deep at high rates, and
+                    // bounded by that SDRAM.
+                    stream: false,
+                    channels: model.channels,
+                    default_sample_rate_hz: model.samplerate,
+                    default_sample_limit: depth_samples,
+                    min_sample_rate_hz: rates.last().copied().unwrap_or(model.samplerate),
+                    max_sample_rate_hz: model.samplerate,
+                    sample_rates: rates.clone(),
+                    description: format!(
+                        "Use {} Channels (Max {}MHz, into device memory)",
+                        model.channels,
+                        model.samplerate / 1_000_000
+                    ),
+                },
+                HardwareChannelModeInfo {
+                    id: format!("KINGST_STREAM{}", model.channels),
+                    // Streaming: samples go straight to the host, so the depth is
+                    // the client's memory budget rather than the device's, and the
+                    // bound is USB 2.0 rather than the SDRAM. `capture_streaming`
+                    // warns when the requested rate needs more than the link
+                    // carries.
+                    //
+                    // This entry used to be missing, and that was not cosmetic: the
+                    // client chooses a channel mode by matching this flag against
+                    // the capture mode it is about to run, and the UI's "Looping"
+                    // mode is `CaptureMode::Stream`. With no streaming entry the
+                    // match came back empty, so the channel-count and sample-rate
+                    // options fell back to generic defaults instead of the
+                    // device's own.
+                    stream: true,
+                    channels: model.channels,
+                    default_sample_rate_hz: model.samplerate,
+                    default_sample_limit: 0,
+                    min_sample_rate_hz: rates.last().copied().unwrap_or(model.samplerate),
+                    max_sample_rate_hz: model.samplerate,
+                    sample_rates: rates,
+                    description: format!(
+                        "Use {} Channels (Max {}MHz, streamed)",
+                        model.channels,
+                        model.samplerate / 1_000_000
+                    ),
+                },
+            ],
         })
     }
 
