@@ -33,11 +33,20 @@ fn env_u64(name: &str, default: u64) -> u64 {
 }
 
 fn settings_for(device_id: &str, rate: u64, duration_ms: u64, threshold: f64) -> CaptureSettings {
+    // `SIGPILOT_SPI_CHANNELS` narrows the enabled set, because the rate a link
+    // can carry depends on how many channels are on. The client asks for 8 of
+    // the LA2016's 16 at 20 MHz, which is 160 Mbps and within USB 2.0's budget;
+    // all 16 is 320 Mbps, where the device throttles and the capture fails for
+    // a reason that has nothing to do with the driver.
+    let enabled: Vec<u8> = match env_u64("SIGPILOT_SPI_CHANNELS", 0) {
+        0 => Vec::new(),
+        count => (0..count.min(u64::from(CHANNELS)) as u8).collect(),
+    };
     CaptureSettings {
         device_id: device_id.to_string(),
         sample_rate_hz: rate,
         channel_count: CHANNELS,
-        enabled_channels: Vec::new(),
+        enabled_channels: enabled,
         duration_ms,
         buffer_size_mb: 1024,
         decode_cross: false,
@@ -216,10 +225,12 @@ fn main() {
     // thing to rule out.
     println!("--- threshold sweep (1 ms probe each) ---");
     let mut chosen: Option<(f64, u64)> = None;
-    // A streaming probe costs real time on the wire, so probing six thresholds
-    // makes the run drag; one is enough to exercise the path.
+    // Streaming gets no probe at all. A 1 ms capture that is then cancelled puts
+    // the device through a full run/halt cycle before the real capture starts,
+    // and the client never does that — so probing here measures the probe, not
+    // the streaming path that is under test.
     let streaming = std::env::var_os("SIGPILOT_SPI_STREAM").is_some();
-    let thresholds: &[f64] = if streaming { &[1.5] } else { &THRESHOLDS };
+    let thresholds: &[f64] = if streaming { &[] } else { &THRESHOLDS };
     for threshold in thresholds.iter().copied() {
         let probe = settings_for(&id, rate, 1, threshold);
         let Some(capture) = run_capture(&id, &probe) else {
@@ -234,9 +245,14 @@ fn main() {
             chosen = Some((threshold, edges));
         }
     }
-    let Some((threshold, edges)) = chosen else {
-        eprintln!("no threshold produced a capture");
-        std::process::exit(1);
+    let (threshold, edges) = match chosen {
+        Some(pair) => pair,
+        // Streaming skipped the sweep, so fall back to the default threshold.
+        None if streaming => (1.5, 0),
+        None => {
+            eprintln!("no threshold produced a capture");
+            std::process::exit(1);
+        }
     };
     println!();
     if edges == 0 {

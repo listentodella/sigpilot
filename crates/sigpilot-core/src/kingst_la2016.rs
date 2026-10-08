@@ -1172,6 +1172,11 @@ fn capture_streaming(
     let mut raw_preview: Vec<u8> = Vec::new();
     let mut last_data = Instant::now();
     let mut worst_gap = Duration::ZERO;
+    // A per-second rate line, because "it stopped early" needs a timeline to be
+    // diagnosable: this shows whether the device produced steadily and then
+    // stopped, or trickled from the start.
+    let mut rate_window = Instant::now();
+    let mut rate_mark = 0u64;
 
     let mut stalled = false;
     loop {
@@ -1211,6 +1216,22 @@ fn capture_streaming(
                 samples_read +=
                     expand_stream_chunk(&buffer[..got], &stream, &mut parser, &mut expanded)?;
                 on_samples(blocks.extend(&expanded));
+                if rate_window.elapsed() >= Duration::from_secs(1) {
+                    let elapsed = rate_window.elapsed();
+                    diagnostics(DiagnosticEvent {
+                        phase: "kingst-capture".to_string(),
+                        level: DiagnosticLevel::Info,
+                        message: format!(
+                            "stream rate: {:.2} Ms/s over {:.2} s ({} samples so far, worst read gap {:.1} ms)",
+                            (samples_read - rate_mark) as f64 / elapsed.as_secs_f64() / 1e6,
+                            elapsed.as_secs_f64(),
+                            samples_read,
+                            worst_gap.as_secs_f64() * 1000.0
+                        ),
+                    });
+                    rate_mark = samples_read;
+                    rate_window = Instant::now();
+                }
                 progress(CaptureProgress {
                     bytes_read: samples_read * unit_size,
                     // A stream has no planned length; the caller decides when to
