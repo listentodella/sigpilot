@@ -2287,6 +2287,21 @@ export default function App() {
     [animateViewport],
   );
 
+  // Instant viewport moves (fit, scrub, keep-a-sample-visible) must not glide.
+  // Route them through the intent path when the frame loop owns the viewport,
+  // else write the store, so both paths land immediately instead of the write
+  // being discarded under the loop.
+  const setViewportNow = useCallback(
+    (sessionId: string, start: number, samples: number) => {
+      if (hasSessionFrameLoop(sessionId)) {
+        dispatchSessionViewIntent(sessionId, { kind: "set", samples, start_sample: start });
+        return;
+      }
+      updateViewport(sessionId, start, samples);
+    },
+    [updateViewport],
+  );
+
   const zoomViewport = useCallback(
     (factor: number) => {
       if (!activeSession?.summary) return;
@@ -2324,8 +2339,8 @@ export default function App() {
 
   const fitViewport = useCallback(() => {
     if (!activeSession?.summary) return;
-    updateViewport(activeSession.id, 0, activeSession.summary.metadata.sample_count);
-  }, [activeSession, updateViewport]);
+    setViewportNow(activeSession.id, 0, activeSession.summary.metadata.sample_count);
+  }, [activeSession, setViewportNow]);
 
   // The backend-owned frame loop. One per session, created when a capture is
   // loaded and driven by requestAnimationFrame from then on — deliberately
@@ -4162,16 +4177,36 @@ export default function App() {
       const padding = preservedSamples * 0.2;
       const targetStart = Math.max(0, range.trimStart - padding);
       const targetEnd = Math.min(total, range.trimEnd + padding);
-      animateViewport(activeSession.id, targetStart, targetEnd - targetStart);
+      stepViewport(
+        activeSession.id,
+        {
+          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          kind: "animate_to",
+          samples: targetEnd - targetStart,
+          start_sample: targetStart,
+        },
+        targetStart,
+        targetEnd - targetStart,
+      );
       return;
     }
 
     const anchor = mode === "before" ? range.trimStart : range.trimEnd;
-    if (
-      anchor < activeSession.viewportStart ||
-      anchor > activeSession.viewportStart + activeSession.viewportSamples
-    ) {
-      animateViewport(activeSession.id, anchor - activeSession.viewportSamples / 2, activeSession.viewportSamples);
+    const liveTrimView = readFrameState(activeSession.id)?.view;
+    const trimStart = liveTrimView?.start_sample ?? activeSession.viewportStart;
+    const trimSamples = liveTrimView?.samples ?? activeSession.viewportSamples;
+    if (anchor < trimStart || anchor > trimStart + trimSamples) {
+      stepViewport(
+        activeSession.id,
+        {
+          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          kind: "animate_to",
+          samples: trimSamples,
+          start_sample: anchor - trimSamples / 2,
+        },
+        anchor - trimSamples / 2,
+        trimSamples,
+      );
     }
   }
 
@@ -4671,8 +4706,13 @@ export default function App() {
     const rect = stage.getBoundingClientRect();
     if (pointerX < rect.left || pointerX > rect.right) return undefined;
     const ratio = (pointerX - rect.left) / Math.max(1, rect.width);
-    const total = session.summary?.metadata.sample_count ?? session.viewportSamples;
-    return clampSamplePoint(session.viewportStart + ratio * session.viewportSamples, total);
+    // Map through the authoritative view: the session store is frozen while the
+    // frame loop owns the viewport, which would place a marker at the wrong sample.
+    const liveView = readFrameState(session.id)?.view;
+    const viewStart = liveView?.start_sample ?? session.viewportStart;
+    const viewSamples = liveView?.samples ?? session.viewportSamples;
+    const total = session.summary?.metadata.sample_count ?? viewSamples;
+    return clampSamplePoint(viewStart + ratio * viewSamples, total);
   }
 
   function addSingleMarkerAtSample(sample: number) {
@@ -4965,13 +5005,15 @@ export default function App() {
   // The footer reports the horizontal range — the time the viewport spans — rather
   // than samples per pixel. "S/px" describes the renderer's sampling, which is not
   // something the user reasons about; the span is, and it is the number Logic 2
-  // shows in this corner.
+  // shows in this corner. Read the span from the authoritative frame view, since
+  // the session store is frozen while the frame loop owns the viewport.
+  const footerSamples =
+    (activeSession ? readFrameState(activeSession.id)?.view.samples : undefined) ??
+    activeSession?.viewportSamples ??
+    0;
   const zoomLabel =
-    activeSession?.summary && activeSession.viewportSamples > 0
-      ? formatSeconds(
-          activeSession.viewportSamples /
-            Math.max(1, activeSession.summary.metadata.sample_rate_hz),
-        )
+    activeSession?.summary && footerSamples > 0
+      ? formatSeconds(footerSamples / Math.max(1, activeSession.summary.metadata.sample_rate_hz))
       : "Zoom";
   const analyzerEditSession = analyzerInEdit
     ? sessions.find((session) => session.id === analyzerInEdit.sessionId) ?? null
@@ -5306,7 +5348,11 @@ export default function App() {
                   <div className="horizontalScrollBar">
                     <StripChartScrollbar
                       onViewportStartChange={(startSample) =>
-                        updateViewport(activeSession.id, startSample, activeSession.viewportSamples)
+                        setViewportNow(
+                          activeSession.id,
+                          startSample,
+                          readFrameState(activeSession.id)?.view.samples ?? activeSession.viewportSamples,
+                        )
                       }
                       sessionId={activeSession.id}
                       totalSamples={totalSamples}
