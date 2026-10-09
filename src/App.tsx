@@ -114,6 +114,7 @@ import {
   setSessionFrameLive,
   subscribeFrameHealth,
 } from "./lib/frameStore";
+import { useSessionFrameState } from "./lib/useFrameState";
 import { ZOOM_ANIMATION_DURATION_MS } from "./lib/wheelZoom";
 import {
   analyzerCanRenderTracksLocally,
@@ -6343,6 +6344,14 @@ function RangeMeasurementsOverlay({
   const lastPlacementPointerRef = useRef<{ x: number; y: number } | null>(null);
   const rangeSnapRequestRef = useRef(0);
   const totalSamples = session.summary?.metadata.sample_count ?? 0;
+  // The frame loop owns the viewport once it has a ready frame, and the React
+  // session store stops being updated while it does. Mapping sample<->pixel
+  // from the store is what made a placed region scroll with the waveform
+  // instead of staying anchored to its samples.
+  const frameState = useSessionFrameState(session.id);
+  const live = frameState?.ready ? frameState : null;
+  const viewportStart = live?.view.start_sample ?? session.viewportStart;
+  const viewportSamples = live?.view.samples ?? session.viewportSamples;
   const rowLayout = useMemo(
     () => getSaleaeGraphChannelLayout(rowHeights, visibleChannelIndexes.length, 1, rowTopInsets),
     [rowHeights, rowTopInsets, visibleChannelIndexes.length],
@@ -6385,14 +6394,14 @@ function RangeMeasurementsOverlay({
   }, [onUpdateSession, session.rangeMeasurements]);
 
   function sampleToPercent(sample: number) {
-    const ratio = (sample - session.viewportStart) / Math.max(1, session.viewportSamples);
+    const ratio = (sample - viewportStart) / Math.max(1, viewportSamples);
     return ratio * 100;
   }
 
   function clientXToSample(clientX: number, host: HTMLElement) {
     const rect = host.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
-    return Math.max(0, Math.min(totalSamples, Math.round(session.viewportStart + ratio * session.viewportSamples)));
+    return Math.max(0, Math.min(totalSamples, Math.round(viewportStart + ratio * viewportSamples)));
   }
 
   function pointerToPlacement(clientX: number, clientY: number, host: HTMLElement, fixedChannelIndex?: number) {
@@ -6407,8 +6416,8 @@ function RangeMeasurementsOverlay({
       rowTopInsets,
       tile,
       totalSamples,
-      viewportSamples: session.viewportSamples,
-      viewportStart: session.viewportStart,
+      viewportSamples,
+      viewportStart,
     });
     const rowIndex = resolved.channelIndex;
     if (rowIndex === null) return null;
@@ -6437,7 +6446,7 @@ function RangeMeasurementsOverlay({
       sample: Math.round(next.rawSample),
     }).then((transition) => {
       if (!transition || requestId !== rangeSnapRequestRef.current) return;
-      const samplesPerPixel = session.viewportSamples / Math.max(1, host.clientWidth);
+      const samplesPerPixel = viewportSamples / Math.max(1, host.clientWidth);
       const withinThreshold = Math.abs(transition.sample - next.rawSample) <= samplesPerPixel * 8;
       const previousGap = transition.previous_sample == null
         ? 0
@@ -6668,8 +6677,8 @@ function RangeMeasurementsOverlay({
     session.rangePlacement?.channelIndex,
     session.rangePlacement?.startSample,
     session.rangePlacement?.startedBy,
-    session.viewportSamples,
-    session.viewportStart,
+    viewportSamples,
+    viewportStart,
     tile,
     totalSamples,
     visibleChannelIndexes,
@@ -6681,7 +6690,7 @@ function RangeMeasurementsOverlay({
     if (!host) return;
     const { x, y } = lastPlacementPointerRef.current;
     updatePlacementHover(x, y, host);
-  }, [session.viewportSamples, session.viewportStart, tile]);
+  }, [viewportSamples, viewportStart, tile]);
 
   if (!session.summary || totalSamples <= 0 || (session.rangeMeasurements.length === 0 && !session.rangePlacement)) {
     return null;
@@ -10884,9 +10893,13 @@ function MeasurementsPanel({
 
   function goToRange(range: UiRangeMeasurement, zoom = false) {
     const span = Math.max(1, range.endSample - range.startSample);
-    const padding = zoom ? Math.round(span * 0.08) : Math.round(session.viewportSamples * 0.5);
+    // The React store is frozen while the frame loop owns the viewport, so the
+    // kept span has to come from the authoritative frame state; otherwise the
+    // jump returns at a stale scale instead of where the region sits.
+    const currentSamples = readFrameState(session.id)?.view.samples ?? session.viewportSamples;
+    const padding = zoom ? Math.round(span * 0.08) : Math.round(currentSamples * 0.5);
     const start = Math.max(0, range.startSample - padding);
-    const samples = zoom ? span + padding * 2 : session.viewportSamples;
+    const samples = zoom ? span + padding * 2 : currentSamples;
     onViewportChange(start, samples);
     selectRange(range.id);
   }
