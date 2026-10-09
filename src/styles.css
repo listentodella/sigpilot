@@ -7271,7 +7271,12 @@ body.timing-marker-col-resize * {
   gap: 0;
   padding: 0;
   position: relative;
-  z-index: 33;
+  /* Above .saleaeSidebarRoot (36). The footer's own popovers (z-index 60) live
+     inside this stacking context, so they cannot escape it: with the footer
+     below the sidebar, opening the language or zoom menu while a session is
+     open painted the menu underneath the sidebar -- the options were rendered
+     but invisible. Keep this above the sidebar. */
+  z-index: 37;
   border-top: 1px solid var(--border-20);
   color: var(--on-background-30);
   background: var(--hover-background);
