@@ -13,6 +13,7 @@ import { initReactI18next } from "react-i18next";
 
 import { loadUiPreferences } from "../lib/preferences";
 import enAdvanced from "./locales/en/advanced.json";
+import enExtensions from "./locales/en/extensions.json";
 import enCommon from "./locales/en/common.json";
 import enFooter from "./locales/en/footer.json";
 import enNotes from "./locales/en/notes.json";
@@ -21,6 +22,7 @@ import enSettings from "./locales/en/settings.json";
 import enStart from "./locales/en/start.json";
 import enToolbar from "./locales/en/toolbar.json";
 import zhAdvanced from "./locales/zh-CN/advanced.json";
+import zhExtensions from "./locales/zh-CN/extensions.json";
 import zhCommon from "./locales/zh-CN/common.json";
 import zhFooter from "./locales/zh-CN/footer.json";
 import zhNotes from "./locales/zh-CN/notes.json";
@@ -39,10 +41,11 @@ void i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   lng: loadUiPreferences().locale,
-  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start"],
+  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions"],
   resources: {
     en: {
       advanced: enAdvanced,
+      extensions: enExtensions,
       common: enCommon,
       footer: enFooter,
       notes: enNotes,
@@ -53,6 +56,7 @@ void i18n.use(initReactI18next).init({
     },
     "zh-CN": {
       advanced: zhAdvanced,
+      extensions: zhExtensions,
       common: zhCommon,
       footer: zhFooter,
       notes: zhNotes,

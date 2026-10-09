@@ -10,6 +10,7 @@ import {
   Search,
   X,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createExtensionTemplate, readExtensionPackage } from "../lib/api";
@@ -34,6 +35,7 @@ const MARKETPLACE_TERMS_URL = "https://www.saleae.com/terms";
 const PUBLISH_URL = "https://marketplace.saleae.com/publish";
 
 export function ExtensionsPanel({ busy, extensions, onChange, onNotify }: ExtensionsPanelProps) {
+  const { t } = useTranslation("extensions");
   const [searchQuery, setSearchQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -144,8 +146,8 @@ export function ExtensionsPanel({ busy, extensions, onChange, onNotify }: Extens
       setLoadingFile(true);
       const path = await openDialog({
         multiple: false,
-        filters: [{ name: "JSON", extensions: ["json"] }],
-        title: "Select extension json file",
+        filters: [{ name: t("jsonFilter"), extensions: ["json"] }],
+        title: t("selectJsonFile"),
       });
       if (typeof path !== "string") return;
       const extensionPackage = await readExtensionPackage(path);
@@ -190,16 +192,16 @@ export function ExtensionsPanel({ busy, extensions, onChange, onNotify }: Extens
 
   function refreshMarketplace() {
     setMenuOpen(false);
-    onNotify("Extension marketplace checked for updates");
+    onNotify(t("marketplaceChecked"));
   }
 
   return (
     <div className="extensionsSidebar">
       <header className="extensionsHeader">
         <div className="extensionsHeaderTitle">
-          <strong>Extensions</strong>
+          <strong>{t("title")}</strong>
           <button
-            aria-label="About extensions"
+            aria-label={t("about")}
             className={helpOpen ? "active" : ""}
             onClick={() => setHelpOpen((open) => !open)}
             type="button"
@@ -209,7 +211,7 @@ export function ExtensionsPanel({ busy, extensions, onChange, onNotify }: Extens
         </div>
         <div className="extensionsMenuAnchor">
           <button
-            aria-label="Extension menu"
+            aria-label={t("menu")}
             className={menuOpen ? "active" : ""}
             onClick={() => setMenuOpen((open) => !open)}
             type="button"
@@ -250,9 +252,9 @@ export function ExtensionsPanel({ busy, extensions, onChange, onNotify }: Extens
       <div className="extensionsSearchSection">
         <Search size={14} />
         <input
-          aria-label="Search Extensions"
+          aria-label={t("searchLabel")}
           onChange={(event) => setSearchQuery(event.target.value)}
-          placeholder="Search Extensions..."
+          placeholder={t("searchPlaceholder")}
           type="search"
           value={searchQuery}
         />
@@ -350,13 +352,14 @@ function ExtensionListItem({
   onUninstall: () => void;
   onUpdate: () => void;
 }) {
+  const { t } = useTranslation("extensions");
   const [hovered, setHovered] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const action =
     extension.source === "Marketplace" && !extension.installed
-      ? { label: "Install", onClick: onInstall }
+      ? { label: t("install"), onClick: onInstall }
       : extension.canUpdate
-        ? { label: "Update", onClick: onUpdate }
+        ? { label: t("update"), onClick: onUpdate }
         : null;
 
   return (
@@ -381,10 +384,10 @@ function ExtensionListItem({
           <strong style={{ opacity: extension.enabled || !extension.installed ? 1 : 0.5 }}>
             {extension.manifest.name}
           </strong>
-          {extension.source === "Local" && <span className="localBadge">Local</span>}
+          {extension.source === "Local" && <span className="localBadge">{t("localBadge")}</span>}
           {extension.source === "Local" && (
             <button
-              aria-label="Reload Extension"
+              aria-label={t("reload")}
               className="extensionReloadButton"
               disabled={busy}
               onClick={(event) => { event.stopPropagation(); onReload(); }}
@@ -395,7 +398,7 @@ function ExtensionListItem({
           )}
         </div>
         <p style={{ opacity: extension.enabled || !extension.installed ? 1 : 0.5 }}>
-          {extension.manifest.description || "No description provided"}
+          {extension.manifest.description || t("noDescription")}
         </p>
         <div className="extensionListFooter">
           <span>by {extension.manifest.author}</span>
@@ -422,14 +425,16 @@ function ExtensionListItem({
         {menuOpen && (
           <div className="extensionItemMenu">
             {extension.source === "Marketplace" && !extension.installed && (
-              <button onClick={onInstall} type="button">Install</button>
+              <button onClick={onInstall} type="button">{t("install")}</button>
             )}
             {extension.source !== "BuiltIn" && extension.installed && (
-              <button disabled={busy} onClick={onUninstall} type="button">Uninstall</button>
+              <button disabled={busy} onClick={onUninstall} type="button">
+              {t("uninstall")}
+            </button>
             )}
             {extension.installed && (
               <button disabled={busy} onClick={onToggleEnabled} type="button">
-                {extension.enabled ? "Disable" : "Enable"}
+                {extension.enabled ? t("disable") : t("enable")}
               </button>
             )}
           </div>
@@ -440,6 +445,7 @@ function ExtensionListItem({
 }
 
 function CreateExtensionCard({ onCreate }: { onCreate: () => void }) {
+  const { t } = useTranslation("extensions");
   return (
     <div className="createExtensionCard">
       <div className="extensionShapes" aria-hidden="true">
@@ -447,7 +453,7 @@ function CreateExtensionCard({ onCreate }: { onCreate: () => void }) {
         <span className="extensionCircle" />
         <span className="extensionSquare" />
       </div>
-      <strong>Create your own extension</strong>
+      <strong>{t("createYourOwn")}</strong>
       <p>
         Visit the{" "}
         <button onClick={() => openExternal(EXTENSION_DOCS_URL)} type="button">
@@ -471,6 +477,7 @@ function CreateExtensionDialog({
   onCreated: (extension: UiExtensionRecord) => void;
   onNotify: (message: string) => void;
 }) {
+  const { t } = useTranslation("extensions");
   const [type, setType] = useState<UiExtensionFeatureType>("HighLevelAnalyzer");
   const [additionalOpen, setAdditionalOpen] = useState(false);
   const [name, setName] = useState("");
@@ -485,7 +492,7 @@ function CreateExtensionDialog({
       if ("__TAURI_INTERNALS__" in window) {
         path = await saveDialog({
           defaultPath: name.trim() || "My Extension",
-          title: "Create extension folder",
+          title: t("createFolderTitle"),
         });
       } else {
         path = `preview:${slugify(name) || "my-extension"}`;
@@ -510,17 +517,17 @@ function CreateExtensionDialog({
     <div className="extensionDialogBackdrop" onMouseDown={onClose}>
       <section className="extensionDialog" onMouseDown={(event) => event.stopPropagation()}>
         <header>
-          <strong>Create Extension</strong>
-          <button aria-label="Close" onClick={onClose} type="button"><X size={14} /></button>
+          <strong>{t("createTitle")}</strong>
+          <button aria-label={t("close")} onClick={onClose} type="button"><X size={14} /></button>
         </header>
         <div className="extensionDialogBody">
-          <h3>Generate from template</h3>
+          <h3>{t("generateFromTemplate")}</h3>
           <div className="extensionTemplateRow">
             <div>
               <select value={type} onChange={(event) => setType(event.target.value as UiExtensionFeatureType)}>
-                <option value="HighLevelAnalyzer">High Level Analyzer</option>
-                <option value="DigitalMeasurement">Digital Measurement</option>
-                <option value="AnalogMeasurement">Analog Measurement</option>
+                <option value="HighLevelAnalyzer">{t("typeHighLevelAnalyzer")}</option>
+                <option value="DigitalMeasurement">{t("typeDigitalMeasurement")}</option>
+                <option value="AnalogMeasurement">{t("typeAnalogMeasurement")}</option>
               </select>
               <button
                 className={`extensionAdditionalToggle ${additionalOpen ? "open" : ""}`}
@@ -532,11 +539,11 @@ function CreateExtensionDialog({
               </button>
               {additionalOpen && (
                 <div className="extensionAdditionalFields">
-                  <input onChange={(event) => setName(event.target.value)} placeholder="Extension Title" value={name} />
-                  <input onChange={(event) => setAuthor(event.target.value)} placeholder="Author" value={author} />
+                  <input onChange={(event) => setName(event.target.value)} placeholder={t("fieldTitle")} value={name} />
+                  <input onChange={(event) => setAuthor(event.target.value)} placeholder={t("fieldAuthor")} value={author} />
                   <input
                     onChange={(event) => setDescription(event.target.value)}
-                    placeholder="Description"
+                    placeholder={t("fieldDescription")}
                     value={description}
                   />
                 </div>
@@ -572,6 +579,7 @@ function ExtensionDetail({
   onToggleEnabled: () => void;
   onUninstall: () => void;
 }) {
+  const { t } = useTranslation("extensions");
   return (
     <div className="extensionDetailOverlay">
       <aside className="extensionDetailSummary">
@@ -596,7 +604,7 @@ function ExtensionDetail({
               onChange={onToggleEnabled}
               type="checkbox"
             />
-            <span>{extension.enabled ? "Enabled" : "Disabled"}</span>
+            <span>{extension.enabled ? t("enabled") : t("disabled")}</span>
           </label>
         )}
         {extension.repository && (
@@ -609,7 +617,7 @@ function ExtensionDetail({
         </button>
       </aside>
       <article className="extensionReadme">
-        <button aria-label="Close extension details" className="extensionDetailClose" onClick={onClose} type="button">
+        <button aria-label={t("closeDetails")} className="extensionDetailClose" onClick={onClose} type="button">
           <X size={14} />
         </button>
         <ReadmeContent extension={extension} />
@@ -619,6 +627,7 @@ function ExtensionDetail({
 }
 
 function ReadmeContent({ extension }: { extension: UiExtensionRecord }) {
+  const { t } = useTranslation("extensions");
   const readme = extension.readme?.trim();
   if (!readme) return <p>readme.md missing from extension</p>;
   return (
@@ -630,7 +639,7 @@ function ReadmeContent({ extension }: { extension: UiExtensionRecord }) {
         if (!line.trim()) return <div className="extensionReadmeSpacer" key={index} />;
         return <p key={index}>{line}</p>;
       })}
-      <h3>Included features</h3>
+      <h3>{t("includedFeatures")}</h3>
       {Object.entries(extension.manifest.extensions).length === 0 ? (
         <p>No feature metadata is available until this marketplace extension is installed.</p>
       ) : (
