@@ -10958,6 +10958,7 @@ function CursorsPanel({
   sampleRateHz: number;
   session: UiSession;
 }) {
+  const { t: measureT } = useTranslation("measurements");
   const cursor = session.cursorState;
   const deltaSamples = Math.abs(cursor.x2Sample - cursor.x1Sample);
   const deltaSeconds = deltaSamples / Math.max(1, sampleRateHz);
@@ -10968,9 +10969,9 @@ function CursorsPanel({
     ["x2", formatSeconds(cursor.x2Sample / Math.max(1, sampleRateHz)), ""],
     ["Δx", formatSeconds(deltaSeconds), ""],
     ["1/Δx", frequency > 0 ? formatRate(frequency) : "-", ""],
-    ["y1", cursor.visible ? "Digital" : "-", `D${cursor.y1Channel}`],
-    ["y2", cursor.visible ? "Digital" : "-", `D${cursor.y2Channel}`],
-    ["Δy", cursor.visible ? "1 state" : "-", ""],
+    ["y1", cursor.visible ? measureT("digital") : "-", `D${cursor.y1Channel}`],
+    ["y2", cursor.visible ? measureT("digital") : "-", `D${cursor.y2Channel}`],
+    ["Δy", cursor.visible ? measureT("oneState") : "-", ""],
   ];
 
   function updateCursor(patch: Partial<UiCursorState>) {
@@ -10989,10 +10990,10 @@ function CursorsPanel({
     <div className="cursorsSettingsPanel">
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
-          <span>Cursors</span>
+          <span>{measureT("cursors")}</span>
           <button className="deviceSettingsSmallButton" onClick={copyRows} type="button">
             <Copy size={12} />
-            Copy
+            {measureT("copy")}
           </button>
         </div>
         <label className="toggle-field panel-toggle">
@@ -11001,7 +11002,7 @@ function CursorsPanel({
             onChange={(event) => updateCursor({ visible: event.target.checked })}
             type="checkbox"
           />
-          Cursors On
+          {measureT("cursorsOn")}
         </label>
       </section>
 
@@ -11019,7 +11020,7 @@ function CursorsPanel({
 
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
-          <span>Y Cursor Channels</span>
+          <span>{measureT("yCursorChannels")}</span>
         </div>
         <div className="twoColumnFields">
           <label className="stack-field">
@@ -11067,6 +11068,7 @@ function MeasurementsPanel({
   onViewportChange: (start: number, samples: number) => void;
   session: UiSession;
 }) {
+  const { t: measureT } = useTranslation("measurements");
   const [addOpen, setAddOpen] = useState(false);
   const [openMenuFor, setOpenMenuFor] = useState<string | null>(null);
   const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
@@ -11139,14 +11141,14 @@ function MeasurementsPanel({
   return (
     <div className="measurementsSidebarPanel">
       <div className="sidebarTitleRow">
-        <div className="sidebarTitleText">Measurements</div>
+        <div className="sidebarTitleText">{measureT("measurements")}</div>
         <div className="measurementAddMenu">
           <button
             className="sidebarCircleButton"
-            data-help-tooltip="Click and drag to select a range or click to start and end a range"
+            data-help-tooltip={measureT("addMeasurementHint")}
             disabled={!canAdd}
             onClick={() => setAddOpen((open) => !open)}
-            title={canAdd ? "Add Measurement" : "Disabled while recording and before the first capture"}
+            title={canAdd ? measureT("addMeasurement") : measureT("addDisabled")}
             type="button"
           >
             <Plus size={13} />
@@ -11154,8 +11156,8 @@ function MeasurementsPanel({
           {addOpen && (
             <div className="measurementAddPopover">
               <button className="popover-row" onClick={addRangeFromMenu} type="button">
-                <span>Add Measurement</span>
-                <small>Cmd/Ctrl+G</small>
+                <span>{measureT("addMeasurement")}</span>
+                <small>{measureT("shortcutCmdCtrlG")}</small>
               </button>
             </div>
           )}
@@ -11165,7 +11167,7 @@ function MeasurementsPanel({
       {session.rangeMeasurements.length === 0 ? (
         <div className="emptyMeasurementState">
           <img alt="" draggable={false} src={emptyMeasurementArt} />
-          <span>Click "+" to add Measurements</span>
+          <span>{measureT("emptyMeasurements")}</span>
         </div>
       ) : (
         <div className="rangeMeasurementList">
@@ -11191,7 +11193,7 @@ function MeasurementsPanel({
                     event.stopPropagation();
                     updateRange(range.id, { expanded: !range.expanded });
                   }}
-                  title={range.expanded ? "Collapse" : "Expand"}
+                  title={range.expanded ? measureT("collapse") : measureT("expand")}
                   type="button"
                 >
                   <SaleaeIcon name="arrowHead" size={6} />
@@ -11199,7 +11201,7 @@ function MeasurementsPanel({
                 <span className="rangeColorSwatch" />
                 <div className="rangeLabelContainer" title={range.name}>
                   <input
-                    aria-label="Range name"
+                    aria-label={measureT("rangeName")}
                     onChange={(event) => updateRange(range.id, { name: event.target.value })}
                     onClick={(event) => event.stopPropagation()}
                     style={{ width: `${Math.min(14, Math.max(2, range.name.length + 1))}ch` }}
@@ -11220,7 +11222,7 @@ function MeasurementsPanel({
                       event.stopPropagation();
                       goToRange(range);
                     }}
-                    title="Go to range. Double click to zoom."
+                    title={measureT("gotoRangeHint")}
                     type="button"
                   >
                     <SaleaeIcon name="goto" size={10} />
@@ -11231,7 +11233,7 @@ function MeasurementsPanel({
                       event.stopPropagation();
                       setOpenMenuFor((current) => (current === range.id ? null : range.id));
                     }}
-                    title="More"
+                    title={measureT("more")}
                     type="button"
                   >
                     <SaleaeIcon name="verticalThreeDots" size={14} />
@@ -11239,22 +11241,22 @@ function MeasurementsPanel({
                   {openMenuFor === range.id && (
                     <div className="rangeItemMenu" onClick={(event) => event.stopPropagation()}>
                       <button className="purple" onClick={onOpenExtensions} type="button">
-                        Find More Measurements
+                        {measureT("findMoreMeasurements")}
                       </button>
                       <button onClick={() => goToRange(range)} type="button">
-                        Go to Range
+                        {measureT("goToRange")}
                       </button>
                       <button onClick={() => goToRange(range, true)} type="button">
-                        Zoom on Range
+                        {measureT("zoomOnRange")}
                       </button>
                       <button onClick={() => copyRange(range)} type="button">
-                        Copy
+                        {measureT("copy")}
                       </button>
                       <button onClick={() => deleteRange(range.id)} type="button">
-                        {range.selected ? "Delete Selected" : "Delete"}
+                        {range.selected ? measureT("deleteSelected") : measureT("delete")}
                       </button>
                       <button onClick={deleteAll} type="button">
-                        Delete All
+                        {measureT("deleteAll")}
                       </button>
                     </div>
                   )}
@@ -11307,6 +11309,7 @@ function LegacyTimingMarkersPanel({
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   session: UiSession;
 }) {
+  const { t: measureT } = useTranslation("measurements");
   const [addOpen, setAddOpen] = useState(false);
   const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
 
@@ -11347,7 +11350,7 @@ function LegacyTimingMarkersPanel({
   return (
     <div className="timingMarkersSidebarPanel">
       <div className="sidebarTitleRow">
-        <div className="sidebarTitleText">Timing Markers</div>
+        <div className="sidebarTitleText">{measureT("timingMarkers")}</div>
         <div className="markerAddMenu">
           <button className={`sidebarCircleButton ${addOpen ? "active" : ""}`} onClick={() => setAddOpen((open) => !open)} type="button">
             <Plus size={13} />
@@ -11355,12 +11358,12 @@ function LegacyTimingMarkersPanel({
           {addOpen && (
             <div className="markerAddPopover">
               <button onClick={() => addMarker("pair")} type="button">
-                <span>Add Marker Pair</span>
-                <small>Cmd/Ctrl+T</small>
+                <span>{measureT("markerPair")}</span>
+                <small>{measureT("shortcutCmdCtrlT")}</small>
               </button>
               <button onClick={() => addMarker("single")} type="button">
-                <span>Add Single Marker</span>
-                <small>Shift+Cmd/Ctrl+T</small>
+                <span>{measureT("addSingleMarker")}</span>
+                <small>{measureT("shortcutShiftCmdCtrlT")}</small>
               </button>
             </div>
           )}
@@ -11370,7 +11373,7 @@ function LegacyTimingMarkersPanel({
       {session.timingMarkers.length === 0 ? (
         <div className="emptyMeasurementState">
           <Clock3 size={24} />
-          <span>Click "+" to add Timing Markers</span>
+          <span>{measureT("emptyTimingMarkers")}</span>
         </div>
       ) : (
         <div className="timingMarkerList">
@@ -11388,7 +11391,7 @@ function LegacyTimingMarkersPanel({
                 <div className="rangeMeasurementHeader">
                   <span className={`markerTypeBadge ${marker.type}`}>{marker.type === "pair" ? "A" : "T"}</span>
                   <input
-                    aria-label="Marker name"
+                    aria-label={measureT("markerName")}
                     onChange={(event) => updateMarker(marker.id, { label: event.target.value })}
                     value={marker.label}
                   />
@@ -11401,7 +11404,7 @@ function LegacyTimingMarkersPanel({
                           viewportStart: Math.max(0, marker.sample - Math.round(current.viewportSamples / 2)),
                         }));
                       }}
-                      title="Go to Marker"
+                      title={measureT("goToMarker")}
                       type="button"
                     >
                       <Search size={12} />
@@ -11416,24 +11419,27 @@ function LegacyTimingMarkersPanel({
                           viewportSamples: Math.round(Math.max(128, span * 1.2)),
                         }));
                       }}
-                      title="Zoom"
+                      title={measureT("zoom")}
                       type="button"
                     >
                       <Maximize2 size={12} />
                     </button>
-                    <button onClick={() => deleteMarker(marker.id)} title="Delete" type="button">
+                    <button onClick={() => deleteMarker(marker.id)} title={measureT("delete")} type="button">
                       <Trash2 size={12} />
                     </button>
                   </div>
                 </div>
                 <div className="markerSummary">
-                  <MetricCell label={marker.type === "pair" ? "Delta" : "Time"} value={duration} />
-                  <MetricCell label="Sample" value={formatSamples(marker.sample)} />
+                  <MetricCell
+                    label={marker.type === "pair" ? measureT("delta") : measureT("time")}
+                    value={duration}
+                  />
+                  <MetricCell label={measureT("sample")} value={formatSamples(marker.sample)} />
                 </div>
                 <textarea
                   className="rangeNote"
                   onChange={(event) => updateMarker(marker.id, { note: event.target.value })}
-                  placeholder="Add note"
+                  placeholder={measureT("addNote")}
                   value={marker.note}
                 />
               </section>
@@ -11445,7 +11451,7 @@ function LegacyTimingMarkersPanel({
             type="button"
           >
             <Trash2 size={15} />
-            Delete All
+            {measureT("deleteAll")}
           </button>
         </div>
       )}

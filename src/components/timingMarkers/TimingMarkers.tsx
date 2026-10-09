@@ -27,6 +27,7 @@ import {
   UiTimingMarker,
   UiTimingMarkerPlacement,
 } from "../../lib/timingMarkers";
+import { useTranslation } from "react-i18next";
 import { SaleaeIcon } from "../SaleaeIcon";
 
 type MarkerUpdater = (updater: (markers: UiTimingMarker[]) => UiTimingMarker[]) => void;
@@ -995,6 +996,7 @@ export function TimingMarkersPanel({
   totalSamples,
   viewportSamples,
 }: TimingMarkersPanelProps) {
+  const { t: measureT } = useTranslation("measurements");
   const [addOpen, setAddOpen] = useState(false);
   const [editMarkerId, setEditMarkerId] = useState<string | null>(null);
   const [menuMarkerId, setMenuMarkerId] = useState<string | null>(null);
@@ -1104,10 +1106,10 @@ export function TimingMarkersPanel({
   return (
     <div className="timingMarkersSidebarPanel" data-timing-marker-interactive="true">
       <div className="timingMarkersTitleRow">
-        <span>Timing Markers</span>
+        <span>{measureT("timingMarkers")}</span>
         <div className="markerAddMenu">
           <button
-            aria-label="Add timing marker"
+            aria-label={measureT("addTimingMarker")}
             className={`sidebarCircleButton ${addOpen ? "active" : ""}`}
             disabled={!hasCapture || busy || placementActive}
             onClick={() => setAddOpen((open) => !open)}
@@ -1118,11 +1120,11 @@ export function TimingMarkersPanel({
           {addOpen && (
             <div className="markerAddPopover">
               <button onClick={() => startPlacement("pair")} type="button">
-                <span>Add Marker Pair</span>
+                <span>{measureT("markerPair")}</span>
                 <small>{primaryShortcut("T")}</small>
               </button>
               <button onClick={() => startPlacement("single")} type="button">
-                <span>Add Single Marker</span>
+                <span>{measureT("addSingleMarker")}</span>
                 <small>{primaryShortcut("Shift+T")}</small>
               </button>
             </div>
@@ -1137,7 +1139,7 @@ export function TimingMarkersPanel({
             <SaleaeIcon name="markerStop" />
             <SaleaeIcon name="markerStop" />
           </div>
-          <span>Click "+" to add Timing Markers</span>
+          <span>{measureT("emptyTimingMarkers")}</span>
         </div>
       ) : (
         <div className="timingMarkerList">
@@ -1255,6 +1257,7 @@ function TimingMarkerListItem({
   sampleRateHz,
   showMenuButton = true,
 }: TimingMarkerListItemProps) {
+  const { t: measureT } = useTranslation("measurements");
   const value = markerValueLabel(marker, itemType, sampleRateHz);
   return (
     <div
@@ -1272,7 +1275,7 @@ function TimingMarkerListItem({
     >
       {onToggleExpanded && (
         <button
-          aria-label={marker.isExpanded ? "Collapse marker pair" : "Expand marker pair"}
+          aria-label={marker.isExpanded ? measureT("collapsePair") : measureT("expandPair")}
           className={`timingMarkerExpandButton ${marker.isExpanded ? "expanded" : ""}`}
           onClick={(event) => {
             event.stopPropagation();
@@ -1300,7 +1303,7 @@ function TimingMarkerListItem({
       </div>
       <div className="timingMarkerItemActions">
         <button
-          aria-label={marker.type === "pair" && itemType === "root" ? "Go to pair" : "Go to marker"}
+          aria-label={marker.type === "pair" && itemType === "root" ? measureT("goToPairAria") : measureT("goToMarkerAria")}
           className="timingMarkerItemActionButton"
           onClick={(event) => {
             event.stopPropagation();
@@ -1310,20 +1313,20 @@ function TimingMarkerListItem({
             event.stopPropagation();
             onZoom?.();
           }}
-          title={marker.type === "pair" && itemType === "root" ? "Go to pair\nDouble click to zoom" : "Go to marker"}
+          title={marker.type === "pair" && itemType === "root" ? measureT("goToPairTitle") : measureT("goToMarkerTitle")}
           type="button"
         >
           <SaleaeIcon name="goto" />
         </button>
         {showMenuButton && (
           <button
-            aria-label="Marker menu"
+            aria-label={measureT("markerMenu")}
             className="timingMarkerItemActionButton"
             onClick={(event) => {
               event.stopPropagation();
               onMenuToggle();
             }}
-            title="Marker menu"
+            title={measureT("markerMenu")}
             type="button"
           >
             <SaleaeIcon name="verticalThreeDots" size={16} />
@@ -1371,6 +1374,7 @@ function TimingMarkerItemMenu({
   showSetAsT0: boolean;
   style?: CSSProperties;
 }) {
+  const { t: measureT } = useTranslation("measurements");
   return (
     <div
       className={`timingMarkerItemMenu ${className}`}
@@ -1378,25 +1382,27 @@ function TimingMarkerItemMenu({
       data-timing-marker-menu="true"
       style={style}
     >
-      {canCreatePair && <button onClick={onCreatePair} type="button">Create Pair</button>}
+      {canCreatePair && <button onClick={onCreatePair} type="button">{measureT("menuCreatePair")}</button>}
       {canCreatePair && <div className="timingMarkerMenuSeparator" />}
-      {!marker.isCaptureTrigger && <button onClick={onEdit} type="button">Edit</button>}
+      {!marker.isCaptureTrigger && <button onClick={onEdit} type="button">{measureT("menuEdit")}</button>}
       <div className="timingMarkerMenuSeparator" />
-      <button onClick={onGoTo} type="button">{marker.type === "pair" ? "Go to Pair" : "Go to Marker"}</button>
-      {marker.type === "pair" && <button onClick={onZoom} type="button">Zoom on Pair</button>}
-      {marker.type === "pair" && <button onClick={onUngroup} type="button">Ungroup Pair</button>}
+      <button onClick={onGoTo} type="button">
+        {marker.type === "pair" ? measureT("menuGoToPair") : measureT("menuGoToMarker")}
+      </button>
+      {marker.type === "pair" && <button onClick={onZoom} type="button">{measureT("menuZoomOnPair")}</button>}
+      {marker.type === "pair" && <button onClick={onUngroup} type="button">{measureT("menuUngroupPair")}</button>}
       {showSetAsT0 && (
-        <button onClick={() => onNotify("Set as T0 is reserved for the capture time-zero service")} type="button">
-          Set as T0
+        <button onClick={() => onNotify(measureT("setAsT0Notice"))} type="button">
+          {measureT("setAsT0")}
         </button>
       )}
       <div className="timingMarkerMenuSeparator" />
-      <button onClick={() => onNotify("Delete Data is available from the graph channel context menu") } type="button">
-        {marker.type === "pair" ? "Delete Data Outside Pair" : "Delete Data"}
+      <button onClick={() => onNotify(measureT("deleteDataNotice")) } type="button">
+        {marker.type === "pair" ? measureT("deleteDataOutsidePair") : measureT("deleteData")}
       </button>
       <div className="timingMarkerMenuSeparator" />
-      {!marker.isCaptureTrigger && <button onClick={onDelete} type="button">Delete</button>}
-      <button onClick={onDeleteAll} type="button">Delete All</button>
+      {!marker.isCaptureTrigger && <button onClick={onDelete} type="button">{measureT("delete")}</button>}
+      <button onClick={onDeleteAll} type="button">{measureT("deleteAll")}</button>
     </div>
   );
 }
@@ -1418,6 +1424,7 @@ function TimingMarkerEditPopup({
   onUpdate,
   style,
 }: TimingMarkerEditPopupProps) {
+  const { t: measureT } = useTranslation("measurements");
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
 
@@ -1477,7 +1484,7 @@ function TimingMarkerEditPopup({
             onClose();
           }
         }}
-        placeholder="Comment here..."
+        placeholder={measureT("commentPlaceholder")}
         rows={3}
         value={marker.note}
       />
@@ -1485,7 +1492,7 @@ function TimingMarkerEditPopup({
         <div className="timingMarkerColorChoices">
           {TIMING_MARKER_COLORS.map((color) => (
             <button
-              aria-label={`Use ${color} marker color`}
+              aria-label={measureT("useMarkerColor", { color })}
               className={marker.color === color ? "selected" : ""}
               key={color}
               onClick={() => onUpdate({ color })}
@@ -1496,7 +1503,7 @@ function TimingMarkerEditPopup({
             </button>
           ))}
         </div>
-        <button className="timingMarkerEditDelete" onClick={onDelete} title="Delete" type="button">
+        <button className="timingMarkerEditDelete" onClick={onDelete} title={measureT("delete")} type="button">
           <SaleaeIcon name="trash" size={14} />
         </button>
       </div>
