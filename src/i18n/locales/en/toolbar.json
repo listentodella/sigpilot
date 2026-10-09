@@ -1,0 +1,16 @@
+{
+  "addAnalyzer": "Add Analyzer",
+  "addMarkerPair": "Add Marker Pair",
+  "addRangeMeasurement": "Add Range Measurement",
+  "addSingleMarker": "Add Single Marker",
+  "addTimingMarkers": "Add Timing Markers",
+  "captureTools": "Capture tools",
+  "fitCapture": "Fit capture",
+  "rangeMeasurementDisabled": "Disabled while recording and before the first capture",
+  "readOnlyCaptureHint": "Opened capture cannot be overwritten. Create a new session to start capturing data.",
+  "start": "Start",
+  "stop": "Stop",
+  "viewTools": "View tools",
+  "zoomIn": "Zoom in",
+  "zoomOut": "Zoom out"
+}

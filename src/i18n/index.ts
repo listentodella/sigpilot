@@ -15,11 +15,15 @@ import { loadUiPreferences } from "../lib/preferences";
 import enAdvanced from "./locales/en/advanced.json";
 import enCommon from "./locales/en/common.json";
 import enFooter from "./locales/en/footer.json";
+import enPanels from "./locales/en/panels.json";
 import enSettings from "./locales/en/settings.json";
+import enToolbar from "./locales/en/toolbar.json";
 import zhAdvanced from "./locales/zh-CN/advanced.json";
 import zhCommon from "./locales/zh-CN/common.json";
 import zhFooter from "./locales/zh-CN/footer.json";
+import zhPanels from "./locales/zh-CN/panels.json";
 import zhSettings from "./locales/zh-CN/settings.json";
+import zhToolbar from "./locales/zh-CN/toolbar.json";
 
 void i18n.use(initReactI18next).init({
   defaultNS: "common",
@@ -31,10 +35,24 @@ void i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   lng: loadUiPreferences().locale,
-  ns: ["common", "footer", "advanced", "settings"],
+  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels"],
   resources: {
-    en: { advanced: enAdvanced, common: enCommon, footer: enFooter, settings: enSettings },
-    "zh-CN": { advanced: zhAdvanced, common: zhCommon, footer: zhFooter, settings: zhSettings },
+    en: {
+      advanced: enAdvanced,
+      common: enCommon,
+      footer: enFooter,
+      panels: enPanels,
+      settings: enSettings,
+      toolbar: enToolbar,
+    },
+    "zh-CN": {
+      advanced: zhAdvanced,
+      common: zhCommon,
+      footer: zhFooter,
+      panels: zhPanels,
+      settings: zhSettings,
+      toolbar: zhToolbar,
+    },
   },
   supportedLngs: ["en", "zh-CN"],
 });

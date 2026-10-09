@@ -1,0 +1,16 @@
+{
+  "addAnalyzer": "添加解码器",
+  "addMarkerPair": "添加标记对",
+  "addRangeMeasurement": "添加区间测量",
+  "addSingleMarker": "添加单个标记",
+  "addTimingMarkers": "添加时间标记",
+  "captureTools": "采集工具",
+  "fitCapture": "适配全览",
+  "rangeMeasurementDisabled": "采集进行中或首次采集前不可用",
+  "readOnlyCaptureHint": "已打开的采集不可覆盖。请新建会话后再开始采集。",
+  "start": "开始采集",
+  "stop": "停止",
+  "viewTools": "视图工具",
+  "zoomIn": "放大",
+  "zoomOut": "缩小"
+}

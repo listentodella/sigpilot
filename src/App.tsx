@@ -557,22 +557,24 @@ function clampFixedPopoverRect(
   };
 }
 
+// Labels are i18next keys in the `panels` namespace rather than display text, so
+// a panel title follows the active language.
 const panelMeta: Record<
   SidebarPanel,
   {
-    label: string;
+    labelKey: string;
     iconUrl: string;
   }
 > = {
-  devices: { label: "Device Settings", iconUrl: devicesIcon },
-  recordingSettings: { label: "Recording Settings", iconUrl: recordingSettingsIcon },
-  analyzers: { label: "Analyzers", iconUrl: analyzersIcon },
-  cursors: { label: "Cursors", iconUrl: cursorsIcon },
-  measurements: { label: "Measurements", iconUrl: measurementsIcon },
-  timingMarkers: { label: "Timing Markers", iconUrl: timingMarkersIcon },
-  extensions: { label: "Extensions", iconUrl: extensionsIcon },
-  notes: { label: "Notes", iconUrl: notesIcon },
-  advanced: { label: "Advanced", iconUrl: advancedIcon },
+  devices: { labelKey: "devices", iconUrl: devicesIcon },
+  recordingSettings: { labelKey: "recordingSettings", iconUrl: recordingSettingsIcon },
+  analyzers: { labelKey: "analyzers", iconUrl: analyzersIcon },
+  cursors: { labelKey: "cursors", iconUrl: cursorsIcon },
+  measurements: { labelKey: "measurements", iconUrl: measurementsIcon },
+  timingMarkers: { labelKey: "timingMarkers", iconUrl: timingMarkersIcon },
+  extensions: { labelKey: "extensions", iconUrl: extensionsIcon },
+  notes: { labelKey: "notes", iconUrl: notesIcon },
+  advanced: { labelKey: "advanced", iconUrl: advancedIcon },
 };
 
 function defaultSettings(deviceId: string): CaptureSettings {
@@ -1415,7 +1417,8 @@ function findAnalyzerRenderedTrackFrameById(
 }
 
 interface SidebarPanelAllowed {
-  disabledReason?: string;
+  /** i18next key in the `panels` namespace, not display text. */
+  disabledReasonKey?: string;
   isSelectable: boolean;
   isVisible: boolean;
 }
@@ -1436,7 +1439,7 @@ function getSidebarPanelAllowed(
 
   if (panel === "recordingSettings") {
     return {
-      disabledReason: isMso ? undefined : "Recording Settings is available for Logic Pro / MSO sessions",
+      disabledReasonKey: isMso ? undefined : "disabledRecordingSettings",
       isSelectable: hasActiveSession && isMso,
       isVisible: !hasActiveSession || isMso,
     };
@@ -1444,7 +1447,7 @@ function getSidebarPanelAllowed(
 
   if (panel === "cursors") {
     return {
-      disabledReason: isMso ? undefined : "Cursors are available for Logic Pro / MSO sessions",
+      disabledReasonKey: isMso ? undefined : "disabledCursors",
       isSelectable: hasActiveSession && isMso,
       isVisible: isMso,
     };
@@ -1459,20 +1462,21 @@ function getSidebarPanelAllowed(
     // the preference is the hidden escape hatch (ctrl+alt+shift+a).
     const show = options.showAdvanced ?? true;
     return {
-      disabledReason: show ? undefined : "Advanced options are hidden (ctrl+alt+shift+a to show)",
+      disabledReasonKey: show ? undefined : "disabledAdvanced",
       isSelectable: show,
       isVisible: show,
     };
   }
 
   return {
-    disabledReason: hasActiveSession ? undefined : "Create or open a session first",
+    disabledReasonKey: hasActiveSession ? undefined : "disabledNoSession",
     isSelectable: hasActiveSession,
     isVisible: true,
   };
 }
 
 export default function App() {
+  const { t: panelsT } = useTranslation("panels");
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [deviceCapabilitiesById, setDeviceCapabilitiesById] = useState<Record<string, HardwareCaptureCapabilities>>({});
   const [draftSelectedDevice, setDraftSelectedDevice] = useState(DEFAULT_DEVICE_ID);
@@ -4567,8 +4571,11 @@ export default function App() {
   function openSidebarPanel(panel: SidebarPanel) {
     const allowed = getSidebarPanelAllowed(panel, activeSession, { showAdvanced: preferences.showAdvancedPanel });
     if (!allowed.isVisible || !allowed.isSelectable) {
-      if (activeSession && allowed.disabledReason) {
-        updateSession(activeSession.id, (session) => ({ ...session, message: allowed.disabledReason ?? session.message }));
+      if (activeSession && allowed.disabledReasonKey) {
+        updateSession(activeSession.id, (session) => ({
+          ...session,
+          message: panelsT(allowed.disabledReasonKey as string) ?? session.message,
+        }));
       }
       return;
     }
@@ -7939,6 +7946,7 @@ function RightSidebar({
   sidebarPanelWidth: number;
   session: UiSession | null;
 }) {
+  const { t: panelsT } = useTranslation("panels");
   const resizeHandleRef = useRef<HTMLDivElement | null>(null);
   const resizeDragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const resizeListenersCleanupRef = useRef<(() => void) | null>(null);
@@ -8047,13 +8055,14 @@ function RightSidebar({
             if (!allowed.isVisible) return null;
             const isSelected = selectedPanel === panel;
             const shortcut = SIDEBAR_PANEL_SHORTCUTS[panel];
-            const title = shortcut ? `${meta.label} (${shortcut})` : meta.label;
+            const label = panelsT(meta.labelKey);
+            const title = shortcut ? `${label} (${shortcut})` : label;
             return (
               <button
                 className={`singleSwitcher ${allowed.isSelectable ? "selectableSwitcher" : "disabledSwitcher"} ${isSelected ? "selectedSwitcher" : ""}`}
                 aria-disabled={!allowed.isSelectable}
                 aria-label={title}
-                data-help-tooltip={allowed.disabledReason ?? title}
+                data-help-tooltip={allowed.disabledReasonKey ? panelsT(allowed.disabledReasonKey) : title}
                 data-help-tooltip-at="left"
                 key={panel}
                 onClick={() => {
@@ -8125,6 +8134,7 @@ function SidebarPanelContent({
   selectedDevice: string;
   session: UiSession | null;
 }) {
+  const { t: panelsT } = useTranslation("panels");
   const meta = panelMeta[panel];
   return (
     <div className="sidebarPanelContent">
@@ -8132,7 +8142,7 @@ function SidebarPanelContent({
         <header className="sidebarPanelHeader">
           <span>
             <SaleaeSidebarIcon iconUrl={meta.iconUrl} />
-            {meta.label}
+            {panelsT(meta.labelKey)}
           </span>
         </header>
       )}

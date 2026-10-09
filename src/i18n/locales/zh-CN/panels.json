@@ -1,0 +1,15 @@
+{
+  "advanced": "高级",
+  "analyzers": "解码器",
+  "cursors": "游标",
+  "devices": "设备设置",
+  "disabledAdvanced": "高级选项已隐藏（Ctrl+Alt+Shift+A 可显示）",
+  "disabledCursors": "游标仅适用于 Logic Pro / MSO 会话",
+  "disabledNoSession": "请先新建或打开一个会话",
+  "disabledRecordingSettings": "采集设置仅适用于 Logic Pro / MSO 会话",
+  "extensions": "扩展",
+  "measurements": "测量",
+  "notes": "备注",
+  "recordingSettings": "采集设置",
+  "timingMarkers": "时间标记"
+}

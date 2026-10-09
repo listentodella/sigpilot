@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
 import { ReactNode, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   AnalyzerCommands,
   CommandPayload,
@@ -42,6 +43,7 @@ export function LogicToolbar({
 }: LogicToolbarProps) {
   const [openMenu, setOpenMenu] = useState<MenuName>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const { t } = useTranslation("toolbar");
 
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
@@ -55,14 +57,14 @@ export function LogicToolbar({
   }, []);
 
   const captureTooltip = busy
-    ? "Stop"
+    ? t("stop")
     : readOnly
-      ? "Opened capture cannot be overwritten. Create a new session to start capturing data."
-      : "Start";
+      ? t("readOnlyCaptureHint")
+      : t("start");
 
   return (
     <div className="saleaeToolbarWrapper" ref={rootRef}>
-      <div className="saleaeToolbar" role="toolbar" aria-label="Capture tools">
+      <div className="saleaeToolbar" role="toolbar" aria-label={t("captureTools")}>
         <div className="saleaeCaptureButtons">
           <ToolbarButton
             className="saleaeCaptureButton"
@@ -78,7 +80,7 @@ export function LogicToolbar({
 
         <PopoverButton
           isActive={openMenu === "analyzers"}
-          title="Add Analyzer"
+          title={t("addAnalyzer")}
           onClick={() => setOpenMenu((current) => (current === "analyzers" ? null : "analyzers"))}
         >
           <AnalyzersIcon />
@@ -102,7 +104,9 @@ export function LogicToolbar({
 
         <ToolbarButton
           disabled={busy || !hasCapture}
-          title={busy || !hasCapture ? "Disabled while recording and before the first capture" : "Add Range Measurement"}
+          title={
+            busy || !hasCapture ? t("rangeMeasurementDisabled") : t("addRangeMeasurement")
+          }
           onClick={() => onCommand(MeasurementCommands.AddRange)}
         >
           <RangeMeasurementIcon />
@@ -110,7 +114,7 @@ export function LogicToolbar({
 
         <PopoverButton
           isActive={openMenu === "markers"}
-          title="Add Timing Markers"
+          title={t("addTimingMarkers")}
           onClick={() => setOpenMenu((current) => (current === "markers" ? null : "markers"))}
         >
           <TimingMarkersIcon />
@@ -125,7 +129,7 @@ export function LogicToolbar({
                 onCommand(MarkerCommands.AddPair);
               }}
             >
-              <span>Add Marker Pair</span>
+              <span>{t("addMarkerPair")}</span>
               <small>A1 / A2</small>
             </button>
             <button
@@ -135,7 +139,7 @@ export function LogicToolbar({
                 onCommand(MarkerCommands.AddMarker);
               }}
             >
-              <span>Add Single Marker</span>
+              <span>{t("addSingleMarker")}</span>
               <small>T1</small>
             </button>
           </ToolbarMenu>
@@ -147,14 +151,14 @@ export function LogicToolbar({
         memoryUsage={memoryUsage}
       />
 
-      <div className="saleaeToolbarAux" aria-label="View tools">
-        <ToolbarIconButton title="Zoom in" disabled={!hasCapture} onClick={onZoomIn}>
+      <div className="saleaeToolbarAux" aria-label={t("viewTools")}>
+        <ToolbarIconButton title={t("zoomIn")} disabled={!hasCapture} onClick={onZoomIn}>
           <ZoomIn size={14} />
         </ToolbarIconButton>
-        <ToolbarIconButton title="Zoom out" disabled={!hasCapture} onClick={onZoomOut}>
+        <ToolbarIconButton title={t("zoomOut")} disabled={!hasCapture} onClick={onZoomOut}>
           <ZoomOut size={14} />
         </ToolbarIconButton>
-        <ToolbarIconButton title="Fit capture" disabled={!hasCapture} onClick={onFit}>
+        <ToolbarIconButton title={t("fitCapture")} disabled={!hasCapture} onClick={onFit}>
           <Maximize2 size={14} />
         </ToolbarIconButton>
       </div>

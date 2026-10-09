@@ -1,0 +1,15 @@
+{
+  "advanced": "Advanced",
+  "analyzers": "Analyzers",
+  "cursors": "Cursors",
+  "devices": "Device Settings",
+  "disabledAdvanced": "Advanced options are hidden (ctrl+alt+shift+a to show)",
+  "disabledCursors": "Cursors are available for Logic Pro / MSO sessions",
+  "disabledNoSession": "Create or open a session first",
+  "disabledRecordingSettings": "Recording Settings is available for Logic Pro / MSO sessions",
+  "extensions": "Extensions",
+  "measurements": "Measurements",
+  "notes": "Notes",
+  "recordingSettings": "Recording Settings",
+  "timingMarkers": "Timing Markers"
+}
