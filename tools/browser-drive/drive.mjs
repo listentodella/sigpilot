@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const CHROME = process.env.CHROME_BIN ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = Number(process.env.CDP_PORT ?? 9336);
+const OUT_DIR = process.env.OUT_DIR ?? "/tmp/pxgl";
+mkdirSync(OUT_DIR, { recursive: true });
 const profile = mkdtempSync(join(tmpdir(), "pxlogic-cdp-"));
 const chrome = spawn(
   CHROME,
@@ -152,15 +154,15 @@ steps.push({ label: "frame state", value: (await evaluate(`(() => {
 })()`)).value });
 
 const shot = await send("Page.captureScreenshot", { format: "png" });
-writeFileSync("/tmp/pxgl/app-capture.png", Buffer.from(shot.data, "base64"));
+writeFileSync(`${OUT_DIR}/app-capture.png`, Buffer.from(shot.data, "base64"));
 const clip = await send("Page.captureScreenshot", {
   clip: { height: 300, scale: 2, width: 700, x: 110, y: 55 },
   format: "png",
 });
-writeFileSync("/tmp/pxgl/app-clip.png", Buffer.from(clip.data, "base64"));
+writeFileSync(`${OUT_DIR}/app-clip.png`, Buffer.from(clip.data, "base64"));
 
 console.log(JSON.stringify({ steps, console: consoleLines.slice(-25) }, null, 2));
-console.log("screenshot: /tmp/pxgl/app-capture.png");
+console.log(`screenshot: ${OUT_DIR}/app-capture.png`);
 
 await cdp.send("Target.closeTarget", { targetId });
 socket.close();

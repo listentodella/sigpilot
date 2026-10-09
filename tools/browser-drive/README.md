@@ -26,7 +26,8 @@ node tools/browser-drive/drive.mjs
 ```
 
 Environment overrides: `APP_URL` (default `http://127.0.0.1:1420/`),
-`CDP_PORT` (default 9336), `CHROME_BIN`.
+`CDP_PORT` (default 9336), `CHROME_BIN`, `OUT_DIR` (default `/tmp/pxgl`, created
+if missing).
 
 It writes `/tmp/pxgl/app-capture.png` (full window) and
 `/tmp/pxgl/app-clip.png` (the first channel rows, cropped) and prints JSON with
