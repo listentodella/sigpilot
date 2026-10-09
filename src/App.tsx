@@ -6370,6 +6370,7 @@ function CursorOverlay({
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   session: UiSession;
 }) {
+  const { t: overlayT } = useTranslation("overlays");
   // The frame loop owns the viewport once it has a ready frame, and the session
   // store stops being updated while it does; map the cursor lines from the live
   // view so they stay anchored under a wired loop.
@@ -6428,7 +6429,7 @@ function CursorOverlay({
         const sample = session.cursorState[key];
         return (
           <button
-            aria-label={`${label} cursor`}
+            aria-label={overlayT("cursorAria", { label })}
             className={`xCursorLine ${label}`}
             key={key}
             onPointerDown={(event) => handlePointerDown(key, event)}
@@ -6463,6 +6464,7 @@ function RangeMeasurementsOverlay({
   tile: WaveformTile | null;
   visibleChannelIndexes: number[];
 }) {
+  const { t: overlayT } = useTranslation("overlays");
   const dragRef = useRef<{ edge: "start" | "end"; id: string } | null>(null);
   const placementDragRef = useRef<{ channelIndex: number; pointerId: number; startSample: number; startX: number } | null>(null);
   const lastPlacementPointerRef = useRef<{ x: number; y: number } | null>(null);
@@ -6490,7 +6492,7 @@ function RangeMeasurementsOverlay({
       onUpdateSession((current) => ({
         ...current,
         rangePlacement: null,
-        message: "Range measurement placement canceled",
+        message: overlayT("placementCanceled"),
       }));
     }
     document.addEventListener("keydown", handleKeyDown);
@@ -6702,7 +6704,7 @@ function RangeMeasurementsOverlay({
         ...current.rangeMeasurements.map((range) => ({ ...range, selected: false, showTooltip: false })),
         createRangeMeasurement(current, channelIndex, startSample, endSample),
       ],
-      message: "Range measurement added",
+      message: overlayT("rangeAdded"),
     }));
   }
 
@@ -6894,7 +6896,7 @@ function RangeMeasurementsOverlay({
             <span className="rangeCenterFill" />
             {startPct >= 0 && startPct <= 100 && (
               <button
-                aria-label={`${range.name} start`}
+                aria-label={overlayT("rangeStartAria", { name: range.name })}
                 className="rangeEdge start"
                 onPointerDown={(event) => handlePointerDown(range.id, "start", event)}
                 onPointerMove={handlePointerMove}
@@ -6905,7 +6907,7 @@ function RangeMeasurementsOverlay({
             )}
             {endPct >= 0 && endPct <= 100 && (
               <button
-                aria-label={`${range.name} end`}
+                aria-label={overlayT("rangeEndAria", { name: range.name })}
                 className="rangeEdge end"
                 onPointerDown={(event) => handlePointerDown(range.id, "end", event)}
                 onPointerMove={handlePointerMove}
@@ -7032,6 +7034,7 @@ function RangeMeasurementTooltip({
   sampleRateHz: number;
   style: CSSProperties;
 }) {
+  const { t: overlayT } = useTranslation("overlays");
   const [addOpen, setAddOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const dragRef = useRef<{ offsetX: number; offsetY: number; pointerId: number } | null>(null);
@@ -7160,8 +7163,8 @@ function RangeMeasurementTooltip({
     >
       <div className="rangeTooltipGrid">
         <RangeMetricCell
-          fullValue={deltaSeconds == null ? "Measurement pending" : `${deltaSeconds} s`}
-          label="Delta T"
+          fullValue={deltaSeconds == null ? overlayT("measurementPending") : `${deltaSeconds} s`}
+          label={overlayT("deltaT")}
           labelHtml="&Delta;T"
           value={formatDeltaTime(stats, sampleRateHz)}
         />
@@ -7183,7 +7186,7 @@ function RangeMeasurementTooltip({
         onPointerMove={handleDragPointerMove}
         onPointerUp={handleDragPointerUp}
         onPointerCancel={handleDragPointerUp}
-        title="Drag to move"
+        title={overlayT("dragToMove")}
       >
         <div className="rangeTooltipPopoverHost">
           <button
@@ -7192,7 +7195,7 @@ function RangeMeasurementTooltip({
               setSettingsOpen(false);
               setAddOpen((open) => !open);
             }}
-            title="Add or Remove Measurements"
+            title={overlayT("addOrRemoveMeasurements")}
             type="button"
           >
             <SaleaeIcon name="plus" size={12} />
@@ -7212,7 +7215,7 @@ function RangeMeasurementTooltip({
               setAddOpen(false);
               setSettingsOpen((open) => !open);
             }}
-            title="Annotation Setting"
+            title={overlayT("annotationSetting")}
             type="button"
           >
             <SaleaeIcon name="gear" size={13} />
@@ -7224,14 +7227,14 @@ function RangeMeasurementTooltip({
             />
           )}
         </div>
-        <button className="rangeTooltipIconButton" onClick={copyRange} title="Copy" type="button">
+        <button className="rangeTooltipIconButton" onClick={copyRange} title={overlayT("copy")} type="button">
           <SaleaeIcon name="copy" size={13} />
         </button>
       </div>
       <div className="rangeTooltipCommentBox">
         <textarea
           onChange={(event) => onUpdate({ note: event.target.value })}
-          placeholder="Comment here"
+          placeholder={overlayT("commentPlaceholder")}
           rows={1}
           value={range.note}
         />
@@ -7239,7 +7242,7 @@ function RangeMeasurementTooltip({
           <div className="rangeTooltipColorGrid">
             {RANGE_COLORS.map((color) => (
               <button
-                aria-label={`Use ${color}`}
+                aria-label={overlayT("useColor", { color })}
                 className={color === range.color ? "selected" : ""}
                 key={color}
                 onClick={() => onUpdate({ color })}
@@ -7250,7 +7253,7 @@ function RangeMeasurementTooltip({
               </button>
             ))}
           </div>
-          <button className="rangeTooltipIconButton" onClick={onDelete} title="Delete" type="button">
+          <button className="rangeTooltipIconButton" onClick={onDelete} title={overlayT("delete")} type="button">
             <SaleaeIcon name="trash" size={14} />
           </button>
         </div>
@@ -7287,6 +7290,7 @@ function RangeMeasurementAddMenu({
   onChange: (measurementIds: DigitalRangeMeasurementId[]) => void;
   onOpenExtensions: () => void;
 }) {
+  const { t: overlayT } = useTranslation("overlays");
   const [search, setSearch] = useState("");
   const selected = new Set(measurementIds);
   const filteredCategories = DIGITAL_RANGE_MEASUREMENT_CATEGORIES.map((category) => ({
@@ -7316,16 +7320,16 @@ function RangeMeasurementAddMenu({
         <input
           autoFocus
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search..."
+          placeholder={overlayT("searchEllipsis")}
           value={search}
         />
       </div>
       <div className="rangeMeasurementAddActions">
         <button onClick={() => onChange([...DEFAULT_DIGITAL_RANGE_MEASUREMENTS])} type="button">
-          All
+          {overlayT("all")}
         </button>
         <button onClick={() => onChange([])} type="button">
-          Clear
+          {overlayT("clear")}
         </button>
       </div>
       <div className="rangeMeasurementAddList">
@@ -7358,7 +7362,7 @@ function RangeMeasurementAddMenu({
       </div>
       <button className="rangeMeasurementMoreButton" onClick={onOpenExtensions} type="button">
         <SaleaeSidebarIcon iconUrl={extensionsIcon} />
-        Install More Measurements
+        {overlayT("installMoreMeasurements")}
       </button>
     </div>
   );
@@ -7371,10 +7375,11 @@ function RangeMeasurementSettingsMenu({
   annotationsVisible: boolean;
   onChange: (annotationsVisible: boolean) => void;
 }) {
+  const { t: overlayT } = useTranslation("overlays");
   return (
     <div className="rangeMeasurementSettingsMenu" onClick={(event) => event.stopPropagation()}>
       <label>
-        <span>Display Annotations</span>
+        <span>{overlayT("displayAnnotations")}</span>
         <span className={`saleaeSwitch ${annotationsVisible ? "checked" : ""}`}>
           <input
             checked={annotationsVisible}

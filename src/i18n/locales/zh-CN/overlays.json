@@ -1,0 +1,21 @@
+{
+  "addOrRemoveMeasurements": "添加或移除测量项",
+  "all": "全选",
+  "annotationSetting": "标注设置",
+  "clear": "清除",
+  "commentPlaceholder": "在此输入注释",
+  "copy": "复制",
+  "cursorAria": "{{label}} 光标",
+  "delete": "删除",
+  "deltaT": "时间差",
+  "displayAnnotations": "显示标注",
+  "dragToMove": "拖动以移动",
+  "installMoreMeasurements": "安装更多测量项",
+  "measurementPending": "等待测量",
+  "rangeAdded": "已添加区域测量",
+  "rangeEndAria": "{{name}} 终点",
+  "rangeStartAria": "{{name}} 起点",
+  "placementCanceled": "已取消区域测量的放置",
+  "searchEllipsis": "搜索...",
+  "useColor": "使用 {{color}}"
+}

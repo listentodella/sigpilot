@@ -1,0 +1,21 @@
+{
+  "addOrRemoveMeasurements": "Add or Remove Measurements",
+  "all": "All",
+  "annotationSetting": "Annotation Setting",
+  "clear": "Clear",
+  "commentPlaceholder": "Comment here",
+  "copy": "Copy",
+  "cursorAria": "{{label}} cursor",
+  "delete": "Delete",
+  "deltaT": "Delta T",
+  "displayAnnotations": "Display Annotations",
+  "dragToMove": "Drag to move",
+  "installMoreMeasurements": "Install More Measurements",
+  "measurementPending": "Measurement pending",
+  "rangeAdded": "Range measurement added",
+  "rangeEndAria": "{{name}} end",
+  "rangeStartAria": "{{name}} start",
+  "placementCanceled": "Range measurement placement canceled",
+  "searchEllipsis": "Search...",
+  "useColor": "Use {{color}}"
+}
