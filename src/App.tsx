@@ -6148,6 +6148,7 @@ function ChannelContextMenu({
   x: number;
   y: number;
 }) {
+  const { t } = useTranslation("channelMenu");
   const menuWidth = 286;
   const submenuWidth = 286;
   const opensLeft = typeof window !== "undefined" && x + menuWidth + submenuWidth + 12 > window.innerWidth;
@@ -6161,7 +6162,7 @@ function ChannelContextMenu({
   }
 
   const screenshotDestinationLabel =
-    screenshotDestination === "File" ? "Save to File" : "Copy to Clipboard";
+    screenshotDestination === "File" ? t("saveToFile") : t("copyToClipboard");
 
   return (
     <div
@@ -6172,44 +6173,44 @@ function ChannelContextMenu({
       style={{ left: menuLeft, top: menuTop }}
     >
       <ChannelMenuSelectionItem
-        label="Resize All Digital Channels to Match"
+        label={t("resizeAllToMatch")}
         onClick={() => run(onMatchAllHeights)}
-        tooltip={`Resize the Y-height of all Digital Channels to match D${channelIndex}.`}
+        tooltip={t("resizeAllToMatchHint", { channel: channelIndex })}
       />
       <ChannelMenuSelectionItem
-        label="Fit all Rows to Window Height"
+        label={t("fitAllRows")}
         onClick={() => run(onFitAllRows)}
-        tooltip="Fit Y-height of all channels to window height"
+        tooltip={t("fitAllRowsHint")}
       />
       <ChannelMenuSelectionItem
-        label="Auto Layout"
+        label={t("autoLayout")}
         onClick={() => run(onToggleAutoLayout)}
         selected={autoLayoutEnabled}
-        tooltip="Automatically manage channel height to fit the window"
+        tooltip={t("autoLayoutHint")}
       />
       <ChannelMenuSeparator />
       <ChannelMenuSelectionItem
-        label="Show Interactive Measurement"
+        label={t("showInteractiveMeasurement")}
         onClick={() => run(onToggleInteractiveMeasurement, false)}
         selected={interactiveMeasurementVisible}
-        tooltip="Display a measurement as the mouse moves over the waveform."
+        tooltip={t("showInteractiveMeasurementHint")}
       />
       <ChannelMenuSeparator />
       {isChannelDeleteDataVisible(hasCapture) && (
         <>
-          <ChannelMenuSubmenu label="Delete Data">
-            <ChannelMenuSelectionItem label="Before This Point" onClick={() => run(onDeleteDataBefore)} />
-            <ChannelMenuSelectionItem label="After This Point" onClick={() => run(onDeleteDataAfter)} />
-            <ChannelMenuSelectionItem label="Off Screen" onClick={() => run(onDeleteDataOffscreen)} />
+          <ChannelMenuSubmenu label={t("deleteData")}>
+            <ChannelMenuSelectionItem label={t("deleteBefore")} onClick={() => run(onDeleteDataBefore)} />
+            <ChannelMenuSelectionItem label={t("deleteAfter")} onClick={() => run(onDeleteDataAfter)} />
+            <ChannelMenuSelectionItem label={t("deleteOffScreen")} onClick={() => run(onDeleteDataOffscreen)} />
           </ChannelMenuSubmenu>
           <ChannelMenuSeparator />
         </>
       )}
-      <ChannelMenuSelectionItem label="Hide Channel" onClick={() => run(onHideChannel)} />
-      <ChannelMenuSubmenu label="Show/Hide Channels">
+      <ChannelMenuSelectionItem label={t("hideChannel")} onClick={() => run(onHideChannel)} />
+      <ChannelMenuSubmenu label={t("showHideChannels")}>
         <ChannelMenuItem
           disabled={!hasHiddenChannels}
-          label="Show All Channels"
+          label={t("showAllChannels")}
           onClick={() => run(onShowAllChannels, false)}
         />
         <ChannelMenuSeparator />
@@ -6227,29 +6228,29 @@ function ChannelContextMenu({
       </ChannelMenuSubmenu>
       <ChannelMenuSeparator />
       <ChannelMenuSelectionItem
-        label="Reset Channel Names"
+        label={t("resetChannelNames")}
         onClick={() => run(onResetChannelNames)}
-        tooltip="Reset all the Channels Names to their default labels."
+        tooltip={t("resetChannelNamesHint")}
       />
       <ChannelMenuSeparator />
-      <ChannelMenuSelectionItem label="Settings" onClick={() => run(onOpenSettings)} />
+      <ChannelMenuSelectionItem label={t("settings")} onClick={() => run(onOpenSettings)} />
       <ChannelMenuSeparator />
       <ChannelMenuSelectionItem
-        label={`Screenshot ${channelLabel}`}
+        label={t("screenshotChannel", { label: channelLabel })}
         onClick={() => run(onScreenshotChannel)}
       />
       <ChannelMenuSelectionItem
-        label="Screenshot Window"
+        label={t("screenshotWindow")}
         onClick={() => run(onScreenshotWindow)}
       />
-      <ChannelMenuSubmenu label={`Screenshot Destination [${screenshotDestinationLabel}]`}>
+      <ChannelMenuSubmenu label={t("screenshotDestination", { destination: screenshotDestinationLabel })}>
         <ChannelMenuSelectionItem
-          label="Save to File"
+          label={t("saveToFile")}
           onClick={() => run(() => onSetScreenshotDestination("File"), false)}
           selected={screenshotDestination === "File"}
         />
         <ChannelMenuSelectionItem
-          label="Copy to Clipboard"
+          label={t("copyToClipboard")}
           onClick={() => run(() => onSetScreenshotDestination("Clipboard"), false)}
           selected={screenshotDestination === "Clipboard"}
         />
