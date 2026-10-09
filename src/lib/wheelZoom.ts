@@ -46,22 +46,40 @@ export const TOUCHPAD_MAX_DELTA = 800;
  * passes `animationDurationScale * 0.1` — 100 ms at the default scale — for a
  * physical wheel, while a touchpad streams and gets `duration: 0`.
  *
- * This is a scale rather than a bare number so the feel stays adjustable without
- * editing the logic, mirroring Logic 2's "Animation Scale" developer option.
+ * This is a scale rather than a bare number so the feel stays adjustable, and it
+ * is a live value rather than a constant because the advanced options panel
+ * exposes it — the same control Logic 2 keeps in its hidden developer menu
+ * ("Animation Scale"). Gestures read it when they fire, so a change applies to
+ * the next gesture without a reload; the choice is persisted in
+ * `UiPreferences.animationScale`.
  *
- * Re-enabled at 1 after a spell at 0.
- *
- * It was pinned to 0 to isolate a report of markers and the trace drifting
- * intermittently after a zoom, but the glide that report was about is the
- * frontend `animateViewport` rAF loop, which this constant does not control —
- * so the bisect settled nothing. This backend glide (zoom and pan_samples
- * carrying `duration_ms` into a `ViewAnimation`) had never run in a build until
- * now, and wants hardware verification: a timing marker must stay pinned to the
- * trace through the glide and after it settles, and repeated keypresses
- * mid-glide must retarget from the current view instead of compounding.
+ * History: it was pinned to 0 to isolate a report of markers and the trace
+ * drifting intermittently after a zoom, but the glide that report was about is
+ * the frontend `animateViewport` rAF loop, which this value does not control, so
+ * the bisect settled nothing. This backend glide (zoom and pan_samples carrying
+ * `duration_ms` into a `ViewAnimation`) had never run in a build before being
+ * re-enabled, and still wants hardware verification: a timing marker must stay
+ * pinned to the trace through the glide and after it settles, and repeated
+ * keypresses mid-glide must retarget from the current view instead of compounding.
  */
-export const ZOOM_ANIMATION_DURATION_SCALE = 1;
-export const ZOOM_ANIMATION_DURATION_MS = 100 * ZOOM_ANIMATION_DURATION_SCALE;
+export const ZOOM_ANIMATION_DURATION_SCALE_DEFAULT = 1;
+export const ZOOM_ANIMATION_DURATION_SCALE_MIN = 0;
+export const ZOOM_ANIMATION_DURATION_SCALE_MAX = 3;
+export const ZOOM_ANIMATION_BASE_MS = 100;
+
+let zoomAnimationDurationScale = ZOOM_ANIMATION_DURATION_SCALE_DEFAULT;
+
+/** Applies the persisted preference; clamped so a bad value cannot disable or stall the glide. */
+export function setZoomAnimationDurationScale(scale: number) {
+  zoomAnimationDurationScale = Number.isFinite(scale)
+    ? Math.min(ZOOM_ANIMATION_DURATION_SCALE_MAX, Math.max(ZOOM_ANIMATION_DURATION_SCALE_MIN, scale))
+    : ZOOM_ANIMATION_DURATION_SCALE_DEFAULT;
+}
+
+/** The glide duration for one discrete step, in milliseconds. */
+export function zoomAnimationDurationMs() {
+  return ZOOM_ANIMATION_BASE_MS * zoomAnimationDurationScale;
+}
 
 /**
  * The wheel fields the zoom factor needs. Both a React wheel event and a plain

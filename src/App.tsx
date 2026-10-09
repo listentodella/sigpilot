@@ -57,6 +57,7 @@ import {
   Droppable,
   DroppableProps,
 } from "react-beautiful-dnd";
+import advancedIcon from "./assets/saleae/sidebar/advanced.svg";
 import analyzersIcon from "./assets/saleae/sidebar/analyzers.svg";
 import cursorsIcon from "./assets/saleae/sidebar/cursors.svg";
 import devicesIcon from "./assets/saleae/sidebar/devices.svg";
@@ -70,6 +71,7 @@ import triggerPulseHighIcon from "./assets/saleae/trigger/pulse-high.svg";
 import triggerPulseLowIcon from "./assets/saleae/trigger/pulse-low.svg";
 import triggerRisingIcon from "./assets/saleae/trigger/rising.svg";
 import emptyMeasurementArt from "./assets/saleae/empty_measurement.svg";
+import { AdvancedOptionsPanel } from "./components/AdvancedOptionsPanel";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
@@ -117,7 +119,7 @@ import {
   subscribeFrameHealth,
 } from "./lib/frameStore";
 import { useSessionFrameState } from "./lib/useFrameState";
-import { ZOOM_ANIMATION_DURATION_MS } from "./lib/wheelZoom";
+import { setZoomAnimationDurationScale, zoomAnimationDurationMs } from "./lib/wheelZoom";
 import {
   analyzerCanRenderTracksLocally,
   analyzerTrackRequestsForAnalyzer,
@@ -274,9 +276,11 @@ import {
 import {
   captureNameFromSavedPath,
   AppLocale,
+  DEFAULT_UI_PREFERENCES,
   loadUiPreferences,
   persistUiPreferences,
   SUPPORTED_LOCALES,
+  UiPreferences,
 } from "./lib/preferences";
 import {
   copyRangeMeasurementValues,
@@ -568,6 +572,7 @@ const panelMeta: Record<
   timingMarkers: { label: "Timing Markers", iconUrl: timingMarkersIcon },
   extensions: { label: "Extensions", iconUrl: extensionsIcon },
   notes: { label: "Notes", iconUrl: notesIcon },
+  advanced: { label: "Advanced", iconUrl: advancedIcon },
 };
 
 function defaultSettings(deviceId: string): CaptureSettings {
@@ -1445,6 +1450,11 @@ function getSidebarPanelAllowed(panel: SidebarPanel, session: UiSession | null |
     return { isSelectable: true, isVisible: true };
   }
 
+  if (panel === "advanced") {
+    // App-level settings, useful with or without a capture open.
+    return { isSelectable: true, isVisible: true };
+  }
+
   return {
     disabledReason: hasActiveSession ? undefined : "Create or open a session first",
     isSelectable: hasActiveSession,
@@ -1542,6 +1552,13 @@ export default function App() {
   useEffect(() => {
     persistUiPreferences(preferences);
   }, [preferences]);
+
+  // The advanced panel's Animation Scale feeds the glide duration. Pushed into
+  // the module rather than read from preferences at gesture time so the hot path
+  // stays a plain number lookup.
+  useEffect(() => {
+    setZoomAnimationDurationScale(preferences.animationScale);
+  }, [preferences.animationScale]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -2286,7 +2303,7 @@ export default function App() {
         dispatchSessionViewIntent(sessionId, intent);
         return;
       }
-      animateViewport(sessionId, fallbackStart, fallbackSamples, ZOOM_ANIMATION_DURATION_MS);
+      animateViewport(sessionId, fallbackStart, fallbackSamples, zoomAnimationDurationMs());
     },
     [animateViewport],
   );
@@ -2333,7 +2350,7 @@ export default function App() {
       // intent, exactly as the keyboard path does.
       stepViewport(
         activeSession.id,
-        { anchor_ratio: 0.5, duration_ms: ZOOM_ANIMATION_DURATION_MS, factor, kind: "zoom" },
+        { anchor_ratio: 0.5, duration_ms: zoomAnimationDurationMs(), factor, kind: "zoom" },
         anchor - nextSamples / 2,
         nextSamples,
       );
@@ -4184,7 +4201,7 @@ export default function App() {
       stepViewport(
         activeSession.id,
         {
-          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          duration_ms: zoomAnimationDurationMs(),
           kind: "animate_to",
           samples: targetEnd - targetStart,
           start_sample: targetStart,
@@ -4203,7 +4220,7 @@ export default function App() {
       stepViewport(
         activeSession.id,
         {
-          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          duration_ms: zoomAnimationDurationMs(),
           kind: "animate_to",
           samples: trimSamples,
           start_sample: anchor - trimSamples / 2,
@@ -4469,7 +4486,7 @@ export default function App() {
       stepViewport(
         session.id,
         {
-          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          duration_ms: zoomAnimationDurationMs(),
           kind: "animate_to",
           samples: frameSamples + padding * 2,
           start_sample: frame.start_sample - padding,
@@ -4482,7 +4499,7 @@ export default function App() {
       stepViewport(
         session.id,
         {
-          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          duration_ms: zoomAnimationDurationMs(),
           kind: "animate_to",
           samples: currentSamples,
           start_sample: center - currentSamples / 2,
@@ -4502,7 +4519,7 @@ export default function App() {
     stepViewport(
       session.id,
       {
-        duration_ms: ZOOM_ANIMATION_DURATION_MS,
+        duration_ms: zoomAnimationDurationMs(),
         kind: "animate_to",
         samples: span + padding * 2,
         start_sample: startSample - padding,
@@ -4904,7 +4921,7 @@ export default function App() {
             activeSession.id,
             {
               anchor_ratio: graphPointerRatioRef.current,
-              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              duration_ms: zoomAnimationDurationMs(),
               factor: 0.5,
               kind: "zoom",
             },
@@ -4921,7 +4938,7 @@ export default function App() {
             activeSession.id,
             {
               anchor_ratio: graphPointerRatioRef.current,
-              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              duration_ms: zoomAnimationDurationMs(),
               factor: 2,
               kind: "zoom",
             },
@@ -4937,7 +4954,7 @@ export default function App() {
             activeSession.id,
             {
               delta_samples: -activeSession.viewportSamples / 3,
-              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              duration_ms: zoomAnimationDurationMs(),
               kind: "pan_samples",
             },
             activeSession.viewportStart - activeSession.viewportSamples / 3,
@@ -4952,7 +4969,7 @@ export default function App() {
             activeSession.id,
             {
               delta_samples: activeSession.viewportSamples / 3,
-              duration_ms: ZOOM_ANIMATION_DURATION_MS,
+              duration_ms: zoomAnimationDurationMs(),
               kind: "pan_samples",
             },
             activeSession.viewportStart + activeSession.viewportSamples / 3,
@@ -5390,7 +5407,7 @@ export default function App() {
                       stepViewport(
                         activeSession.id,
                         {
-                          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+                          duration_ms: zoomAnimationDurationMs(),
                           kind: "animate_to",
                           samples,
                           start_sample: start,
@@ -5430,6 +5447,7 @@ export default function App() {
             devices={devices}
             extensions={extensions}
             onChangeExtensions={(updater) => setExtensions((current) => updater(current))}
+            onChangePreferences={(updater) => setPreferences(updater)}
             onCreateSession={createSessionFromFooter}
             onAddAnalyzer={handleAddAnalyzer}
             onAddRangeMeasurement={handleAddRangeMeasurement}
@@ -5460,7 +5478,7 @@ export default function App() {
                 stepViewport(
                   activeSession.id,
                   {
-                    duration_ms: ZOOM_ANIMATION_DURATION_MS,
+                    duration_ms: zoomAnimationDurationMs(),
                     kind: "animate_to",
                     samples,
                     start_sample: start,
@@ -5470,6 +5488,7 @@ export default function App() {
                 );
               }
             }}
+            preferences={preferences}
             selectedDevice={selectedDevice}
             selectedCapabilities={selectedCapabilities}
             selectedPanel={selectedPanel}
@@ -7839,6 +7858,7 @@ function RightSidebar({
   devices,
   extensions,
   onChangeExtensions,
+  onChangePreferences,
   onAddAnalyzer,
   onAddRangeMeasurement,
   onAddMarkerPair,
@@ -7855,6 +7875,7 @@ function RightSidebar({
   onUpdateSession,
   onUpdateSettings,
   onViewportChange,
+  preferences,
   selectedDevice,
   selectedCapabilities,
   selectedPanel,
@@ -7865,6 +7886,7 @@ function RightSidebar({
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
+  onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
   onAddAnalyzer: (choiceOrName: AnalyzerLibraryChoice | string, backend?: DecoderBackendKind) => void;
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
@@ -7881,6 +7903,7 @@ function RightSidebar({
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   onViewportChange: (start: number, samples: number) => void;
+  preferences: UiPreferences;
   selectedDevice: string;
   selectedCapabilities: HardwareCaptureCapabilities | null;
   selectedPanel: SidebarPanel | undefined;
@@ -7961,6 +7984,7 @@ function RightSidebar({
             devices={devices}
             extensions={extensions}
             onChangeExtensions={onChangeExtensions}
+            onChangePreferences={onChangePreferences}
             onAddAnalyzer={onAddAnalyzer}
             onAddRangeMeasurement={onAddRangeMeasurement}
             onAddMarkerPair={onAddMarkerPair}
@@ -7977,6 +8001,7 @@ function RightSidebar({
             onUpdateSettings={onUpdateSettings}
             onViewportChange={onViewportChange}
             panel={selectedPanel}
+            preferences={preferences}
             selectedCapabilities={selectedCapabilities}
             selectedDevice={selectedDevice}
             session={session}
@@ -8021,6 +8046,7 @@ function SidebarPanelContent({
   devices,
   extensions,
   onChangeExtensions,
+  onChangePreferences,
   onAddAnalyzer,
   onAddRangeMeasurement,
   onAddMarkerPair,
@@ -8037,6 +8063,7 @@ function SidebarPanelContent({
   onUpdateSettings,
   onViewportChange,
   panel,
+  preferences,
   selectedCapabilities,
   selectedDevice,
   session,
@@ -8045,6 +8072,7 @@ function SidebarPanelContent({
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
+  onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
   onAddAnalyzer: (choiceOrName: AnalyzerLibraryChoice | string, backend?: DecoderBackendKind) => void;
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
@@ -8061,6 +8089,7 @@ function SidebarPanelContent({
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   onViewportChange: (start: number, samples: number) => void;
   panel: SidebarPanel;
+  preferences: UiPreferences;
   selectedCapabilities: HardwareCaptureCapabilities | null;
   selectedDevice: string;
   session: UiSession | null;
@@ -8153,6 +8182,13 @@ function SidebarPanelContent({
         <CaptureNotesPanel
           notes={session.notes}
           onChange={(notes) => onUpdateSession((current) => ({ ...current, notes }))}
+        />
+      )}
+      {panel === "advanced" && (
+        <AdvancedOptionsPanel
+          onChangePreferences={onChangePreferences}
+          onReset={() => onChangePreferences(() => DEFAULT_UI_PREFERENCES)}
+          preferences={preferences}
         />
       )}
     </div>

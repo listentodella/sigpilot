@@ -1,0 +1,15 @@
+{
+  "panelTitle": "高级",
+  "sectionDisplay": "显示",
+  "sectionBehavior": "行为",
+  "sectionPerformance": "性能",
+  "matchChannelColors": "波形同色显示",
+  "matchChannelColorsHint": "数字与模拟通道使用相同颜色绘制。",
+  "panToTrigger": "自动平移到触发点",
+  "panToTriggerHint": "采集到达时将视图移动到触发位置。",
+  "renameTabToSavedCapture": "标签页随保存文件名重命名",
+  "renameTabToSavedCaptureHint": "保存后使用文件名作为会话标签标题。",
+  "animationScale": "动画时长比例",
+  "animationScaleHint": "缩放与平移的过渡时长。0 为瞬时，1 为 100 毫秒，3 为 300 毫秒。",
+  "resetAll": "恢复默认"
+}

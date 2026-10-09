@@ -3,7 +3,7 @@ import { frontendLog, measureDigitalPoint, type WaveformTile } from "../lib/api"
 import { normalizeCaptureViewport, normalizeLiveCaptureViewport } from "../lib/captureViewport";
 import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "../lib/saleaeGraphLayout";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
-import { isPhysicalWheelZoom, wheelZoomFactor, ZOOM_ANIMATION_DURATION_MS } from "../lib/wheelZoom";
+import { isPhysicalWheelZoom, wheelZoomFactor, zoomAnimationDurationMs } from "../lib/wheelZoom";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
@@ -817,7 +817,7 @@ function handleWheel(event: WheelEvent) {
         // One wheel notch is a single hard step, so it glides; a touchpad streams
         // and would only fight itself if each event were interpolated. Logic 2
         // makes the same split.
-        duration_ms: isPhysicalWheelZoom(event) ? ZOOM_ANIMATION_DURATION_MS : 0,
+        duration_ms: isPhysicalWheelZoom(event) ? zoomAnimationDurationMs() : 0,
       });
       if (edgeJumpRef.current) updateEdgeJumpAt(event.clientX, event.clientY);
       return;

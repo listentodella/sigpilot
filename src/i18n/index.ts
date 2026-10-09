@@ -12,8 +12,10 @@ import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 
 import { loadUiPreferences } from "../lib/preferences";
+import enAdvanced from "./locales/en/advanced.json";
 import enCommon from "./locales/en/common.json";
 import enFooter from "./locales/en/footer.json";
+import zhAdvanced from "./locales/zh-CN/advanced.json";
 import zhCommon from "./locales/zh-CN/common.json";
 import zhFooter from "./locales/zh-CN/footer.json";
 
@@ -27,10 +29,10 @@ void i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   lng: loadUiPreferences().locale,
-  ns: ["common", "footer"],
+  ns: ["common", "footer", "advanced"],
   resources: {
-    en: { common: enCommon, footer: enFooter },
-    "zh-CN": { common: zhCommon, footer: zhFooter },
+    en: { advanced: enAdvanced, common: enCommon, footer: enFooter },
+    "zh-CN": { advanced: zhAdvanced, common: zhCommon, footer: zhFooter },
   },
   supportedLngs: ["en", "zh-CN"],
 });

@@ -6,7 +6,8 @@ export type SidebarPanel =
   | "measurements"
   | "timingMarkers"
   | "extensions"
-  | "notes";
+  | "notes"
+  | "advanced";
 
 export const SIDEBAR_PANELS: SidebarPanel[] = [
   "devices",
@@ -17,6 +18,7 @@ export const SIDEBAR_PANELS: SidebarPanel[] = [
   "timingMarkers",
   "extensions",
   "notes",
+  "advanced",
 ];
 
 export const SidebarCommands = {
@@ -27,6 +29,7 @@ export const SidebarCommands = {
   OpenMeasurements: "sidebar:open:measurements",
   OpenNotes: "sidebar:open:notes",
   OpenTimingMarkers: "sidebar:open:timing-markers",
+  OpenAdvanced: "sidebar:open:advanced",
   CloseSidebar: "sidebar:close",
 } as const;
 
@@ -63,6 +66,7 @@ export const SIDEBAR_COMMAND_TO_PANEL: Partial<Record<UiCommand, SidebarPanel>> 
   [SidebarCommands.OpenMeasurements]: "measurements",
   [SidebarCommands.OpenNotes]: "notes",
   [SidebarCommands.OpenTimingMarkers]: "timingMarkers",
+  [SidebarCommands.OpenAdvanced]: "advanced",
 };
 
 export const SIDEBAR_PANEL_SHORTCUTS: Record<SidebarPanel, string> = {
@@ -74,6 +78,7 @@ export const SIDEBAR_PANEL_SHORTCUTS: Record<SidebarPanel, string> = {
   timingMarkers: "N T",
   extensions: "N E",
   notes: "N N",
+  advanced: "N X",
 };
 
 export const SIDEBAR_SHORTCUT_TO_COMMAND: Record<string, UiCommand> = {
@@ -85,4 +90,5 @@ export const SIDEBAR_SHORTCUT_TO_COMMAND: Record<string, UiCommand> = {
   n: SidebarCommands.OpenNotes,
   q: SidebarCommands.CloseSidebar,
   t: SidebarCommands.OpenTimingMarkers,
+  x: SidebarCommands.OpenAdvanced,
 };

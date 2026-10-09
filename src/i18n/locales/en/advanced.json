@@ -1,0 +1,15 @@
+{
+  "panelTitle": "Advanced",
+  "sectionDisplay": "Display",
+  "sectionBehavior": "Behavior",
+  "sectionPerformance": "Performance",
+  "matchChannelColors": "Color-match waveforms",
+  "matchChannelColorsHint": "Draw digital and analog channels in the same colour.",
+  "panToTrigger": "Pan to trigger",
+  "panToTriggerHint": "Move the view to the trigger when a capture arrives.",
+  "renameTabToSavedCapture": "Rename tab to saved file",
+  "renameTabToSavedCaptureHint": "Use the saved file name as the session tab title.",
+  "animationScale": "Animation scale",
+  "animationScaleHint": "Length of the zoom and pan glide. 0 is instant, 1 is 100 ms, 3 is 300 ms.",
+  "resetAll": "Reset to defaults"
+}

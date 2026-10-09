@@ -19,10 +19,15 @@ export function initialLocale(): AppLocale {
 
 export interface UiPreferences {
   locale: AppLocale;
+  animationScale: number;
   matchChannelColors: boolean;
   panToTrigger: boolean;
   renameTabToSavedCapture: boolean;
 }
+
+/** Bounds for `animationScale`: 0 is instant, 1 is the 100 ms default, 3 is 300 ms. */
+export const ANIMATION_SCALE_MIN = 0;
+export const ANIMATION_SCALE_MAX = 3;
 
 interface PreferenceStorage {
   getItem(key: string): string | null;
@@ -35,6 +40,7 @@ const LEGACY_UI_PREFERENCES_KEY = "pxlogic.preferences.v1";
 
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   locale: DEFAULT_LOCALE,
+  animationScale: 1,
   matchChannelColors: true,
   panToTrigger: true,
   renameTabToSavedCapture: false,
@@ -45,6 +51,10 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
   const candidate = value as Partial<UiPreferences>;
   return {
     locale: isAppLocale(candidate.locale) ? candidate.locale : DEFAULT_UI_PREFERENCES.locale,
+    animationScale:
+      typeof candidate.animationScale === "number" && Number.isFinite(candidate.animationScale)
+        ? Math.min(ANIMATION_SCALE_MAX, Math.max(ANIMATION_SCALE_MIN, candidate.animationScale))
+        : DEFAULT_UI_PREFERENCES.animationScale,
     matchChannelColors:
       typeof candidate.matchChannelColors === "boolean"
         ? candidate.matchChannelColors
