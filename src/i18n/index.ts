@@ -17,6 +17,7 @@ import enAnalyzers from "./locales/en/analyzers.json";
 import enExtensions from "./locales/en/extensions.json";
 import enChannelMenu from "./locales/en/channelMenu.json";
 import enCommon from "./locales/en/common.json";
+import enDevice from "./locales/en/device.json";
 import enGraph from "./locales/en/graph.json";
 import enFooter from "./locales/en/footer.json";
 import enNotes from "./locales/en/notes.json";
@@ -29,6 +30,7 @@ import zhAnalyzers from "./locales/zh-CN/analyzers.json";
 import zhExtensions from "./locales/zh-CN/extensions.json";
 import zhChannelMenu from "./locales/zh-CN/channelMenu.json";
 import zhCommon from "./locales/zh-CN/common.json";
+import zhDevice from "./locales/zh-CN/device.json";
 import zhGraph from "./locales/zh-CN/graph.json";
 import zhFooter from "./locales/zh-CN/footer.json";
 import zhNotes from "./locales/zh-CN/notes.json";
@@ -47,7 +49,7 @@ void i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   lng: loadUiPreferences().locale,
-  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions", "analyzers", "graph", "channelMenu"],
+  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions", "analyzers", "graph", "channelMenu", "device"],
   resources: {
     en: {
       advanced: enAdvanced,
@@ -55,6 +57,7 @@ void i18n.use(initReactI18next).init({
       channelMenu: enChannelMenu,
       extensions: enExtensions,
       common: enCommon,
+      device: enDevice,
       graph: enGraph,
       footer: enFooter,
       notes: enNotes,
@@ -69,6 +72,7 @@ void i18n.use(initReactI18next).init({
       channelMenu: zhChannelMenu,
       extensions: zhExtensions,
       common: zhCommon,
+      device: zhDevice,
       graph: zhGraph,
       footer: zhFooter,
       notes: zhNotes,

@@ -8269,6 +8269,7 @@ function DeviceSettingsPanel({
   selectedDevice: string;
   session: UiSession;
 }) {
+  const { t: deviceT } = useTranslation("device");
   const [showDeviceInfo, setShowDeviceInfo] = useState(false);
   const [pwmBusy, setPwmBusy] = useState(false);
   const selected = devices.find((device) => device.id === selectedDevice);
@@ -8374,7 +8375,7 @@ function DeviceSettingsPanel({
             hiddenIndex === index ? false : hidden,
           )
         : current.hiddenDigitalChannels,
-      message: `D${index} ${nextChannels[index] ? "shown and enabled" : "hidden and disabled"}`,
+      message: deviceT(nextChannels[index] ? "channelShown" : "channelHidden", { channel: `D${index}` }),
     }));
   }
 
@@ -8392,7 +8393,9 @@ function DeviceSettingsPanel({
         triggerChannel: 0,
       },
       hiddenDigitalChannels: makeHiddenDigitalChannels(),
-      message: enabled ? `All ${nextCount} digital channels shown and enabled` : "All digital channels hidden and disabled",
+      message: enabled
+        ? deviceT("allChannelsShown", { count: nextCount })
+        : deviceT("allChannelsHidden"),
     }));
   }
 
@@ -8436,7 +8439,10 @@ function DeviceSettingsPanel({
           pwmEffectiveDutyPercent: configuration.effective_duty_percent,
           pwmEffectiveFrequencyHz: configuration.effective_frequency_hz,
         },
-        message: `PWM0 ${configuration.enabled ? "enabled" : "disabled"} at ${formatRate(configuration.effective_frequency_hz)}, ${trimNumber(configuration.effective_duty_percent)}% duty`,
+        message: deviceT(configuration.enabled ? "pwmAppliedEnabled" : "pwmAppliedDisabled", {
+          duty: trimNumber(configuration.effective_duty_percent),
+          frequency: formatRate(configuration.effective_frequency_hz),
+        }),
       }));
     } catch (error) {
       onUpdateSession((current) => ({ ...current, message: String(error) }));
@@ -8449,43 +8455,46 @@ function DeviceSettingsPanel({
     <div className="deviceSettingsPanel">
       <section className="deviceSettingsHeader">
         <div className="deviceSettingsTitle">
-          <strong>{selected?.label ?? "Disconnected"}</strong>
-          <small>{selected?.kind === "Usb" ? "Connected Logic Device" : "Demo Logic Device"}</small>
+          <strong>{selected?.label ?? deviceT("disconnected")}</strong>
+          <small>{selected?.kind === "Usb" ? deviceT("connectedLogicDevice") : deviceT("demoLogicDevice")}</small>
         </div>
         <button className="deviceSettingsSmallButton" onClick={() => setShowDeviceInfo((open) => !open)} type="button">
-          Device Information
+          {deviceT("deviceInformation")}
         </button>
       </section>
 
       {showDeviceInfo && (
         <section className="deviceInfoPanel">
-          <InfoRow label="Device ID" value={selectedDevice} />
-          <InfoRow label="VID / PID" value={selected ? `${hex16(selected.vid)} / ${hex16(selected.pid)}` : "-"} />
-          <InfoRow label="USB Address" value={selected?.bus == null ? "Simulation" : `${selected.bus}:${selected.address}`} />
-          <InfoRow label="USB Speed" value={selected?.usb_speed ?? "-"} />
-          <InfoRow label="Manufacturer" value={selected?.manufacturer ?? "-"} />
-          <InfoRow label="Product" value={selected?.product ?? "-"} />
-          <InfoRow label="PXView Profile" value={selected?.profile_model ?? "-"} />
-          <InfoRow label="PXView Channel Mode" value={selectedChannelMode?.description ?? "-"} />
-          <InfoRow label="Logic Mode" value={selected?.logic_mode == null ? "-" : hex32(selected.logic_mode)} />
-          {selected?.probe_error && <InfoRow label="Probe" value={selected.probe_error} />}
-          <InfoRow label="Capture Buffer" value={formatBytes(session.deviceSettings.bufferSizeMb * 1024 * 1024)} />
+          <InfoRow label={deviceT("deviceId")} value={selectedDevice} />
+          <InfoRow label={deviceT("vidPid")} value={selected ? `${hex16(selected.vid)} / ${hex16(selected.pid)}` : "-"} />
+          <InfoRow
+            label={deviceT("usbAddress")}
+            value={selected?.bus == null ? deviceT("simulation") : `${selected.bus}:${selected.address}`}
+          />
+          <InfoRow label={deviceT("usbSpeed")} value={selected?.usb_speed ?? "-"} />
+          <InfoRow label={deviceT("manufacturer")} value={selected?.manufacturer ?? "-"} />
+          <InfoRow label={deviceT("product")} value={selected?.product ?? "-"} />
+          <InfoRow label={deviceT("profile")} value={selected?.profile_model ?? "-"} />
+          <InfoRow label={deviceT("channelMode")} value={selectedChannelMode?.description ?? "-"} />
+          <InfoRow label={deviceT("logicMode")} value={selected?.logic_mode == null ? "-" : hex32(selected.logic_mode)} />
+          {selected?.probe_error && <InfoRow label={deviceT("probe")} value={selected.probe_error} />}
+          <InfoRow label={deviceT("captureBuffer")} value={formatBytes(session.deviceSettings.bufferSizeMb * 1024 * 1024)} />
           <button className="deviceSettingsSmallButton" onClick={onRefreshDevices} type="button">
             <RefreshCw size={13} />
-            Refresh Devices
+            {deviceT("refreshDevices")}
           </button>
         </section>
       )}
 
       <section className="deviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
-          <span>Digital</span>
+          <span>{deviceT("digital")}</span>
           <div className="deviceSettingsActions">
             <button type="button" onClick={() => selectAllDigitalChannels(true)}>
-              All
+              {deviceT("all")}
             </button>
             <button type="button" onClick={() => selectAllDigitalChannels(false)}>
-              Clear
+              {deviceT("clear")}
             </button>
           </div>
         </div>
@@ -8501,7 +8510,7 @@ function DeviceSettingsPanel({
                   "--channel-color": saleaeLegacyChannelColor(index),
                 } as CSSProperties
               }
-              title={`${enabled ? "Hide and disable" : "Show and enable"} D${index}`}
+              title={deviceT(enabled ? "hideAndDisable" : "showAndEnable", { channel: `D${index}` })}
               type="button"
             >
               {index}
@@ -8511,7 +8520,7 @@ function DeviceSettingsPanel({
 
         <div className="twoColumnFields captureInputRow">
           <label className="stack-field">
-            <span>Sample rate</span>
+            <span>{deviceT("sampleRate")}</span>
             <select
               value={session.settings.sample_rate_hz}
               onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
@@ -8531,11 +8540,11 @@ function DeviceSettingsPanel({
           />
         </div>
         <label className="stack-field">
-          <span>Active channels</span>
+          <span>{deviceT("activeChannels")}</span>
           <select value={session.settings.channel_count} onChange={(event) => setChannelCount(Number(event.target.value))}>
             {channelCountOptions.map((count) => (
               <option key={count} value={count}>
-                {count} digital
+                {deviceT("digitalChannelCount", { count })}
               </option>
             ))}
           </select>
@@ -8547,13 +8556,13 @@ function DeviceSettingsPanel({
 
       <section className="deviceSettingsBlock analogDeviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
-          <span>Analog</span>
+          <span>{deviceT("analog")}</span>
           <div className="deviceSettingsActions">
             <button type="button" onClick={() => selectAllAnalogChannels(true)}>
-              All
+              {deviceT("all")}
             </button>
             <button type="button" onClick={() => selectAllAnalogChannels(false)}>
-              Clear
+              {deviceT("clear")}
             </button>
           </div>
         </div>
@@ -8564,7 +8573,7 @@ function DeviceSettingsPanel({
               key={index}
               onClick={() => toggleAnalogChannel(index)}
               style={{ "--channel-color": saleaeLegacyChannelColor(index) } as CSSProperties}
-              title={`${channel.enabled ? "Hide and disable" : "Show and enable"} A${index}`}
+              title={deviceT(channel.enabled ? "hideAndDisable" : "showAndEnable", { channel: `A${index}` })}
               type="button"
             >
               {index}
@@ -8572,7 +8581,7 @@ function DeviceSettingsPanel({
           ))}
         </div>
         <label className="stack-field">
-          <span>Sample rate</span>
+          <span>{deviceT("sampleRate")}</span>
           <select
             value={session.deviceSettings.analogSampleRateHz}
             onChange={(event) => updateDeviceSettings({ analogSampleRateHz: Number(event.target.value) })}
@@ -8588,7 +8597,7 @@ function DeviceSettingsPanel({
 
       <section className="deviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
-          <span>Capture Mode</span>
+          <span>{deviceT("captureMode")}</span>
           <small>{session.deviceSettings.captureMode}</small>
         </div>
         <div className="modeButtonGroup">
@@ -8599,14 +8608,14 @@ function DeviceSettingsPanel({
               onClick={() => setCaptureMode(mode)}
               type="button"
             >
-              {mode === "FreeRun" ? "Looping" : mode}
+              {deviceT(mode === "FreeRun" ? "modeFreeRun" : mode === "Timer" ? "modeTimer" : "modeTrigger")}
             </button>
           ))}
         </div>
 
         {session.deviceSettings.captureMode === "Timer" && (
           <label className="stack-field">
-            <span>After time</span>
+            <span>{deviceT("afterTime")}</span>
             <input
               min={1}
               onChange={(event) => onUpdateSettings({ duration_ms: Number(event.target.value) })}
@@ -8641,16 +8650,16 @@ function DeviceSettingsPanel({
             onChange={(event) => updateDeviceSettings({ trimAfterCapture: event.target.checked })}
             type="checkbox"
           />
-          Trim after capture
+          {deviceT("trimAfterCapture")}
         </label>
         <label className="stack-field">
-          <span>Glitch filter</span>
+          <span>{deviceT("glitchFilter")}</span>
           <select
             onChange={(event) => updateDeviceSettings({ glitchFilterEnabled: event.target.value === "one-sample" })}
             value={session.deviceSettings.glitchFilterEnabled ? "one-sample" : "none"}
           >
-            <option value="none">None</option>
-            <option value="one-sample">1 sample clock</option>
+            <option value="none">{deviceT("glitchNone")}</option>
+            <option value="one-sample">{deviceT("glitchOneSample")}</option>
           </select>
         </label>
         <MemoryBufferSizeSetter
@@ -8665,11 +8674,11 @@ function DeviceSettingsPanel({
 
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
-          <span>Hardware I/O</span>
+          <span>{deviceT("hardwareIo")}</span>
           <small>SigPilot</small>
         </div>
         <label className="stack-field">
-          <span>Ext Trigger Mode</span>
+          <span>{deviceT("extTriggerMode")}</span>
           <select
             value={session.deviceSettings.externalTriggerMode}
             onChange={(event) =>
@@ -8678,16 +8687,16 @@ function DeviceSettingsPanel({
           >
             {(
               [
-                ["Close", "close"],
-                ["Rising", "Rising"],
-                ["One", "One"],
-                ["Falling", "Falling"],
-                ["Zero", "Zero"],
-                ["Edge", "Edge"],
+                ["close", "extTriggerClose"],
+                ["Rising", "extTriggerRising"],
+                ["One", "extTriggerOne"],
+                ["Falling", "extTriggerFalling"],
+                ["Zero", "extTriggerZero"],
+                ["Edge", "extTriggerEdge"],
               ] as [ExternalTriggerMode, string][]
-            ).map(([value, label]) => (
+            ).map(([value, labelKey]) => (
               <option key={value} value={value}>
-                {label}
+                {deviceT(labelKey)}
               </option>
             ))}
           </select>
@@ -8698,7 +8707,7 @@ function DeviceSettingsPanel({
             onChange={(event) => updateDeviceSettings({ clockNegedge: event.target.checked })}
             type="checkbox"
           />
-          Using Clock Negedge
+          {deviceT("usingClockNegedge")}
         </label>
         <label className="toggle-field panel-toggle">
           <input
@@ -8706,14 +8715,14 @@ function DeviceSettingsPanel({
             onChange={(event) => updateDeviceSettings({ triggerOutEnabled: event.target.checked })}
             type="checkbox"
           />
-          En Trigger Out
+          {deviceT("enTriggerOut")}
         </label>
       </section>
 
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
-          <span>PWM0 Output</span>
-          <small>125 MHz clock</small>
+          <span>{deviceT("pwm0Output")}</span>
+          <small>{deviceT("pwm0Clock")}</small>
         </div>
         <label className="toggle-field panel-toggle">
           <input
@@ -8721,11 +8730,11 @@ function DeviceSettingsPanel({
             onChange={(event) => updateDeviceSettings({ pwmEnabled: event.target.checked })}
             type="checkbox"
           />
-          PWM0 EN
+          {deviceT("pwm0En")}
         </label>
         <div className="pwmSettingsGrid">
           <label className="stack-field">
-            <span>PWM0 Freq (Hz)</span>
+            <span>{deviceT("pwm0Freq")}</span>
             <input
               max={1_000_000}
               min={1}
@@ -8736,7 +8745,7 @@ function DeviceSettingsPanel({
             />
           </label>
           <label className="stack-field">
-            <span>PWM0 Duty (%)</span>
+            <span>{deviceT("pwm0Duty")}</span>
             <input
               max={100}
               min={0}
@@ -8750,7 +8759,10 @@ function DeviceSettingsPanel({
         {session.deviceSettings.pwmEffectiveFrequencyHz != null &&
           session.deviceSettings.pwmEffectiveDutyPercent != null && (
             <div className="pwmEffectiveValue">
-              Effective {formatRate(session.deviceSettings.pwmEffectiveFrequencyHz)} / {trimNumber(session.deviceSettings.pwmEffectiveDutyPercent)}%
+              {deviceT("pwmEffective", {
+                frequency: formatRate(session.deviceSettings.pwmEffectiveFrequencyHz),
+                percent: trimNumber(session.deviceSettings.pwmEffectiveDutyPercent),
+              })}
             </div>
           )}
         <button
@@ -8760,14 +8772,14 @@ function DeviceSettingsPanel({
           type="button"
         >
           <SlidersHorizontal size={13} />
-          {pwmBusy ? "Applying..." : "Apply PWM0"}
+          {pwmBusy ? deviceT("pwmApplying") : deviceT("applyPwm0")}
         </button>
       </section>
 
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
-          <span>Connected Devices</span>
-          <small>{enabledChannels} active</small>
+          <span>{deviceT("connectedDevices")}</span>
+          <small>{deviceT("activeCount", { count: enabledChannels })}</small>
         </div>
         <DeviceMenuRows
           devices={devices}
@@ -8780,7 +8792,7 @@ function DeviceSettingsPanel({
 
       {(session.busy || session.readOnly) && (
         <div className="deviceSettingsDisabledOverlay">
-          {session.readOnly ? "This is a read-only session" : "Settings are disabled during capture"}
+          {session.readOnly ? deviceT("readOnlySession") : deviceT("disabledDuringCapture")}
         </div>
       )}
     </div>
@@ -8796,6 +8808,7 @@ function MemoryBufferSizeSetter({
   disabled: boolean;
   onChange: (bufferSizeMb: number) => void;
 }) {
+  const { t: deviceT } = useTranslation("device");
   const valueGb = Math.max(0.5, Math.round((bufferSizeMb / 1024) * 100) / 100);
   const [draftValue, setDraftValue] = useState(String(valueGb));
 
@@ -8821,20 +8834,20 @@ function MemoryBufferSizeSetter({
 
   return (
     <div className={`memoryBufferSizeSetter ${disabled ? "disabled" : ""}`}>
-      <span className="memoryBufferSizeLabel">Memory buffer size</span>
+      <span className="memoryBufferSizeLabel">{deviceT("memoryBufferSize")}</span>
       <div className="memoryBufferValueSetter">
         <button
-          aria-label="Decrease memory buffer size"
+          aria-label={deviceT("decreaseMemoryBuffer")}
           disabled={disabled || valueGb <= 0.5}
           onClick={() => setValue(valueGb - 0.5)}
-          title="Decrease memory buffer size"
+          title={deviceT("decreaseMemoryBuffer")}
           type="button"
         >
           <Minus size={16} strokeWidth={2.5} />
         </button>
         <label className="memoryBufferValueInput">
           <input
-            aria-label="Memory buffer size"
+            aria-label={deviceT("memoryBufferSize")}
             disabled={disabled}
             min={0.5}
             onBlur={commitDraftValue}
@@ -8853,10 +8866,10 @@ function MemoryBufferSizeSetter({
           <span>GB</span>
         </label>
         <button
-          aria-label="Increase memory buffer size"
+          aria-label={deviceT("increaseMemoryBuffer")}
           disabled={disabled}
           onClick={() => setValue(valueGb + 0.5)}
-          title="Increase memory buffer size"
+          title={deviceT("increaseMemoryBuffer")}
           type="button"
         >
           <Plus size={16} strokeWidth={2.5} />
@@ -8908,6 +8921,7 @@ function ThresholdVoltageField({
   presets: number[];
   value: number;
 }) {
+  const { t: deviceT } = useTranslation("device");
   const [open, setOpen] = useState(false);
   const [text, setText] = useState(() => trimNumber(value));
   const hostRef = useRef<HTMLDivElement>(null);
@@ -8930,10 +8944,10 @@ function ThresholdVoltageField({
 
   return (
     <label className="stack-field thresholdVoltageField">
-      <span>Threshold</span>
+      <span>{deviceT("threshold")}</span>
       <div className={`thresholdVoltageControl ${open ? "open" : ""}`} ref={hostRef}>
         <input
-          aria-label="Threshold voltage"
+          aria-label={deviceT("thresholdVoltage")}
           disabled={disabled}
           inputMode="decimal"
           max={6.668}
@@ -8960,7 +8974,7 @@ function ThresholdVoltageField({
           aria-haspopup="listbox"
           disabled={disabled}
           onClick={() => setOpen((current) => !current)}
-          title="Threshold presets"
+          title={deviceT("thresholdPresets")}
           type="button"
         >
           <ChevronDown size={14} />
@@ -9004,6 +9018,7 @@ function TriggerSettingsEditor({
   onChange: (patch: Partial<UiDeviceSettings>) => void;
   triggerChannel: number;
 }) {
+  const { t: deviceT } = useTranslation("device");
   const channels = Array.from({ length: Math.max(1, channelCount) }, (_, index) => index);
   const activeConditions = channels.filter((channel) => channel !== triggerChannel && (conditions[channel] ?? "Ignore") !== "Ignore").length;
   function setCondition(channel: number, condition: UiTriggerCondition) {
@@ -9015,20 +9030,28 @@ function TriggerSettingsEditor({
   return (
     <div className="triggerEditor">
       <div className="triggerPatternRow">
-        <div className="triggerEdgeChoices" role="group" aria-label="Trigger edge">
+        <div className="triggerEdgeChoices" role="group" aria-label={deviceT("triggerEdgeGroup")}>
           <TriggerEdgePicker edge={edge} onChange={onChange} />
         </div>
         <TriggerChannelPicker channelLabels={channelLabels} channels={channels} onChange={onChange} triggerChannel={triggerChannel} />
       </div>
       <details className="triggerConditions" open={activeConditions > 0}>
-        <summary>Other channel conditions{activeConditions > 0 ? ` (${activeConditions})` : ""}</summary>
+        <summary>
+          {activeConditions > 0
+            ? deviceT("otherChannelConditionsWithCount", { count: activeConditions })
+            : deviceT("otherChannelConditions")}
+        </summary>
         <div className="triggerConditionRows">
           {channels.filter((channel) => channel !== triggerChannel).map((channel) => {
             const condition = conditions[channel] ?? "Ignore";
             return (
               <div className="triggerConditionRow" key={channel}>
                 <TriggerChannelIdentifier channel={channel} name={channelLabels[channel] ?? `D${channel}`} />
-                <div className="triggerConditionChoices" role="group" aria-label={`D${channel} trigger condition`}>
+                <div
+                  className="triggerConditionChoices"
+                  role="group"
+                  aria-label={deviceT("channelTriggerCondition", { channel: `D${channel}` })}
+                >
                   {(["Low", "High"] as const).map((value) => (
                     <button
                       aria-pressed={condition === value}
@@ -9037,7 +9060,7 @@ function TriggerSettingsEditor({
                       onClick={() => setCondition(channel, value)}
                       type="button"
                     >
-                      {value === "Low" ? "Lo" : "Hi"}
+                      {deviceT(value === "Low" ? "conditionLow" : "conditionHigh")}
                     </button>
                   ))}
                 </div>
@@ -9054,17 +9077,18 @@ function TriggerEdgePicker({ edge, onChange }: {
   edge: UiTriggerEdge;
   onChange: (patch: Partial<UiDeviceSettings>) => void;
 }) {
+  const { t: deviceT } = useTranslation("device");
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => { const close = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) setOpen(false); }; window.addEventListener("pointerdown", close); return () => window.removeEventListener("pointerdown", close); }, []);
-  const options: Array<{ icon: string; label: UiTriggerEdge; }> = [
-    { icon: triggerRisingIcon, label: "Rising Edge" },
-    { icon: triggerFallingIcon, label: "Falling Edge" },
-    { icon: triggerPulseHighIcon, label: "High Pulse" },
-    { icon: triggerPulseLowIcon, label: "Low Pulse" },
+  const options: Array<{ icon: string; label: UiTriggerEdge; labelKey: string; }> = [
+    { icon: triggerRisingIcon, label: "Rising Edge", labelKey: "risingEdge" },
+    { icon: triggerFallingIcon, label: "Falling Edge", labelKey: "fallingEdge" },
+    { icon: triggerPulseHighIcon, label: "High Pulse", labelKey: "highPulse" },
+    { icon: triggerPulseLowIcon, label: "Low Pulse", labelKey: "lowPulse" },
   ];
   const selected = options.find((option) => option.label === edge) ?? options[0];
-  return <div className="triggerPicker" ref={ref}><button aria-expanded={open} aria-haspopup="listbox" onClick={() => setOpen(!open)} title={edge} type="button"><TriggerTypeIcon icon={selected.icon} /><ChevronDown size={14} /></button>{open && <div className="triggerPickerMenu" role="listbox">{options.map((option) => <button aria-selected={edge === option.label} key={option.label} onClick={() => { onChange({ triggerEdge: option.label }); setOpen(false); }} role="option" type="button"><TriggerTypeIcon icon={option.icon} /><span>{option.label}</span>{edge === option.label && <Check size={16} />}</button>)}</div>}</div>;
+  return <div className="triggerPicker" ref={ref}><button aria-expanded={open} aria-haspopup="listbox" onClick={() => setOpen(!open)} title={deviceT(selected.labelKey)} type="button"><TriggerTypeIcon icon={selected.icon} /><ChevronDown size={14} /></button>{open && <div className="triggerPickerMenu" role="listbox">{options.map((option) => <button aria-selected={edge === option.label} key={option.label} onClick={() => { onChange({ triggerEdge: option.label }); setOpen(false); }} role="option" type="button"><TriggerTypeIcon icon={option.icon} /><span>{deviceT(option.labelKey)}</span>{edge === option.label && <Check size={16} />}</button>)}</div>}</div>;
 }
 
 function TriggerChannelPicker({ channelLabels, channels, onChange, triggerChannel }: {
@@ -9089,7 +9113,8 @@ function TriggerChannelIdentifier({ channel, name }: { channel: number; name: st
 }
 
 function TriggerDurationField({ onChange, valueMs }: { onChange: (valueMs: number) => void; valueMs: number }) {
-  return <label className="stack-field triggerDurationField"><span>Capture duration after trigger</span><div><input min={0.001} onChange={(event) => onChange(Math.max(1, Math.round(Number(event.target.value) * 1_000)))} step={0.001} type="number" value={trimNumber(valueMs / 1_000)} /><span>s</span></div></label>;
+  const { t: deviceT } = useTranslation("device");
+  return <label className="stack-field triggerDurationField"><span>{deviceT("captureDurationAfterTrigger")}</span><div><input min={0.001} onChange={(event) => onChange(Math.max(1, Math.round(Number(event.target.value) * 1_000)))} step={0.001} type="number" value={trimNumber(valueMs / 1_000)} /><span>s</span></div></label>;
 }
 
 function RecordingSettingsPanel({
