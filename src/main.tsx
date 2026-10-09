@@ -1,5 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+// Initialises i18next (and applies the persisted locale) before the first render.
+import "./i18n";
 import App from "./App";
 import "./styles.css";
 

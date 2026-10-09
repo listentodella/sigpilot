@@ -1,6 +1,24 @@
 import { migrateLegacyKey } from "./legacyStorage.ts";
 
+export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
+export type AppLocale = (typeof SUPPORTED_LOCALES)[number];
+export const DEFAULT_LOCALE: AppLocale = "en";
+
+export function isAppLocale(value: unknown): value is AppLocale {
+  return typeof value === "string" && (SUPPORTED_LOCALES as readonly string[]).includes(value);
+}
+
+/**
+ * The locale to use before the user has chosen one. `navigator.language` is a
+ * BCP-47 tag, so match on its language subtag and otherwise stay on English.
+ */
+export function initialLocale(): AppLocale {
+  const preferred = typeof navigator === "undefined" ? "" : navigator.language;
+  return preferred.toLowerCase().startsWith("zh") ? "zh-CN" : DEFAULT_LOCALE;
+}
+
 export interface UiPreferences {
+  locale: AppLocale;
   matchChannelColors: boolean;
   panToTrigger: boolean;
   renameTabToSavedCapture: boolean;
@@ -16,6 +34,7 @@ const UI_PREFERENCES_KEY = "sigpilot.preferences.v1";
 const LEGACY_UI_PREFERENCES_KEY = "pxlogic.preferences.v1";
 
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
+  locale: DEFAULT_LOCALE,
   matchChannelColors: true,
   panToTrigger: true,
   renameTabToSavedCapture: false,
@@ -25,6 +44,7 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
   if (!value || typeof value !== "object") return { ...DEFAULT_UI_PREFERENCES };
   const candidate = value as Partial<UiPreferences>;
   return {
+    locale: isAppLocale(candidate.locale) ? candidate.locale : DEFAULT_UI_PREFERENCES.locale,
     matchChannelColors:
       typeof candidate.matchChannelColors === "boolean"
         ? candidate.matchChannelColors
@@ -44,9 +64,13 @@ export function loadUiPreferences(storage = browserPreferenceStorage()): UiPrefe
   if (!storage) return { ...DEFAULT_UI_PREFERENCES };
   migrateLegacyKey(storage, UI_PREFERENCES_KEY, LEGACY_UI_PREFERENCES_KEY);
   try {
-    return normalizeUiPreferences(JSON.parse(storage.getItem(UI_PREFERENCES_KEY) ?? "null"));
+    const stored = storage.getItem(UI_PREFERENCES_KEY);
+    // First run (nothing stored yet): follow the OS language rather than
+    // starting every user on English.
+    if (stored === null) return normalizeUiPreferences({ locale: initialLocale() });
+    return normalizeUiPreferences(JSON.parse(stored));
   } catch {
-    return { ...DEFAULT_UI_PREFERENCES };
+    return normalizeUiPreferences({ locale: initialLocale() });
   }
 }
 

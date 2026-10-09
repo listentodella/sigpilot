@@ -8,7 +8,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "perf:self-test": "cargo run --release -p sigpilot-graph --bin sigpilot-perf-self-test --"
+    "perf:self-test": "cargo run --release -p sigpilot-graph --bin sigpilot-perf-self-test --",
+    "i18n:extract": "i18next-cli extract",
+    "i18n:lint": "i18next-cli lint",
+    "i18n:status": "i18next-cli status"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -16,10 +19,12 @@
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "decimal.js": "^10.6.0",
     "html2canvas": "1.4.1",
+    "i18next": "^26.4.2",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-beautiful-dnd": "13.1.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-i18next": "^17.0.16"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
@@ -27,6 +32,7 @@
     "@types/react-beautiful-dnd": "13.1.8",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "i18next-cli": "^1.75.0",
     "typescript": "^5.5.3",
     "vite": "^5.4.0"
   },

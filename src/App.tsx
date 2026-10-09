@@ -16,6 +16,7 @@ import {
   Minus,
   Plus,
   RefreshCw,
+  Languages,
   Save,
   Search,
   Settings2,
@@ -47,6 +48,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 import {
   DragDropContext,
   Draggable,
@@ -271,8 +273,10 @@ import {
 } from "./lib/screenshots";
 import {
   captureNameFromSavedPath,
+  AppLocale,
   loadUiPreferences,
   persistUiPreferences,
+  SUPPORTED_LOCALES,
 } from "./lib/preferences";
 import {
   copyRangeMeasurementValues,
@@ -293,7 +297,7 @@ import {
   UiTimingMarkerPlacement,
 } from "./lib/timingMarkers";
 
-type FooterPopover = "devices" | "newSession" | "zoom" | null;
+type FooterPopover = "devices" | "newSession" | "zoom" | "language" | null;
 
 const GRAPH_MIN_WIDTH = 50;
 const GRAPH_ROW_LABEL_MAX_WIDTH = 293;
@@ -5530,6 +5534,7 @@ export default function App() {
           }
           onSelectDevice={setSelectedDeviceForActive}
           onSelectSession={setActiveSessionId}
+          onChangeLocale={(locale) => setPreferences((current) => ({ ...current, locale }))}
           onSetFooterPopover={setFooterPopover}
           onZoomFit={fitViewport}
           onZoomIn={() => zoomViewport(0.5)}
@@ -7461,6 +7466,7 @@ function BottomBar({
   activeSessionId,
   devices,
   footerPopover,
+  onChangeLocale,
   onCloseSession,
   onCreateSession,
   onDuplicateSession,
@@ -7484,6 +7490,7 @@ function BottomBar({
   activeSessionId: string | null;
   devices: DeviceInfo[];
   footerPopover: FooterPopover;
+  onChangeLocale: (locale: AppLocale) => void;
   onCloseSession: (sessionId: string) => void;
   onCreateSession: (deviceId?: string) => void;
   onDuplicateSession: (sessionId: string) => void;
@@ -7504,6 +7511,7 @@ function BottomBar({
   summary: CaptureSummary | null;
   zoomLabel: string;
 }) {
+  const { i18n, t } = useTranslation("footer");
   const physicalCount = devices.filter((device) => device.kind === "Usb").length;
   const deviceButtonText = physicalCount > 0 ? `${physicalCount} Device${physicalCount === 1 ? "" : "s"}` : "Disconnected";
 
@@ -7575,7 +7583,7 @@ function BottomBar({
         </div>
         <span>{summary ? formatSamples(summary.metadata.sample_count) : "No samples"}</span>
         <span>{summary ? formatBytes(summary.bytes) : "0 B"}</span>
-        <span>{selectedDeviceReady ? "Device ready" : "No device"}</span>
+        <span>{selectedDeviceReady ? t("deviceReady") : t("noDevice")}</span>
       </div>
 
       <div className="zoomFooterMenu">
@@ -7586,16 +7594,45 @@ function BottomBar({
           <FooterPopoverBox className="zoomMenuPopover" align="right">
             <button className="footerMenuItem" onClick={onZoomIn} type="button">
               <ZoomIn size={14} />
-              Zoom In
+              {t("zoomIn")}
             </button>
             <button className="footerMenuItem" onClick={onZoomOut} type="button">
               <ZoomOut size={14} />
-              Zoom Out
+              {t("zoomOut")}
             </button>
             <button className="footerMenuItem" onClick={onZoomFit} type="button">
               <Maximize2 size={14} />
-              Fit Capture
+              {t("zoomFit")}
             </button>
+          </FooterPopoverBox>
+        )}
+      </div>
+
+      <div className="zoomFooterMenu">
+        <FooterButton
+          selected={footerPopover === "language"}
+          onClick={() => onSetFooterPopover(footerPopover === "language" ? null : "language")}
+        >
+          <Languages size={14} />
+          <span>{i18n.resolvedLanguage === "zh-CN" ? "简体中文" : "English"}</span>
+        </FooterButton>
+        {footerPopover === "language" && (
+          <FooterPopoverBox align="right" className="zoomMenuPopover">
+            <div className="footerMenuHeading">{t("language")}</div>
+            {SUPPORTED_LOCALES.map((locale) => (
+              <button
+                aria-pressed={i18n.resolvedLanguage === locale}
+                className="footerMenuItem"
+                key={locale}
+                onClick={() => {
+                  void i18n.changeLanguage(locale);
+                  onChangeLocale(locale);
+                }}
+                type="button"
+              >
+                {locale === "zh-CN" ? "简体中文" : "English"}
+              </button>
+            ))}
           </FooterPopoverBox>
         )}
       </div>
