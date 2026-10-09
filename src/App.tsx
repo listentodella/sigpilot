@@ -49,6 +49,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { TFunction } from "i18next";
+import i18n from "./i18n";
 import { useTranslation } from "react-i18next";
 import {
   DragDropContext,
@@ -974,7 +975,7 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     viewportStart: viewport.start,
     viewportSamples: viewport.samples,
     viewportMaxSamples: session.viewportMaxSamples,
-    message: "Capturing",
+    message: i18n.t("status:capturing"),
   };
 }
 
@@ -1112,10 +1113,10 @@ function applyTrimmedCapture(
     cursorState: defaultCursorState(totalSamples, summary.metadata.channel_count),
     message:
       mode === "before"
-        ? "Deleted data before point"
+        ? i18n.t("status:deletedBeforePoint")
         : mode === "after"
-          ? "Deleted data after point"
-          : "Deleted off-screen data",
+          ? i18n.t("status:deletedAfterPoint")
+          : i18n.t("status:deletedOffScreen"),
     rangePlacement: null,
     timingMarkerPlacement: null,
     rangeMeasurements: session.rangeMeasurements
@@ -1345,7 +1346,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     liveViewportMode: "auto",
     diagnostics: [],
     busy: false,
-    message: "Ready",
+    message: i18n.t("status:ready"),
     analyzers: source
       ? source.analyzers.map((analyzer, index) => ({
           ...analyzer,
@@ -1477,7 +1478,9 @@ function getSidebarPanelAllowed(
 }
 
 export default function App() {
+  const { t } = useTranslation();
   const { t: panelsT } = useTranslation("panels");
+  const { t: statusT } = useTranslation("status");
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [deviceCapabilitiesById, setDeviceCapabilitiesById] = useState<Record<string, HardwareCaptureCapabilities>>({});
   const [draftSelectedDevice, setDraftSelectedDevice] = useState(DEFAULT_DEVICE_ID);
@@ -1865,10 +1868,10 @@ export default function App() {
         const total = catalog.decoders.length;
         setStartupMessage(
           (current) =>
-            current === "Ready"
+            current === i18n.t("status:ready")
               ? total > 0
-                ? `Loaded ${total} Sigrok decoder${total === 1 ? "" : "s"}`
-                : "Sigrok decoder catalog is empty"
+                ? i18n.t("status:sigrokLoaded", { count: total })
+                : i18n.t("status:sigrokCatalogEmpty")
               : current,
         );
       })
@@ -2019,7 +2022,7 @@ export default function App() {
               decodeProgress: 0,
               highlightedFrameIndex: null,
             })),
-            message: "Capture complete",
+            message: statusT("captureComplete"),
           };
         });
       }).catch(() => () => {}),
@@ -3137,7 +3140,7 @@ export default function App() {
     if (session.readOnly) {
       updateSession(session.id, (current) => ({
         ...current,
-        message: "Opened capture cannot be overwritten. Create a new session to start capturing data.",
+        message: statusT("captureReadOnly"),
       }));
       return;
     }
@@ -3149,7 +3152,7 @@ export default function App() {
     if (nextSettings.enabled_channels.length === 0) {
       updateSession(session.id, (current) => ({
         ...current,
-        message: "Enable at least one digital channel before starting capture",
+        message: statusT("enableChannelFirst"),
       }));
       return;
     }
@@ -3206,10 +3209,13 @@ export default function App() {
       diagnostics: [],
       message:
         nextSettings.trigger_enabled && captureDevice?.kind === "Usb"
-          ? `Preparing device; waiting for ${nextSettings.trigger_kind.toLowerCase()} trigger on D${nextSettings.trigger_channel}`
+          ? statusT("preparingTrigger", {
+            channel: nextSettings.trigger_channel,
+            kind: nextSettings.trigger_kind.toLowerCase(),
+          })
           : captureDevice?.kind === "Usb"
-            ? "Preparing device and capturing"
-            : "Capturing",
+            ? statusT("preparingDeviceAndCapturing")
+            : statusT("capturing"),
     }));
     try {
       const demoAnalyzers = session.analyzers
@@ -3266,7 +3272,7 @@ export default function App() {
             decodeProgress: 0,
             highlightedFrameIndex: null,
           })),
-          message: "Capture complete",
+          message: statusT("captureComplete"),
         };
       });
     } catch (error) {
@@ -3716,7 +3722,7 @@ export default function App() {
   async function handleCancel() {
     const targetId = captureSessionRef.current ?? activeSession?.id;
     if (targetId) {
-      updateSession(targetId, (session) => ({ ...session, message: "Stopping capture" }));
+      updateSession(targetId, (session) => ({ ...session, message: statusT("stoppingCapture") }));
     }
     try {
       await cancelCapture();
@@ -3791,8 +3797,8 @@ export default function App() {
         })),
       message:
         restoredAnalyzers && restoredAnalyzers.length > 0
-          ? `Capture opened - ${restoredAnalyzers.length} analyzer${restoredAnalyzers.length === 1 ? "" : "s"} restored`
-          : "Capture opened",
+          ? statusT("captureOpenedWithAnalyzers", { count: restoredAnalyzers.length })
+          : statusT("captureOpened"),
     }));
     setActiveSessionId(target.id);
   }
@@ -3821,7 +3827,7 @@ export default function App() {
             : createSession(selectedDevice, activeSession ?? undefined);
         const opened = await openCapture(target.id, "preview");
         await loadCaptureIntoSession(opened, target, sourcePath ?? undefined);
-        updateSession(target.id, (session) => ({ ...session, message: "Preview capture loaded" }));
+        updateSession(target.id, (session) => ({ ...session, message: statusT("previewCaptureLoaded") }));
       } catch {
         if (activeSession) {
           updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
@@ -3867,10 +3873,10 @@ export default function App() {
         name: savedName || session.name,
         message:
           extension === "sr"
-            ? "Sigrok session exported"
+            ? statusT("sigrokExported")
             : extension === "vcd"
-              ? "VCD exported"
-              : "Capture saved",
+              ? statusT("vcdExported")
+              : statusT("captureSaved"),
       }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
@@ -4030,7 +4036,7 @@ export default function App() {
     updateSession(activeSession.id, (session) => ({
       ...session,
       hiddenDigitalChannels: makeHiddenDigitalChannels(),
-      message: "All channels shown",
+      message: statusT("allChannelsShown"),
     }));
   }
 
@@ -4052,7 +4058,7 @@ export default function App() {
               })),
             }
           : session.tile,
-        message: "Channel names reset",
+        message: statusT("channelNamesReset"),
       };
     });
   }
@@ -4162,7 +4168,7 @@ export default function App() {
         ...session,
         channelHeights,
         manualChannelLayout: true,
-        message: "Digital channel heights matched",
+        message: statusT("channelHeightsMatched"),
       };
     });
   }
@@ -4172,7 +4178,7 @@ export default function App() {
     updateSession(activeSession.id, (session) => ({
       ...session,
       manualChannelLayout: false,
-      message: "Rows fit to window height",
+      message: statusT("rowsFitToWindow"),
     }));
   }
 
@@ -4219,7 +4225,7 @@ export default function App() {
     });
     updateSession(activeSession.id, (session) => ({
       ...session,
-      message: "Review highlighted data before deleting",
+      message: statusT("reviewBeforeDelete"),
     }));
 
     if (mode === "offscreen") {
@@ -4272,7 +4278,7 @@ export default function App() {
     setPendingChannelTrim(null);
     updateSession(pending.sessionId, (current) => ({
       ...current,
-      message: "Deleting data...",
+      message: statusT("deletingData"),
     }));
     try {
       const nextSummary = await trimCapture(pending.sessionId, {
@@ -4290,7 +4296,7 @@ export default function App() {
   function cancelPendingChannelTrim() {
     setPendingChannelTrim(null);
     if (activeSession) {
-      updateSession(activeSession.id, (session) => ({ ...session, message: "Delete Data canceled" }));
+      updateSession(activeSession.id, (session) => ({ ...session, message: statusT("deleteDataCanceled") }));
     }
   }
 
@@ -4347,17 +4353,17 @@ export default function App() {
             updateSession(sessionId, (session) => ({ ...session, message: result.message ?? session.message }));
             showScreenshotNotification({
               body: screenshotNotificationBody(result.message),
-              heading: "Screenshot Taken",
+              heading: statusT("screenshotTaken"),
               type: "success",
             });
           }
         })
         .catch((error) => {
-          const errorMessage = `Screenshot failed: ${String(error)}`;
+          const errorMessage = statusT("screenshotFailed", { error: String(error) });
           updateSession(sessionId, (session) => ({ ...session, message: errorMessage }));
           showScreenshotNotification({
-            body: "An error occurred while taking a screenshot. Please try again.",
-            heading: "Screenshot Error",
+            body: statusT("screenshotErrorBody"),
+            heading: statusT("screenshotError"),
             type: "error",
           });
         })
@@ -4669,14 +4675,14 @@ export default function App() {
     if (!activeSession.summary) {
       updateSession(activeSession.id, (session) => ({
         ...session,
-        message: "Capture data before adding a range measurement",
+        message: statusT("captureBeforeRange"),
       }));
       return;
     }
     if (activeSession.busy) {
       updateSession(activeSession.id, (session) => ({
         ...session,
-        message: "Range measurements are disabled while recording",
+        message: statusT("rangeDisabledWhileRecording"),
       }));
       return;
     }
@@ -4688,7 +4694,7 @@ export default function App() {
         startedBy: "command",
         startSample: null,
       },
-      message: "Click and drag over a channel to add a range measurement",
+      message: statusT("rangePlacementHint"),
     }));
   }
 
@@ -4698,14 +4704,14 @@ export default function App() {
     if (!activeSession.summary) {
       updateSession(activeSession.id, (session) => ({
         ...session,
-        message: "Capture data before adding a marker pair",
+        message: statusT("captureBeforeMarkerPair"),
       }));
       return;
     }
     if (activeSession.busy) {
       updateSession(activeSession.id, (session) => ({
         ...session,
-        message: "Timing markers are disabled while recording",
+        message: statusT("markersDisabledWhileRecording"),
       }));
       return;
     }
@@ -4718,7 +4724,7 @@ export default function App() {
         initialTimingMarkerSample(session),
       ),
       timingMarkers: session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
-      message: "Click twice on the graph to place a marker pair",
+      message: statusT("markerPairPlacementHint"),
     }));
   }
 
@@ -4728,14 +4734,14 @@ export default function App() {
     if (!activeSession.summary) {
       updateSession(activeSession.id, (session) => ({
         ...session,
-        message: "Capture data before adding a single marker",
+        message: statusT("captureBeforeSingleMarker"),
       }));
       return;
     }
     if (activeSession.busy) {
       updateSession(activeSession.id, (session) => ({
         ...session,
-        message: "Timing markers are disabled while recording",
+        message: statusT("markersDisabledWhileRecording"),
       }));
       return;
     }
@@ -4748,7 +4754,7 @@ export default function App() {
         initialTimingMarkerSample(session),
       ),
       timingMarkers: session.timingMarkers.map((marker) => ({ ...marker, selected: false })),
-      message: "Click on the graph to place a single marker",
+      message: statusT("singleMarkerPlacementHint"),
     }));
   }
 
@@ -4776,7 +4782,7 @@ export default function App() {
         ...session.timingMarkers.map((marker) => ({ ...marker, graphPopupOpen: null, selected: false })),
         createTimingMarker(session, "single", sample),
       ],
-      message: "Single marker added",
+      message: statusT("singleMarkerAdded"),
     }));
   }
 
@@ -4853,7 +4859,7 @@ export default function App() {
         updateSession(activeSession.id, (session) => ({
           ...session,
           timingMarkerPlacement: null,
-          message: "Timing marker placement canceled",
+          message: statusT("markerPlacementCanceled"),
         }));
         return;
       }
@@ -4916,7 +4922,7 @@ export default function App() {
             startedBy: "selectionKey",
             startSample: null,
           },
-          message: "Click and drag over a channel to add a range measurement",
+          message: statusT("rangePlacementHint"),
         }));
         return;
       }
@@ -5046,7 +5052,7 @@ export default function App() {
       updateSession(activeSession.id, (session) => ({
         ...session,
         rangePlacement: null,
-        message: "Range measurement placement canceled",
+        message: t("rangePlacementCanceled"),
       }));
     }
 
@@ -5088,18 +5094,18 @@ export default function App() {
             <span>{activeMessage}</span>
           </div>
           <div className="window-actions">
-            <button className="tool-button text-tool" title="Open capture" onClick={handleOpen}>
+            <button className="tool-button text-tool" title={t("openCapture")} onClick={handleOpen}>
               <FolderOpen size={14} />
-              Open
+              {t("open")}
             </button>
             <button
               className="tool-button text-tool"
-              title="Save capture"
+              title={t("saveCapture")}
               onClick={handleSave}
               disabled={!activeSession?.summary || activeSession.busy}
             >
               <Save size={14} />
-              Save
+              {t("save")}
             </button>
           </div>
         </header>
@@ -5921,6 +5927,7 @@ function ScreenshotToast({
   onClose: () => void;
   type: "error" | "success";
 }) {
+  const { t } = useTranslation();
   return createPortal(
     <section className={`screenshotToast ${type}`} role="status" aria-live="polite">
       <div className="screenshotToastIcon" aria-hidden="true">
@@ -5930,7 +5937,7 @@ function ScreenshotToast({
         <h2>{heading}</h2>
         <p>{body}</p>
       </div>
-      <button aria-label="Dismiss screenshot notification" onClick={onClose} type="button">
+      <button aria-label={t("dismissScreenshotNotification")} onClick={onClose} type="button">
         <X size={14} />
       </button>
     </section>,
@@ -5951,13 +5958,14 @@ function ChannelTrimDialog({
   range: ChannelTrimPreview;
   sampleRateHz?: number;
 }) {
+  const { t } = useTranslation();
   const keptSamples = Math.max(0, range.trimEnd - range.trimStart);
   const modeLabel =
     mode === "before"
-      ? "before this point"
+      ? t("deleteDataRangeBefore")
       : mode === "after"
-        ? "after this point"
-        : "outside the current view";
+        ? t("deleteDataRangeAfter")
+        : t("deleteDataOutside");
   const duration = sampleRateHz && sampleRateHz > 0
     ? formatTrimDuration(keptSamples / sampleRateHz)
     : null;
@@ -5984,24 +5992,26 @@ function ChannelTrimDialog({
         aria-labelledby="trim-dialog-title"
       >
         <header className="trimDialogHeader">
-          <h2 id="trim-dialog-title">Delete Data</h2>
-          <button aria-label="Cancel Delete Data" onClick={onCancel} type="button">
+          <h2 id="trim-dialog-title">{t("deleteData")}</h2>
+          <button aria-label={t("cancelDeleteData")} onClick={onCancel} type="button">
             <X size={16} />
           </button>
         </header>
         <div className="trimDialogContent">
-          <h3>Are you sure?</h3>
-          <p>This operation is irreversible. Analyzers will be restarted.</p>
+          <h3>{t("deleteDataConfirm")}</h3>
+          <p>{t("deleteDataWarning")}</p>
           <p className="trimDialogDetail">
-            The highlighted data {modeLabel} will be removed. {duration ? `${duration} remains selected.` : `${formatSamples(keptSamples)} remain selected.`}
+            {duration
+              ? t("deleteDataRemainsDuration", { duration, range: modeLabel })
+              : t("deleteDataRemainsSamples", { count: formatSamples(keptSamples), range: modeLabel })}
           </p>
         </div>
         <footer className="trimDialogActions">
           <button className="trimDialogButton transparent" onClick={onCancel} type="button">
-            Cancel
+            {t("cancel")}
           </button>
           <button className="trimDialogButton primary" onClick={onConfirm} type="button">
-            Yes, Delete
+            {t("yesDelete")}
           </button>
         </footer>
       </section>
@@ -7601,7 +7611,7 @@ function BottomBar({
         )}
       </div>
 
-      <div className="sessionTabs" role="tablist" aria-label="Capture sessions">
+      <div className="sessionTabs" role="tablist" aria-label={t("captureSessions")}>
         {sessions.map((session) => (
           <SessionTab
             isActive={session.id === activeSessionId}
@@ -7720,6 +7730,7 @@ function SessionTab({
   onSelect: () => void;
   session: UiSession;
 }) {
+  const { t } = useTranslation();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -7753,7 +7764,7 @@ function SessionTab({
     >
       {isActive && !session.readOnly ? (
         <input
-          aria-label="Session name"
+          aria-label={t("sessionName")}
           value={session.name}
           onChange={(event) => onRename(event.target.value)}
           onClick={(event) => event.stopPropagation()}
@@ -7765,13 +7776,13 @@ function SessionTab({
         <ReadOnlyLockIcon />
       )}
       <button
-        aria-label={`Close ${session.name}`}
+        aria-label={t("closeSession", { name: session.name })}
         disabled={session.busy}
         onClick={(event) => {
           event.stopPropagation();
           onClose();
         }}
-        title={session.busy ? "Tab can't be closed while a capture is in progress" : "Close tab"}
+        title={session.busy ? t("closeTabBusy") : t("closeTab")}
         type="button"
       >
         <X size={12} />
@@ -7795,7 +7806,7 @@ function SessionTab({
             type="button"
           >
             <Copy size={13} />
-            <span>Duplicate Session Setup</span>
+            <span>{t("duplicateSessionSetup")}</span>
           </button>
         </div>,
         document.body,
@@ -7805,9 +7816,10 @@ function SessionTab({
 }
 
 function ReadOnlyLockIcon() {
+  const { t } = useTranslation();
   return (
     <svg
-      aria-label="Read-only session"
+      aria-label={t("readOnlySession")}
       className="sessionTabLock"
       width="10"
       height="14"
@@ -8023,7 +8035,7 @@ function RightSidebar({
         <section className="sidebarActiveComponent">
           <div
             ref={resizeHandleRef}
-            aria-label="Resize sidebar"
+            aria-label={panelsT("resizeSidebar")}
             className="sidebarResizeHandle"
             onPointerDown={handleResizePointerDown}
             role="separator"
@@ -8057,7 +8069,7 @@ function RightSidebar({
           />
         </section>
       )}
-      <nav className="panelSwitcher" aria-label="Sidebar panels">
+      <nav className="panelSwitcher" aria-label={panelsT("sidebarPanels")}>
         <div className="panelSwitcherTopSection">
           {SIDEBAR_PANELS.map((panel) => {
             const meta = panelMeta[panel];
@@ -9134,6 +9146,7 @@ function RecordingSettingsPanel({
   selectedCapabilities: HardwareCaptureCapabilities | null;
   session: UiSession;
 }) {
+  const { t: deviceT } = useTranslation("device");
   const activeBackendMode = backendCaptureMode(session.deviceSettings.captureMode);
   const sampleRateOptions = sampleRateSelectOptionsForCapabilities(
     selectedCapabilities,
@@ -9173,7 +9186,7 @@ function RecordingSettingsPanel({
     <div className="recordingSettingsPanel">
       <section className="deviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
-          <span>Recording Type</span>
+          <span>{deviceT("recordingType")}</span>
           <small>{selectedChannelMode?.description ?? session.deviceSettings.captureMode}</small>
         </div>
         <div className="recordingTypeGrid">
@@ -9184,8 +9197,8 @@ function RecordingSettingsPanel({
               onClick={() => setCaptureMode(mode)}
               type="button"
             >
-              <span>{mode === "FreeRun" ? "Looping" : mode}</span>
-              <small>{mode === "FreeRun" ? "Free Run" : mode === "Timer" ? "Timed" : "Event"}</small>
+              <span>{deviceT(mode === "FreeRun" ? "modeFreeRun" : mode === "Timer" ? "modeTimer" : "modeTrigger")}</span>
+              <small>{deviceT(mode === "FreeRun" ? "modeFreeRunSub" : mode === "Timer" ? "modeTimerSub" : "modeTriggerSub")}</small>
             </button>
           ))}
         </div>
@@ -9194,11 +9207,11 @@ function RecordingSettingsPanel({
       {session.deviceSettings.captureMode === "FreeRun" && (
         <section className="deviceSettingsBlock">
           <div className="deviceSettingsBlockTitle">
-            <span>Free Run Settings</span>
-            <small>Continuous</small>
+            <span>{deviceT("freeRunSettings")}</span>
+            <small>{deviceT("continuous")}</small>
           </div>
           <label className="stack-field">
-            <span>Continuous sample rate</span>
+            <span>{deviceT("continuousSampleRate")}</span>
             <select
               value={session.settings.sample_rate_hz}
               onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
@@ -9216,7 +9229,7 @@ function RecordingSettingsPanel({
               onChange={(event) => updateDeviceSettings({ trimAfterCapture: event.target.checked })}
               type="checkbox"
             />
-            Trim after capture
+            {deviceT("trimAfterCapture")}
           </label>
         </section>
       )}
@@ -9224,11 +9237,11 @@ function RecordingSettingsPanel({
       {session.deviceSettings.captureMode === "Timer" && (
         <section className="deviceSettingsBlock">
           <div className="deviceSettingsBlockTitle">
-            <span>Timer Settings</span>
+            <span>{deviceT("timerSettings")}</span>
             <small>{formatRate(session.settings.sample_rate_hz)}</small>
           </div>
           <label className="stack-field">
-            <span>Stop after ms</span>
+            <span>{deviceT("stopAfterMs")}</span>
             <input
               min={1}
               onChange={(event) => onUpdateSettings({ duration_ms: Number(event.target.value) })}
@@ -9237,7 +9250,7 @@ function RecordingSettingsPanel({
             />
           </label>
           <label className="stack-field">
-            <span>Sample rate</span>
+            <span>{deviceT("sampleRate")}</span>
             <select
               value={session.settings.sample_rate_hz}
               onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
@@ -9256,8 +9269,8 @@ function RecordingSettingsPanel({
         <>
           <section className="deviceSettingsBlock">
             <div className="deviceSettingsBlockTitle">
-              <span>Pattern and Channel</span>
-              <small>Digital trigger</small>
+              <span>{deviceT("patternAndChannel")}</span>
+              <small>{deviceT("digitalTrigger")}</small>
             </div>
             <TriggerSettingsEditor
               channelLabels={session.channelLabels}
@@ -9270,8 +9283,8 @@ function RecordingSettingsPanel({
           </section>
           <section className="deviceSettingsBlock compact">
             <div className="deviceSettingsBlockTitle">
-              <span>Capture Window</span>
-              <small>Stops after trigger</small>
+              <span>{deviceT("captureWindow")}</span>
+              <small>{deviceT("stopsAfterTrigger")}</small>
             </div>
             <TriggerDurationField
               valueMs={session.deviceSettings.singleShotPostTriggerMs}

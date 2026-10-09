@@ -1,1 +1,25 @@
-{}
+{
+  "cancel": "取消",
+  "cancelDeleteData": "取消删除数据",
+  "closeSession": "关闭 {{name}}",
+  "closeTab": "关闭标签页",
+  "closeTabBusy": "采集进行中无法关闭标签页",
+  "deleteData": "删除数据",
+  "deleteDataConfirm": "确定要删除吗？",
+  "deleteDataOutside": "当前视图之外的",
+  "deleteDataRangeAfter": "此点之后的",
+  "deleteDataRangeBefore": "此点之前的",
+  "deleteDataRemainsDuration": "高亮显示的{{range}}数据将被删除。{{duration}}保持选中。",
+  "deleteDataRemainsSamples": "高亮显示的{{range}}数据将被删除。{{count}}保持选中。",
+  "deleteDataWarning": "此操作不可撤销。解码器将重新运行。",
+  "dismissScreenshotNotification": "关闭截图提示",
+  "duplicateSessionSetup": "复制会话设置",
+  "open": "打开",
+  "openCapture": "打开采集文件",
+  "rangePlacementCanceled": "已取消区域测量的放置",
+  "readOnlySession": "只读会话",
+  "save": "保存",
+  "saveCapture": "保存采集文件",
+  "sessionName": "会话名称",
+  "yesDelete": "确认删除"
+}

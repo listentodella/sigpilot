@@ -1,1 +1,25 @@
-{}
+{
+  "cancel": "Cancel",
+  "cancelDeleteData": "Cancel Delete Data",
+  "closeSession": "Close {{name}}",
+  "closeTab": "Close tab",
+  "closeTabBusy": "Tab can't be closed while a capture is in progress",
+  "deleteData": "Delete Data",
+  "deleteDataConfirm": "Are you sure?",
+  "deleteDataOutside": "outside the current view",
+  "deleteDataRangeAfter": "after this point",
+  "deleteDataRangeBefore": "before this point",
+  "deleteDataRemainsDuration": "The highlighted data {{range}} will be removed. {{duration}} remains selected.",
+  "deleteDataRemainsSamples": "The highlighted data {{range}} will be removed. {{count}} remain selected.",
+  "deleteDataWarning": "This operation is irreversible. Analyzers will be restarted.",
+  "dismissScreenshotNotification": "Dismiss screenshot notification",
+  "duplicateSessionSetup": "Duplicate Session Setup",
+  "open": "Open",
+  "openCapture": "Open capture",
+  "rangePlacementCanceled": "Range measurement placement canceled",
+  "readOnlySession": "Read-only session",
+  "save": "Save",
+  "saveCapture": "Save capture",
+  "sessionName": "Session name",
+  "yesDelete": "Yes, Delete"
+}

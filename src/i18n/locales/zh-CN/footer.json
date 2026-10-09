@@ -1,4 +1,5 @@
 {
+  "captureSessions": "采集会话",
   "connectedDevices": "已连接设备",
   "demoDevices": "演示设备",
   "deviceCount_one": "{{count}} 个设备",

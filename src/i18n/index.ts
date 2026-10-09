@@ -23,6 +23,7 @@ import enFooter from "./locales/en/footer.json";
 import enMeasurements from "./locales/en/measurements.json";
 import enNotes from "./locales/en/notes.json";
 import enOverlays from "./locales/en/overlays.json";
+import enStatus from "./locales/en/status.json";
 import enPanels from "./locales/en/panels.json";
 import enSettings from "./locales/en/settings.json";
 import enStart from "./locales/en/start.json";
@@ -38,6 +39,7 @@ import zhFooter from "./locales/zh-CN/footer.json";
 import zhMeasurements from "./locales/zh-CN/measurements.json";
 import zhNotes from "./locales/zh-CN/notes.json";
 import zhOverlays from "./locales/zh-CN/overlays.json";
+import zhStatus from "./locales/zh-CN/status.json";
 import zhPanels from "./locales/zh-CN/panels.json";
 import zhSettings from "./locales/zh-CN/settings.json";
 import zhStart from "./locales/zh-CN/start.json";
@@ -53,7 +55,7 @@ void i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   lng: loadUiPreferences().locale,
-  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions", "analyzers", "graph", "channelMenu", "device", "measurements", "overlays"],
+  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions", "analyzers", "graph", "channelMenu", "device", "measurements", "overlays", "status"],
   resources: {
     en: {
       advanced: enAdvanced,
@@ -67,6 +69,7 @@ void i18n.use(initReactI18next).init({
       measurements: enMeasurements,
       notes: enNotes,
       overlays: enOverlays,
+      status: enStatus,
       panels: enPanels,
       settings: enSettings,
       start: enStart,
@@ -84,6 +87,7 @@ void i18n.use(initReactI18next).init({
       measurements: zhMeasurements,
       notes: zhNotes,
       overlays: zhOverlays,
+      status: zhStatus,
       panels: zhPanels,
       settings: zhSettings,
       start: zhStart,

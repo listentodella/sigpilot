@@ -1,4 +1,5 @@
 {
+  "captureSessions": "Capture sessions",
   "connectedDevices": "Connected Devices",
   "demoDevices": "Demo Devices",
   "deviceCount_one": "{{count}} Device",
