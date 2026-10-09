@@ -96,6 +96,7 @@ export function TimingMarkersOverlay({
   viewportSamples: viewportSamplesProp,
   viewportStart: viewportStartProp,
 }: TimingMarkersOverlayProps) {
+  const { t: overlayT } = useTranslation("overlays");
   // Markers are anchored to samples, so they must track the live viewport to stay
   // pinned to the waveform while it is being panned or zoomed.
   const liveViewport = useSessionViewport(sessionId, viewportStartProp, viewportSamplesProp);
@@ -348,7 +349,7 @@ export function TimingMarkersOverlay({
           ? { ...current, endSample: sample, placingSide: "end", sample }
           : null,
       );
-      onMessage("Move the pointer and click again to place the second marker");
+      onMessage(overlayT("placeSecondMarkerHint"));
       previewSampleRef.current = sample;
       if (previewSampleFrameRef.current !== null) {
         window.cancelAnimationFrame(previewSampleFrameRef.current);
@@ -382,7 +383,7 @@ export function TimingMarkersOverlay({
       previewSampleFrameRef.current = null;
     }
     setPreviewSample(null);
-    onMessage(marker.type === "pair" ? "Marker pair added" : "Single marker added");
+    onMessage(marker.type === "pair" ? overlayT("markerPairAdded") : overlayT("singleMarkerAdded"));
   }
 
   useEffect(() => {
@@ -790,6 +791,7 @@ function GraphMarker({
   viewportSamples,
   viewportStart,
 }: GraphMarkerProps) {
+  const { t: overlayT } = useTranslation("overlays");
   const left = ((sample - viewportStart) / Math.max(1, viewportSamples)) * 100;
   if (left < -1 || left > 101) return null;
   const selected = marker.selected || dragging;
@@ -819,7 +821,7 @@ function GraphMarker({
         <span className="timingMarkerVisibleLine" />
       </div>
       <button
-        aria-label={`${getTimingMarkerFullLabel(marker, itemType)} timing marker`}
+        aria-label={overlayT("timingMarkerAria", { label: getTimingMarkerFullLabel(marker, itemType) })}
         className={`timingMarkerHead ${itemType}`}
         onMouseEnter={() => onHover({ id: marker.id, itemType })}
         onMouseLeave={() => onHover(null)}

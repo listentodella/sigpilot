@@ -11,11 +11,15 @@
   "displayAnnotations": "Display Annotations",
   "dragToMove": "Drag to move",
   "installMoreMeasurements": "Install More Measurements",
+  "markerPairAdded": "Marker pair added",
   "measurementPending": "Measurement pending",
+  "placeSecondMarkerHint": "Move the pointer and click again to place the second marker",
   "rangeAdded": "Range measurement added",
   "rangeEndAria": "{{name}} end",
   "rangeStartAria": "{{name}} start",
   "placementCanceled": "Range measurement placement canceled",
   "searchEllipsis": "Search...",
+  "singleMarkerAdded": "Single marker added",
+  "timingMarkerAria": "{{label}} timing marker",
   "useColor": "Use {{color}}"
 }

@@ -11,11 +11,15 @@
   "displayAnnotations": "显示标注",
   "dragToMove": "拖动以移动",
   "installMoreMeasurements": "安装更多测量项",
+  "markerPairAdded": "已添加标记对",
   "measurementPending": "等待测量",
+  "placeSecondMarkerHint": "移动指针后再次单击以放置第二个标记",
   "rangeAdded": "已添加区域测量",
   "rangeEndAria": "{{name}} 终点",
   "rangeStartAria": "{{name}} 起点",
   "placementCanceled": "已取消区域测量的放置",
   "searchEllipsis": "搜索...",
+  "singleMarkerAdded": "已添加单个标记",
+  "timingMarkerAria": "{{label}} 时间标记",
   "useColor": "使用 {{color}}"
 }
