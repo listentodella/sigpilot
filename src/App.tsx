@@ -4419,12 +4419,37 @@ export default function App() {
     if (!session || !frame) return;
     selectAnalyzerFrame(session.id, analyzerId, frameId);
     const frameSamples = Math.max(1, frame.end_sample - frame.start_sample);
+    // Keep the authoritative span. The React session store is frozen while the
+    // frame loop owns the viewport, so a keep-zoom jump that read
+    // `session.viewportSamples` would preserve a stale width even once the
+    // jump itself lands.
+    const currentSamples = readFrameState(session.id)?.view.samples ?? session.viewportSamples;
     if (zoom) {
       const padding = frameSamples * 0.05;
-      animateViewport(session.id, frame.start_sample - padding, frameSamples + padding * 2);
+      stepViewport(
+        session.id,
+        {
+          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          kind: "animate_to",
+          samples: frameSamples + padding * 2,
+          start_sample: frame.start_sample - padding,
+        },
+        frame.start_sample - padding,
+        frameSamples + padding * 2,
+      );
     } else {
       const center = frame.start_sample + frameSamples / 2;
-      animateViewport(session.id, center - session.viewportSamples / 2, session.viewportSamples);
+      stepViewport(
+        session.id,
+        {
+          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+          kind: "animate_to",
+          samples: currentSamples,
+          start_sample: center - currentSamples / 2,
+        },
+        center - currentSamples / 2,
+        currentSamples,
+      );
     }
   }
 
@@ -4434,7 +4459,17 @@ export default function App() {
     selectAnalyzerFrame(session.id, analyzerId, frameId);
     const span = Math.max(1, endSample - startSample);
     const padding = span * 0.05;
-    animateViewport(session.id, startSample - padding, span + padding * 2);
+    stepViewport(
+      session.id,
+      {
+        duration_ms: ZOOM_ANIMATION_DURATION_MS,
+        kind: "animate_to",
+        samples: span + padding * 2,
+        start_sample: startSample - padding,
+      },
+      startSample - padding,
+      span + padding * 2,
+    );
   }
 
   function openAnalyzerTableFrame(analyzerId: string, frameId: number) {
