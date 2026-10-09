@@ -48,6 +48,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import {
   DragDropContext,
@@ -9295,6 +9296,7 @@ function AnalyzersPanel({
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   session: UiSession;
 }) {
+  const { t: analyzerT } = useTranslation("analyzers");
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [selectorAnchorRect, setSelectorAnchorRect] = useState<DOMRect | null>(null);
   const [activeAnalyzerMenu, setActiveAnalyzerMenu] = useState<{ analyzerId: string; anchorRect: DOMRect } | null>(null);
@@ -9354,7 +9356,7 @@ function AnalyzersPanel({
     onUpdateSession((current) => ({
       ...current,
       analyzers: current.analyzers.filter((analyzer) => analyzer.id !== analyzerId),
-      message: "Analyzer removed",
+      message: analyzerT("analyzerRemoved"),
     }));
   }
 
@@ -9383,7 +9385,7 @@ function AnalyzersPanel({
       const analyzers = [...current.analyzers];
       const [moved] = analyzers.splice(sourceIndex, 1);
       analyzers.splice(destinationIndex, 0, moved);
-      return { ...current, analyzers, message: `${moved.name} moved` };
+      return { ...current, analyzers, message: analyzerT("analyzerMoved", { name: moved.name }) };
     });
   }
 
@@ -10144,7 +10146,7 @@ function AnalyzersPanel({
     <div className="analyzersSidebarPanel">
       <section className="analyzersSelectorSection">
         <div className="sidebarTitleRow">
-          <div className="sidebarTitleText">Analyzers</div>
+          <div className="sidebarTitleText">{analyzerT("analyzers")}</div>
           <button
             aria-expanded={selectorOpen}
             aria-haspopup="menu"
@@ -10171,7 +10173,7 @@ function AnalyzersPanel({
 
         {session.analyzers.length === 0 ? (
           <div className="suggestedAnalyzers">
-            <div className="suggestedAnalyzersTitle">Suggested Analyzers</div>
+            <div className="suggestedAnalyzersTitle">{analyzerT("suggestedAnalyzers")}</div>
             {suggestedAnalyzers.map((choice) => (
               <button
                 className="suggestedAnalyzerItem"
@@ -10216,9 +10218,9 @@ function AnalyzersPanel({
                           >
                             <div className="activeAnalyzerHeader">
                               <span
-                                aria-label={`Move ${analyzer.name}`}
+                                aria-label={analyzerT("moveAnalyzer", { name: analyzer.name })}
                                 className="analyzerDragHandle"
-                                title="Drag to reorder"
+                                title={analyzerT("dragToReorder")}
                                 {...draggableProvided.dragHandleProps}
                               >
                                 <GripVertical size={13} />
@@ -10227,25 +10229,25 @@ function AnalyzersPanel({
                               <button className="analyzerNameButton" onDoubleClick={() => onEditAnalyzer(analyzer.id)} type="button">
                                 <strong title={analyzer.nativeCatalogDescription ?? analyzer.type}>{analyzer.name}</strong>
                                 <small>
-                                  {decoderBackendLabel(analyzer.decoderBackend)} · {analyzerPhysicalChannelSummary(analyzer)}
-                                  {analyzer.nativeRunnerStatus === "catalog_only" ? " · Catalog only" : ""}
+                                  {decoderBackendLabel(analyzer.decoderBackend)} · {analyzerPhysicalChannelSummary(analyzer, analyzerT)}
+                                  {analyzer.nativeRunnerStatus === "catalog_only" ? analyzerT("catalogOnly") : ""}
                                 </small>
                               </button>
                               <span
                                 aria-label={
                                   analyzerBusy
-                                    ? `${Math.round(analyzerProgress)}% decoded`
+                                    ? analyzerT("decodedPercentAria", { percent: Math.round(analyzerProgress) })
                                     : analyzerComplete
-                                      ? "Decoder complete"
-                                      : "Decoder idle"
+                                      ? analyzerT("decoderComplete")
+                                      : analyzerT("decoderIdle")
                                 }
                                 className={`analyzerDecodeStatus ${analyzerBusy ? "busy" : ""} ${analyzerComplete ? "complete" : ""}`}
                                 title={
                                   analyzerBusy
-                                    ? `Decoding ${Math.round(analyzerProgress)}%`
+                                    ? analyzerT("decodingPercent", { percent: Math.round(analyzerProgress) })
                                     : analyzerComplete
-                                      ? "Decoding complete"
-                                      : "Decoder idle"
+                                      ? analyzerT("decodingComplete")
+                                      : analyzerT("decoderIdle")
                                 }
                               >
                                 {analyzerBusy ? (
@@ -10272,7 +10274,7 @@ function AnalyzersPanel({
                                     current?.analyzerId === analyzer.id ? null : { analyzerId: analyzer.id, anchorRect: rect },
                                   );
                                 }}
-                                title="Analyzer menu"
+                                title={analyzerT("analyzerMenu")}
                                 type="button"
                               >
                                 <MoreVertical size={15} />
@@ -10318,14 +10320,14 @@ function AnalyzersPanel({
       <section className="analyzerDataSection">
         <div className="sidebarTitleRow tight">
           <div className="sidebarTitleText">
-            Data
+            {analyzerT("data")}
             <small>{session.analyzerDataPane === "terminal" ? terminalEffectiveFrameCount : filteredTableFrameCount}</small>
           </div>
           <div className="dataPaneButtons">
             <button
               className={session.analyzerDataPane === "table" ? "active" : ""}
               onClick={() => onUpdateSession((current) => ({ ...current, analyzerDataPane: "table" }))}
-              title="Data Table"
+              title={analyzerT("dataTable")}
               type="button"
             >
               <Table2 size={13} />
@@ -10333,7 +10335,7 @@ function AnalyzersPanel({
             <button
               className={session.analyzerDataPane === "terminal" ? "active" : ""}
               onClick={() => onUpdateSession((current) => ({ ...current, analyzerDataPane: "terminal" }))}
-              title="Terminal"
+              title={analyzerT("terminal")}
               type="button"
             >
               <Terminal size={13} />
@@ -10347,15 +10349,15 @@ function AnalyzersPanel({
               <div className="analyzerSearchField">
                 <Search size={13} />
                 <input
-                  aria-label="Search analyzer results"
+                  aria-label={analyzerT("searchAnalyzerResults")}
                   onChange={(event) => setSearchQuery(event.target.value)}
-                  placeholder="Type to search"
+                  placeholder={analyzerT("typeToSearch")}
                   type="search"
                   value={searchQuery}
                 />
               </div>
               <button
-                aria-label="Copy analyzer data"
+                aria-label={analyzerT("copyAnalyzerData")}
                 disabled={filteredTableFrameCount === 0}
                 onClick={async () => {
                   const rows: string[] = [];
@@ -10418,10 +10420,16 @@ function AnalyzersPanel({
                   } else {
                     forEachAnalyzerFrameListRow(tableFrameSources, appendRow);
                   }
-                  const header = ["Frame", "Type", "Start", "Duration", ...columns].join("\t");
+                  const header = [
+                    analyzerT("frame"),
+                    analyzerT("type"),
+                    analyzerT("start"),
+                    analyzerT("duration"),
+                    ...columns,
+                  ].join("\t");
                   void navigator.clipboard?.writeText([header, ...rows].join("\n"));
                 }}
-                title="Copy"
+                title={analyzerT("copy")}
                 type="button"
               >
                 <Copy size={12} />
@@ -10436,23 +10444,23 @@ function AnalyzersPanel({
                 <span />
                 <span />
                 <span>#</span>
-                <span>Type</span>
-                <span>Start</span>
-                <span>Duration</span>
+                <span>{analyzerT("type")}</span>
+                <span>{analyzerT("start")}</span>
+                <span>{analyzerT("duration")}</span>
                 {tableDataColumns.map((role) => <span key={role}>{role}</span>)}
               </div>
               {session.analyzers.length === 0 ? (
-                <div className="empty-result">No analyzers</div>
+                <div className="empty-result">{analyzerT("noAnalyzers")}</div>
               ) : tableFrameCount === 0 ? (
                 <div className="empty-result">
-                  {session.analyzers.some((analyzer) => analyzer.decodeBusy) ? "Analyzing..." : "No frames"}
+                  {session.analyzers.some((analyzer) => analyzer.decodeBusy) ? analyzerT("analyzing") : analyzerT("noFrames")}
                 </div>
               ) : tableSearchBackendWindowEnabled && !tableSearchBackendWindowRowsMatch ? (
-                <div className="empty-result">Loading matching data...</div>
+                <div className="empty-result">{analyzerT("loadingMatchingData")}</div>
               ) : filteredTableFrameCount === 0 ? (
-                <div className="empty-result">No matching frames</div>
+                <div className="empty-result">{analyzerT("noMatchingFrames")}</div>
               ) : tableBackendWindowEnabled && !tableBackendWindowMatches ? (
-                <div className="empty-result">Loading data...</div>
+                <div className="empty-result">{analyzerT("loadingData")}</div>
               ) : (
                 <>
                   <div
@@ -10490,7 +10498,7 @@ function AnalyzersPanel({
                           event.stopPropagation();
                           onGoToAnalyzerFrame(analyzer.id, frameIndex, true, frame);
                         }}
-                        title={"Go to data\nDouble click to zoom"}
+                        title={analyzerT("goToDataHint")}
                         type="button"
                       >
                         <SaleaeGoToIcon />
@@ -10526,9 +10534,9 @@ function AnalyzersPanel({
         ) : (
           <div className="analyzerTerminal" onScroll={syncTerminalViewport} ref={terminalBodyRef}>
             {terminalEffectiveFrameCount === 0 ? (
-              <div className="empty-result">No terminal data</div>
+              <div className="empty-result">{analyzerT("noTerminalData")}</div>
             ) : terminalBackendWindowEnabled && !terminalBackendWindowMatches ? (
-              <div className="empty-result">Loading terminal data...</div>
+              <div className="empty-result">{analyzerT("loadingTerminalData")}</div>
             ) : (
               <>
                 <div
@@ -10650,6 +10658,7 @@ function AnalyzerItemMenu({
   onRestart: () => void;
   onUpdate: (updater: (analyzer: UiAnalyzerInstance) => UiAnalyzerInstance) => void;
 }) {
+  const { t: analyzerT } = useTranslation("analyzers");
   const width = 238;
   const position = clampFixedPopoverRect(anchorRect, width, 500, { align: "end", gap: 4 });
   const runAction = (action: () => void) => {
@@ -10657,8 +10666,8 @@ function AnalyzerItemMenu({
     action();
   };
   const restartTitle = analyzerCanRunDecoder(analyzer)
-    ? "Restart analyzer"
-    : "Decoder runner is not available yet";
+    ? analyzerT("restartAnalyzer")
+    : analyzerT("restartUnavailable");
   const canExport = Math.max(analyzer.decodedFrameCount, analyzer.decodedFrames.length) > 0;
 
   return createPortal(
@@ -10671,14 +10680,14 @@ function AnalyzerItemMenu({
       >
         <button onClick={() => runAction(onEdit)} role="menuitem" type="button">
           <Settings2 size={13} />
-          <span>Settings...</span>
+          <span>{analyzerT("settingsEllipsis")}</span>
         </button>
-        <div className="analyzerMenuColorBlock" role="group" aria-label="Select Color">
-          <span>Select Color</span>
+        <div className="analyzerMenuColorBlock" role="group" aria-label={analyzerT("selectColor")}>
+          <span>{analyzerT("selectColor")}</span>
           <div className="analyzerMenuColorGrid">
             {SALEAE_ANALYZER_COLORS.map((color) => (
               <button
-                aria-label={`Color ${color}`}
+                aria-label={analyzerT("colorSwatch", { color })}
                 className={color.toLowerCase() === analyzer.color.toLowerCase() ? "selected" : ""}
                 key={color}
                 onClick={() => runAction(() => onUpdate((item) => ({ ...item, color })))}
@@ -10698,15 +10707,15 @@ function AnalyzerItemMenu({
           type="button"
         >
           <RefreshCw size={13} />
-          <span>Restart</span>
+          <span>{analyzerT("restart")}</span>
         </button>
         <button disabled={!canMoveUp} onClick={() => runAction(() => onMove(-1))} role="menuitem" type="button">
           <ChevronUp size={13} />
-          <span>Move Up</span>
+          <span>{analyzerT("moveUp")}</span>
         </button>
         <button disabled={!canMoveDown} onClick={() => runAction(() => onMove(1))} role="menuitem" type="button">
           <ChevronDown size={13} />
-          <span>Move Down</span>
+          <span>{analyzerT("moveDown")}</span>
         </button>
         <div className="analyzerMenuDivider" role="separator" />
         <button
@@ -10716,7 +10725,7 @@ function AnalyzerItemMenu({
           type="button"
         >
           <span className="analyzerMenuCheck">{analyzer.streamToTerminal && <Check size={12} />}</span>
-          <span>Stream to Terminal</span>
+          <span>{analyzerT("streamToTerminal")}</span>
         </button>
         <button
           aria-checked={analyzer.showInDataTable}
@@ -10725,7 +10734,7 @@ function AnalyzerItemMenu({
           type="button"
         >
           <span className="analyzerMenuCheck">{analyzer.showInDataTable && <Check size={12} />}</span>
-          <span>Show in Data Table</span>
+          <span>{analyzerT("showInDataTable")}</span>
         </button>
         <div className="analyzerMenuDivider" role="separator" />
         {DISPLAY_RADIX_OPTIONS.map((radix) => (
@@ -10737,7 +10746,7 @@ function AnalyzerItemMenu({
             type="button"
           >
             <span className="analyzerMenuCheck">{analyzer.displayRadix === radix && <Check size={12} />}</span>
-            <span>{radix}</span>
+            <span>{analyzerT(`radix${radix}`)}</span>
           </button>
         ))}
         <div className="analyzerMenuDivider" role="separator" />
@@ -10745,26 +10754,26 @@ function AnalyzerItemMenu({
           disabled={!canExport}
           onClick={() => runAction(() => onExport("csv"))}
           role="menuitem"
-          title={canExport ? "Export decoded analyzer data to CSV" : "No decoded frames to export"}
+          title={canExport ? analyzerT("exportCsvHint") : analyzerT("noFramesToExport")}
           type="button"
         >
           <FileDown size={13} />
-          <span>Export CSV</span>
+          <span>{analyzerT("exportCsv")}</span>
         </button>
         <button
           disabled={!canExport}
           onClick={() => runAction(() => onExport("txt"))}
           role="menuitem"
-          title={canExport ? "Export decoded analyzer data to TXT" : "No decoded frames to export"}
+          title={canExport ? analyzerT("exportTxtHint") : analyzerT("noFramesToExport")}
           type="button"
         >
           <FileDown size={13} />
-          <span>Export TXT</span>
+          <span>{analyzerT("exportTxt")}</span>
         </button>
         <div className="analyzerMenuDivider" role="separator" />
         <button className="danger" onClick={() => runAction(onDelete)} role="menuitem" type="button">
           <Trash2 size={13} />
-          <span>Delete</span>
+          <span>{analyzerT("delete")}</span>
         </button>
       </div>
     </div>,
@@ -10772,11 +10781,11 @@ function AnalyzerItemMenu({
   );
 }
 
-function analyzerPhysicalChannelSummary(analyzer: UiAnalyzerInstance) {
+function analyzerPhysicalChannelSummary(analyzer: UiAnalyzerInstance, t: TFunction) {
   const channels = analyzerChannelIndexes(analyzer);
-  if (channels.length === 0) return "Catalog";
+  if (channels.length === 0) return t("channelSummaryCatalog");
   if (channels.length === 1) return `D${channels[0]}`;
-  return `${channels.length} channels`;
+  return t("channelSummaryCount", { count: channels.length });
 }
 
 function formatAnalyzerFrameLabel(analyzer: UiAnalyzerInstance, frame: DecodedFrame) {
@@ -10843,6 +10852,7 @@ function AnalyzerTriggerView({
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   session: UiSession;
 }) {
+  const { t: analyzerT } = useTranslation("analyzers");
   const trigger = session.analyzerTrigger;
   const selectedAnalyzer = session.analyzers.find((analyzer) => analyzer.id === trigger.analyzerId);
 
@@ -10863,18 +10873,18 @@ function AnalyzerTriggerView({
           type="button"
         >
           <ChevronRight size={11} />
-          <strong>Trigger View</strong>
+          <strong>{analyzerT("triggerView")}</strong>
           <Activity
-            aria-label="Experimental"
-            data-help-tooltip="Experimental! Partial match of your query against a single analyzer result"
+            aria-label={analyzerT("experimental")}
+            data-help-tooltip={analyzerT("experimentalHint")}
             size={11}
           />
         </button>
         <span
           className="saleaeSwitch analyzerTriggerSwitch"
-          data-help-tooltip="Analyzer Trigger is not available for this device"
+          data-help-tooltip={analyzerT("triggerUnavailableHint")}
         >
-          <input aria-label="Enable Analyzer Trigger" checked={false} disabled readOnly type="checkbox" />
+          <input aria-label={analyzerT("enableAnalyzerTrigger")} checked={false} disabled readOnly type="checkbox" />
           <span className="saleaeSwitchTrack">
             <span className="saleaeSwitchHandle" />
           </span>
@@ -10882,13 +10892,13 @@ function AnalyzerTriggerView({
       </div>
       <div className="analyzerTriggerBody" aria-hidden={!trigger.expanded}>
         <label className="stack-field">
-          <span>Analyzer</span>
+          <span>{analyzerT("analyzer")}</span>
           <select
             disabled={session.analyzers.length === 0}
             onChange={(event) => updateTrigger({ analyzerId: event.target.value })}
             value={selectedAnalyzer?.id ?? ""}
           >
-            <option value="">Select analyzer...</option>
+            <option value="">{analyzerT("selectAnalyzer")}</option>
             {session.analyzers.map((analyzer) => (
               <option key={analyzer.id} value={analyzer.id}>{analyzer.name}</option>
             ))}
@@ -10896,17 +10906,17 @@ function AnalyzerTriggerView({
         </label>
         <div className="analyzerTriggerQueryGrid">
           <label className="stack-field">
-            <span>Query</span>
+            <span>{analyzerT("query")}</span>
             <input
               disabled
               onChange={(event) => updateTrigger({ query: event.target.value })}
-              placeholder="Value [Hexadecimal]"
+              placeholder={analyzerT("queryPlaceholder")}
               type="text"
               value={trigger.query}
             />
           </label>
           <label className="stack-field">
-            <span>Holdoff</span>
+            <span>{analyzerT("holdoff")}</span>
             <input
               disabled
               min={0.1}
