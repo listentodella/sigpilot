@@ -3,6 +3,7 @@
   "sectionDisplay": "Display",
   "sectionBehavior": "Behavior",
   "sectionPerformance": "Performance",
+  "sectionDiagnostics": "Diagnostics",
   "gridLines": "Grid lines",
   "gridLinesHint": "Draw the time grid behind the waveform. Turn it off for a cleaner trace when reading values by eye.",
   "matchChannelColors": "Color-match waveforms",
@@ -13,5 +14,14 @@
   "renameTabToSavedCaptureHint": "Use the saved file name as the session tab title.",
   "animationScale": "Animation scale",
   "animationScaleHint": "Length of the zoom and pan glide. 0 is instant, 1 is 100 ms, 3 is 300 ms.",
-  "resetAll": "Reset to defaults"
+  "diagCapture": "Capture",
+  "diagCaptureHint": "Samples held, the sample rate they were taken at, and the time span they cover.",
+  "diagMemory": "Capture memory",
+  "diagMemoryHint": "Memory used by the loaded capture against the configured capture memory limit.",
+  "diagFrameLoop": "Frame loop",
+  "diagFrameLoopHint": "Whether the backend frame loop is wired for this session and has produced a frame yet. The loop owns the viewport while a capture is loaded.",
+  "diagDrawPaths": "Draw paths",
+  "diagDrawPathsHint": "Waveform draws recorded since load and the most-used path. Only recorded in development builds.",
+  "resetAll": "Reset to defaults",
+  "resetAllHint": "Restores every option on this panel to its default value."
 }

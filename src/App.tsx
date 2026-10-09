@@ -1426,7 +1426,11 @@ function isMsoSession(session: UiSession | null | undefined) {
   return source.includes("mso") || source.includes("logic pro");
 }
 
-function getSidebarPanelAllowed(panel: SidebarPanel, session: UiSession | null | undefined): SidebarPanelAllowed {
+function getSidebarPanelAllowed(
+  panel: SidebarPanel,
+  session: UiSession | null | undefined,
+  options: { showAdvanced?: boolean } = {},
+): SidebarPanelAllowed {
   const hasActiveSession = Boolean(session);
   const isMso = isMsoSession(session);
 
@@ -1451,8 +1455,14 @@ function getSidebarPanelAllowed(panel: SidebarPanel, session: UiSession | null |
   }
 
   if (panel === "advanced") {
-    // App-level settings, useful with or without a capture open.
-    return { isSelectable: true, isVisible: true };
+    // App-level settings, useful with or without a capture open. Ships visible;
+    // the preference is the hidden escape hatch (ctrl+alt+shift+a).
+    const show = options.showAdvanced ?? true;
+    return {
+      disabledReason: show ? undefined : "Advanced options are hidden (ctrl+alt+shift+a to show)",
+      isSelectable: show,
+      isVisible: show,
+    };
   }
 
   return {
@@ -1559,6 +1569,20 @@ export default function App() {
   useEffect(() => {
     setZoomAnimationDurationScale(preferences.animationScale);
   }, [preferences.animationScale]);
+
+  // Hidden escape hatch for the advanced panel, mirroring the undocumented chord
+  // the homage project keeps its developer surface behind. It gets its own
+  // listener because the main shortcut handler returns early on any modifier.
+  useEffect(() => {
+    function handleAdvancedPanelChord(event: KeyboardEvent) {
+      if (!event.ctrlKey || !event.altKey || !event.shiftKey) return;
+      if (event.key.toLowerCase() !== "a") return;
+      event.preventDefault();
+      setPreferences((current) => ({ ...current, showAdvancedPanel: !current.showAdvancedPanel }));
+    }
+    document.addEventListener("keydown", handleAdvancedPanelChord);
+    return () => document.removeEventListener("keydown", handleAdvancedPanelChord);
+  }, []);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -4541,7 +4565,7 @@ export default function App() {
   }
 
   function openSidebarPanel(panel: SidebarPanel) {
-    const allowed = getSidebarPanelAllowed(panel, activeSession);
+    const allowed = getSidebarPanelAllowed(panel, activeSession, { showAdvanced: preferences.showAdvancedPanel });
     if (!allowed.isVisible || !allowed.isSelectable) {
       if (activeSession && allowed.disabledReason) {
         updateSession(activeSession.id, (session) => ({ ...session, message: allowed.disabledReason ?? session.message }));
@@ -4783,11 +4807,15 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedPanel) return;
-    const allowed = getSidebarPanelAllowed(selectedPanel, activeSession);
+    const allowed = getSidebarPanelAllowed(selectedPanel, activeSession, {
+      showAdvanced: preferences.showAdvancedPanel,
+    });
     if (!allowed.isVisible || !allowed.isSelectable) {
       setSelectedPanel(undefined);
     }
-  }, [activeSession, selectedPanel]);
+    // showAdvancedPanel matters here: hiding the advanced panel must close it if
+    // it is the panel currently open.
+  }, [activeSession, preferences.showAdvancedPanel, selectedPanel]);
 
   useEffect(() => {
     const shortcutState = sidebarShortcutRef.current;
@@ -8013,7 +8041,9 @@ function RightSidebar({
         <div className="panelSwitcherTopSection">
           {SIDEBAR_PANELS.map((panel) => {
             const meta = panelMeta[panel];
-            const allowed = getSidebarPanelAllowed(panel, session);
+            const allowed = getSidebarPanelAllowed(panel, session, {
+              showAdvanced: preferences.showAdvancedPanel,
+            });
             if (!allowed.isVisible) return null;
             const isSelected = selectedPanel === panel;
             const shortcut = SIDEBAR_PANEL_SHORTCUTS[panel];
@@ -8187,6 +8217,14 @@ function SidebarPanelContent({
       )}
       {panel === "advanced" && (
         <AdvancedOptionsPanel
+          diagnostics={{
+            captureBytes: session?.summary?.bytes ?? 0,
+            memoryBufferBytes: session?.memoryUsage?.buffer_bytes ?? 0,
+            memoryTotalBytes: session?.memoryUsage?.total_bytes ?? 0,
+            sampleCount: session?.summary?.metadata.sample_count ?? 0,
+            sampleRateHz: session?.summary?.metadata.sample_rate_hz ?? 0,
+            sessionId: session?.id ?? null,
+          }}
           onChangePreferences={onChangePreferences}
           onReset={() => onChangePreferences(() => DEFAULT_UI_PREFERENCES)}
           preferences={preferences}

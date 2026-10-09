@@ -1,8 +1,11 @@
+import { readFrameState } from "./frameStore";
+import { formatBytes, formatRate, formatSamples } from "./format";
 import {
   ANIMATION_SCALE_MAX,
   ANIMATION_SCALE_MIN,
   type UiPreferences,
 } from "./preferences";
+import { waveformDrawSummary } from "./waveformDrawProbe";
 
 // The advanced surface is DATA, not bespoke JSX: one descriptor per control, so
 // adding an option is one entry and the renderer never changes. This follows the
@@ -13,28 +16,35 @@ import {
 // state, so the panel stays presentational and every control applies live.
 //
 // Only options that actually exist are listed. Options that would need a feature
-// built first (grid-line toggle, waveform line width, backend log level) are
-// deliberately absent -- see the P1.5 list rather than adding dead controls.
+// built first (waveform line width, backend log level) are deliberately absent.
+type CommonControl = {
+  id: string;
+  labelKey: string;
+  hintKey: string;
+  /** Destructive or hard to reason about: flagged in the UI. */
+  danger?: boolean;
+  /** Needs an app restart before it takes effect (backend-owned values). */
+  restartRequired?: boolean;
+};
+
 export type AdvancedControl =
-  | {
+  | (CommonControl & {
       kind: "toggle";
-      id: string;
-      labelKey: string;
-      hintKey: string;
       get: () => boolean;
       set: (value: boolean) => void;
-    }
-  | {
+    })
+  | (CommonControl & {
       kind: "number";
-      id: string;
-      labelKey: string;
-      hintKey: string;
       get: () => number;
       set: (value: number) => void;
       min: number;
       max: number;
       step: number;
-    };
+    })
+  | (CommonControl & {
+      kind: "readonly";
+      value: () => string;
+    });
 
 export interface AdvancedSection {
   id: string;
@@ -42,12 +52,91 @@ export interface AdvancedSection {
   controls: AdvancedControl[];
 }
 
+/**
+ * Read-only facts the panel reports. App assembles this so this module never has
+ * to know about UiSession.
+ */
+export interface AdvancedDiagnostics {
+  sessionId: string | null;
+  sampleCount: number;
+  sampleRateHz: number;
+  captureBytes: number;
+  memoryBufferBytes: number;
+  memoryTotalBytes: number;
+}
+
 export interface AdvancedOptionsSource {
   preferences: UiPreferences;
   onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
+  diagnostics?: AdvancedDiagnostics;
+}
+
+function formatSpanSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  if (seconds < 0.001) return `${(seconds * 1e6).toFixed(0)} µs`;
+  if (seconds < 1) return `${(seconds * 1e3).toFixed(2)} ms`;
+  return `${seconds.toFixed(3)} s`;
+}
+
+function buildDiagnosticsSection(diagnostics: AdvancedDiagnostics): AdvancedSection {
+  const { sessionId } = diagnostics;
+  return {
+    id: "diagnostics",
+    labelKey: "sectionDiagnostics",
+    controls: [
+      {
+        kind: "readonly",
+        id: "diagCapture",
+        labelKey: "diagCapture",
+        hintKey: "diagCaptureHint",
+        value: () => {
+          if (!sessionId || diagnostics.sampleCount <= 0) return "—";
+          const span = formatSpanSeconds(diagnostics.sampleCount / Math.max(1, diagnostics.sampleRateHz));
+          return `${formatSamples(diagnostics.sampleCount)} · ${formatRate(diagnostics.sampleRateHz)} · ${span}`;
+        },
+      },
+      {
+        kind: "readonly",
+        id: "diagMemory",
+        labelKey: "diagMemory",
+        hintKey: "diagMemoryHint",
+        value: () => {
+          const { memoryBufferBytes, memoryTotalBytes, captureBytes } = diagnostics;
+          if (memoryBufferBytes <= 0) return captureBytes > 0 ? formatBytes(captureBytes) : "—";
+          const percent = Math.min(100, (memoryTotalBytes / memoryBufferBytes) * 100);
+          return `${formatBytes(memoryTotalBytes)} / ${formatBytes(memoryBufferBytes)} (${percent.toFixed(0)}%)`;
+        },
+      },
+      {
+        kind: "readonly",
+        id: "diagFrameLoop",
+        labelKey: "diagFrameLoop",
+        hintKey: "diagFrameLoopHint",
+        value: () => {
+          if (!sessionId) return "—";
+          const state = readFrameState(sessionId);
+          if (!state) return "off";
+          return state.ready ? "ready" : "starting";
+        },
+      },
+      {
+        kind: "readonly",
+        id: "diagDrawPaths",
+        labelKey: "diagDrawPaths",
+        hintKey: "diagDrawPathsHint",
+        value: () => {
+          const summary = waveformDrawSummary();
+          if (summary.total === 0) return "—";
+          const top = summary.paths[0];
+          return `${summary.total}× · ${top.path} ${(top.share * 100).toFixed(0)}%`;
+        },
+      },
+    ],
+  };
 }
 
 export function buildAdvancedSections({
+  diagnostics,
   preferences,
   onChangePreferences,
 }: AdvancedOptionsSource): AdvancedSection[] {
@@ -116,5 +205,6 @@ export function buildAdvancedSections({
         },
       ],
     },
+    ...(diagnostics ? [buildDiagnosticsSection(diagnostics)] : []),
   ];
 }

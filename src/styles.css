@@ -8048,6 +8048,14 @@ body.timing-marker-col-resize * {
   width: 14px;
 }
 
+.advancedValue {
+  color: var(--on-background-20);
+  font-family: "Roboto Mono", ui-monospace, monospace;
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .advancedResetButton {
   align-self: flex-start;
   background: var(--background-20);
@@ -8061,4 +8069,10 @@ body.timing-marker-col-resize * {
 
 .advancedResetButton:hover {
   border-color: var(--border-hover);
+}
+
+/* Destructive actions read differently from ordinary options. */
+.advancedResetButton.dangerAction {
+  border-color: var(--red, #b4544a);
+  color: var(--red, #d97b6f);
 }

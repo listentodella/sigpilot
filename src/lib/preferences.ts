@@ -24,6 +24,8 @@ export interface UiPreferences {
   panToTrigger: boolean;
   renameTabToSavedCapture: boolean;
   showGridLines: boolean;
+  /** The advanced panel ships visible; this is its escape hatch. */
+  showAdvancedPanel: boolean;
 }
 
 /** Bounds for `animationScale`: 0 is instant, 1 is the 100 ms default, 3 is 300 ms. */
@@ -46,6 +48,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   panToTrigger: true,
   renameTabToSavedCapture: false,
   showGridLines: true,
+  showAdvancedPanel: true,
 };
 
 export function normalizeUiPreferences(value: unknown): UiPreferences {
@@ -73,6 +76,10 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
       typeof candidate.showGridLines === "boolean"
         ? candidate.showGridLines
         : DEFAULT_UI_PREFERENCES.showGridLines,
+    showAdvancedPanel:
+      typeof candidate.showAdvancedPanel === "boolean"
+        ? candidate.showAdvancedPanel
+        : DEFAULT_UI_PREFERENCES.showAdvancedPanel,
   };
 }
 

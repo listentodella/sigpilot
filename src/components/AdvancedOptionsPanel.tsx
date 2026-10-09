@@ -14,13 +14,14 @@ import { HelpHint } from "./HelpHint";
  * affordance because a bare label rarely explains what a knob does.
  */
 export function AdvancedOptionsPanel({
+  diagnostics,
   onChangePreferences,
   onReset,
   preferences,
 }: AdvancedOptionsSource & { onReset: () => void }) {
   const { t } = useTranslation("advanced");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const sections = buildAdvancedSections({ onChangePreferences, preferences });
+  const sections = buildAdvancedSections({ diagnostics, onChangePreferences, preferences });
 
   return (
     <div className="advancedPanel">
@@ -43,9 +44,14 @@ export function AdvancedOptionsPanel({
           </section>
         );
       })}
-      <button className="advancedResetButton" onClick={onReset} type="button">
-        {t("resetAll")}
-      </button>
+      <div className="advancedRow">
+        <button className="advancedResetButton dangerAction" onClick={onReset} type="button">
+          {t("resetAll")}
+        </button>
+        <span className="advancedRowEnd">
+          <HelpHint text={t("resetAllHint")} />
+        </span>
+      </div>
     </div>
   );
 }
@@ -56,11 +62,15 @@ function AdvancedRow({ control }: { control: AdvancedControl }) {
 
   return (
     <div className="advancedRow">
-      <label className="advancedRowLabel" htmlFor={inputId}>
+      <label className="advancedRowLabel" htmlFor={control.kind === "readonly" ? undefined : inputId}>
         {t(control.labelKey)}
       </label>
       <span className="advancedRowEnd">
-        <HelpHint text={t(control.hintKey)} />
+        {control.kind === "readonly" ? (
+          <span className="advancedValue">{control.value()}</span>
+        ) : (
+          <HelpHint text={t(control.hintKey)} />
+        )}
         {control.kind === "toggle" ? (
           <input
             checked={control.get()}
@@ -68,9 +78,8 @@ function AdvancedRow({ control }: { control: AdvancedControl }) {
             type="checkbox"
             onChange={(event) => control.set(event.target.checked)}
           />
-        ) : (
-          <NumberInput control={control} inputId={inputId} />
-        )}
+        ) : null}
+        {control.kind === "number" ? <NumberInput control={control} inputId={inputId} /> : null}
       </span>
     </div>
   );
