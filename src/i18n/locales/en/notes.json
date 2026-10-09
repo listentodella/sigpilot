@@ -1,0 +1,7 @@
+{
+  "about": "About capture notes",
+  "fieldLabel": "Capture notes",
+  "help": "Write any info about your capture that will be helpful such as your test setup and important features of the signal.",
+  "placeholder": "Click to add a description of your capture",
+  "title": "Notes"
+}

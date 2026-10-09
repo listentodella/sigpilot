@@ -7568,7 +7568,8 @@ function BottomBar({
 }) {
   const { i18n, t } = useTranslation("footer");
   const physicalCount = devices.filter((device) => device.kind === "Usb").length;
-  const deviceButtonText = physicalCount > 0 ? `${physicalCount} Device${physicalCount === 1 ? "" : "s"}` : "Disconnected";
+  const deviceButtonText =
+    physicalCount > 0 ? t("deviceCount", { count: physicalCount }) : t("disconnected");
 
   return (
     <footer className="bottomBar saleaeBottomBar" ref={refElement}>
@@ -7579,7 +7580,9 @@ function BottomBar({
         </FooterButton>
         {footerPopover === "devices" && (
           <FooterPopoverBox className="deviceMenuPopover" align="left">
-            <div className="footerMenuHeading">{physicalCount > 0 ? "Connected Devices" : "Demo Devices"}</div>
+            <div className="footerMenuHeading">
+              {physicalCount > 0 ? t("connectedDevices") : t("demoDevices")}
+            </div>
             <DeviceMenuRows
               devices={devices}
               onCreateSession={onCreateSession}
@@ -7609,7 +7612,7 @@ function BottomBar({
         <div className="newSessionMenu">
           <button
             className={`newSessionButton ${footerPopover === "newSession" ? "selected" : ""}`}
-            title="Create a new session"
+            title={t("newSession")}
             onClick={() => onSetFooterPopover(footerPopover === "newSession" ? null : "newSession")}
             type="button"
           >
@@ -7636,7 +7639,7 @@ function BottomBar({
           </div>
           <span>{status}</span>
         </div>
-        <span>{summary ? formatSamples(summary.metadata.sample_count) : "No samples"}</span>
+        <span>{summary ? formatSamples(summary.metadata.sample_count) : t("noSamples")}</span>
         <span>{summary ? formatBytes(summary.bytes) : "0 B"}</span>
         <span>{selectedDeviceReady ? t("deviceReady") : t("noDevice")}</span>
       </div>
@@ -7863,6 +7866,8 @@ function DeviceMenuRows({
   onSelectDevice?: (deviceId: string) => void;
   selectedDevice: string;
 }) {
+  const { t } = useTranslation("footer");
+
   return (
     <div className="deviceMenuRows">
       {devices.map((device) => (
@@ -7882,8 +7887,8 @@ function DeviceMenuRows({
       ))}
       <button className="deviceMenuRow" onClick={onRefreshDevices} type="button">
         <RefreshCw size={15} />
-        <span>Refresh Devices</span>
-        <small>Scan</small>
+        <span>{t("refreshDevices")}</span>
+        <small>{t("scan")}</small>
       </button>
     </div>
   );

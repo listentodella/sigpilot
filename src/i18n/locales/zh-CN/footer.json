@@ -1,7 +1,16 @@
 {
+  "connectedDevices": "已连接设备",
+  "demoDevices": "演示设备",
+  "deviceCount_one": "{{count}} 个设备",
+  "deviceCount_other": "{{count}} 个设备",
   "deviceReady": "设备就绪",
+  "disconnected": "未连接",
   "language": "语言",
+  "newSession": "新建会话",
   "noDevice": "无设备",
+  "noSamples": "无样本",
+  "refreshDevices": "刷新设备",
+  "scan": "扫描",
   "zoomFit": "适配全览",
   "zoomIn": "放大",
   "zoomOut": "缩小"

@@ -1,7 +1,16 @@
 {
+  "connectedDevices": "Connected Devices",
+  "demoDevices": "Demo Devices",
+  "deviceCount_one": "{{count}} Device",
+  "deviceCount_other": "{{count}} Devices",
   "deviceReady": "Device ready",
+  "disconnected": "Disconnected",
   "language": "Language",
+  "newSession": "Create a new session",
   "noDevice": "No device",
+  "noSamples": "No samples",
+  "refreshDevices": "Refresh Devices",
+  "scan": "Scan",
   "zoomFit": "Fit Capture",
   "zoomIn": "Zoom In",
   "zoomOut": "Zoom Out"
