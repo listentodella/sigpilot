@@ -1,3 +1,4 @@
+import { DEFAULT_LOG_LEVEL, isLogLevel, type LogLevel } from "./logger";
 import { migrateLegacyKey } from "./legacyStorage.ts";
 
 export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
@@ -20,6 +21,8 @@ export function initialLocale(): AppLocale {
 export interface UiPreferences {
   locale: AppLocale;
   animationScale: number;
+  /** Verbosity of the frontend log; the backend level follows it. */
+  logLevel: LogLevel;
   matchChannelColors: boolean;
   panToTrigger: boolean;
   renameTabToSavedCapture: boolean;
@@ -44,6 +47,7 @@ const LEGACY_UI_PREFERENCES_KEY = "pxlogic.preferences.v1";
 export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   locale: DEFAULT_LOCALE,
   animationScale: 1,
+  logLevel: DEFAULT_LOG_LEVEL,
   matchChannelColors: true,
   panToTrigger: true,
   renameTabToSavedCapture: false,
@@ -60,6 +64,7 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
       typeof candidate.animationScale === "number" && Number.isFinite(candidate.animationScale)
         ? Math.min(ANIMATION_SCALE_MAX, Math.max(ANIMATION_SCALE_MIN, candidate.animationScale))
         : DEFAULT_UI_PREFERENCES.animationScale,
+    logLevel: isLogLevel(candidate.logLevel) ? candidate.logLevel : DEFAULT_UI_PREFERENCES.logLevel,
     matchChannelColors:
       typeof candidate.matchChannelColors === "boolean"
         ? candidate.matchChannelColors

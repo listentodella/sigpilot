@@ -1,5 +1,6 @@
 import { readFrameState } from "./frameStore";
 import { formatBytes, formatRate, formatSamples } from "./format";
+import { LOG_LEVELS, type LogLevel } from "./logger";
 import {
   ANIMATION_SCALE_MAX,
   ANIMATION_SCALE_MIN,
@@ -15,8 +16,8 @@ import { waveformDrawSummary } from "./waveformDrawProbe";
 // Values are read and written through `get`/`set` closures over the preferences
 // state, so the panel stays presentational and every control applies live.
 //
-// Only options that actually exist are listed. Options that would need a feature
-// built first (waveform line width, backend log level) are deliberately absent.
+// Only options that actually exist are listed. An option that would need a
+// feature built first (waveform line width) is deliberately absent.
 type CommonControl = {
   id: string;
   labelKey: string;
@@ -40,6 +41,19 @@ export type AdvancedControl =
       min: number;
       max: number;
       step: number;
+    })
+  | (CommonControl & {
+      kind: "dropdown";
+      get: () => string;
+      set: (value: string) => void;
+      /** `labelKey`s, so the choices translate with everything else. */
+      options: Array<{ labelKey: string; value: string }>;
+    })
+  | (CommonControl & {
+      kind: "button";
+      /** Fires on click. May be async; the panel awaits nothing, so a slow
+       *  action owns its own progress reporting. */
+      run: () => void | Promise<void>;
     })
   | (CommonControl & {
       kind: "readonly";
@@ -69,6 +83,10 @@ export interface AdvancedOptionsSource {
   preferences: UiPreferences;
   onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
   diagnostics?: AdvancedDiagnostics;
+  /** Writes the diagnostics bundle to a path the user picks. */
+  onExportLogs?: () => void | Promise<void>;
+  /** Where the backend log file lives, shown so it can be found by hand. */
+  logPath?: string | null;
 }
 
 function formatSpanSeconds(seconds: number): string {
@@ -135,10 +153,59 @@ function buildDiagnosticsSection(diagnostics: AdvancedDiagnostics): AdvancedSect
   };
 }
 
+/**
+ * The logging block. Frontend and backend share one verbosity setting because a
+ * bundle that is half-verbose is worse than useless: the layer that stayed quiet
+ * is usually the one with the answer.
+ */
+function buildLoggingSection({
+  logPath,
+  onExportLogs,
+  preferences,
+  setPreference,
+}: {
+  logPath?: string | null;
+  onExportLogs?: () => void | Promise<void>;
+  preferences: UiPreferences;
+  setPreference: <K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) => void;
+}): AdvancedSection {
+  return {
+    controls: [
+      {
+        get: () => preferences.logLevel,
+        hintKey: "logLevelHint",
+        id: "logLevel",
+        kind: "dropdown",
+        labelKey: "logLevel",
+        options: LOG_LEVELS.map((level) => ({ labelKey: `logLevel_${level}`, value: level })),
+        set: (value) => setPreference("logLevel", value as LogLevel),
+      },
+      {
+        hintKey: "logPathHint",
+        id: "logPath",
+        kind: "readonly",
+        labelKey: "logPath",
+        value: () => logPath ?? "—",
+      },
+      {
+        hintKey: "exportLogsHint",
+        id: "exportLogs",
+        kind: "button",
+        labelKey: "exportLogs",
+        run: () => onExportLogs?.(),
+      },
+    ],
+    id: "logging",
+    labelKey: "sectionLogging",
+  };
+}
+
 export function buildAdvancedSections({
   diagnostics,
-  preferences,
+  logPath,
   onChangePreferences,
+  onExportLogs,
+  preferences,
 }: AdvancedOptionsSource): AdvancedSection[] {
   const setPreference = <K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) =>
     onChangePreferences((current) => ({ ...current, [key]: value }));
@@ -205,6 +272,7 @@ export function buildAdvancedSections({
         },
       ],
     },
+    buildLoggingSection({ logPath, onExportLogs, preferences, setPreference }),
     ...(diagnostics ? [buildDiagnosticsSection(diagnostics)] : []),
   ];
 }

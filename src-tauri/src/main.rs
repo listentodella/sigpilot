@@ -459,6 +459,54 @@ fn frontend_log(level: Option<String>, message: String) {
     }
 }
 
+/// Change the backend log level while the app is running.
+///
+/// A user who hits a hardware bug cannot restart with `SIGPILOT_LOG=trace` set
+/// without losing the state that reproduces it.
+#[tauri::command]
+fn set_log_level(level: String) -> CommandResult<String> {
+    let Some(level) = logging::level_from_str(&level) else {
+        return Err(format!("unknown log level `{level}`"));
+    };
+    logging::set_level(level);
+    Ok(logging::level_to_str(logging::current_level()).to_string())
+}
+
+#[tauri::command]
+fn log_level() -> String {
+    logging::level_to_str(logging::current_level()).to_string()
+}
+
+/// Where the backend log file lives, so the panel can show (and copy) it.
+#[tauri::command]
+fn log_path() -> Option<String> {
+    logging::log_path().map(|path| path.display().to_string())
+}
+
+/// Write the diagnostics bundle the user chose a path for.
+///
+/// The frontend hands over its own log because the webview is the only place it
+/// exists; everything else is read from disk here.
+#[tauri::command]
+fn export_logs(path: String, frontend_log: String) -> CommandResult<()> {
+    let path = PathBuf::from(&path);
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "log" | "txt") {
+        return Err("diagnostics must use a .log or .txt extension".to_string());
+    }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(to_string)?;
+    }
+    fs::write(path, logging::export_bundle(&frontend_log)).map_err(to_string)
+}
+
 /// Publishes capture UI updates from a thread of its own.
 ///
 /// The capture thread must never wait on the webview. `emit` serialises the
@@ -2248,6 +2296,10 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             frontend_log,
+            set_log_level,
+            log_level,
+            log_path,
+            export_logs,
             list_devices,
             device_capabilities,
             prepare_device,

@@ -30,6 +30,27 @@ const separatorAlpha = 0.075;
 // busy region look washed out and its vertical edges muddy.
 const denseFillAlpha = 1;
 
+// A worker has no `invoke`, so anything it writes to the console dies with the
+// worker's devtools session and never reaches the log file. Forwarding through
+// `postMessage` lets the main thread put it in the record alongside everything
+// else, which is the whole point of the diagnostics export.
+const nativeWarn = console.warn.bind(console);
+const nativeError = console.error.bind(console);
+console.warn = (...args: unknown[]) => {
+  nativeWarn(...args);
+  self.postMessage({ level: "warn", message: describe(args), type: "log" });
+};
+console.error = (...args: unknown[]) => {
+  nativeError(...args);
+  self.postMessage({ level: "error", message: describe(args), type: "log" });
+};
+
+function describe(args: unknown[]) {
+  return args
+    .map((arg) => (arg instanceof Error ? (arg.stack ?? arg.message) : String(arg)))
+    .join(" ");
+}
+
 interface WorkerBin {
   edges: number;
   first: boolean;

@@ -15,13 +15,21 @@ import { HelpHint } from "./HelpHint";
  */
 export function AdvancedOptionsPanel({
   diagnostics,
+  logPath,
   onChangePreferences,
+  onExportLogs,
   onReset,
   preferences,
 }: AdvancedOptionsSource & { onReset: () => void }) {
   const { t } = useTranslation("advanced");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const sections = buildAdvancedSections({ diagnostics, onChangePreferences, preferences });
+  const sections = buildAdvancedSections({
+    diagnostics,
+    logPath,
+    onChangePreferences,
+    onExportLogs,
+    preferences,
+  });
 
   return (
     <div className="advancedPanel">
@@ -60,6 +68,21 @@ function AdvancedRow({ control }: { control: AdvancedControl }) {
   const { t } = useTranslation("advanced");
   const inputId = `advanced-${control.id}`;
 
+  // A button is its own label, so it takes the row rather than sharing it with
+  // one.
+  if (control.kind === "button") {
+    return (
+      <div className="advancedRow">
+        <button className="advancedRowButton" onClick={() => void control.run()} type="button">
+          {t(control.labelKey)}
+        </button>
+        <span className="advancedRowEnd">
+          <HelpHint text={t(control.hintKey)} />
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="advancedRow">
       <label className="advancedRowLabel" htmlFor={control.kind === "readonly" ? undefined : inputId}>
@@ -80,6 +103,15 @@ function AdvancedRow({ control }: { control: AdvancedControl }) {
           />
         ) : null}
         {control.kind === "number" ? <NumberInput control={control} inputId={inputId} /> : null}
+        {control.kind === "dropdown" ? (
+          <select id={inputId} onChange={(event) => control.set(event.target.value)} value={control.get()}>
+            {control.options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {t(option.labelKey)}
+              </option>
+            ))}
+          </select>
+        ) : null}
       </span>
     </div>
   );

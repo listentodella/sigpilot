@@ -163,6 +163,9 @@ import {
   DecoderBackendKind,
   deviceCapabilities,
   DeviceInfo,
+  applyBackendLogLevel,
+  exportLogs,
+  readLogPath,
   DigitalRangeMeasurementStats,
   DiagnosticEvent,
   ExternalTriggerMode,
@@ -191,6 +194,7 @@ import {
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
+import { formatLogEntries, logSnapshot, setLogLevel } from "./lib/logger";
 import {
   ChannelDeleteDataMode,
   ChannelTrimPreview,
@@ -1507,6 +1511,9 @@ export default function App() {
   const [graphViewportInteracting, setGraphViewportInteracting] = useState(false);
   const graphPointerRatioRef = useRef(0.5);
   const [startupMessage, setStartupMessage] = useState("Ready");
+  // Where the backend writes its log; shown in the advanced panel so the file
+  // can be read in place without going through an export.
+  const [logPath, setLogPath] = useState<string | null>(null);
 
   const footerRef = useRef<HTMLElement>(null);
   const graphScrollerRef = useRef<HTMLDivElement>(null);
@@ -1571,12 +1578,30 @@ export default function App() {
     persistUiPreferences(preferences);
   }, [preferences]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void readLogPath().then((path) => {
+      if (!cancelled) setLogPath(path);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // The advanced panel's Animation Scale feeds the glide duration. Pushed into
   // the module rather than read from preferences at gesture time so the hot path
   // stays a plain number lookup.
   useEffect(() => {
     setZoomAnimationDurationScale(preferences.animationScale);
   }, [preferences.animationScale]);
+
+  // One verbosity for both layers: the webview filters locally and the backend
+  // reloads its subscriber to match, so an exported bundle is coherent instead
+  // of half-verbose.
+  useEffect(() => {
+    setLogLevel(preferences.logLevel);
+    void applyBackendLogLevel(preferences.logLevel);
+  }, [preferences.logLevel]);
 
   // Hidden escape hatch for the advanced panel, mirroring the undocumented chord
   // the homage project keeps its developer surface behind. It gets its own
@@ -3883,6 +3908,26 @@ export default function App() {
     }
   }
 
+  /**
+   * Hand the user one file containing every layer's log.
+   *
+   * The webview buffer is passed to the backend because only the backend can
+   * read its own log file, and one artifact is what a bug report wants.
+   */
+  async function handleExportLogs() {
+    const path = await saveDialog({
+      defaultPath: `sigpilot-diagnostics-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.log`,
+      filters: [{ name: "Log", extensions: ["log", "txt"] }],
+    });
+    if (!path) return;
+    try {
+      await exportLogs(path, formatLogEntries(logSnapshot()));
+      setStartupMessage(t("logsExported", { defaultValue: "Diagnostics exported" }));
+    } catch (error) {
+      setStartupMessage(String(error));
+    }
+  }
+
   function setSelectedDeviceForActive(deviceId: string) {
     setDraftSelectedDevice(deviceId);
     if (!activeSession) return;
@@ -5489,6 +5534,7 @@ export default function App() {
             availableAnalyzers={availableAnalyzers}
             devices={devices}
             extensions={extensions}
+            logPath={logPath}
             onChangeExtensions={(updater) => setExtensions((current) => updater(current))}
             onChangePreferences={(updater) => setPreferences(updater)}
             onCreateSession={createSessionFromFooter}
@@ -5497,6 +5543,7 @@ export default function App() {
             onAddMarkerPair={handleAddMarkerPair}
             onAddSingleMarker={handleAddSingleMarker}
             onDecodeAnalyzer={(analyzerId) => activeSession && handleDecodeAnalyzer(activeSession.id, analyzerId)}
+            onExportLogs={handleExportLogs}
             onEditAnalyzer={beginEditAnalyzer}
             onGoToAnalyzerFrame={(analyzerId, frameIndex, zoom, frame) =>
               goToAnalyzerFrame(analyzerId, frameIndex, zoom, frame)
@@ -7917,6 +7964,7 @@ function RightSidebar({
   availableAnalyzers,
   devices,
   extensions,
+  logPath,
   onChangeExtensions,
   onChangePreferences,
   onAddAnalyzer,
@@ -7926,6 +7974,7 @@ function RightSidebar({
   onCreateSession,
   onDecodeAnalyzer,
   onEditAnalyzer,
+  onExportLogs,
   onGoToAnalyzerFrame,
   onNotify,
   onRefreshDevices,
@@ -7945,6 +7994,7 @@ function RightSidebar({
   availableAnalyzers: AnalyzerLibraryChoice[];
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
+  logPath: string | null;
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
   onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
   onAddAnalyzer: (choiceOrName: AnalyzerLibraryChoice | string, backend?: DecoderBackendKind) => void;
@@ -7954,6 +8004,7 @@ function RightSidebar({
   onCreateSession: (deviceId?: string) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
+  onExportLogs: () => void | Promise<void>;
   onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean, frame?: DecodedFrame) => void;
   onNotify: (message: string) => void;
   onRefreshDevices: () => void;
@@ -8044,6 +8095,7 @@ function RightSidebar({
             availableAnalyzers={availableAnalyzers}
             devices={devices}
             extensions={extensions}
+            logPath={logPath}
             onChangeExtensions={onChangeExtensions}
             onChangePreferences={onChangePreferences}
             onAddAnalyzer={onAddAnalyzer}
@@ -8053,6 +8105,7 @@ function RightSidebar({
             onCreateSession={onCreateSession}
             onDecodeAnalyzer={onDecodeAnalyzer}
             onEditAnalyzer={onEditAnalyzer}
+            onExportLogs={onExportLogs}
             onGoToAnalyzerFrame={onGoToAnalyzerFrame}
             onNotify={onNotify}
             onRefreshDevices={onRefreshDevices}
@@ -8109,6 +8162,7 @@ function SidebarPanelContent({
   availableAnalyzers,
   devices,
   extensions,
+  logPath,
   onChangeExtensions,
   onChangePreferences,
   onAddAnalyzer,
@@ -8118,6 +8172,7 @@ function SidebarPanelContent({
   onCreateSession,
   onDecodeAnalyzer,
   onEditAnalyzer,
+  onExportLogs,
   onGoToAnalyzerFrame,
   onNotify,
   onRefreshDevices,
@@ -8135,6 +8190,7 @@ function SidebarPanelContent({
   availableAnalyzers: AnalyzerLibraryChoice[];
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
+  logPath: string | null;
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
   onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
   onAddAnalyzer: (choiceOrName: AnalyzerLibraryChoice | string, backend?: DecoderBackendKind) => void;
@@ -8144,6 +8200,7 @@ function SidebarPanelContent({
   onCreateSession: (deviceId?: string) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
+  onExportLogs: () => void | Promise<void>;
   onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean, frame?: DecodedFrame) => void;
   onNotify: (message: string) => void;
   onRefreshDevices: () => void;
@@ -8259,7 +8316,9 @@ function SidebarPanelContent({
             sampleRateHz: session?.summary?.metadata.sample_rate_hz ?? 0,
             sessionId: session?.id ?? null,
           }}
+          logPath={logPath}
           onChangePreferences={onChangePreferences}
+          onExportLogs={onExportLogs}
           onReset={() => onChangePreferences(() => DEFAULT_UI_PREFERENCES)}
           preferences={preferences}
         />

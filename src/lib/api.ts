@@ -901,6 +901,37 @@ export function frontendLog(message: string, level: "info" | "warn" | "error" = 
   void invoke("frontend_log", { level, message }).catch(() => {});
 }
 
+/**
+ * Applies the same verbosity to the backend log and returns the level that
+ * ended up in effect, so the UI can show what the backend actually did.
+ */
+export async function applyBackendLogLevel(level: string): Promise<string> {
+  if (!isTauriRuntime()) return level;
+  try {
+    return await invoke<string>("set_log_level", { level });
+  } catch {
+    return level;
+  }
+}
+
+export async function readLogPath(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    const path = await invoke<string | null>("log_path");
+    return path ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Writes the diagnostics bundle: the webview log handed in by the caller plus
+ * everything the backend has on disk.
+ */
+export async function exportLogs(path: string, frontendLogText: string): Promise<void> {
+  await callBackend("export_logs", { frontendLog: frontendLogText, path });
+}
+
 async function callBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauriRuntime()) {
     throw new Error("Tauri runtime is not available");

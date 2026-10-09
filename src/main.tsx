@@ -4,8 +4,15 @@ import ReactDOM from "react-dom/client";
 import "./i18n";
 import App from "./App";
 import "./styles.css";
+import { installConsoleCapture, setLogLevel } from "./lib/logger";
+import { loadUiPreferences } from "./lib/preferences";
 
 async function mountApp() {
+  // Capture as early as possible: everything logged during startup is part of
+  // the record a bug report needs, and none of it can be recovered later.
+  setLogLevel(loadUiPreferences().logLevel);
+  installConsoleCapture();
+
   if (document.fonts) {
     try {
       await Promise.all([

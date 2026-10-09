@@ -8048,6 +8048,30 @@ body.timing-marker-col-resize * {
   width: 14px;
 }
 
+.advancedRow select {
+  background: var(--background-20);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  color: var(--on-background-0);
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+/* Actions sit where a control would, so the row still reads as one option. */
+.advancedRowButton {
+  background: var(--background-20);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  color: var(--on-background-0);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.advancedRowButton:hover {
+  border-color: var(--border-hover);
+}
+
 .advancedValue {
   color: var(--on-background-20);
   font-family: "Roboto Mono", ui-monospace, monospace;
