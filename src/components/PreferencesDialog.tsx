@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { ReactNode, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import type { UiPreferences } from "../lib/preferences";
 
 interface PreferencesDialogProps {
@@ -9,6 +10,8 @@ interface PreferencesDialogProps {
 }
 
 export function PreferencesDialog({ onChange, onClose, preferences }: PreferencesDialogProps) {
+  const { t } = useTranslation("settings");
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
@@ -40,33 +43,33 @@ export function PreferencesDialog({ onChange, onClose, preferences }: Preference
         role="dialog"
       >
         <header className="preferencesHeader">
-          <h2 id="preferences-title">Settings</h2>
-          <button aria-label="Close Settings" onClick={onClose} title="Close" type="button">
+          <h2 id="preferences-title">{t("dialogTitle")}</h2>
+          <button aria-label={t("closeDialog")} onClick={onClose} title={t("close")} type="button">
             <X aria-hidden size={16} />
           </button>
         </header>
         <div className="preferencesContent">
-          <PreferenceSection title="Channel Settings">
+          <PreferenceSection title={t("sectionChannel")}>
             <PreferenceCheckbox
               checked={preferences.matchChannelColors}
-              label="Color-match Waveforms"
+              label={t("matchChannelColors")}
               onChange={(checked) => update({ matchChannelColors: checked })}
-              tooltip="Color the Waveforms to match the logic analyzer wires."
+              tooltip={t("matchChannelColorsHint")}
             />
           </PreferenceSection>
 
-          <PreferenceSection title="When Capture Ends">
+          <PreferenceSection title={t("sectionCaptureEnd")}>
             <PreferenceCheckbox
               checked={preferences.panToTrigger}
-              label="Pan to Trigger"
+              label={t("panToTrigger")}
               onChange={(checked) => update({ panToTrigger: checked })}
             />
           </PreferenceSection>
 
-          <PreferenceSection title="Save Capture">
+          <PreferenceSection title={t("sectionSave")}>
             <PreferenceCheckbox
               checked={preferences.renameTabToSavedCapture}
-              label="When saving a capture rename tab to saved capture filename"
+              label={t("renameTabToSavedCapture")}
               onChange={(checked) => update({ renameTabToSavedCapture: checked })}
             />
           </PreferenceSection>

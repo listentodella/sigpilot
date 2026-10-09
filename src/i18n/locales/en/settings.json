@@ -1,0 +1,12 @@
+{
+  "close": "Close",
+  "closeDialog": "Close Settings",
+  "dialogTitle": "Settings",
+  "matchChannelColors": "Color-match Waveforms",
+  "matchChannelColorsHint": "Color the Waveforms to match the logic analyzer wires.",
+  "panToTrigger": "Pan to Trigger",
+  "renameTabToSavedCapture": "When saving a capture rename tab to saved capture filename",
+  "sectionCaptureEnd": "When Capture Ends",
+  "sectionChannel": "Channel Settings",
+  "sectionSave": "Save Capture"
+}

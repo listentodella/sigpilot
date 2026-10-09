@@ -12,6 +12,12 @@ export default defineConfig({
   extract: {
     defaultNS: "common",
     input: ["src/**/*.{ts,tsx}"],
+    // The advanced panel renders its labels from registry data, so most of its
+    // keys are reached through variables (t(control.labelKey)) rather than a
+    // literal. Static analysis cannot see those, and with this left on the
+    // extractor deleted them. Use `i18next-cli status --unused` to review
+    // unused keys instead of deleting them automatically.
+    removeUnusedKeys: false,
     output: "src/i18n/locales/{{language}}/{{namespace}}.json",
   },
 });

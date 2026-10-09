@@ -1,0 +1,12 @@
+{
+  "close": "关闭",
+  "closeDialog": "关闭设置",
+  "dialogTitle": "设置",
+  "matchChannelColors": "波形同色显示",
+  "matchChannelColorsHint": "让波形颜色与逻辑分析仪的导线颜色一致。",
+  "panToTrigger": "自动平移到触发点",
+  "renameTabToSavedCapture": "保存采集时，将标签页重命名为保存的文件名",
+  "sectionCaptureEnd": "采集结束时",
+  "sectionChannel": "通道设置",
+  "sectionSave": "保存采集"
+}
