@@ -1,0 +1,12 @@
+{
+  "chooseFile": "Choose a file from your computer",
+  "deviceFound": "Found",
+  "deviceReady": "Ready",
+  "dragDropHere": "Drag and drop a file here or",
+  "loadCaptureFile": "Load a Capture File",
+  "noDeviceDetected": "No Logic device detected",
+  "refresh": "Refresh",
+  "serialNumber": "S/N {{serial}}",
+  "tryDemoDevice": "Try a demo Logic device",
+  "usbBusAddress": "USB bus {{bus}}, address {{address}}"
+}

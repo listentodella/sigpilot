@@ -1,0 +1,12 @@
+{
+  "chooseFile": "从电脑中选择文件",
+  "deviceFound": "已发现",
+  "deviceReady": "就绪",
+  "dragDropHere": "将文件拖放到此处，或",
+  "loadCaptureFile": "加载采集文件",
+  "noDeviceDetected": "未检测到 Logic 设备",
+  "refresh": "刷新",
+  "serialNumber": "序列号 {{serial}}",
+  "tryDemoDevice": "试用演示 Logic 设备",
+  "usbBusAddress": "USB 总线 {{bus}}，地址 {{address}}"
+}

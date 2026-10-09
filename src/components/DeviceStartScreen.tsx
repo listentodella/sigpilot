@@ -1,4 +1,6 @@
+import type { TFunction } from "i18next";
 import { Download, RefreshCw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import devicePattern from "../assets/start-screen/device-pattern.png";
 import { DeviceInfo } from "../lib/api";
 import { UsbSpeedIcon, usbSpeedFromLinkSpeed, usbSpeedLabel } from "./UsbSpeedIcon";
@@ -22,6 +24,7 @@ export function DeviceStartScreen({
   onCreateSessionWithDevice,
   onSelectDevice,
 }: DeviceStartScreenProps) {
+  const { t } = useTranslation("start");
   const physicalDevices = devices.filter((device) => device.kind === "Usb");
   const demoDevices = devices.filter((device) => device.kind === "Fake");
   const selectedDemo = demoDevices.find((device) => device.id === selectedDevice) ?? demoDevices[0];
@@ -33,7 +36,7 @@ export function DeviceStartScreen({
           <DeviceList
             busy={busy}
             devices={physicalDevices}
-            emptyLabel="No Logic device detected"
+            emptyLabel={t("noDeviceDetected")}
             onRefreshDevices={onRefreshDevices}
             onCreateSessionWithDevice={onCreateSessionWithDevice}
             onSelectDevice={onSelectDevice}
@@ -49,21 +52,21 @@ export function DeviceStartScreen({
               }}
               type="button"
             >
-              Try a demo Logic device
+              {t("tryDemoDevice")}
             </button>
           )}
         </DevicePromptCard>
       </div>
 
       <div className="loadCaptureFile">
-        <div className="loadCaptureTitle">Load a Capture File</div>
+        <div className="loadCaptureTitle">{t("loadCaptureFile")}</div>
         <div className="fileChooser">
           <div className="dragDrop">
             <Download size={16} />
-            Drag and drop a file here or
+            {t("dragDropHere")}
           </div>
           <button className="saleaePrimaryButton" onClick={onOpenCapture} type="button">
-            Choose a file from your computer
+            {t("chooseFile")}
           </button>
         </div>
       </div>
@@ -100,13 +103,13 @@ interface DeviceListProps {
  * apart, but they made every row unreadable when they were part of the label.
  * Keep them reachable on hover instead.
  */
-function deviceLocation(device: DeviceInfo): string {
+function deviceLocation(device: DeviceInfo, t: TFunction): string {
   const parts = [device.label];
   if (device.bus != null && device.address != null) {
-    parts.push(`USB bus ${device.bus}, address ${device.address}`);
+    parts.push(t("usbBusAddress", { address: device.address, bus: device.bus }));
   }
   if (device.serial_number) {
-    parts.push(`S/N ${device.serial_number}`);
+    parts.push(t("serialNumber", { serial: device.serial_number }));
   }
   return parts.join(" · ");
 }
@@ -120,13 +123,15 @@ function DeviceList({
   onCreateSessionWithDevice,
   onSelectDevice,
 }: DeviceListProps) {
+  const { t } = useTranslation("start");
+
   if (devices.length === 0) {
     return (
       <div className="devicePromptEmpty">
         <span>{emptyLabel}</span>
         <button className="saleaeSecondaryButton compact" disabled={busy} onClick={onRefreshDevices} type="button">
           <RefreshCw size={14} />
-          Refresh
+          {t("refresh")}
         </button>
       </div>
     );
@@ -146,12 +151,12 @@ function DeviceList({
               onSelectDevice(device.id);
               onCreateSessionWithDevice(device.id);
             }}
-            title={deviceLocation(device)}
+            title={deviceLocation(device, t)}
             type="button"
           >
             <UsbSpeedIcon speed={usbSpeed} title={usbSpeedLabel(usbSpeed)} />
             <span>{device.label}</span>
-            <small>{device.ready ? "Ready" : "Found"}</small>
+            <small>{device.ready ? t("deviceReady") : t("deviceFound")}</small>
           </button>
         );
       })}
