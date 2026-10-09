@@ -5300,7 +5300,17 @@ export default function App() {
                     onAddSingleMarker={addSingleMarkerAtSample}
                     onOpenSidebar={() => openSidebarPanel("timingMarkers")}
                     onViewportChange={(start, samples) =>
-                      animateViewport(activeSession.id, start, samples)
+                      stepViewport(
+                        activeSession.id,
+                        {
+                          duration_ms: ZOOM_ANIMATION_DURATION_MS,
+                          kind: "animate_to",
+                          samples,
+                          start_sample: start,
+                        },
+                        start,
+                        samples,
+                      )
                     }
                     placement={activeSession.timingMarkerPlacement}
                     rowHeights={visibleOuterRowHeights}
@@ -5359,7 +5369,19 @@ export default function App() {
             }}
             onUpdateSettings={updateActiveSettings}
             onViewportChange={(start, samples) => {
-              if (activeSession) animateViewport(activeSession.id, start, samples);
+              if (activeSession) {
+                stepViewport(
+                  activeSession.id,
+                  {
+                    duration_ms: ZOOM_ANIMATION_DURATION_MS,
+                    kind: "animate_to",
+                    samples,
+                    start_sample: start,
+                  },
+                  start,
+                  samples,
+                );
+              }
             }}
             selectedDevice={selectedDevice}
             selectedCapabilities={selectedCapabilities}
