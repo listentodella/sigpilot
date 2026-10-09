@@ -5313,6 +5313,7 @@ export default function App() {
                       {activePendingChannelTrim && (
                         <ChannelTrimOverlay
                           range={activePendingChannelTrim.range}
+                          sessionId={activeSession.id}
                           viewportSamples={activeSession.viewportSamples}
                           viewportStart={activeSession.viewportStart}
                         />
@@ -5815,13 +5816,21 @@ function ChannelResizeHandle({
 
 function ChannelTrimOverlay({
   range,
-  viewportSamples,
-  viewportStart,
+  sessionId,
+  viewportSamples: viewportSamplesProp,
+  viewportStart: viewportStartProp,
 }: {
   range: ChannelTrimPreview;
+  sessionId: string;
   viewportSamples: number;
   viewportStart: number;
 }) {
+  // The frame loop owns the viewport once it has a ready frame and the session
+  // store freezes, so the trim stripes have to be placed against the live view.
+  const frameState = useSessionFrameState(sessionId);
+  const live = frameState?.ready ? frameState : null;
+  const viewportStart = live?.view.start_sample ?? viewportStartProp;
+  const viewportSamples = live?.view.samples ?? viewportSamplesProp;
   const scale = 100 / Math.max(1, viewportSamples);
   const leftWidth =
     range.trimBefore === undefined
@@ -6299,12 +6308,19 @@ function CursorOverlay({
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   session: UiSession;
 }) {
+  // The frame loop owns the viewport once it has a ready frame, and the session
+  // store stops being updated while it does; map the cursor lines from the live
+  // view so they stay anchored under a wired loop.
+  const frameState = useSessionFrameState(session.id);
+  const live = frameState?.ready ? frameState : null;
+  const viewportStart = live?.view.start_sample ?? session.viewportStart;
+  const viewportSamples = live?.view.samples ?? session.viewportSamples;
   const dragRef = useRef<"x1Sample" | "x2Sample" | null>(null);
   const totalSamples = session.summary?.metadata.sample_count ?? 0;
   if (!session.cursorState.visible || !session.summary || totalSamples <= 0) return null;
 
   function sampleToPercent(sample: number) {
-    const ratio = (sample - session.viewportStart) / Math.max(1, session.viewportSamples);
+    const ratio = (sample - viewportStart) / Math.max(1, viewportSamples);
     return Math.max(0, Math.min(1, ratio)) * 100;
   }
 
@@ -6313,7 +6329,7 @@ function CursorOverlay({
     if (!key) return;
     const rect = host.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
-    const sample = Math.round(session.viewportStart + ratio * session.viewportSamples);
+    const sample = Math.round(viewportStart + ratio * viewportSamples);
     const nextSample = Math.max(0, Math.min(totalSamples - 1, sample));
     onUpdateSession((current) => ({
       ...current,
