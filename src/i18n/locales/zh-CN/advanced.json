@@ -3,6 +3,8 @@
   "sectionDisplay": "显示",
   "sectionBehavior": "行为",
   "sectionPerformance": "性能",
+  "gridLines": "网格线",
+  "gridLinesHint": "在波形后方绘制时间网格线。用肉眼读数时可关闭，波形会更干净。",
   "matchChannelColors": "波形同色显示",
   "matchChannelColorsHint": "数字与模拟通道使用相同颜色绘制。",
   "panToTrigger": "自动平移到触发点",

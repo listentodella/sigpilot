@@ -3,6 +3,8 @@
   "sectionDisplay": "Display",
   "sectionBehavior": "Behavior",
   "sectionPerformance": "Performance",
+  "gridLines": "Grid lines",
+  "gridLinesHint": "Draw the time grid behind the waveform. Turn it off for a cleaner trace when reading values by eye.",
   "matchChannelColors": "Color-match waveforms",
   "matchChannelColorsHint": "Draw digital and analog channels in the same colour.",
   "panToTrigger": "Pan to trigger",

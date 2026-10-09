@@ -5260,6 +5260,7 @@ export default function App() {
                         sampleRateHz={activeSession.summary?.metadata.sample_rate_hz ?? activeSession.settings.sample_rate_hz}
                         timeOriginSample={activeSession.summary?.metadata.trigger?.sample_index ?? 0}
                         showInteractiveMeasurement={activeSession.showInteractiveMeasurement}
+                        showGridLines={preferences.showGridLines}
                         totalSamples={totalSamples}
                         viewportStart={activeSession.viewportStart}
                         viewportSamples={activeSession.viewportSamples}

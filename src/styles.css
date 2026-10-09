@@ -7951,11 +7951,67 @@ body.timing-marker-col-resize * {
 }
 
 .advancedSectionTitle {
+  align-items: center;
+  background: none;
+  border: 0;
   color: var(--on-background-40);
+  cursor: pointer;
+  display: flex;
   font-size: 11px;
   font-weight: 600;
+  gap: 4px;
   letter-spacing: 0.05em;
+  padding: 0;
   text-transform: uppercase;
+}
+
+.advancedSectionTitle:hover {
+  color: var(--on-background-20);
+}
+
+.advancedRowEnd {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+/* The "?" affordance next to each option. The popover is portalled, so it is
+   positioned with fixed coordinates and can escape the scrolling panel. */
+.helpHint {
+  align-items: center;
+  border: 1px solid var(--border-20);
+  border-radius: 50%;
+  color: var(--on-background-40);
+  cursor: help;
+  display: inline-flex;
+  flex: none;
+  font-size: 9px;
+  height: 14px;
+  justify-content: center;
+  line-height: 1;
+  width: 14px;
+}
+
+.helpHint:hover,
+.helpHint:focus-visible {
+  border-color: var(--border-hover);
+  color: var(--on-background-0);
+  outline: none;
+}
+
+.helpHintPopover {
+  background: var(--background-0);
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  box-shadow: var(--box-shadow);
+  color: var(--on-background-10);
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 6px 8px;
+  pointer-events: none;
+  position: fixed;
+  transform: translateY(-100%);
+  z-index: 200;
 }
 
 .advancedRow {

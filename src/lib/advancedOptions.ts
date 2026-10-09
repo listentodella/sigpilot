@@ -61,6 +61,14 @@ export function buildAdvancedSections({
       controls: [
         {
           kind: "toggle",
+          id: "showGridLines",
+          labelKey: "gridLines",
+          hintKey: "gridLinesHint",
+          get: () => preferences.showGridLines,
+          set: (value) => setPreference("showGridLines", value),
+        },
+        {
+          kind: "toggle",
           id: "matchChannelColors",
           labelKey: "matchChannelColors",
           hintKey: "matchChannelColorsHint",

@@ -43,6 +43,7 @@ interface WaveformCanvasProps {
   sampleRateHz: number;
   timeOriginSample?: number;
   showInteractiveMeasurement?: boolean;
+  showGridLines?: boolean;
   totalSamples: number;
   viewportStart: number;
   viewportSamples: number;
@@ -161,6 +162,7 @@ export function WaveformCanvas({
   sampleRateHz,
   timeOriginSample = 0,
   showInteractiveMeasurement = true,
+  showGridLines = true,
   totalSamples,
   viewportStart: viewportStartProp,
   viewportSamples: viewportSamplesProp,
@@ -220,6 +222,7 @@ export function WaveformCanvas({
   const edgeJumpRef = useRef<EdgeJumpMeasurement | null>(null);
   const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
   const showInteractiveMeasurementRef = useRef(showInteractiveMeasurement);
+  const showGridLinesRef = useRef(showGridLines);
   const matchChannelColorsRef = useRef(matchChannelColors);
   const hoverNavigationRef = useRef<HoverNavigation | null>(null);
   const pendingViewportRef = useRef<{ start: number; samples: number } | null>(null);
@@ -390,6 +393,7 @@ export function WaveformCanvas({
       rowHeightsRef.current !== rowHeights ||
       rowTopInsetsRef.current !== rowTopInsets;
     const interactionChanged = showInteractiveMeasurementRef.current !== showInteractiveMeasurement;
+    const gridLinesChanged = showGridLinesRef.current !== showGridLines;
     const colorsChanged = matchChannelColorsRef.current !== matchChannelColors;
 
     tileRef.current = tile;
@@ -440,6 +444,7 @@ export function WaveformCanvas({
     isLiveRef.current = isLive;
     timeOriginSampleRef.current = timeOriginSample;
     showInteractiveMeasurementRef.current = showInteractiveMeasurement;
+    showGridLinesRef.current = showGridLines;
     matchChannelColorsRef.current = matchChannelColors;
     totalSamplesRef.current = totalSamples;
     rowHeightsRef.current = rowHeights;
@@ -454,6 +459,7 @@ export function WaveformCanvas({
       (!isLive && visualViewportChanged) ||
       graphLayoutChanged ||
       interactionChanged ||
+      gridLinesChanged ||
       colorsChanged
     ) {
       scheduleDraw();
@@ -467,6 +473,7 @@ export function WaveformCanvas({
     rowTopInsets,
     sampleRateHz,
     sessionId,
+    showGridLines,
     showInteractiveMeasurement,
     tile,
     timeOriginSample,
@@ -511,6 +518,7 @@ export function WaveformCanvas({
       null,
       sampleRateRef.current,
       timeOriginSampleRef.current,
+      showGridLinesRef.current,
       rowHeightsRef.current,
       rowTopInsetsRef.current,
       matchChannelColorsRef.current,
@@ -1473,6 +1481,7 @@ function draw(
   hover: HoverMeasurement | null,
   sampleRateHz: number,
   timeOriginSample: number,
+  showGridLines: boolean,
   rowHeights: number[],
   rowTopInsets: number[],
   matchChannelColors: boolean,
@@ -1490,7 +1499,9 @@ function draw(
   ctx.fillStyle = "#101013";
   ctx.fillRect(0, 0, width, height);
 
-  drawGridLines(ctx, width, height, viewportStart, viewportSamples, sampleRateHz, timeOriginSample);
+  if (showGridLines) {
+    drawGridLines(ctx, width, height, viewportStart, viewportSamples, sampleRateHz, timeOriginSample);
+  }
 
   if (!tile || tile.channels.length === 0) {
     ctx.fillStyle = "rgba(255,255,255,0.55)";

@@ -23,6 +23,7 @@ export interface UiPreferences {
   matchChannelColors: boolean;
   panToTrigger: boolean;
   renameTabToSavedCapture: boolean;
+  showGridLines: boolean;
 }
 
 /** Bounds for `animationScale`: 0 is instant, 1 is the 100 ms default, 3 is 300 ms. */
@@ -44,6 +45,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   matchChannelColors: true,
   panToTrigger: true,
   renameTabToSavedCapture: false,
+  showGridLines: true,
 };
 
 export function normalizeUiPreferences(value: unknown): UiPreferences {
@@ -67,6 +69,10 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
       typeof candidate.renameTabToSavedCapture === "boolean"
         ? candidate.renameTabToSavedCapture
         : DEFAULT_UI_PREFERENCES.renameTabToSavedCapture,
+    showGridLines:
+      typeof candidate.showGridLines === "boolean"
+        ? candidate.showGridLines
+        : DEFAULT_UI_PREFERENCES.showGridLines,
   };
 }
 
