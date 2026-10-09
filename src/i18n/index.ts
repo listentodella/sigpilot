@@ -13,8 +13,10 @@ import { initReactI18next } from "react-i18next";
 
 import { loadUiPreferences } from "../lib/preferences";
 import enAdvanced from "./locales/en/advanced.json";
+import enAnalyzers from "./locales/en/analyzers.json";
 import enExtensions from "./locales/en/extensions.json";
 import enCommon from "./locales/en/common.json";
+import enGraph from "./locales/en/graph.json";
 import enFooter from "./locales/en/footer.json";
 import enNotes from "./locales/en/notes.json";
 import enPanels from "./locales/en/panels.json";
@@ -22,8 +24,10 @@ import enSettings from "./locales/en/settings.json";
 import enStart from "./locales/en/start.json";
 import enToolbar from "./locales/en/toolbar.json";
 import zhAdvanced from "./locales/zh-CN/advanced.json";
+import zhAnalyzers from "./locales/zh-CN/analyzers.json";
 import zhExtensions from "./locales/zh-CN/extensions.json";
 import zhCommon from "./locales/zh-CN/common.json";
+import zhGraph from "./locales/zh-CN/graph.json";
 import zhFooter from "./locales/zh-CN/footer.json";
 import zhNotes from "./locales/zh-CN/notes.json";
 import zhPanels from "./locales/zh-CN/panels.json";
@@ -41,12 +45,14 @@ void i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   lng: loadUiPreferences().locale,
-  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions"],
+  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions", "analyzers", "graph"],
   resources: {
     en: {
       advanced: enAdvanced,
+      analyzers: enAnalyzers,
       extensions: enExtensions,
       common: enCommon,
+      graph: enGraph,
       footer: enFooter,
       notes: enNotes,
       panels: enPanels,
@@ -56,8 +62,10 @@ void i18n.use(initReactI18next).init({
     },
     "zh-CN": {
       advanced: zhAdvanced,
+      analyzers: zhAnalyzers,
       extensions: zhExtensions,
       common: zhCommon,
+      graph: zhGraph,
       footer: zhFooter,
       notes: zhNotes,
       panels: zhPanels,

@@ -1,0 +1,6 @@
+{
+  "captureHorizontalScroll": "采集横向滚动条",
+  "hideCaptureProgress": "隐藏采集进度",
+  "memory": "内存",
+  "memoryUsed": "已用内存 {{percent}}%"
+}

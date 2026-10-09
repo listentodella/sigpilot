@@ -1,0 +1,6 @@
+{
+  "captureHorizontalScroll": "Capture horizontal scroll",
+  "hideCaptureProgress": "Hide capture progress",
+  "memory": "Memory",
+  "memoryUsed": "Memory used {{percent}}%"
+}

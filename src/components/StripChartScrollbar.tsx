@@ -1,5 +1,6 @@
 import { PointerEvent, useEffect, useRef, useState } from "react";
 import { useSessionViewport } from "../lib/useSessionViewport";
+import { useTranslation } from "react-i18next";
 
 interface StripChartScrollbarProps {
   onViewportStartChange: (startSample: number) => void;
@@ -65,6 +66,7 @@ export function StripChartScrollbar({
   viewportSamples,
   viewportStart,
 }: StripChartScrollbarProps) {
+  const { t } = useTranslation("graph");
   const trackRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ pointerId: number; startLeftPx: number; startX: number } | null>(null);
   const animationFrameRef = useRef<number | null>(null);
@@ -144,7 +146,7 @@ export function StripChartScrollbar({
 
   return (
     <div
-      aria-label="Capture horizontal scroll"
+      aria-label={t("captureHorizontalScroll")}
       aria-orientation="horizontal"
       aria-valuemax={Math.max(0, totalSamples - viewport.samples)}
       aria-valuemin={0}

@@ -2,6 +2,7 @@ import { ChevronRight, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { DecoderBackendKind, SigrokDecoderCatalogItem } from "../lib/api";
 import { analyzerCatalogChoiceKey, sigrokCatalogRunnerLabel } from "../lib/analyzers";
+import { useTranslation } from "react-i18next";
 
 export interface AnalyzerLibraryChoice {
   backend: DecoderBackendKind;
@@ -19,6 +20,7 @@ export function AnalyzerLibraryMenu({
   choices: AnalyzerLibraryChoice[];
   onSelect: (choice: AnalyzerLibraryChoice) => void;
 }) {
+  const { t } = useTranslation("analyzers");
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLowerCase();
   const filteredChoices = useMemo(
@@ -70,13 +72,13 @@ export function AnalyzerLibraryMenu({
       <label className="analyzerLibrarySearch">
         <Search size={13} />
         <input
-          aria-label="Search analyzers"
+          aria-label={t("searchAnalyzers")}
           autoCapitalize="none"
           autoComplete="off"
           autoCorrect="off"
           inputMode="search"
           name="sigpilot-analyzer-library-search"
-          placeholder="Search decoders"
+          placeholder={t("searchDecoders")}
           spellCheck={false}
           type="search"
           value={query}
@@ -114,7 +116,7 @@ export function AnalyzerLibraryMenu({
             )}
           </button>
         ))}
-        {!activeGroup && <div className="analyzerLibraryEmpty">No decoders found</div>}
+        {!activeGroup && <div className="analyzerLibraryEmpty">{t("noDecodersFound")}</div>}
       </div>
     </div>
   );

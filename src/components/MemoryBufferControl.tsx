@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 import { PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CaptureMemoryUsage } from "../lib/api";
+import { useTranslation } from "react-i18next";
 
 interface MemoryBufferControlProps {
   busy: boolean;
@@ -19,6 +20,7 @@ interface DragState {
 }
 
 export function MemoryBufferControl({ busy, memoryUsage }: MemoryBufferControlProps) {
+  const { t } = useTranslation("graph");
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -81,20 +83,20 @@ export function MemoryBufferControl({ busy, memoryUsage }: MemoryBufferControlPr
       style={position ? { bottom: "auto", left: position.left, right: "auto", top: position.top } : undefined}
     >
       <button
-        aria-label="Hide capture progress"
+        aria-label={t("hideCaptureProgress")}
         className="captureMemoryProgressClose"
         onClick={() => setOpen(false)}
-        title="Hide capture progress"
+        title={t("hideCaptureProgress")}
         type="button"
       >
         <X size={12} strokeWidth={2} />
       </button>
       <div className="captureMemoryProgressSpacer" />
       <div className="captureMemoryProgressLabels">
-        <span>Memory</span>
+        <span>{t("memory")}</span>
         <span>{memoryLabel}</span>
       </div>
-      <div className="captureMemoryProgressTrack" aria-label={`Memory used ${fillPercent.toFixed(1)}%`}>
+      <div className="captureMemoryProgressTrack" aria-label={t("memoryUsed", { percent: fillPercent.toFixed(1) })}>
         <div className="captureMemoryProgressFill" style={{ width: `${fillPercent}%` }} />
       </div>
     </div>,
