@@ -77,3 +77,44 @@ test("a live session follows the tail rather than fitting the whole capture", ()
   assert.equal(view.samples, 250_000);
   assert.equal(view.start_sample, 0);
 });
+
+test("a zoom past the preview ceiling does not translate the view", () => {
+  const sessionId = "preview-zoom-ceiling";
+  previewSetViewLimits(sessionId, {
+    live: false,
+    maximum_samples: null,
+    sample_rate_hz: 25_000_000,
+  });
+
+  // Settle on the widest span this session may show, whatever the preview
+  // capture's length is: a `set` far past any ceiling comes back clamped to it.
+  // Asking for the ceiling instead of computing it keeps the test independent of
+  // the demo capture's size.
+  const wide = previewApplyViewIntent(sessionId, { kind: "set", samples: 1e12, start_sample: 0 });
+  const atCeiling = previewApplyViewIntent(sessionId, {
+    kind: "set",
+    samples: wide.samples,
+    start_sample: 0,
+  });
+  assert.equal(atCeiling.start_sample, 0);
+
+  // Keep scrolling out. The span cannot grow, so the start must not move either:
+  // otherwise every notch past the end of the range slides the trace sideways.
+  let view = atCeiling;
+  for (let notch = 0; notch < 6; notch += 1) {
+    view = previewApplyViewIntent(sessionId, {
+      kind: "zoom",
+      factor: 1.4142135623730951,
+      anchor_ratio: 0.1342925659472422,
+    });
+    assert.equal(
+      view.samples,
+      atCeiling.samples,
+      `notch ${notch} changed the span past the ceiling`,
+    );
+    assert.ok(
+      Math.abs(view.start_sample - atCeiling.start_sample) < 1,
+      `notch ${notch} slid the view: start went from ${atCeiling.start_sample} to ${view.start_sample}`,
+    );
+  }
+});

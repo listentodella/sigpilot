@@ -17,7 +17,7 @@
 // backend filters on, so "capture is quiet, transport is loud" is one setting
 // the user can express instead of a level that drowns the module they care
 // about.
-import { frontendLog } from "./api";
+import { frontendLog } from "./api.ts";
 
 export const LOG_LEVELS = ["error", "warn", "info", "debug", "trace"] as const;
 

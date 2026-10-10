@@ -3294,9 +3294,17 @@ impl GraphSession {
                 // always an opaque column. This is the same scaling the legacy
                 // render path applies as `pixelScale` (App.tsx); the frame loop
                 // had dropped it.
+                //
+                // `floor`, not `ceil`: the budget must never exceed the screen
+                // pixels the data occupies (`screen_px * data_fraction`), or the
+                // blit minifies and can still drop the burst's column. Rounding
+                // up broke the guarantee at any width whose data footprint is
+                // fractional — a 1668-px canvas puts the data in 667.2 px, and
+                // `ceil` handed the raster 668 columns. Flooring keeps the blit
+                // magnifying by less than one column at every width.
                 let data_fraction =
                     (sample_count as f64 / data_view.samples.max(1.0)).clamp(0.0, 1.0);
-                let pixels = ((f64::from(request.waveform.pixels) * data_fraction).ceil() as u32)
+                let pixels = ((f64::from(request.waveform.pixels) * data_fraction).floor() as u32)
                     .clamp(1, request.waveform.pixels.max(1));
                 (
                     data_view,
@@ -9961,74 +9969,95 @@ mod tests {
     /// The invariant that rules that out is one bin per screen pixel the data
     /// actually occupies: `tile.pixels * viewport <= screen_px * sample_count`.
     /// At equality the blit is 1:1 and the burst's bin is an opaque column.
+    ///
+    /// It has to hold at every canvas width, not just the convenient ones, so
+    /// this walks widths whose data footprint is *not* a whole number of
+    /// columns: 40% of 1668 px is 667.2 px, and a budget that rounds up hands
+    /// the raster 668 columns, which the blit then minifies away — the same
+    /// dropped burst, just from a smaller overshoot. 1000 and 1920 are exact
+    /// controls; 1001 is one past one.
     #[test]
     fn a_short_event_survives_zoom_out_because_the_tile_keeps_one_bin_per_screen_pixel() {
         let total = 1_000_000u64;
         let sample_rate_hz = 25_000_000.0;
-        let screen_px = 1_000u32;
         // 2.5x the data: the widest a DataLimited viewport may be, so the data
         // covers 40% of the canvas and the overshoot is at its worst.
         let viewport = view_state::maximum_capture_view_samples(total);
 
-        let mut metadata = demo_capture(1, total).metadata;
-        metadata.sample_count = total;
-        let session = GraphSession::default();
-        session
-            .replace_sparse_capture(SparseCaptureData {
-                metadata,
-                channels: vec![SparseDigitalChannel {
-                    channel: 0,
-                    initial_high: false,
-                    // A one-sample pulse, deliberately on a bin boundary of the
-                    // fixed binning (bin width 2_500).
-                    transitions: vec![500_000, 500_001],
-                }],
-            })
-            .unwrap();
-        session.set_view_limits(ViewLimits {
-            live: false,
-            maximum_samples: Some(viewport),
-            sample_rate_hz,
-        });
+        for screen_px in [1_000u32, 1_001, 1_668, 1_920] {
+            let mut metadata = demo_capture(1, total).metadata;
+            metadata.sample_count = total;
+            let session = GraphSession::default();
+            session
+                .replace_sparse_capture(SparseCaptureData {
+                    metadata,
+                    channels: vec![SparseDigitalChannel {
+                        channel: 0,
+                        initial_high: false,
+                        // A one-sample pulse, deliberately on a bin boundary of
+                        // the fixed binning (bin width 2_500).
+                        transitions: vec![500_000, 500_001],
+                    }],
+                })
+                .unwrap();
+            session.set_view_limits(ViewLimits {
+                live: false,
+                maximum_samples: Some(viewport),
+                sample_rate_hz,
+            });
 
-        let response = session
-            .render_frame(&GraphFrameRequest {
-                frame_id: 1,
-                waveform: WaveformRequest {
-                    start_sample: 0,
-                    sample_count: 0,
-                    pixels: screen_px,
-                    channels: vec![0],
-                },
-                include_tile: true,
-                analyzer_view: None,
-                analyzers: Vec::new(),
-                view: Some(ViewIntent::Set {
-                    start_sample: 0.0,
-                    samples: viewport,
-                }),
-            })
-            .unwrap();
-        let tile = response.tile;
+            let response = session
+                .render_frame(&GraphFrameRequest {
+                    frame_id: 1,
+                    waveform: WaveformRequest {
+                        start_sample: 0,
+                        sample_count: 0,
+                        pixels: screen_px,
+                        channels: vec![0],
+                    },
+                    include_tile: true,
+                    analyzer_view: None,
+                    analyzers: Vec::new(),
+                    view: Some(ViewIntent::Set {
+                        start_sample: 0.0,
+                        samples: viewport,
+                    }),
+                })
+                .unwrap();
+            let tile = response.tile;
 
-        let viewport_samples_per_pixel = viewport / f64::from(screen_px);
-        assert!(
-            tile.samples_per_pixel >= viewport_samples_per_pixel - 0.5,
-            "the data was binned at {} samples/px for a {viewport_samples_per_pixel}-samples/px \
-             screen, so the raster is {:.1}x finer than the data's footprint and the blit will \
-             minify it",
-            tile.samples_per_pixel,
-            viewport_samples_per_pixel / tile.samples_per_pixel,
-        );
+            // The invariant, stated exactly. The raster must not be finer than
+            // the screen pixels the data occupies, or the blit minifies and the
+            // burst's column can be dropped. `ceil` fails this at 1668 px (668
+            // columns for 667.2 px); `floor` holds at every width.
+            let data_px = tile.sample_count as f64 / viewport * f64::from(screen_px);
+            assert!(
+                f64::from(tile.pixels) <= data_px,
+                "at {screen_px}px the data covers {data_px:.2}px but the tile has {} columns, \
+                 so the blit minifies it and can drop the burst",
+                tile.pixels,
+            );
 
-        // The envelope itself is intact either way — this pins that the fix buys
-        // visibility without touching what a bin means.
-        let bins = unpack_digital_bins(tile.channels[0].packed_bins.as_deref().unwrap());
-        let bin = (500_000.0 / tile.samples_per_pixel) as usize;
-        assert!(
-            bins[bin].has_high && bins[bin].has_low,
-            "the pulse's bin lost its envelope: it would be invisible even at 1:1"
-        );
+            let viewport_samples_per_pixel = viewport / f64::from(screen_px);
+            assert!(
+                tile.samples_per_pixel >= viewport_samples_per_pixel - 0.5,
+                "at {screen_px}px the data was binned at {} samples/px for a \
+                 {viewport_samples_per_pixel}-samples/px screen, so the raster is {:.1}x finer \
+                 than the data's footprint and the blit will minify it",
+                tile.samples_per_pixel,
+                viewport_samples_per_pixel / tile.samples_per_pixel,
+            );
+
+            // The envelope itself is intact either way — this pins that the fix
+            // buys visibility without touching what a bin means.
+            let bins = unpack_digital_bins(tile.channels[0].packed_bins.as_deref().unwrap());
+            let bin = (500_000.0 / tile.samples_per_pixel) as usize;
+            assert!(
+                bins[bin].has_high && bins[bin].has_low,
+                "at {screen_px}px the pulse's bin lost its envelope: it would be invisible even \
+                 at 1:1"
+            );
+        }
     }
 
     #[test]

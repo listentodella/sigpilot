@@ -1732,9 +1732,33 @@ function previewSessionView(sessionId: string): SessionView {
   return { samples: normalized.samples, start_sample: normalized.start };
 }
 
+/**
+ * Hold a zoom at the span this session is actually allowed to reach.
+ *
+ * The anchor arithmetic in `applyPreviewIntent` turns a span into a start, so
+ * running it against a span the normalizer is about to reduce leaves the
+ * overshoot behind as a start offset: the span stops changing and the view
+ * translates instead of stopping. Clamping the *factor* keeps the two in step —
+ * at the limit the factor settles at 1.0 and the arithmetic becomes an identity.
+ * This is the same defect the Rust session had, and the same fix.
+ *
+ * Note the difference from `WaveformCanvas`'s wheel handler, which clamps the
+ * span first and anchors with the clamped value: both are correct, but only
+ * because each anchors against the span it will actually show. Clamping the
+ * result *after* anchoring, which is what this path used to do, is the one that
+ * drifts.
+ */
+function clampPreviewZoom(sessionId: string, current: { samples: number; start: number }, intent: ViewIntent) {
+  if (intent.kind !== "zoom") return intent;
+  const currentSamples = Math.max(1, current.samples);
+  const requested = Math.max(1, currentSamples * intent.factor);
+  const bounded = normalizePreviewView(sessionId, current.start, requested).samples;
+  return { ...intent, factor: bounded / currentSamples };
+}
+
 function applyPreviewViewIntent(sessionId: string, intent: ViewIntent): SessionView {
   const current = previewViews.get(sessionId) ?? defaultPreviewView(sessionId);
-  const next = applyPreviewIntent(current, intent);
+  const next = applyPreviewIntent(current, clampPreviewZoom(sessionId, current, intent));
   const normalized = normalizePreviewView(sessionId, next.start, next.samples);
   // A gesture is a real decision, so this one is remembered.
   previewViews.set(sessionId, normalized);

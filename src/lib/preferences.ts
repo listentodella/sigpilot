@@ -3,7 +3,7 @@ import {
   isLogLevel,
   normalizeLogModuleLevels,
   type LogLevel,
-} from "./logger";
+} from "./logger.ts";
 import { migrateLegacyKey } from "./legacyStorage.ts";
 
 export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
