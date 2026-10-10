@@ -914,22 +914,61 @@ export async function applyBackendLogLevel(level: string): Promise<string> {
   }
 }
 
-export async function readLogPath(): Promise<string | null> {
+export async function readLogStatus(): Promise<LogStatus | null> {
   if (!isTauriRuntime()) return null;
   try {
-    const path = await invoke<string | null>("log_path");
-    return path ?? null;
+    return await invoke<LogStatus>("log_status");
   } catch {
     return null;
   }
 }
 
+export async function setLogPaused(paused: boolean): Promise<void> {
+  await callBackend("set_log_paused", { paused });
+}
+
+export async function clearLogs(): Promise<void> {
+  await callBackend("clear_logs");
+}
+
 /**
- * Writes the diagnostics bundle: the webview log handed in by the caller plus
- * everything the backend has on disk.
+ * The diagnostics text, for the clipboard.
+ *
+ * The frontend passes its own log because the webview is the only place it
+ * exists; the backend adds version, platform and every retained log file.
+ */
+export async function readDiagnostics(frontendLogText: string, maxBytes?: number): Promise<string> {
+  return callBackend<string>("read_diagnostics", {
+    frontendLog: frontendLogText,
+    maxBytes: maxBytes ?? null,
+  });
+}
+
+/**
+ * Writes the diagnostics bundle to a path the user chose.
+ *
+ * Secondary to the clipboard: attaching a file is still the better move when
+ * the report goes somewhere that takes attachments.
  */
 export async function exportLogs(path: string, frontendLogText: string): Promise<void> {
   await callBackend("export_logs", { frontendLog: frontendLogText, path });
+}
+
+export interface LogFileInfo {
+  name: string;
+  bytes: number;
+}
+
+export interface LogStatus {
+  available: boolean;
+  currentFile: string;
+  directory: string;
+  files: LogFileInfo[];
+  level: string;
+  maxFileBytes: number;
+  maxFiles: number;
+  paused: boolean;
+  totalBytes: number;
 }
 
 async function callBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {

@@ -477,16 +477,39 @@ fn log_level() -> String {
     logging::level_to_str(logging::current_level()).to_string()
 }
 
-/// Where the backend log file lives, so the panel can show (and copy) it.
+/// Where the backend log files live and how much they currently take, so the
+/// panel can state the cost instead of leaving the user to guess.
 #[tauri::command]
-fn log_path() -> Option<String> {
-    logging::log_path().map(|path| path.display().to_string())
+fn log_status() -> logging::LogStatus {
+    logging::status()
+}
+
+/// Stop writing to disk without stopping the app.
+#[tauri::command]
+fn set_log_paused(paused: bool) {
+    logging::set_paused(paused);
+}
+
+#[tauri::command]
+fn clear_logs() {
+    logging::clear();
+}
+
+/// The diagnostics text, for the clipboard.
+///
+/// The frontend hands over its own log because the webview is the only place it
+/// exists; everything else is read from disk here. This is the primary way a
+/// user shares logs — pasting into an issue beats choosing a path, finding it
+/// in a file manager and attaching it.
+#[tauri::command]
+fn read_diagnostics(frontend_log: String, max_bytes: Option<u64>) -> String {
+    logging::diagnostics(&frontend_log, max_bytes.unwrap_or(logging::DIAGNOSTICS_BYTES))
 }
 
 /// Write the diagnostics bundle the user chose a path for.
 ///
-/// The frontend hands over its own log because the webview is the only place it
-/// exists; everything else is read from disk here.
+/// Kept alongside the clipboard route because attaching a file is still the
+/// better move when the report goes somewhere that takes attachments.
 #[tauri::command]
 fn export_logs(path: String, frontend_log: String) -> CommandResult<()> {
     let path = PathBuf::from(&path);
@@ -504,7 +527,7 @@ fn export_logs(path: String, frontend_log: String) -> CommandResult<()> {
     {
         fs::create_dir_all(parent).map_err(to_string)?;
     }
-    fs::write(path, logging::export_bundle(&frontend_log)).map_err(to_string)
+    fs::write(path, logging::diagnostics(&frontend_log, logging::DIAGNOSTICS_BYTES)).map_err(to_string)
 }
 
 /// Publishes capture UI updates from a thread of its own.
@@ -2298,7 +2321,10 @@ fn main() {
             frontend_log,
             set_log_level,
             log_level,
-            log_path,
+            log_status,
+            set_log_paused,
+            clear_logs,
+            read_diagnostics,
             export_logs,
             list_devices,
             device_capabilities,

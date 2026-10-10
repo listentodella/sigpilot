@@ -23,6 +23,9 @@ export interface UiPreferences {
   animationScale: number;
   /** Verbosity of the frontend log; the backend level follows it. */
   logLevel: LogLevel;
+  /** Stop writing logs to disk. Off by default: the run that needs a log is
+   *  usually the one that already happened. */
+  logPaused: boolean;
   matchChannelColors: boolean;
   panToTrigger: boolean;
   renameTabToSavedCapture: boolean;
@@ -48,6 +51,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   locale: DEFAULT_LOCALE,
   animationScale: 1,
   logLevel: DEFAULT_LOG_LEVEL,
+  logPaused: false,
   matchChannelColors: true,
   panToTrigger: true,
   renameTabToSavedCapture: false,
@@ -65,6 +69,8 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
         ? Math.min(ANIMATION_SCALE_MAX, Math.max(ANIMATION_SCALE_MIN, candidate.animationScale))
         : DEFAULT_UI_PREFERENCES.animationScale,
     logLevel: isLogLevel(candidate.logLevel) ? candidate.logLevel : DEFAULT_UI_PREFERENCES.logLevel,
+    logPaused:
+      typeof candidate.logPaused === "boolean" ? candidate.logPaused : DEFAULT_UI_PREFERENCES.logPaused,
     matchChannelColors:
       typeof candidate.matchChannelColors === "boolean"
         ? candidate.matchChannelColors

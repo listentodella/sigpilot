@@ -15,19 +15,23 @@ import { HelpHint } from "./HelpHint";
  */
 export function AdvancedOptionsPanel({
   diagnostics,
-  logPath,
+  logStatus,
   onChangePreferences,
-  onExportLogs,
+  onClearLogs,
+  onCopyLogs,
   onReset,
+  onSaveLogs,
   preferences,
 }: AdvancedOptionsSource & { onReset: () => void }) {
   const { t } = useTranslation("advanced");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const sections = buildAdvancedSections({
     diagnostics,
-    logPath,
+    logStatus,
     onChangePreferences,
-    onExportLogs,
+    onClearLogs,
+    onCopyLogs,
+    onSaveLogs,
     preferences,
   });
 

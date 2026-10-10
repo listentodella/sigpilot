@@ -23,6 +23,7 @@ serde_json.workspace = true
 tauri.workspace = true
 tauri-plugin-clipboard-manager.workspace = true
 tauri-plugin-dialog.workspace = true
+time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

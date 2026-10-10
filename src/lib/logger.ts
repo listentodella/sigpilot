@@ -33,6 +33,7 @@ export function isLogLevel(value: unknown): value is LogLevel {
 }
 
 let activeLevel: LogLevel = DEFAULT_LOG_LEVEL;
+let paused = false;
 
 export function setLogLevel(level: LogLevel) {
   activeLevel = level;
@@ -40,6 +41,21 @@ export function setLogLevel(level: LogLevel) {
 
 export function logLevel(): LogLevel {
   return activeLevel;
+}
+
+/**
+ * Stop accumulating.
+ *
+ * Pausing is about the disk, but the webview buffer is memory the user is
+ * paying for too, and a paused run that keeps a full ring is a bug report
+ * about a different program.
+ */
+export function setPaused(value: boolean) {
+  paused = value;
+}
+
+export function isPaused() {
+  return paused;
 }
 
 export interface LogEntry {
@@ -55,6 +71,7 @@ const RING_CAPACITY = 2000;
 const ring: LogEntry[] = [];
 
 export function logRecord(level: LogLevel, scope: string, message: string) {
+  if (paused) return;
   if (LEVEL_RANK[level] > LEVEL_RANK[activeLevel]) return;
   ring.push({ at: Date.now(), level, message, scope });
   if (ring.length > RING_CAPACITY) ring.splice(0, ring.length - RING_CAPACITY);

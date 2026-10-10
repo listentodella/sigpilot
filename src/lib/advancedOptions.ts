@@ -1,6 +1,7 @@
 import { readFrameState } from "./frameStore";
 import { formatBytes, formatRate, formatSamples } from "./format";
 import { LOG_LEVELS, type LogLevel } from "./logger";
+import type { LogStatus } from "./api";
 import {
   ANIMATION_SCALE_MAX,
   ANIMATION_SCALE_MIN,
@@ -83,10 +84,14 @@ export interface AdvancedOptionsSource {
   preferences: UiPreferences;
   onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
   diagnostics?: AdvancedDiagnostics;
-  /** Writes the diagnostics bundle to a path the user picks. */
-  onExportLogs?: () => void | Promise<void>;
-  /** Where the backend log file lives, shown so it can be found by hand. */
-  logPath?: string | null;
+  /** Copies the full diagnostics bundle to the clipboard. */
+  onCopyLogs?: () => void | Promise<void>;
+  /** Writes the same bundle to a path the user picks. */
+  onSaveLogs?: () => void | Promise<void>;
+  /** Deletes the retained log files and starts a fresh one. */
+  onClearLogs?: () => void | Promise<void>;
+  /** Where the logs live and what they currently cost. */
+  logStatus?: LogStatus | null;
 }
 
 function formatSpanSeconds(seconds: number): string {
@@ -157,15 +162,23 @@ function buildDiagnosticsSection(diagnostics: AdvancedDiagnostics): AdvancedSect
  * The logging block. Frontend and backend share one verbosity setting because a
  * bundle that is half-verbose is worse than useless: the layer that stayed quiet
  * is usually the one with the answer.
+ *
+ * Recording is on by default and bounded, not opt-in — see the reasoning on
+ * `set_paused` in the backend. What the panel has to do is make the cost
+ * visible and give the user one obvious way to get the logs out.
  */
 function buildLoggingSection({
-  logPath,
-  onExportLogs,
+  logStatus,
+  onClearLogs,
+  onCopyLogs,
+  onSaveLogs,
   preferences,
   setPreference,
 }: {
-  logPath?: string | null;
-  onExportLogs?: () => void | Promise<void>;
+  logStatus?: LogStatus | null;
+  onClearLogs?: () => void | Promise<void>;
+  onCopyLogs?: () => void | Promise<void>;
+  onSaveLogs?: () => void | Promise<void>;
   preferences: UiPreferences;
   setPreference: <K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) => void;
 }): AdvancedSection {
@@ -181,18 +194,47 @@ function buildLoggingSection({
         set: (value) => setPreference("logLevel", value as LogLevel),
       },
       {
-        hintKey: "logPathHint",
-        id: "logPath",
-        kind: "readonly",
-        labelKey: "logPath",
-        value: () => logPath ?? "—",
+        get: () => preferences.logPaused,
+        hintKey: "logPausedHint",
+        id: "logPaused",
+        kind: "toggle",
+        labelKey: "logPaused",
+        set: (value) => setPreference("logPaused", value),
       },
       {
-        hintKey: "exportLogsHint",
-        id: "exportLogs",
+        hintKey: "logUsageHint",
+        id: "logUsage",
+        kind: "readonly",
+        // Not a translated string here: the panel's readonly rows take a plain
+        // value, so the shape is assembled in the app's language via the
+        // `logUsage` key below.
+        labelKey: "logUsage",
+        value: () => {
+          if (!logStatus?.available) return "—";
+          return `${formatBytes(logStatus.totalBytes)} / ${formatBytes(logStatus.maxFileBytes * logStatus.maxFiles)}`;
+        },
+      },
+      {
+        hintKey: "copyLogsHint",
+        id: "copyLogs",
         kind: "button",
-        labelKey: "exportLogs",
-        run: () => onExportLogs?.(),
+        labelKey: "copyLogs",
+        run: () => onCopyLogs?.(),
+      },
+      {
+        hintKey: "saveLogsHint",
+        id: "saveLogs",
+        kind: "button",
+        labelKey: "saveLogs",
+        run: () => onSaveLogs?.(),
+      },
+      {
+        danger: true,
+        hintKey: "clearLogsHint",
+        id: "clearLogs",
+        kind: "button",
+        labelKey: "clearLogs",
+        run: () => onClearLogs?.(),
       },
     ],
     id: "logging",
@@ -202,9 +244,11 @@ function buildLoggingSection({
 
 export function buildAdvancedSections({
   diagnostics,
-  logPath,
+  logStatus,
   onChangePreferences,
-  onExportLogs,
+  onClearLogs,
+  onCopyLogs,
+  onSaveLogs,
   preferences,
 }: AdvancedOptionsSource): AdvancedSection[] {
   const setPreference = <K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) =>
@@ -272,7 +316,14 @@ export function buildAdvancedSections({
         },
       ],
     },
-    buildLoggingSection({ logPath, onExportLogs, preferences, setPreference }),
+    buildLoggingSection({
+      logStatus,
+      onClearLogs,
+      onCopyLogs,
+      onSaveLogs,
+      preferences,
+      setPreference,
+    }),
     ...(diagnostics ? [buildDiagnosticsSection(diagnostics)] : []),
   ];
 }

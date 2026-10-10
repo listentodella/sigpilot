@@ -7,27 +7,36 @@
 //!
 //! * a `tracing` subscriber, so the `tracing::*` calls already spread through
 //!   the crates stop being silently dropped, and
-//! * a log file the user can hand over when something goes wrong.
+//! * log files the user can hand over when something goes wrong.
 //!
 //! The level comes from `SIGPILOT_LOG` (`error`, `warn`, `info`, `debug`,
 //! `trace`). Without it the default is `debug` in a debug build and `info`
 //! otherwise, so a development run is verbose by default and a release build is
-//! not.
+//! not. It can also be changed while the app runs; see [`set_level`].
 //!
-//! Everything goes to one file per run, and to stderr as well when stderr is a
-//! terminal, which is what `tauri dev` shows.
+//! # Why logging is always on
 //!
-//! The level is also changeable while the app is running. A user hitting a
-//! hardware bug cannot restart with `SIGPILOT_LOG=trace` set without losing the
-//! state that reproduces it, so the subscriber is installed through a `reload`
-//! layer that swaps the filter in place.
+//! An opt-in switch sounds considerate until you need the log: the moment you
+//! wish you had recording enabled is *after* the failure, and you cannot turn it
+//! on for a run that already happened. So recording is on by default and the
+//! disk cost is bounded instead — see [`MAX_FILE_BYTES`] and [`MAX_FILES`].
+//! [`set_paused`] exists for the case that does need silence, like leaving the
+//! app open for a multi-hour capture.
+//!
+//! # Why each launch gets its own file
+//!
+//! Overwriting would destroy exactly the evidence a crash report needs: the
+//! records from the run that died. Files are named
+//! `sigpilot-<utc timestamp>-p<part>.log`, which sorts chronologically by name
+//! and makes the oldest easy to drop.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use time::OffsetDateTime;
 use tracing::Level;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::time::SystemTime;
@@ -39,8 +48,25 @@ use tracing_subscriber::util::SubscriberInitExt;
 /// Environment variable holding the log level.
 const LEVEL_ENV: &str = "SIGPILOT_LOG";
 
-static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// Prefix every file we own starts with, so pruning never touches anything else
+/// that happens to live in the log directory.
+const LOG_PREFIX: &str = "sigpilot-";
+
+/// Ceiling on one file. Past it the writer rolls over to a new part.
+pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How many files to keep across all launches, so the worst case on disk is
+/// `MAX_FILE_BYTES * MAX_FILES` and the user never has to think about it.
+pub const MAX_FILES: usize = 5;
+
+/// How much of the retained logs a diagnostics bundle carries. A session left at
+/// `trace` can fill every file, and the part that explains a bug is at the end.
+pub const DIAGNOSTICS_BYTES: u64 = 512 * 1024;
+
+static LOG_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+static SINK: OnceLock<Arc<Mutex<Option<Sink>>>> = OnceLock::new();
 static LEVEL: AtomicU8 = AtomicU8::new(LEVEL_INFO);
+static PAUSED: AtomicBool = AtomicBool::new(false);
 static RELOAD_HANDLE: OnceLock<Mutex<Option<LevelHandle>>> = OnceLock::new();
 
 // `Level` has no stable numeric ordering to rely on, so the atomic holds a rank
@@ -117,17 +143,149 @@ pub fn set_level(level: Level) {
     let _ = handle.modify(|filter| *filter = LevelFilter::from_level(level));
 }
 
-/// Path of the log file, when logging is up.
-pub fn log_path() -> Option<&'static PathBuf> {
-    LOG_PATH.get()
+/// Stop writing to the file without stopping the app. Stderr keeps going, so a
+/// `tauri dev` run still shows what is happening.
+pub fn set_paused(paused: bool) {
+    PAUSED.store(paused, Ordering::Relaxed);
 }
 
-/// How much of the log file an export carries. A session left at `trace` can
-/// write hundreds of megabytes, and the part that explains a bug is always at
-/// the end.
-const EXPORT_TAIL_BYTES: u64 = 16 * 1024 * 1024;
+pub fn is_paused() -> bool {
+    PAUSED.load(Ordering::Relaxed)
+}
 
-fn read_tail(path: &std::path::Path, max_bytes: u64) -> io::Result<String> {
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogFileInfo {
+    pub name: String,
+    pub bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogStatus {
+    pub available: bool,
+    pub current_file: String,
+    pub directory: String,
+    pub files: Vec<LogFileInfo>,
+    pub level: String,
+    pub max_file_bytes: u64,
+    pub max_files: usize,
+    pub paused: bool,
+    pub total_bytes: u64,
+}
+
+/// Everything the advanced panel needs to describe the log honestly.
+pub fn status() -> LogStatus {
+    let directory = log_directory();
+    let mut files = Vec::new();
+    let mut total_bytes = 0;
+    for path in log_files_newest_first(&directory) {
+        let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        total_bytes += bytes;
+        files.push(LogFileInfo {
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            bytes,
+        });
+    }
+    LogStatus {
+        available: SINK.get().is_some_and(|sink| sink.lock().is_ok_and(|sink| sink.is_some())),
+        current_file: log_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        directory: directory.display().to_string(),
+        files,
+        level: level_to_str(current_level()).to_string(),
+        max_file_bytes: MAX_FILE_BYTES,
+        max_files: MAX_FILES,
+        paused: is_paused(),
+        total_bytes,
+    }
+}
+
+/// Delete every retained file and start a fresh one.
+pub fn clear() {
+    let directory = log_directory();
+    for path in log_files_newest_first(&directory) {
+        let _ = fs::remove_file(path);
+    }
+    let Some(slot) = SINK.get() else { return };
+    let Ok(mut guard) = slot.lock() else { return };
+    let Some(sink) = guard.as_mut() else { return };
+    sink.part = 0;
+    sink.open_current();
+}
+
+/// Path of the file currently being written, when logging is up.
+pub fn log_path() -> Option<PathBuf> {
+    let sink = SINK.get()?.lock().ok()?;
+    let sink = sink.as_ref()?;
+    Some(sink.current_path())
+}
+
+/// UTC timestamp for a file name.
+///
+/// UTC rather than local so the name is reproducible in a bug report whatever
+/// the reporter's timezone is.
+fn file_stamp(epoch_seconds: i64) -> String {
+    let Ok(stamp) = OffsetDateTime::from_unix_timestamp(epoch_seconds) else {
+        return "00000000T000000Z".to_string();
+    };
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        stamp.year(),
+        u8::from(stamp.month()),
+        stamp.day(),
+        stamp.hour(),
+        stamp.minute(),
+        stamp.second()
+    )
+}
+
+fn log_file_name(stamp: &str, part: u32) -> String {
+    // Zero-padded so a plain string sort is a chronological sort, and the part
+    // suffix sorts after the base name rather than before it.
+    format!("{LOG_PREFIX}{stamp}-p{part:03}.log")
+}
+
+fn now_epoch_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn is_log_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with(LOG_PREFIX) && name.ends_with(".log"))
+        .unwrap_or(false)
+}
+
+fn log_files_newest_first(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_log_file(path))
+        .collect();
+    // Names encode the timestamp and the part, both zero-padded, so byte order
+    // is time order.
+    files.sort();
+    files.reverse();
+    files
+}
+
+fn prune(directory: &Path) {
+    let files = log_files_newest_first(directory);
+    for stale in files.into_iter().skip(MAX_FILES) {
+        let _ = fs::remove_file(stale);
+    }
+}
+
+fn read_tail(path: &Path, max_bytes: u64) -> io::Result<String> {
     use std::io::{BufRead, Read, Seek, SeekFrom};
 
     let length = fs::metadata(path)?.len();
@@ -148,16 +306,16 @@ fn read_tail(path: &std::path::Path, max_bytes: u64) -> io::Result<String> {
     Ok(contents)
 }
 
-/// The single file a user attaches to a bug report.
+/// The text a user pastes into a bug report.
 ///
 /// Every layer lands in it: the webview's own record (handed in by the
-/// frontend, which is the only place it exists), then the backend file. One
-/// plain-text file beats an archive here — it can be pasted, grepped and read
-/// without unpacking.
-pub fn export_bundle(frontend_log: &str) -> String {
+/// frontend, which is the only place it exists), then the retained backend
+/// files. One plain-text blob beats an archive here — it pastes, it greps, and
+/// it needs no unpacking.
+pub fn diagnostics(frontend_log: &str, max_bytes: u64) -> String {
     let mut out = String::new();
     out.push_str("=== SigPilot diagnostics ===\n");
-    out.push_str(&format!("generated: {}\n", chrono_like_timestamp()));
+    out.push_str(&format!("generated (unix): {}\n", now_epoch_seconds()));
     out.push_str(&format!("version: {}\n", env!("CARGO_PKG_VERSION")));
     out.push_str(&format!(
         "platform: {} {} ({})\n",
@@ -166,6 +324,7 @@ pub fn export_bundle(frontend_log: &str) -> String {
         std::env::consts::FAMILY
     ));
     out.push_str(&format!("log level: {}\n", level_to_str(current_level())));
+    out.push_str(&format!("recording paused: {}\n", is_paused()));
 
     out.push_str("\n--- frontend log (webview) ---\n");
     let frontend = frontend_log.trim();
@@ -176,28 +335,42 @@ pub fn export_bundle(frontend_log: &str) -> String {
         out.push('\n');
     }
 
+    let files = log_files_newest_first(&log_directory());
     out.push_str("\n--- backend log ---\n");
-    match log_path() {
-        Some(path) => {
-            out.push_str(&format!("file: {}\n\n", path.display()));
-            match read_tail(path, EXPORT_TAIL_BYTES) {
-                Ok(contents) if contents.trim().is_empty() => out.push_str("(empty)\n"),
-                Ok(contents) => out.push_str(&contents),
-                Err(error) => out.push_str(&format!("(unreadable: {error})\n")),
-            }
+    if files.is_empty() {
+        out.push_str("(no log files)\n");
+        return out;
+    }
+    // Share the budget across the retained files so a deep session cannot
+    // produce a paste that no issue tracker will accept.
+    let per_file = (max_bytes / files.len() as u64).max(4096);
+    let mut budget = max_bytes;
+    for (index, path) in files.iter().enumerate() {
+        if budget == 0 {
+            out.push_str(&format!(
+                "... ({} earlier file(s) omitted, {max_bytes} byte budget reached)\n",
+                files.len() - index
+            ));
+            break;
         }
-        None => out.push_str("(logging unavailable)\n"),
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push_str(&format!("\n[{name}]\n"));
+        match read_tail(path, per_file.min(budget)) {
+            Ok(contents) if contents.trim().is_empty() => out.push_str("(empty)\n"),
+            Ok(contents) => {
+                budget = budget.saturating_sub(contents.len() as u64);
+                out.push_str(&contents);
+                if !contents.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Err(error) => out.push_str(&format!("(unreadable: {error})\n")),
+        }
     }
     out
-}
-
-/// Seconds since the Unix epoch. `SystemTime` is not `Display`, and pulling a
-/// date-time crate in for one header line is not worth it.
-fn chrono_like_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
 }
 
 /// Directory the log lives in, following each platform's convention for
@@ -237,20 +410,87 @@ fn log_directory() -> PathBuf {
     std::env::temp_dir().join("sigpilot-logs")
 }
 
-fn level_from_env() -> tracing::Level {
+fn level_from_env() -> Level {
     let raw = std::env::var(LEVEL_ENV).ok();
     let default = if cfg!(debug_assertions) {
-        tracing::Level::DEBUG
+        Level::DEBUG
     } else {
-        tracing::Level::INFO
+        Level::INFO
     };
-    match raw.as_deref().map(str::trim).map(str::to_ascii_lowercase) {
-        Some(value) if value == "error" => tracing::Level::ERROR,
-        Some(value) if value == "warn" => tracing::Level::WARN,
-        Some(value) if value == "info" => tracing::Level::INFO,
-        Some(value) if value == "debug" => tracing::Level::DEBUG,
-        Some(value) if value == "trace" => tracing::Level::TRACE,
+    match raw.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("error") => Level::ERROR,
+        Some("warn") => Level::WARN,
+        Some("info") => Level::INFO,
+        Some("debug") => Level::DEBUG,
+        Some("trace") => Level::TRACE,
         _ => default,
+    }
+}
+
+/// The file half of the writer: one part of this launch's file, rolling over
+/// into the next part when it reaches [`MAX_FILE_BYTES`].
+struct Sink {
+    directory: PathBuf,
+    stem: String,
+    part: u32,
+    file: Option<File>,
+    written: u64,
+}
+
+impl Sink {
+    fn open(directory: PathBuf, stem: String) -> Self {
+        let mut sink = Self {
+            directory,
+            stem,
+            part: 0,
+            file: None,
+            written: 0,
+        };
+        sink.open_current();
+        sink
+    }
+
+    fn path(&self, part: u32) -> PathBuf {
+        self.directory.join(log_file_name(&self.stem, part))
+    }
+
+    fn current_path(&self) -> PathBuf {
+        self.path(self.part)
+    }
+
+    fn open_current(&mut self) {
+        self.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.current_path())
+            .ok();
+        self.written = self
+            .file
+            .as_ref()
+            .and_then(|file| file.metadata().ok())
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+    }
+
+    /// Move to the next part, dropping the oldest file if the retention budget
+    /// is now exceeded.
+    fn roll(&mut self) {
+        self.file = None;
+        self.part = self.part.saturating_add(1);
+        self.open_current();
+        prune(&self.directory);
+    }
+
+    fn write(&mut self, buf: &[u8]) {
+        if self.written + buf.len() as u64 > MAX_FILE_BYTES && self.written > 0 {
+            self.roll();
+        }
+        if let Some(file) = self.file.as_mut() {
+            // A logging failure must never take the app down.
+            if file.write_all(buf).is_ok() {
+                self.written += buf.len() as u64;
+            }
+        }
     }
 }
 
@@ -258,18 +498,17 @@ fn level_from_env() -> tracing::Level {
 /// stderr as well.
 #[derive(Clone)]
 struct Tee {
-    /// `None` when logging never opened its file, which keeps this type usable
-    /// as the fallback writer instead of forcing a second code path.
-    file: Arc<Mutex<Option<File>>>,
+    sink: Arc<Mutex<Option<Sink>>>,
     stderr: bool,
 }
 
 impl Write for Tee {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Ok(mut file) = self.file.lock() {
-            // A logging failure must never take the app down.
-            if let Some(file) = file.as_mut() {
-                let _ = file.write_all(buf);
+        if !is_paused() {
+            if let Ok(mut guard) = self.sink.lock() {
+                if let Some(sink) = guard.as_mut() {
+                    sink.write(buf);
+                }
             }
         }
         if self.stderr {
@@ -279,9 +518,11 @@ impl Write for Tee {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if let Ok(mut file) = self.file.lock() {
-            if let Some(file) = file.as_mut() {
-                let _ = file.flush();
+        if let Ok(mut guard) = self.sink.lock() {
+            if let Some(sink) = guard.as_mut() {
+                if let Some(file) = sink.file.as_mut() {
+                    let _ = file.flush();
+                }
             }
         }
         if self.stderr {
@@ -301,25 +542,34 @@ impl<'a> MakeWriter<'a> for Tee {
 
 /// Install the subscriber. Safe to call more than once; later calls do nothing.
 ///
-/// Returns the path of the log file, or `None` when logging could not be set up
-/// at all — which is deliberately not fatal, since losing logs is much better
-/// than losing the app.
+/// Returns the log directory, or `None` when logging could not be set up at all
+/// — which is deliberately not fatal, since losing logs is much better than
+/// losing the app.
 pub fn init() -> Option<&'static PathBuf> {
-    if LOG_PATH.get().is_some() {
-        return LOG_PATH.get();
+    if LOG_DIRECTORY.get().is_some() {
+        return LOG_DIRECTORY.get();
     }
 
     let directory = log_directory();
     if fs::create_dir_all(&directory).is_err() {
         return None;
     }
-    let path = directory.join("sigpilot.log");
-    let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) else {
-        return None;
-    };
+    // A previous run may have died with a full disk or a stale lock; make room
+    // before adding another file to the set.
+    prune(&directory);
+
+    let sink = Arc::new(Mutex::new(Some(Sink::open(
+        directory.clone(),
+        file_stamp(now_epoch_seconds()),
+    ))));
+    let _ = SINK.set(sink);
+    let _ = LOG_DIRECTORY.set(directory.clone());
 
     let tee = Tee {
-        file: Arc::new(Mutex::new(Some(file))),
+        sink: SINK
+            .get()
+            .expect("SINK was just set")
+            .clone(),
         stderr: io::IsTerminal::is_terminal(&io::stderr()),
     };
 
@@ -342,8 +592,7 @@ pub fn init() -> Option<&'static PathBuf> {
     if installed {
         LEVEL.store(rank_of(&level), Ordering::Relaxed);
         let _ = RELOAD_HANDLE.set(Mutex::new(Some(handle)));
-        let _ = LOG_PATH.set(path);
-        LOG_PATH.get()
+        Some(LOG_DIRECTORY.get().expect("LOG_DIRECTORY was just set"))
     } else {
         None
     }
@@ -377,8 +626,8 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         std::env::set_var("SIGPILOT_LOG_DIR", &directory);
 
-        let path = init().expect("logging should initialise");
-        assert_eq!(path, &directory.join("sigpilot.log"));
+        let logged = init().expect("logging should initialise");
+        assert_eq!(logged, &directory);
 
         // The fmt layer writes synchronously, so a record is on disk by the
         // time the macro returns.
@@ -392,7 +641,11 @@ mod tests {
         set_level(Level::INFO);
         tracing::info!(target: "sigpilot_webview", marker = "level-test-emitted", "must be written");
 
-        let contents = fs::read_to_string(path).expect("log file should exist");
+        let current = log_files_newest_first(&directory)
+            .into_iter()
+            .next()
+            .expect("this launch should have a log file");
+        let contents = fs::read_to_string(&current).expect("log file should exist");
         assert!(
             contents.contains("logging-self-test"),
             "log file did not contain the record: {contents:?}"
@@ -405,6 +658,49 @@ mod tests {
         assert!(
             contents.contains("level-test-emitted"),
             "the info record is missing after raising the level: {contents:?}"
+        );
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// Retention has to hold across launches, and file names have to sort so
+    /// that "oldest" and "newest" are decidable without a timestamp parse.
+    #[test]
+    fn retention_keeps_the_newest_files_across_launches() {
+        let directory = std::env::temp_dir().join(format!(
+            "sigpilot-logging-prune-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("scratch directory");
+
+        for launch in 0..(MAX_FILES + 3) {
+            for part in 0..2 {
+                let name = log_file_name(&file_stamp(1_700_000_000 + launch as i64), part as u32);
+                fs::write(directory.join(name), b"x").expect("write scratch log");
+            }
+        }
+        // Something that is not ours must survive.
+        fs::write(directory.join("notes.txt"), b"keep me").expect("write bystander");
+
+        prune(&directory);
+
+        let kept: Vec<String> = log_files_newest_first(&directory)
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(kept.len(), MAX_FILES, "pruning kept the wrong number of files");
+        assert!(
+            !kept.iter().any(|name| name.contains("1700000000")),
+            "pruning kept the oldest launch: {kept:?}"
+        );
+        assert!(
+            kept[0].contains(&file_stamp(1_700_000_000 + (MAX_FILES + 2) as i64)),
+            "the newest launch is not first: {kept:?}"
+        );
+        assert!(
+            directory.join("notes.txt").exists(),
+            "pruning deleted a file it does not own"
         );
 
         let _ = fs::remove_dir_all(&directory);
