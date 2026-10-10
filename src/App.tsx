@@ -98,6 +98,7 @@ import { graphTileCanServeViewport } from "./lib/waveformTileCoverage";
 import { virtualListWindow } from "./lib/virtualList";
 import { defaultCaptureViewportSamples, previewCaptureViewportSamples } from "./lib/liveViewport";
 import {
+  maximumCaptureViewportSamples,
   maximumDataViewportSamples,
   minimumViewportSamples,
   normalizeCaptureViewport,
@@ -1018,10 +1019,19 @@ function completedCaptureViewport(
   panToTrigger: boolean,
 ) {
   const totalSamples = Math.max(1, summary.metadata.sample_count);
-  const dataViewportMaxSamples = maximumDataViewportSamples(
-    totalSamples,
-    summary.metadata.sample_rate_hz,
-  );
+  // Data limit only — deliberately NOT `maximumDataViewportSamples`.
+  //
+  // That helper takes `max(total / 0.4, sample_rate * 500s)`, and the 500 s is a
+  // LIVE reserve: room to keep zooming while samples are still arriving. At
+  // 25 MHz it is 12.5 billion samples, so applying it to a finished capture
+  // handed the user a viewport 24x wider than their data. A capture of
+  // 506,724,352 samples ended up framed at 12,499,675,760 — almost exactly the
+  // live ceiling — with the trace squeezed into a fortieth of the width and the
+  // disturbance they were looking for reduced to a sub-pixel sliver.
+  //
+  // A finished capture is bounded by its own length. The reserve still applies
+  // while `busy`, via `initialCaptureViewport`.
+  const dataViewportMaxSamples = maximumCaptureViewportSamples(totalSamples);
   if (session.liveViewportMode === "manual") {
     // The window the user is looking at is allowed to be wider than the data
     // limit — that is what the reserved live range is for, and narrowing it
