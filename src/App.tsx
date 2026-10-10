@@ -1023,18 +1023,28 @@ function completedCaptureViewport(
     summary.metadata.sample_rate_hz,
   );
   if (session.liveViewportMode === "manual") {
-    const viewportMaxSamples = Math.max(
-      dataViewportMaxSamples,
-      Math.round(session.viewportSamples),
-    );
+    // The window the user is looking at is allowed to be wider than the data
+    // limit — that is what the reserved live range is for, and narrowing it
+    // here would yank the view out from under them the moment a capture ends.
+    //
+    // What must NOT happen is feeding that width back as the ceiling. The
+    // backend applies `maximum_samples` by taking the larger of it and the data
+    // limit, so a ceiling derived from the current viewport ratchets: every
+    // zoom-out raised the ceiling, and nothing could ever pull it back. A
+    // 693,108,736-sample capture ended up framed at 6,471,905,066 samples —
+    // 9.3x the data, with the capture squeezed into an eleventh of the width
+    // and a one-sample bus disturbance reduced to a sub-pixel sliver.
+    //
+    // So: normalise the viewport against the wider value, but report the
+    // ceiling as a function of the data alone.
     const viewport = normalizeCaptureViewport(
       session.viewportStart,
       session.viewportSamples,
       totalSamples,
-      viewportMaxSamples,
+      Math.max(dataViewportMaxSamples, Math.round(session.viewportSamples)),
     );
     return {
-      viewportMaxSamples,
+      viewportMaxSamples: dataViewportMaxSamples,
       viewportSamples: viewport.samples,
       viewportStart: viewport.start,
     };

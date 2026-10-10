@@ -179,6 +179,7 @@ function buildLoggingSection({
   onCopyLogs,
   onSaveLogs,
   preferences,
+  setModuleLevel,
   setPreference,
 }: {
   logStatus?: LogStatus | null;
@@ -187,6 +188,7 @@ function buildLoggingSection({
   onCopyLogs?: () => void | Promise<void>;
   onSaveLogs?: () => void | Promise<void>;
   preferences: UiPreferences;
+  setModuleLevel: (moduleId: string, level: LogLevel) => void;
   setPreference: <K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) => void;
 }): AdvancedSection {
   return {
@@ -200,6 +202,15 @@ function buildLoggingSection({
         options: LOG_LEVELS.map((level) => ({ labelKey: `logLevel_${level}`, value: level })),
         set: (value) => setPreference("logLevel", value as LogLevel),
       },
+      ...LOG_MODULES.map((module) => ({
+        get: () => preferences.logModuleLevels[module.id] ?? preferences.logLevel,
+        hintKey: "logModuleHint",
+        id: `logModule_${module.id}`,
+        kind: "dropdown" as const,
+        labelKey: module.labelKey,
+        options: LOG_LEVELS.map((level) => ({ labelKey: `logLevel_${level}`, value: level })),
+        set: (value: string) => setModuleLevel(module.id, value as LogLevel),
+      })),
       {
         get: () => preferences.logPaused,
         hintKey: "logPausedHint",
@@ -253,33 +264,6 @@ function buildLoggingSection({
     ],
     id: "logging",
     labelKey: "sectionLogging",
-  };
-}
-
-/**
- * Ten rows would bury the buttons that actually get used, so they get their own
- * collapsible section — the same mechanism every other section uses, rather than
- * a nesting kind the renderer would then have to know about.
- */
-function buildLogModuleSection({
-  preferences,
-  setModuleLevel,
-}: {
-  preferences: UiPreferences;
-  setModuleLevel: (moduleId: string, level: LogLevel) => void;
-}): AdvancedSection {
-  return {
-    controls: LOG_MODULES.map((module) => ({
-      get: () => preferences.logModuleLevels[module.id] ?? preferences.logLevel,
-      hintKey: "logModuleHint",
-      id: `logModule_${module.id}`,
-      kind: "dropdown",
-      labelKey: module.labelKey,
-      options: LOG_LEVELS.map((level) => ({ labelKey: `logLevel_${level}`, value: level })),
-      set: (value: string) => setModuleLevel(module.id, value as LogLevel),
-    })),
-    id: "logModules",
-    labelKey: "sectionLogModules",
   };
 }
 
@@ -370,9 +354,9 @@ export function buildAdvancedSections({
       onCopyLogs,
       onSaveLogs,
       preferences,
+      setModuleLevel,
       setPreference,
     }),
-    buildLogModuleSection({ preferences, setModuleLevel }),
     ...(diagnostics ? [buildDiagnosticsSection(diagnostics)] : []),
   ];
 }

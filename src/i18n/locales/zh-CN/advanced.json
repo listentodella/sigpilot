@@ -53,7 +53,6 @@
   "sectionBehavior": "行为",
   "sectionDiagnostics": "诊断",
   "sectionDisplay": "显示",
-  "sectionLogModules": "分模块等级",
   "sectionLogging": "日志",
   "sectionPerformance": "性能"
 }
