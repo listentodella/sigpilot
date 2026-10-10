@@ -133,9 +133,15 @@ export function levelForModule(module: LogModuleId | null): LogLevel {
  * make the file useless — but a user who deliberately raised one module asked
  * for exactly that, and silently keeping it webview-only makes the setting look
  * broken.
+ *
+ * Only an override counts. Falling back to the default here would read the
+ * *global* level as a raise on every module the moment it went to debug, which
+ * is the flood this exists to prevent — and it is not what the module control
+ * means.
  */
 function isRaised(module: LogModuleId): boolean {
-  return LEVEL_RANK[moduleLevels[module] ?? activeLevel] > LEVEL_RANK[DEFAULT_LOG_LEVEL];
+  const own = moduleLevels[module];
+  return own !== undefined && LEVEL_RANK[own] > LEVEL_RANK[DEFAULT_LOG_LEVEL];
 }
 
 /**

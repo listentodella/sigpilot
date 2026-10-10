@@ -3281,12 +3281,29 @@ impl GraphSession {
                 // sampled at the moment this frame is built.
                 let data_view = self.session_view();
                 let (start_sample, sample_count) = data_view.sample_window(self.sample_count());
+                // A DataLimited viewport is wider than the capture, so the data
+                // fills only part of the canvas. `pixels` is a canvas-pixel
+                // budget, and spending all of it on the data gives the raster
+                // more columns than the data has screen pixels — which the blit
+                // then has to squeeze with nearest-neighbour, *dropping* the
+                // column that holds a short event rather than dimming it.
+                //
+                // Scaling the budget by the fraction of the viewport the data
+                // actually covers makes the raster one column per screen pixel
+                // at every zoom, so the blit is 1:1 and a one-sample event is
+                // always an opaque column. This is the same scaling the legacy
+                // render path applies as `pixelScale` (App.tsx); the frame loop
+                // had dropped it.
+                let data_fraction =
+                    (sample_count as f64 / data_view.samples.max(1.0)).clamp(0.0, 1.0);
+                let pixels = ((f64::from(request.waveform.pixels) * data_fraction).ceil() as u32)
+                    .clamp(1, request.waveform.pixels.max(1));
                 (
                     data_view,
                     WaveformRequest {
                         start_sample,
                         sample_count,
-                        pixels: request.waveform.pixels,
+                        pixels,
                         channels: request.waveform.channels.clone(),
                     },
                 )
@@ -3357,7 +3374,12 @@ impl GraphSession {
             tile,
             analyzers,
         };
-        tracing::trace!(
+        // `debug`, not `trace`: this is the record that says what every frame
+        // actually rendered, and a user who turns the `graph` module up to debug
+        // gets nothing at all while it sits at trace. It is one line per frame,
+        // so debug is the level that means "show me the frames" without being a
+        // per-sample firehose.
+        tracing::debug!(
             target: "sigpilot::graph",
             session_id = self.instance_id,
             frame_id = request.frame_id,
@@ -9924,6 +9946,89 @@ mod tests {
                 after.start_sample
             );
         }
+    }
+
+    /// A short event must survive the overview zoom.
+    ///
+    /// A DataLimited viewport is wider than the capture, so the data fills part
+    /// of the canvas. Binning the data into the *whole* canvas' pixel budget
+    /// gives the raster far more columns than the data has screen pixels, and
+    /// the blit that follows squeezes it with nearest-neighbour — which drops a
+    /// one-column mark rather than dimming it. The user sees a bus burst that is
+    /// plainly there zoomed in and completely absent zoomed out, with nothing in
+    /// between.
+    ///
+    /// The invariant that rules that out is one bin per screen pixel the data
+    /// actually occupies: `tile.pixels * viewport <= screen_px * sample_count`.
+    /// At equality the blit is 1:1 and the burst's bin is an opaque column.
+    #[test]
+    fn a_short_event_survives_zoom_out_because_the_tile_keeps_one_bin_per_screen_pixel() {
+        let total = 1_000_000u64;
+        let sample_rate_hz = 25_000_000.0;
+        let screen_px = 1_000u32;
+        // 2.5x the data: the widest a DataLimited viewport may be, so the data
+        // covers 40% of the canvas and the overshoot is at its worst.
+        let viewport = view_state::maximum_capture_view_samples(total);
+
+        let mut metadata = demo_capture(1, total).metadata;
+        metadata.sample_count = total;
+        let session = GraphSession::default();
+        session
+            .replace_sparse_capture(SparseCaptureData {
+                metadata,
+                channels: vec![SparseDigitalChannel {
+                    channel: 0,
+                    initial_high: false,
+                    // A one-sample pulse, deliberately on a bin boundary of the
+                    // fixed binning (bin width 2_500).
+                    transitions: vec![500_000, 500_001],
+                }],
+            })
+            .unwrap();
+        session.set_view_limits(ViewLimits {
+            live: false,
+            maximum_samples: Some(viewport),
+            sample_rate_hz,
+        });
+
+        let response = session
+            .render_frame(&GraphFrameRequest {
+                frame_id: 1,
+                waveform: WaveformRequest {
+                    start_sample: 0,
+                    sample_count: 0,
+                    pixels: screen_px,
+                    channels: vec![0],
+                },
+                include_tile: true,
+                analyzer_view: None,
+                analyzers: Vec::new(),
+                view: Some(ViewIntent::Set {
+                    start_sample: 0.0,
+                    samples: viewport,
+                }),
+            })
+            .unwrap();
+        let tile = response.tile;
+
+        let viewport_samples_per_pixel = viewport / f64::from(screen_px);
+        assert!(
+            tile.samples_per_pixel >= viewport_samples_per_pixel - 0.5,
+            "the data was binned at {} samples/px for a {viewport_samples_per_pixel}-samples/px \
+             screen, so the raster is {:.1}x finer than the data's footprint and the blit will \
+             minify it",
+            tile.samples_per_pixel,
+            viewport_samples_per_pixel / tile.samples_per_pixel,
+        );
+
+        // The envelope itself is intact either way — this pins that the fix buys
+        // visibility without touching what a bin means.
+        let bins = unpack_digital_bins(tile.channels[0].packed_bins.as_deref().unwrap());
+        let bin = (500_000.0 / tile.samples_per_pixel) as usize;
+        assert!(
+            bins[bin].has_high && bins[bin].has_low,
+            "the pulse's bin lost its envelope: it would be invisible even at 1:1"
+        );
     }
 
     #[test]
