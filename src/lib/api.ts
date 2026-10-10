@@ -1,3 +1,4 @@
+import { ANALOG_CHANNEL_COUNT, ANALOG_SAMPLE_RATE_OPTIONS } from "./analogChannels.ts";
 import { invoke } from "@tauri-apps/api/core";
 import {
   normalizeCaptureViewport,
@@ -55,7 +56,11 @@ export interface HardwareCaptureCapabilities {
   profile_model?: string | null;
   usb_speed?: string | null;
   logic_mode?: number | null;
+  /** Maximum digital inputs; channel_modes may impose a lower limit. */
   max_channels: number;
+  /** Missing fields from older backends mean no analog support. */
+  max_analog_channels?: number;
+  analog_sample_rates?: number[];
   default_channel_count: number;
   default_sample_rate_hz: number;
   sample_rates: number[];
@@ -1212,6 +1217,8 @@ function previewDeviceCapabilities(deviceId: string): HardwareCaptureCapabilitie
     usb_speed: null,
     logic_mode: null,
     max_channels: 32,
+    max_analog_channels: deviceId.startsWith("fake:") ? ANALOG_CHANNEL_COUNT : 0,
+    analog_sample_rates: deviceId.startsWith("fake:") ? [...ANALOG_SAMPLE_RATE_OPTIONS] : [],
     default_channel_count: 8,
     default_sample_rate_hz: 25_000_000,
     sample_rates: PREVIEW_SAMPLE_RATES,

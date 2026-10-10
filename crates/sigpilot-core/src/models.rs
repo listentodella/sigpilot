@@ -46,7 +46,13 @@ pub struct HardwareCaptureCapabilities {
     pub profile_model: Option<String>,
     pub usb_speed: Option<String>,
     pub logic_mode: Option<u32>,
+    /// Maximum digital channel count; channel_modes may impose a lower limit.
     pub max_channels: u8,
+    /// Usable analog inputs, not digital threshold/PWM outputs. Missing means unsupported.
+    #[serde(default)]
+    pub max_analog_channels: u8,
+    #[serde(default)]
+    pub analog_sample_rates: Vec<u64>,
     pub default_channel_count: u8,
     pub default_sample_rate_hz: u64,
     pub sample_rates: Vec<u64>,

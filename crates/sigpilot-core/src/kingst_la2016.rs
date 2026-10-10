@@ -2117,6 +2117,8 @@ impl DeviceDriver for KingstLa2016Driver {
             usb_speed: Some("high".to_string()),
             logic_mode: None,
             max_channels: model.channels,
+            max_analog_channels: 0,
+            analog_sample_rates: Vec::new(),
             default_channel_count: model.channels,
             default_sample_rate_hz: rates.first().copied().unwrap_or(model.samplerate),
             sample_rates: rates.clone(),

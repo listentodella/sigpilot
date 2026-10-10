@@ -446,6 +446,8 @@ pub fn pxlogic_capture_capabilities_from_profile(
         usb_speed: Some(profile.usb_speed.label().to_string()),
         logic_mode: Some(profile.logic_mode),
         max_channels,
+        max_analog_channels: 0,
+        analog_sample_rates: Vec::new(),
         default_channel_count: max_channels.min(8),
         default_sample_rate_hz: default_mode
             .map(|mode| mode.default_samplerate_hz)
@@ -499,6 +501,8 @@ pub fn generic_logic_capture_capabilities(
         usb_speed: None,
         logic_mode: None,
         max_channels: 32,
+        max_analog_channels: 0,
+        analog_sample_rates: Vec::new(),
         default_channel_count: 8,
         default_sample_rate_hz: 25 * MHZ,
         sample_rates,
@@ -746,6 +750,8 @@ mod tests {
             Some("PX-Logic U2 channel 32")
         );
         assert_eq!(caps.max_channels, 32);
+        assert_eq!(caps.max_analog_channels, 0);
+        assert!(caps.analog_sample_rates.is_empty());
         assert_eq!(caps.threshold_volts, PXLOGIC_THRESHOLD_VOLTAGES);
 
         let stream_32 = caps
@@ -758,5 +764,17 @@ mod tests {
         assert_eq!(stream_32.max_sample_rate_hz, 5 * MHZ);
         assert!(stream_32.sample_rates.contains(&(5 * MHZ)));
         assert!(!stream_32.sample_rates.contains(&(10 * MHZ)));
+    }
+
+    #[test]
+    fn legacy_capabilities_default_to_digital_only() {
+        let caps = generic_logic_capture_capabilities("test:legacy", "Legacy");
+        let mut json = serde_json::to_value(&caps).unwrap();
+        json.as_object_mut().unwrap().remove("max_analog_channels");
+        json.as_object_mut().unwrap().remove("analog_sample_rates");
+        let restored: HardwareCaptureCapabilities = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.max_channels, 32);
+        assert_eq!(restored.max_analog_channels, 0);
+        assert!(restored.analog_sample_rates.is_empty());
     }
 }

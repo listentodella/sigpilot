@@ -1,4 +1,30 @@
+// Demo defaults only; never infer hardware support from these constants.
 export const ANALOG_CHANNEL_COUNT = 16;
+
+type AnalogCapabilities = {
+  max_analog_channels?: number | null;
+  analog_sample_rates?: readonly number[] | null;
+};
+
+export function analogChannelCountForCapabilities(capabilities?: AnalogCapabilities | null): number {
+  const count = capabilities?.max_analog_channels;
+  return typeof count === "number" && Number.isInteger(count) && count > 0 && count <= 255 ? count : 0;
+}
+
+export function analogSampleRateOptionsForCapabilities(capabilities?: AnalogCapabilities | null): number[] {
+  if (analogChannelCountForCapabilities(capabilities) === 0) return [];
+  return [...new Set(capabilities?.analog_sample_rates ?? [])]
+    .filter((rate) => Number.isSafeInteger(rate) && rate > 0)
+    .sort((a, b) => a - b);
+}
+
+export function analogChannelsForCapabilities(
+  capabilities: AnalogCapabilities | null | undefined,
+  existing: Partial<UiAnalogChannelSettings>[] = [],
+  defaultEnabledCount = 0,
+): UiAnalogChannelSettings[] {
+  return makeDefaultAnalogChannels(existing, defaultEnabledCount, analogChannelCountForCapabilities(capabilities));
+}
 export const ANALOG_ROW_MIN_HEIGHT_PX = 160;
 export const ANALOG_ROW_DEFAULT_HEIGHT_PX = 280;
 export const ANALOG_GRAPH_INSET_PX = 8;
@@ -31,8 +57,9 @@ export interface UiAnalogChannelSettings {
 export function makeDefaultAnalogChannels(
   existing: Partial<UiAnalogChannelSettings>[] = [],
   defaultEnabledCount = 4,
+  channelCount = ANALOG_CHANNEL_COUNT,
 ): UiAnalogChannelSettings[] {
-  return Array.from({ length: ANALOG_CHANNEL_COUNT }, (_, index) => ({
+  return Array.from({ length: channelCount }, (_, index) => ({
     enabled: existing[index]?.enabled ?? index < defaultEnabledCount,
     height: Math.max(ANALOG_ROW_MIN_HEIGHT_PX, existing[index]?.height ?? ANALOG_ROW_DEFAULT_HEIGHT_PX),
     label: existing[index]?.label?.trim() || `Analog ${index}`,
@@ -48,7 +75,7 @@ export function makeDefaultAnalogChannels(
 }
 
 export function cloneAnalogChannels(channels: Partial<UiAnalogChannelSettings>[] | undefined) {
-  return makeDefaultAnalogChannels(channels ?? []);
+  return makeDefaultAnalogChannels(channels ?? [], 0, channels?.length ?? 0);
 }
 
 export function enabledAnalogChannels(channels: UiAnalogChannelSettings[]) {

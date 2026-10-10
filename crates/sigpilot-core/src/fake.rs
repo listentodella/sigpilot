@@ -318,16 +318,31 @@ impl DeviceDriver for FakeDriver {
         if device_id != FakeBackend::DEVICE_ID {
             return Err(CoreError::UnsupportedDevice);
         }
-        Ok(crate::pxview_profile::generic_logic_capture_capabilities(
+        let mut capabilities = crate::pxview_profile::generic_logic_capture_capabilities(
             device_id,
             "SigPilot Preview Device",
-        ))
+        );
+        // Synthetic analog signals are rendered by the Demo frontend only.
+        capabilities.max_analog_channels = 16;
+        capabilities.analog_sample_rates = vec![
+            1_000_000, 2_500_000, 5_000_000, 6_250_000, 10_000_000, 12_500_000, 25_000_000,
+        ];
+        Ok(capabilities)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_explicitly_advertises_synthetic_analog_channels() {
+        let caps = FakeDriver::new().capabilities(FakeBackend::DEVICE_ID).unwrap();
+        assert_eq!(caps.max_channels, 32);
+        assert_eq!(caps.max_analog_channels, 16);
+        assert_eq!(caps.analog_sample_rates.len(), 7);
+        assert!(caps.analog_sample_rates.contains(&6_250_000));
+    }
 
     #[test]
     fn demo_capture_checks_cancellation_between_small_generation_chunks() {

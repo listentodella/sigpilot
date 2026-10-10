@@ -466,6 +466,8 @@ mod tests {
             usb_speed: None,
             logic_mode: None,
             max_channels: 8,
+            max_analog_channels: 0,
+            analog_sample_rates: Vec::new(),
             default_channel_count: 8,
             default_sample_rate_hz: 1_000_000,
             sample_rates: vec![1_000_000],

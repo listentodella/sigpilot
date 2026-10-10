@@ -1,3 +1,4 @@
+import { maxDigitalChannelsForCapabilities as maxChannelsForCapabilities } from "./lib/deviceCapabilities";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -250,11 +251,12 @@ import {
 import { saleaeLegacyChannelColor } from "./lib/saleaeChannelColors";
 import {
   ANALOG_ROW_MIN_HEIGHT_PX,
-  ANALOG_SAMPLE_RATE_OPTIONS,
+  analogChannelCountForCapabilities,
+  analogChannelsForCapabilities,
+  analogSampleRateOptionsForCapabilities,
   ANALOG_VIEW_RANGE_MIN_VOLTS,
   cloneAnalogChannels,
   enabledAnalogChannels,
-  makeDefaultAnalogChannels,
   UiAnalogChannelSettings,
 } from "./lib/analogChannels";
 import {
@@ -698,13 +700,6 @@ function hardwareModesForCaptureMode(
   return capabilities.channel_modes.filter((channelMode) => channelMode.stream === stream);
 }
 
-function maxChannelsForCapabilities(
-  capabilities: HardwareCaptureCapabilities | null | undefined,
-  mode: CaptureSettings["mode"],
-) {
-  const modes = hardwareModesForCaptureMode(capabilities, mode);
-  return Math.max(1, ...(modes.length > 0 ? modes.map((channelMode) => channelMode.channels) : [capabilities?.max_channels ?? 32]));
-}
 
 function channelCountOptionsForCapabilities(
   capabilities: HardwareCaptureCapabilities | null | undefined,
@@ -714,7 +709,7 @@ function channelCountOptionsForCapabilities(
   const maxChannels = maxChannelsForCapabilities(capabilities, mode);
   const options = FALLBACK_CHANNEL_COUNTS.filter((count) => count <= maxChannels);
   if (current != null && current >= 1 && current <= maxChannels) options.push(current);
-  if (!options.includes(maxChannels)) options.push(maxChannels);
+  if (maxChannels > 0 && !options.includes(maxChannels)) options.push(maxChannels);
   return uniqueSortedNumbers(options);
 }
 
@@ -1195,10 +1190,13 @@ function analogChannelsForDevice(
   deviceId: string,
   existing?: Partial<UiAnalogChannelSettings>[],
   preserveExisting = false,
+  capabilities?: HardwareCaptureCapabilities | null,
 ) {
-  const channels = makeDefaultAnalogChannels(existing, isDemoDevice(deviceId) ? 4 : 0);
-  if (preserveExisting || isDemoDevice(deviceId)) return channels;
-  return channels.map((channel) => ({ ...channel, enabled: false }));
+  return analogChannelsForCapabilities(
+    capabilities,
+    preserveExisting ? existing : [],
+    isDemoDevice(deviceId) ? 4 : 0,
+  );
 }
 
 function defaultDeviceSettings(
@@ -1344,11 +1342,9 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     deviceSettings: source
       ? {
           ...source.deviceSettings,
-          analogChannels: analogChannelsForDevice(
-            deviceId,
-            source.deviceSettings.analogChannels,
-            preserveSourceAnalogChannels,
-          ),
+          analogChannels: preserveSourceAnalogChannels
+            ? cloneAnalogChannels(source.deviceSettings.analogChannels)
+            : [],
           analogSampleRateHz: source.deviceSettings.analogSampleRateHz ?? 6_250_000,
           digitalChannels: [...source.deviceSettings.digitalChannels],
         }
@@ -1975,29 +1971,42 @@ export default function App() {
         }));
       })
       .catch((error) => {
-        if (!cancelled) setStartupMessage(`Capabilities: ${String(error)}`);
+        if (cancelled) return;
+        setDeviceCapabilitiesById((current) => {
+          const next = { ...current };
+          delete next[selectedDevice];
+          return next;
+        });
+        setStartupMessage(`Capabilities: ${String(error)}`);
       });
     return () => {
       cancelled = true;
     };
-  }, [selectedDevice, selected?.logic_mode, selected?.pid, selected?.usb_speed, selected?.vid]);
+  }, [selectedDevice, devices, selected?.logic_mode, selected?.pid, selected?.usb_speed, selected?.vid]);
 
   useEffect(() => {
-    if (!activeSession || !selectedCapabilities) return;
+    if (!activeSession || activeSession.readOnly || !selectedCapabilities) return;
     updateSession(activeSession.id, (session) => {
       if (session.selectedDevice !== selectedDevice) return session;
       const nextSettings = clampCaptureSettingsToCapabilities(session.settings, selectedCapabilities);
+      const analogChannels = analogChannelsForDevice(
+        selectedDevice, session.deviceSettings.analogChannels, true, selectedCapabilities,
+      );
+      const analogRates = analogSampleRateOptionsForCapabilities(selectedCapabilities);
+      const analogSampleRateHz = analogRates.length
+        ? nearestSampleRate(analogRates, session.deviceSettings.analogSampleRateHz)
+        : 0;
+      const channelCountChanged = nextSettings.channel_count !== session.settings.channel_count;
+      const digitalChannels = session.deviceSettings.digitalChannels.map(
+        (enabled, index) => enabled && index < nextSettings.channel_count,
+      );
       if (
         nextSettings.sample_rate_hz === session.settings.sample_rate_hz &&
-        nextSettings.channel_count === session.settings.channel_count &&
-        nextSettings.mode === session.settings.mode
-      ) {
-        return session;
-      }
-      const channelCountChanged = nextSettings.channel_count !== session.settings.channel_count;
-      const digitalChannels = channelCountChanged
-        ? makeDigitalChannels(nextSettings.channel_count)
-        : session.deviceSettings.digitalChannels;
+        !channelCountChanged &&
+        analogChannels.length === session.deviceSettings.analogChannels.length &&
+        analogSampleRateHz === session.deviceSettings.analogSampleRateHz &&
+        digitalChannels.every((enabled, index) => enabled === session.deviceSettings.digitalChannels[index])
+      ) return session;
       return {
         ...session,
         channelLabels: channelCountChanged
@@ -2005,6 +2014,8 @@ export default function App() {
           : session.channelLabels,
         deviceSettings: {
           ...session.deviceSettings,
+          analogChannels,
+          analogSampleRateHz,
           digitalChannels,
           triggerChannel: Math.min(session.deviceSettings.triggerChannel, Math.max(0, nextSettings.channel_count - 1)),
         },
@@ -2135,13 +2146,17 @@ export default function App() {
     ],
   );
   const visibleChannelIndexes = useMemo(
-    () => (activeSession ? visibleDigitalChannelIndexes(activeSession) : []),
+    () => (activeSession ? visibleDigitalChannelIndexes(activeSession).filter((index) =>
+      activeSession.summary || index < maxChannelsForCapabilities(selectedCapabilities, activeSession.settings.mode),
+    ) : []),
     [
       activeSession?.channelOrder,
       activeSession?.deviceSettings.digitalChannels,
       activeSession?.hiddenDigitalChannels,
       activeSession?.settings.channel_count,
       activeSession?.summary?.metadata.channel_count,
+      activeSession?.settings.mode,
+      selectedCapabilities,
     ],
   );
   const visibleChannelSignature = visibleChannelIndexes.join(",");
@@ -2207,8 +2222,12 @@ export default function App() {
     [visibleAnalyzerInsets, visibleChannelHeights],
   );
   const visibleAnalogChannelEntries = useMemo(
-    () => (activeSession ? enabledAnalogChannels(activeSession.deviceSettings.analogChannels) : []),
-    [activeSession?.deviceSettings.analogChannels],
+    () => (activeSession && !activeSession.readOnly
+      ? enabledAnalogChannels(activeSession.deviceSettings.analogChannels.slice(
+          0, analogChannelCountForCapabilities(selectedCapabilities),
+        ))
+      : []),
+    [activeSession?.deviceSettings.analogChannels, activeSession?.readOnly, selectedCapabilities],
   );
   const visibleAnalogRowHeights = useMemo(
     () => visibleAnalogChannelEntries.map(({ settings }) => settings.height),
@@ -3225,6 +3244,13 @@ export default function App() {
       }));
       return;
     }
+    if (!capabilitiesForDevice(deviceId)) {
+      updateSession(session.id, (current) => ({
+        ...current,
+        message: "Device capabilities are unavailable. Refresh the device before capturing.",
+      }));
+      return;
+    }
     const captureDevice = devices.find((device) => device.id === deviceId) ?? selected;
     const nextSettings = clampCaptureSettingsToCapabilities(
       settingsFromDeviceSettings(session, deviceId),
@@ -4053,6 +4079,7 @@ export default function App() {
             deviceId,
             session.deviceSettings.analogChannels,
             session.selectedDevice === deviceId,
+            capabilitiesForDevice(deviceId),
           ),
           bufferSizeMb,
           digitalChannels,
@@ -8510,7 +8537,8 @@ function DeviceSettingsPanel({
     { length: maxDigitalChannels },
     (_, index) => session.deviceSettings.digitalChannels[index] ?? index < session.settings.channel_count,
   );
-  const analogChannels = cloneAnalogChannels(session.deviceSettings.analogChannels);
+  const analogChannels = analogChannelsForCapabilities(selectedCapabilities, session.deviceSettings.analogChannels);
+  const analogSampleRates = analogSampleRateOptionsForCapabilities(selectedCapabilities);
 
   function updateDeviceSettings(patch: Partial<UiDeviceSettings>) {
     onUpdateSession((current) => ({
@@ -8761,6 +8789,7 @@ function DeviceSettingsPanel({
         )}
       </section>
 
+      {analogChannels.length > 0 && (
       <section className="deviceSettingsBlock analogDeviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
           <span>{deviceT("analog")}</span>
@@ -8790,10 +8819,11 @@ function DeviceSettingsPanel({
         <label className="stack-field">
           <span>{deviceT("sampleRate")}</span>
           <select
+            disabled={analogSampleRates.length === 0}
             value={session.deviceSettings.analogSampleRateHz}
             onChange={(event) => updateDeviceSettings({ analogSampleRateHz: Number(event.target.value) })}
           >
-            {ANALOG_SAMPLE_RATE_OPTIONS.map((rate) => (
+            {analogSampleRates.map((rate) => (
               <option key={rate} value={rate}>
                 {formatRate(rate)}
               </option>
@@ -8801,6 +8831,7 @@ function DeviceSettingsPanel({
           </select>
         </label>
       </section>
+      )}
 
       <section className="deviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
