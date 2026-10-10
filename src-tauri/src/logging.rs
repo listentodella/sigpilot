@@ -28,14 +28,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use tracing::level_filters::LevelFilter;
 use tracing::Level;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer as _;
 
 /// Environment variable holding the log level.
 const LEVEL_ENV: &str = "SIGPILOT_LOG";
@@ -43,7 +42,6 @@ const LEVEL_ENV: &str = "SIGPILOT_LOG";
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static LEVEL: AtomicU8 = AtomicU8::new(LEVEL_INFO);
 static RELOAD_HANDLE: OnceLock<Mutex<Option<LevelHandle>>> = OnceLock::new();
-static WRITER: OnceLock<Tee> = OnceLock::new();
 
 // `Level` has no stable numeric ordering to rely on, so the atomic holds a rank
 // of our own. The mapping is duplicated in the frontend's `LOG_LEVELS`.
@@ -53,8 +51,14 @@ const LEVEL_INFO: u8 = 2;
 const LEVEL_DEBUG: u8 = 3;
 const LEVEL_TRACE: u8 = 4;
 
-type BoxedLayer = Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
-type LevelHandle = reload::Handle<BoxedLayer, tracing_subscriber::Registry>;
+/// The level filter is what gets reloaded — not the layer that writes.
+///
+/// `reload::Layer` cannot wrap a layer produced by `Layer::with_filter`: that
+/// produces a `Filtered`, which is only handed a `FilterId` when it is
+/// registered directly with the subscriber, and `reload` swallows that
+/// registration. Every event then trips a `debug_assert!` in `Filtered::id`,
+/// which in a debug build is an abort trap on whichever thread logged it.
+type LevelHandle = reload::Handle<LevelFilter, tracing_subscriber::Registry>;
 
 pub fn level_to_str(level: Level) -> &'static str {
     match level {
@@ -108,9 +112,9 @@ pub fn set_level(level: Level) {
     let Some(slot) = RELOAD_HANDLE.get() else { return };
     let Ok(guard) = slot.lock() else { return };
     let Some(handle) = guard.as_ref() else { return };
-    // Rebuilding the layer is the whole point of `reload`: the writer (and with
-    // it the open file) is recreated from the same `Tee`, so nothing is lost.
-    let _ = handle.reload(boxed_layer(level));
+    // Only the filter is swapped, so the open log file is never touched and no
+    // record in flight is lost.
+    let _ = handle.modify(|filter| *filter = LevelFilter::from_level(level));
 }
 
 /// Path of the log file, when logging is up.
@@ -260,15 +264,6 @@ struct Tee {
     stderr: bool,
 }
 
-impl Tee {
-    fn sink(stderr: bool) -> Self {
-        Self {
-            file: Arc::new(Mutex::new(None)),
-            stderr,
-        }
-    }
-}
-
 impl Write for Tee {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Ok(mut file) = self.file.lock() {
@@ -304,23 +299,6 @@ impl<'a> MakeWriter<'a> for Tee {
     }
 }
 
-/// The recording half of the subscriber, rebuilt whenever the level changes.
-fn boxed_layer(level: Level) -> BoxedLayer {
-    // `init` always runs first; the fallback keeps this total rather than
-    // panicking inside a diagnostic.
-    let writer = WRITER
-        .get()
-        .cloned()
-        .unwrap_or_else(|| Tee::sink(io::IsTerminal::is_terminal(&io::stderr())));
-    tracing_subscriber::fmt::layer()
-        .with_writer(writer)
-        .with_ansi(false)
-        .with_target(true)
-        .with_timer(SystemTime)
-        .with_filter(LevelFilter::from_level(level))
-        .boxed()
-}
-
 /// Install the subscriber. Safe to call more than once; later calls do nothing.
 ///
 /// Returns the path of the log file, or `None` when logging could not be set up
@@ -344,11 +322,22 @@ pub fn init() -> Option<&'static PathBuf> {
         file: Arc::new(Mutex::new(Some(file))),
         stderr: io::IsTerminal::is_terminal(&io::stderr()),
     };
-    let _ = WRITER.set(tee);
 
     let level = level_from_env();
-    let (layer, handle) = reload::Layer::new(boxed_layer(level));
-    let installed = tracing_subscriber::registry().with(layer).try_init().is_ok();
+    // The filter is its own layer ahead of the writer, so it gates everything
+    // behind it and can be swapped without disturbing the file.
+    let (filter, handle) = reload::Layer::new(LevelFilter::from_level(level));
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(tee)
+                .with_ansi(false)
+                .with_target(true)
+                .with_timer(SystemTime),
+        )
+        .try_init()
+        .is_ok();
 
     if installed {
         LEVEL.store(rank_of(&level), Ordering::Relaxed);
@@ -364,8 +353,21 @@ pub fn init() -> Option<&'static PathBuf> {
 mod tests {
     use super::*;
 
+    /// Records reach the file, and the level can be changed afterwards without
+    /// restarting — including through the callsite shape `frontend_log` uses.
+    ///
+    /// One test rather than two on purpose: the subscriber can only be
+    /// installed once per process, so two tests would race on `init`.
+    ///
+    /// This is also the regression test for a crash. The subscriber used to be
+    /// installed as a `reload` layer wrapping a layer built with
+    /// `with_filter`. That pairing produces a `Filtered`, which is only handed
+    /// a `FilterId` when it is registered directly with the subscriber, and
+    /// `reload` swallows the registration — so every event tripped a
+    /// `debug_assert!` in `Filtered::id`, an abort trap on whichever thread
+    /// logged it. Reproduced before the fix; passes after.
     #[test]
-    fn records_land_in_the_log_file() {
+    fn records_land_in_the_file_and_follow_the_level() {
         // Point the log at a scratch directory so the test does not write into
         // the user's real log location.
         let directory = std::env::temp_dir().join(format!(
@@ -378,9 +380,17 @@ mod tests {
         let path = init().expect("logging should initialise");
         assert_eq!(path, &directory.join("sigpilot.log"));
 
-        // The fmt layer writes synchronously, so the record is on disk by the
+        // The fmt layer writes synchronously, so a record is on disk by the
         // time the macro returns.
         tracing::info!(marker = "logging-self-test", "hello from the test");
+
+        // Mirror `frontend_log`: an explicit target is what webview records
+        // carry, and it is the callsite shape that used to abort.
+        set_level(Level::WARN);
+        tracing::info!(target: "sigpilot_webview", marker = "level-test-suppressed", "must not be written");
+
+        set_level(Level::INFO);
+        tracing::info!(target: "sigpilot_webview", marker = "level-test-emitted", "must be written");
 
         let contents = fs::read_to_string(path).expect("log file should exist");
         assert!(
@@ -388,6 +398,14 @@ mod tests {
             "log file did not contain the record: {contents:?}"
         );
         assert!(contents.contains("hello from the test"));
+        assert!(
+            !contents.contains("level-test-suppressed"),
+            "an info record was written while the level was `warn`: {contents:?}"
+        );
+        assert!(
+            contents.contains("level-test-emitted"),
+            "the info record is missing after raising the level: {contents:?}"
+        );
 
         let _ = fs::remove_dir_all(&directory);
     }
