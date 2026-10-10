@@ -26,6 +26,7 @@ tauri-plugin-dialog.workspace = true
 time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zip.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true

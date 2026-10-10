@@ -3956,19 +3956,21 @@ export default function App() {
    * The primary way a user shares logs: one click, then paste into the report.
    *
    * Choosing a path and then hunting the file down in a file manager is the
-   * part everyone skips, and an unshared log is a log that never gets used.
-   */
-  /**
-   * The primary action: put the log files themselves on the clipboard so they
-   * can be pasted as attachments.
+   * part everyone skips, and an unshared log is a log that never gets used. So
+   * this puts one archive of the log files on the clipboard, ready to paste as
+   * an attachment.
+   *
+   * One archive, not one clipboard item per file: the retained files are one
+   * per *launch*, so listing them separately handed the user five attachments
+   * from five different runs and left them to guess which one described the
+   * failure.
    */
   async function handleCopyLogFiles() {
     try {
-      const copied = await copyLogFiles();
-      const total = copied.files.reduce((sum, [, bytes]) => sum + bytes, 0);
+      const copied = await copyLogFiles(formatLogEntries(logSnapshot()));
       showToast(
         statusT("logFilesCopied", { count: copied.files.length }),
-        `${formatBytes(total)} · ${statusT("logFilesCopiedHint")}`,
+        `${copied.name} · ${formatBytes(copied.bytes)} · ${statusT("logFilesCopiedHint")}`,
         "success",
       );
     } catch (error) {

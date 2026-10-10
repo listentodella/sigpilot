@@ -489,6 +489,79 @@ pub fn diagnostics(frontend_log: &str, max_bytes: u64) -> String {
     out
 }
 
+/// Bundle the retained logs plus the frontend's own record into one archive.
+///
+/// The alternative — putting every retained file on the clipboard separately —
+/// was tried and is wrong: the retained files are one *per launch*, so the
+/// clipboard ends up carrying five files from five different runs of the app,
+/// and the user has to work out which one describes the failure. They also have
+/// to attach five files instead of one. One archive is one attachment, and the
+/// manifest inside it says which launch each part came from.
+///
+/// The archive is written to a temporary path that the caller owns; it is not
+/// left in the log directory, where it would be counted against
+/// [`MAX_FILES`] and pruned as if it were a log.
+pub fn write_bundle(destination: &Path, frontend_log: &str) -> io::Result<Vec<(String, u64)>> {
+    use zip::write::SimpleFileOptions;
+
+    let files = log_files_newest_first(&log_directory());
+    let file = File::create(destination)?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options =
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    let mut manifest = String::new();
+    manifest.push_str("SigPilot diagnostics\n");
+    manifest.push_str("===================\n\n");
+    manifest.push_str(&format!("version: {}\n", env!("CARGO_PKG_VERSION")));
+    manifest.push_str(&format!(
+        "platform: {} {} ({})\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::env::consts::FAMILY
+    ));
+    manifest.push_str(&format!("log level: {}\n", level_to_str(current_level())));
+    manifest.push_str(&format!("recording paused: {}\n", is_paused()));
+    manifest.push_str(&format!("generated (unix): {}\n", now_epoch_seconds()));
+    manifest.push_str(&format!("log directory: {}\n", log_directory().display()));
+
+    archive.start_file("MANIFEST.txt", options)?;
+    archive.write_all(manifest.as_bytes())?;
+
+    // The webview's record exists nowhere else, so it goes in the archive too
+    // rather than only in the clipboard-text path.
+    archive.start_file("frontend.log", options)?;
+    let frontend = frontend_log.trim();
+    archive.write_all(frontend.as_bytes())?;
+    if !frontend.is_empty() && !frontend.ends_with('\n') {
+        archive.write_all(b"\n")?;
+    }
+
+    let mut entries = Vec::with_capacity(files.len());
+    for path in &files {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            // A file that vanished between the listing and the read is not
+            // worth failing the whole bundle over; the manifest records the gap.
+            Err(_) => continue,
+        };
+        let size = bytes.len() as u64;
+        archive.start_file(name.clone(), options)?;
+        archive.write_all(&bytes)?;
+        entries.push((name, size));
+    }
+
+    archive.finish()?;
+    Ok(entries)
+}
+
 /// Directory the log lives in, following each platform's convention for
 /// application logs rather than scattering files next to the binary.
 ///
@@ -861,6 +934,74 @@ mod tests {
             "pruning deleted a file it does not own"
         );
 
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// The bundle is what the user actually pastes, so it has to carry every
+    /// launch in one attachment and say which is which.
+    #[test]
+    fn the_bundle_carries_every_retained_launch_and_the_frontend_record() {
+        use std::io::Read;
+
+        let directory = std::env::temp_dir().join(format!(
+            "sigpilot-logging-bundle-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("scratch directory");
+        // SAFETY: single-threaded test setup, restored immediately below.
+        unsafe { std::env::set_var("SIGPILOT_LOG_DIR", &directory) };
+
+        let mut expected = Vec::new();
+        for launch in 0..3 {
+            let name = log_file_name(&file_stamp(1_700_000_000 + launch as i64), 0);
+            fs::write(directory.join(&name), format!("launch-{launch}")).expect("write scratch log");
+            expected.push(name);
+        }
+
+        let archive_path = directory.join("bundle.zip");
+        let written =
+            write_bundle(&archive_path, "webview-test-record").expect("the bundle should be written");
+        assert_eq!(
+            written.len(),
+            expected.len(),
+            "the bundle carried {} of {expected:?} files",
+            written.len()
+        );
+
+        let file = File::open(&archive_path).expect("reopen bundle");
+        let mut archive = zip::ZipArchive::new(file).expect("read bundle");
+        let names: Vec<String> = (0..archive.len())
+            .map(|index| archive.by_index(index).expect("entry").name().to_string())
+            .collect();
+        for name in &expected {
+            assert!(names.contains(name), "{name} is missing from {names:?}");
+        }
+        assert!(
+            names.iter().any(|name| name == "MANIFEST.txt"),
+            "the bundle has no manifest: {names:?}"
+        );
+
+        let mut frontend = String::new();
+        archive
+            .by_name("frontend.log")
+            .expect("frontend record")
+            .read_to_string(&mut frontend)
+            .expect("read frontend record");
+        assert_eq!(frontend.trim(), "webview-test-record");
+
+        let mut manifest = String::new();
+        archive
+            .by_name("MANIFEST.txt")
+            .expect("manifest")
+            .read_to_string(&mut manifest)
+            .expect("read manifest");
+        assert!(
+            manifest.contains(&directory.display().to_string()),
+            "the manifest does not say where the logs live: {manifest}"
+        );
+
+        unsafe { std::env::remove_var("SIGPILOT_LOG_DIR") };
         let _ = fs::remove_dir_all(&directory);
     }
 }

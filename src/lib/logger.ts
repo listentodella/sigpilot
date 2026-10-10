@@ -125,6 +125,20 @@ export function levelForModule(module: LogModuleId | null): LogLevel {
 }
 
 /**
+ * Whether a module was explicitly turned up, rather than merely inheriting the
+ * default.
+ *
+ * This is what decides whether the verbose records reach the log file. Mirroring
+ * every `debug` record would turn each waveform frame into an IPC round trip and
+ * make the file useless — but a user who deliberately raised one module asked
+ * for exactly that, and silently keeping it webview-only makes the setting look
+ * broken.
+ */
+function isRaised(module: LogModuleId): boolean {
+  return LEVEL_RANK[moduleLevels[module] ?? activeLevel] > LEVEL_RANK[DEFAULT_LOG_LEVEL];
+}
+
+/**
  * Stop accumulating.
  *
  * Pausing is about the disk, but the webview buffer is memory the user is
@@ -169,9 +183,12 @@ export function logRecord(
   if (LEVEL_RANK[level] > LEVEL_RANK[levelForModule(module)]) return;
   ring.push({ at: Date.now(), level, message, scope, target: moduleTarget(module) });
   if (ring.length > RING_CAPACITY) ring.splice(0, ring.length - RING_CAPACITY);
-  // debug/trace stay webview-only: forwarding them would turn every draw into
-  // an IPC round trip and make the log file useless.
-  if (level !== "debug" && level !== "trace") {
+  // `debug`/`trace` stay webview-only by default: forwarding them would turn
+  // every draw into an IPC round trip and make the log file useless. A module
+  // the user explicitly turned up is the exception — that is the whole point of
+  // the per-module setting, and swallowing the records makes it look broken.
+  const verbose = level === "debug" || level === "trace";
+  if (!verbose || isRaised(module)) {
     frontendLog(`[${scope}] ${message}`, level, module);
   }
 }

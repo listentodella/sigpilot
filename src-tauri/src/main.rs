@@ -486,6 +486,13 @@ fn frontend_log(level: Option<String>, module: Option<String>, message: String) 
     match level.as_deref() {
         Some("warn") => dispatch_webview_log!(warn, module, message),
         Some("error") => dispatch_webview_log!(error, module, message),
+        // The webview keeps `debug`/`trace` in its own buffer by default and
+        // only forwards them for a module the user explicitly turned up. They
+        // are honoured here rather than folded into `info`, because a record
+        // that says `INFO` when the panel says the module is at `debug` is
+        // exactly the kind of thing that makes a log untrustworthy.
+        Some("debug") => dispatch_webview_log!(debug, module, message),
+        Some("trace") => dispatch_webview_log!(trace, module, message),
         _ => dispatch_webview_log!(info, module, message),
     }
 }
@@ -592,56 +599,83 @@ fn export_logs(path: String, frontend_log: String) -> CommandResult<()> {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CopiedLogFiles {
+    /// Absolute path of the archive, which is also what is on the pasteboard.
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+    /// `(name, bytes)` per log file inside it, newest first.
     pub files: Vec<(String, u64)>,
 }
 
-/// Put the log files themselves on the clipboard.
+/// Where the bundle is staged before it goes on the pasteboard.
+///
+/// A fixed name in a per-app cache directory, not `temp_dir()`: pasting is not
+/// instantaneous, and a name the OS may clean up underneath the user would make
+/// the pasteboard point at nothing. Resolved from the environment for the same
+/// reason [`logging`] resolves the log directory that way.
+fn bundle_staging_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Caches"))
+        .unwrap_or_else(std::env::temp_dir);
+    #[cfg(not(target_os = "macos"))]
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    let directory = base.join("SigPilot");
+    let _ = fs::create_dir_all(&directory);
+    directory.join("sigpilot-diagnostics.zip")
+}
+
+/// Put one archive of the retained logs on the clipboard.
 ///
 /// The user asked for the file, not its contents: pasting hundreds of kilobytes
 /// of log text into a chat window is unusable, whereas pasting the file lets
 /// them attach it and lets the recipient open it properly. The clipboard plugin
 /// only speaks text and images, so the pasteboard is written directly.
+///
+/// One archive rather than one clipboard item per file, because the retained
+/// files are one per *launch*: five separate items meant five attachments from
+/// five different runs, with the user left to work out which one matters.
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn copy_log_files() -> CommandResult<CopiedLogFiles> {
+fn copy_log_files(frontend_log: String) -> CommandResult<CopiedLogFiles> {
     use objc2::runtime::ProtocolObject;
     use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
     use objc2_foundation::{NSArray, NSString, NSURL};
 
-    let files = logging::retained_files();
+    if logging::retained_files().is_empty() {
+        return Err("there are no log files to copy".to_string());
+    }
+
+    let path = bundle_staging_path();
+    let files = logging::write_bundle(&path, &frontend_log).map_err(to_string)?;
     if files.is_empty() {
         return Err("there are no log files to copy".to_string());
     }
 
-    // The URLs have to stay alive across the write, so they are collected first
-    // and handed over as owned references.
-    let urls: Vec<_> = files
-        .iter()
-        .map(|path| {
-            ProtocolObject::<dyn NSPasteboardWriting>::from_retained(NSURL::fileURLWithPath(
-                &NSString::from_str(&path.to_string_lossy()),
-            ))
-        })
-        .collect();
+    // The URL has to stay alive across the write, so it is built first and
+    // handed over as an owned reference.
+    let url = ProtocolObject::<dyn NSPasteboardWriting>::from_retained(NSURL::fileURLWithPath(
+        &NSString::from_str(&path.to_string_lossy()),
+    ));
 
     let pasteboard = NSPasteboard::generalPasteboard();
     pasteboard.clearContents();
-    if !pasteboard.writeObjects(&NSArray::from_retained_slice(&urls)) {
-        return Err("the pasteboard rejected the log files".to_string());
+    if !pasteboard.writeObjects(&NSArray::from_retained_slice(&[url])) {
+        return Err("the pasteboard rejected the log bundle".to_string());
     }
 
     Ok(CopiedLogFiles {
-        files: files
-            .iter()
-            .map(|path| {
-                (
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
-                )
-            })
-            .collect(),
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        bytes: fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+        path: path.to_string_lossy().into_owned(),
+        files,
     })
 }
 
@@ -650,7 +684,8 @@ fn copy_log_files() -> CommandResult<CopiedLogFiles> {
 /// button.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn copy_log_files() -> CommandResult<CopiedLogFiles> {
+fn copy_log_files(frontend_log: String) -> CommandResult<CopiedLogFiles> {
+    let _ = frontend_log;
     Err("copying log files to the clipboard is only implemented on macOS; use Save as file instead".to_string())
 }
 

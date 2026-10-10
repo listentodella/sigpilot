@@ -13,6 +13,9 @@ import type {
   UiExtensionPackage,
   UiExtensionTemplateRequest,
 } from "./extensions.ts";
+// Type-only: `logger.ts` imports `frontendLog` from here, so a value import
+// would be a cycle. The type is erased at compile time.
+import type { LogLevel } from "./logger.ts";
 
 export type DeviceKind = "Fake" | "Usb";
 
@@ -898,7 +901,7 @@ function previewBitMask(bits: number) {
  */
 export function frontendLog(
   message: string,
-  level: "info" | "warn" | "error" = "info",
+  level: LogLevel = "info",
   module = "webview",
 ) {
   if (!isTauriRuntime()) return;
@@ -931,19 +934,26 @@ export async function applyBackendLogLevels(
 
 /** What the backend put on the clipboard. */
 export interface CopiedLogFiles {
+  /** Absolute path of the archive, which is also what is on the pasteboard. */
+  path: string;
+  name: string;
+  bytes: number;
+  /** One entry per log file inside the archive, newest first. */
   files: Array<[string, number]>;
 }
 
 /**
- * Puts the log FILES on the clipboard, not their contents.
+ * Puts ONE archive of the log files on the clipboard, not their contents.
  *
  * The user asked for the file: pasting a megabyte of log text into a chat is
  * unusable, while pasting the file lets them attach it and the recipient open
- * it. macOS only — the pasteboard plugin speaks text and images, so this goes
- * through NSPasteboard directly.
+ * it. It is one archive rather than one clipboard item per file because the
+ * retained files are one per *launch* — five items meant five attachments from
+ * five different runs. macOS only; the pasteboard plugin speaks text and
+ * images, so this goes through NSPasteboard directly.
  */
-export async function copyLogFiles(): Promise<CopiedLogFiles> {
-  return callBackend<CopiedLogFiles>("copy_log_files");
+export async function copyLogFiles(frontendLog: string): Promise<CopiedLogFiles> {
+  return callBackend<CopiedLogFiles>("copy_log_files", { frontendLog });
 }
 
 export async function readLogStatus(): Promise<LogStatus | null> {

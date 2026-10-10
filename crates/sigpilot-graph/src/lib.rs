@@ -669,7 +669,10 @@ impl DigitalGraph {
             requested_channels.into_iter().map(build_channel).collect()
         };
 
-        tracing::trace!(
+        // `debug`, not `trace`: this is the statement that explains what the
+        // renderer was actually handed, and a user who turns the `rendering`
+        // module up to debug gets nothing at all if it sits at trace.
+        tracing::debug!(
             target: "sigpilot::rendering",
             start_sample = start,
             visible_samples,
