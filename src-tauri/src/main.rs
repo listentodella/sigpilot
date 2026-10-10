@@ -450,12 +450,16 @@ async fn configure_pwm(
 /// Without this the log file is backend-only, which makes a frontend problem
 /// undiagnosable from it: an event that never arrived and a handler that decided
 /// not to act leave exactly the same trace, which is none.
+///
+/// The target is the `webview` module rather than a free-standing one, so the
+/// panel's per-module filter can quieten the frontend without touching the
+/// backend.
 #[tauri::command]
 fn frontend_log(level: Option<String>, message: String) {
     match level.as_deref() {
-        Some("warn") => tracing::warn!(target: "sigpilot_webview", "{message}"),
-        Some("error") => tracing::error!(target: "sigpilot_webview", "{message}"),
-        _ => tracing::info!(target: "sigpilot_webview", "{message}"),
+        Some("warn") => tracing::warn!(target: "sigpilot::webview", "{message}"),
+        Some("error") => tracing::error!(target: "sigpilot::webview", "{message}"),
+        _ => tracing::info!(target: "sigpilot::webview", "{message}"),
     }
 }
 
@@ -469,6 +473,33 @@ fn set_log_level(level: String) -> CommandResult<String> {
         return Err(format!("unknown log level `{level}`"));
     };
     logging::set_level(level);
+    Ok(logging::level_to_str(logging::current_level()).to_string())
+}
+
+/// Change the default log level and the per-module levels together.
+///
+/// One call rather than one per module: the levels are read together by the
+/// panel, and a filter swap that lands halfway through is a log that is briefly
+/// shaped like neither of the two settings the user asked for.
+#[tauri::command]
+fn set_log_levels(
+    default_level: String,
+    modules: HashMap<String, String>,
+) -> CommandResult<String> {
+    let Some(default) = logging::level_from_str(&default_level) else {
+        return Err(format!("unknown log level `{default_level}`"));
+    };
+    let mut levels = Vec::with_capacity(modules.len());
+    for (module, level) in modules {
+        if !logging::is_module(&module) {
+            return Err(format!("unknown log module `{module}`"));
+        }
+        let Some(level) = logging::level_from_str(&level) else {
+            return Err(format!("unknown log level `{level}` for module `{module}`"));
+        };
+        levels.push((module, level));
+    }
+    logging::set_levels(default, &levels);
     Ok(logging::level_to_str(logging::current_level()).to_string())
 }
 
@@ -528,6 +559,72 @@ fn export_logs(path: String, frontend_log: String) -> CommandResult<()> {
         fs::create_dir_all(parent).map_err(to_string)?;
     }
     fs::write(path, logging::diagnostics(&frontend_log, logging::DIAGNOSTICS_BYTES)).map_err(to_string)
+}
+
+/// What `copy_log_files` put on the clipboard, so the UI can say what to expect.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopiedLogFiles {
+    pub files: Vec<(String, u64)>,
+}
+
+/// Put the log files themselves on the clipboard.
+///
+/// The user asked for the file, not its contents: pasting hundreds of kilobytes
+/// of log text into a chat window is unusable, whereas pasting the file lets
+/// them attach it and lets the recipient open it properly. The clipboard plugin
+/// only speaks text and images, so the pasteboard is written directly.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn copy_log_files() -> CommandResult<CopiedLogFiles> {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let files = logging::retained_files();
+    if files.is_empty() {
+        return Err("there are no log files to copy".to_string());
+    }
+
+    // The URLs have to stay alive across the write, so they are collected first
+    // and handed over as owned references.
+    let urls: Vec<_> = files
+        .iter()
+        .map(|path| {
+            ProtocolObject::<dyn NSPasteboardWriting>::from_retained(NSURL::fileURLWithPath(
+                &NSString::from_str(&path.to_string_lossy()),
+            ))
+        })
+        .collect();
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    if !pasteboard.writeObjects(&NSArray::from_retained_slice(&urls)) {
+        return Err("the pasteboard rejected the log files".to_string());
+    }
+
+    Ok(CopiedLogFiles {
+        files: files
+            .iter()
+            .map(|path| {
+                (
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
+                )
+            })
+            .collect(),
+    })
+}
+
+/// Windows and Linux have no equivalent wired up here. "Save as file..." still
+/// works everywhere, so the failure is a clear message rather than a dead
+/// button.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn copy_log_files() -> CommandResult<CopiedLogFiles> {
+    Err("copying log files to the clipboard is only implemented on macOS; use Save as file instead".to_string())
 }
 
 /// Publishes capture UI updates from a thread of its own.
@@ -2056,8 +2153,17 @@ fn set_graph_view_limits(
 #[tauri::command]
 fn read_extension_package(path: String) -> CommandResult<ExtensionPackage> {
     let manifest_path = PathBuf::from(&path);
-    let contents = fs::read_to_string(&manifest_path).map_err(to_string)?;
-    let manifest = serde_json::from_str(&contents).map_err(to_string)?;
+    // An extension that cannot be read is the single most common reason for
+    // "the measurement I installed never shows up", so say which path failed.
+    let contents = fs::read_to_string(&manifest_path).map_err(|error| {
+        tracing::warn!(target: "sigpilot::extensions", path = %manifest_path.display(), %error, "cannot read the extension manifest");
+        to_string(error)
+    })?;
+    let manifest = serde_json::from_str(&contents).map_err(|error| {
+        tracing::warn!(target: "sigpilot::extensions", path = %manifest_path.display(), %error, "the extension manifest is not valid JSON");
+        to_string(error)
+    })?;
+    tracing::debug!(target: "sigpilot::extensions", path = %path, "extension package loaded");
     let readme = read_extension_readme(&manifest_path);
     Ok(ExtensionPackage {
         manifest,
@@ -2073,6 +2179,7 @@ fn create_extension_template(request: ExtensionTemplateRequest) -> CommandResult
         return Err("the extension directory already exists; choose a new location".to_string());
     }
     fs::create_dir_all(&directory).map_err(to_string)?;
+    tracing::info!(target: "sigpilot::extensions", path = %directory.display(), extension_type = %request.extension_type, "creating an extension template");
 
     let parsed_name = directory
         .file_name()
@@ -2261,7 +2368,7 @@ fn warm_saleae_native_sidecar_async(decoder: Option<SaleaeNativeDecoder>, delay:
                 }
                 Err(error) => {
                     tracing::debug!(
-                        target: "sigpilot::decoder_performance",
+                        target: "sigpilot::decoders",
                         component = "tauri",
                         stage = "saleae_native_warmup_unavailable",
                         detail = %error
@@ -2284,7 +2391,7 @@ fn warm_sigrok_native_catalog_async(delay: Duration) {
                 }
                 Err(error) => {
                     tracing::debug!(
-                        target: "sigpilot::decoder_performance",
+                        target: "sigpilot::decoders",
                         component = "tauri",
                         stage = "sigrok_native_warmup_unavailable",
                         detail = %error
@@ -2320,11 +2427,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             frontend_log,
             set_log_level,
+            set_log_levels,
             log_level,
             log_status,
             set_log_paused,
             clear_logs,
             read_diagnostics,
+            copy_log_files,
             export_logs,
             list_devices,
             device_capabilities,

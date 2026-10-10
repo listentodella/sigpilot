@@ -904,14 +904,38 @@ export function frontendLog(message: string, level: "info" | "warn" | "error" = 
 /**
  * Applies the same verbosity to the backend log and returns the level that
  * ended up in effect, so the UI can show what the backend actually did.
+ *
+ * The default and every module override go in one call: the backend rebuilds
+ * its subscriber from the whole set, so sending them separately would leave a
+ * window where the file is filtered by a level the panel no longer shows.
  */
-export async function applyBackendLogLevel(level: string): Promise<string> {
-  if (!isTauriRuntime()) return level;
+export async function applyBackendLogLevels(
+  defaultLevel: string,
+  modules: Record<string, string>,
+): Promise<string> {
+  if (!isTauriRuntime()) return defaultLevel;
   try {
-    return await invoke<string>("set_log_level", { level });
+    return await invoke<string>("set_log_levels", { defaultLevel, modules });
   } catch {
-    return level;
+    return defaultLevel;
   }
+}
+
+/** What the backend put on the clipboard. */
+export interface CopiedLogFiles {
+  files: Array<[string, number]>;
+}
+
+/**
+ * Puts the log FILES on the clipboard, not their contents.
+ *
+ * The user asked for the file: pasting a megabyte of log text into a chat is
+ * unusable, while pasting the file lets them attach it and the recipient open
+ * it. macOS only — the pasteboard plugin speaks text and images, so this goes
+ * through NSPasteboard directly.
+ */
+export async function copyLogFiles(): Promise<CopiedLogFiles> {
+  return callBackend<CopiedLogFiles>("copy_log_files");
 }
 
 export async function readLogStatus(): Promise<LogStatus | null> {

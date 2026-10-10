@@ -210,17 +210,68 @@ impl DeviceRegistry {
     pub fn list_devices(&self) -> Vec<DeviceInfo> {
         let mut devices = Vec::new();
         for driver in &self.drivers {
+            let driver_id = driver.descriptor().driver_id.as_str();
             match driver.list_devices() {
-                Ok(mut found) => devices.append(&mut found),
-                Err(_) => continue,
+                Ok(mut found) => {
+                    // A device the driver could not probe is exactly the case a
+                    // user needs explained: it shows up in the list greyed out
+                    // with a probe error the UI renders but never logs.
+                    for device in &found {
+                        if let Some(error) = &device.probe_error {
+                            tracing::warn!(
+                                target: "sigpilot::device",
+                                driver = driver_id,
+                                device_id = device.id.as_str(),
+                                vid = format!("{:04x}", device.vid),
+                                pid = format!("{:04x}", device.pid),
+                                error = error.as_str(),
+                                "device enumerated but its identity probe failed"
+                            );
+                        }
+                    }
+                    devices.append(&mut found);
+                }
+                Err(error) => {
+                    // Documented as "nothing available" rather than a failure, so
+                    // this is a debug line and not a warning.
+                    tracing::debug!(
+                        target: "sigpilot::device",
+                        driver = driver_id,
+                        error = error.to_string(),
+                        "driver could not enumerate; continuing with the others"
+                    );
+                    continue;
+                }
             }
         }
+        tracing::info!(
+            target: "sigpilot::device",
+            devices = devices.len(),
+            drivers = self.drivers.len(),
+            "device scan complete"
+        );
         devices
     }
 
     /// The driver that owns `device_id`, if any.
     pub fn driver_for(&self, device_id: &str) -> Option<&Arc<dyn DeviceDriver>> {
-        self.drivers.iter().find(|driver| driver.owns_device(device_id))
+        let found = self.drivers.iter().find(|driver| driver.owns_device(device_id));
+        if found.is_none() {
+            // A device id with no owner is the single most common cause of a
+            // capture that refuses to start, and the id alone does not say why:
+            // a stale id from before a re-enumeration looks exactly like a typo.
+            tracing::warn!(
+                target: "sigpilot::device",
+                device_id,
+                schemes = ?self
+                    .drivers
+                    .iter()
+                    .flat_map(|driver| driver.descriptor().id_schemes.iter().cloned())
+                    .collect::<Vec<_>>(),
+                "no registered driver claims this device id"
+            );
+        }
+        found
     }
 
     /// Capabilities for `device_id`.
@@ -228,7 +279,31 @@ impl DeviceRegistry {
         let driver = self
             .driver_for(device_id)
             .ok_or(CoreError::UnsupportedDevice)?;
-        driver.capabilities(device_id)
+        let capabilities = driver.capabilities(device_id)?;
+        // A capability set that disagrees with the device it came from is the
+        // profile-mismatch case: the UI will happily offer a rate the hardware
+        // cannot do, and the capture then comes back short.
+        if capabilities.device_id != device_id {
+            tracing::warn!(
+                target: "sigpilot::device",
+                driver = driver.descriptor().driver_id.as_str(),
+                requested_device_id = device_id,
+                reported_device_id = capabilities.device_id.as_str(),
+                "capabilities came back for a different device id than the one asked for"
+            );
+        }
+        tracing::debug!(
+            target: "sigpilot::device",
+            driver = driver.descriptor().driver_id.as_str(),
+            device_id,
+            model = capabilities.profile_model.as_deref().unwrap_or("-"),
+            max_channels = capabilities.max_channels,
+            default_sample_rate_hz = capabilities.default_sample_rate_hz,
+            sample_rates = capabilities.sample_rates.len(),
+            channel_modes = capabilities.channel_modes.len(),
+            "device capabilities resolved"
+        );
+        Ok(capabilities)
     }
 
     /// Prepare `device_id` for capture.
@@ -240,7 +315,31 @@ impl DeviceRegistry {
         let driver = self
             .driver_for(device_id)
             .ok_or(CoreError::UnsupportedDevice)?;
-        driver.prepare(device_id, sink)
+        let driver_id = driver.descriptor().driver_id.as_str();
+        let started = std::time::Instant::now();
+        tracing::info!(target: "sigpilot::device", driver = driver_id, device_id, "preparing device");
+        let result = driver.prepare(device_id, sink);
+        // The time matters as much as the outcome: a `prepare` that re-flashes
+        // an FPGA takes seconds, and a caller timing out on it needs to know
+        // whether it was slow or actually stuck.
+        match &result {
+            Ok(()) => tracing::info!(
+                target: "sigpilot::device",
+                driver = driver_id,
+                device_id,
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                "device ready"
+            ),
+            Err(error) => tracing::error!(
+                target: "sigpilot::device",
+                driver = driver_id,
+                device_id,
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                error = error.to_string(),
+                "device prepare failed"
+            ),
+        }
+        result
     }
 
     /// Release `device_id`.
@@ -248,13 +347,39 @@ impl DeviceRegistry {
         let driver = self
             .driver_for(device_id)
             .ok_or(CoreError::UnsupportedDevice)?;
-        driver.stop(device_id)
+        let driver_id = driver.descriptor().driver_id.as_str();
+        tracing::info!(target: "sigpilot::device", driver = driver_id, device_id, "releasing device");
+        let result = driver.stop(device_id);
+        if let Err(error) = &result {
+            tracing::error!(
+                target: "sigpilot::device",
+                driver = driver_id,
+                device_id,
+                error = error.to_string(),
+                "device release failed"
+            );
+        }
+        result
     }
 
     /// Drop cached per-device state. A no-op for unknown device ids, because the
     /// caller is usually reacting to a device that has just disappeared.
     pub fn invalidate(&self, device_id: &str) {
-        if let Some(driver) = self.driver_for(device_id) {
+        // Goes through the driver list rather than `driver_for`, because an
+        // unknown id is the *expected* case here — the caller is usually
+        // reacting to a device that has just disappeared — and `driver_for`
+        // warns about exactly that.
+        if let Some(driver) = self
+            .drivers
+            .iter()
+            .find(|driver| driver.owns_device(device_id))
+        {
+            tracing::warn!(
+                target: "sigpilot::device",
+                driver = driver.descriptor().driver_id.as_str(),
+                device_id,
+                "dropping cached device state after a transport error or unplug"
+            );
             driver.invalidate(device_id);
         }
     }

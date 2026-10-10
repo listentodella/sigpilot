@@ -49,6 +49,12 @@ impl FakeBackend {
         on_samples: &mut dyn FnMut(&[u8]),
     ) -> Result<CaptureData> {
         if settings.device_id != Self::DEVICE_ID {
+            tracing::warn!(
+                target: "sigpilot::capture",
+                requested_device_id = settings.device_id.as_str(),
+                expected_device_id = Self::DEVICE_ID,
+                "demo source asked to capture a device it does not own"
+            );
             return Err(CoreError::UnsupportedDevice);
         }
 
@@ -65,6 +71,18 @@ impl FakeBackend {
         };
         let bytes_expected = sample_count * unitsize;
         let started_at = std::time::Instant::now();
+        tracing::info!(
+            target: "sigpilot::capture",
+            device_id = settings.device_id.as_str(),
+            mode = format!("{:?}", settings.mode),
+            sample_rate_hz = settings.sample_rate_hz,
+            duration_ms = settings.duration_ms,
+            channels = settings.channel_count,
+            sample_count,
+            unitsize = unitsize_u8,
+            bytes_expected,
+            "demo capture requested"
+        );
         let captured_at = Utc::now();
         let mut samples_read = 0u64;
         let mut samples = Vec::with_capacity(
@@ -91,6 +109,14 @@ impl FakeBackend {
                 .collect(),
             trigger: None,
         };
+        tracing::info!(
+            target: "sigpilot::capture",
+            device_id = metadata.source_device.as_str(),
+            channels = metadata.channel_count,
+            enabled_channels = metadata.enabled_channels.len(),
+            sample_rate_hz = metadata.sample_rate_hz,
+            "demo capture started"
+        );
         started(&metadata);
 
         loop {
@@ -107,6 +133,15 @@ impl FakeBackend {
                     samples_read: partial_samples,
                     sample_memory_bytes: samples.len() as u64,
                 });
+                tracing::info!(
+                    target: "sigpilot::capture",
+                    device_id = settings.device_id.as_str(),
+                    samples = partial_samples,
+                    requested_samples = sample_count,
+                    bytes = samples.len(),
+                    elapsed_ms = started_at.elapsed().as_secs_f64() * 1_000.0,
+                    "demo capture cancelled"
+                );
                 return Ok(CaptureData {
                     metadata: CaptureMetadata {
                         sample_count: partial_samples,
@@ -158,6 +193,15 @@ impl FakeBackend {
             thread::sleep(Duration::from_millis(50));
         }
 
+        tracing::info!(
+            target: "sigpilot::capture",
+            device_id = settings.device_id.as_str(),
+            samples = sample_count,
+            bytes = samples.len(),
+            expected_bytes = bytes_expected,
+            elapsed_ms = started_at.elapsed().as_secs_f64() * 1_000.0,
+            "demo capture completed"
+        );
         Ok(CaptureData {
             metadata: CaptureMetadata {
                 sample_count,

@@ -164,8 +164,9 @@ import {
   DecoderBackendKind,
   deviceCapabilities,
   DeviceInfo,
-  applyBackendLogLevel,
+  applyBackendLogLevels,
   clearLogs,
+  copyLogFiles,
   exportLogs,
   readDiagnostics,
   readLogStatus,
@@ -199,7 +200,7 @@ import {
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
-import { formatLogEntries, logSnapshot, setLogLevel, setPaused } from "./lib/logger";
+import { formatLogEntries, logSnapshot, setLogLevel, setLogModuleLevels, setPaused } from "./lib/logger";
 import {
   ChannelDeleteDataMode,
   ChannelTrimPreview,
@@ -322,6 +323,8 @@ const SIDEBAR_TABS_CHANGER_WIDTH = 47;
 /** How often the advanced panel re-reads the backend log status. Long enough
  *  not to chatter, short enough that a rotation is visible without a restart. */
 const LOG_STATUS_POLL_MS = 5_000;
+/** Text is the secondary path, so it stays small enough to actually paste. */
+const LOG_TEXT_BYTES = 64 * 1024;
 
 // Routes the waveform through the backend-owned frame loop instead of the
 // frontend's tile pipeline (level-of-detail bands, request rate limits, raster
@@ -1611,13 +1614,18 @@ export default function App() {
 
   // One verbosity for both layers: the webview filters locally and the backend
   // reloads its subscriber to match, so an exported bundle is coherent instead
-  // of half-verbose.
+  // of half-verbose. The default and the per-module overrides are sent together
+  // because the backend rebuilds its filter from the whole set.
   useEffect(() => {
     setLogLevel(preferences.logLevel);
+    setLogModuleLevels(preferences.logModuleLevels);
+    void applyBackendLogLevels(preferences.logLevel, preferences.logModuleLevels);
+  }, [preferences.logLevel, preferences.logModuleLevels]);
+
+  useEffect(() => {
     setPaused(preferences.logPaused);
-    void applyBackendLogLevel(preferences.logLevel);
     void setLogPaused(preferences.logPaused);
-  }, [preferences.logLevel, preferences.logPaused]);
+  }, [preferences.logPaused]);
 
   // Hidden escape hatch for the advanced panel, mirroring the undocumented chord
   // the homage project keeps its developer surface behind. It gets its own
@@ -3930,9 +3938,28 @@ export default function App() {
    * Choosing a path and then hunting the file down in a file manager is the
    * part everyone skips, and an unshared log is a log that never gets used.
    */
+  /**
+   * The primary action: put the log files themselves on the clipboard so they
+   * can be pasted as attachments.
+   */
+  async function handleCopyLogFiles() {
+    try {
+      const copied = await copyLogFiles();
+      const total = copied.files.reduce((sum, [, bytes]) => sum + bytes, 0);
+      showToast(
+        statusT("logFilesCopied", { count: copied.files.length }),
+        `${formatBytes(total)} · ${statusT("logFilesCopiedHint")}`,
+        "success",
+      );
+    } catch (error) {
+      showToast(statusT("logsFailed"), String(error), "error");
+    }
+  }
+
+  /** Secondary: the same content as text, capped so it stays pasteable. */
   async function handleCopyLogs() {
     try {
-      const bundle = await readDiagnostics(formatLogEntries(logSnapshot()));
+      const bundle = await readDiagnostics(formatLogEntries(logSnapshot()), LOG_TEXT_BYTES);
       await writeText(bundle);
       showToast(statusT("logsCopied"), statusT("logsCopiedHint"), "success");
     } catch (error) {
@@ -5592,6 +5619,7 @@ export default function App() {
             onAddSingleMarker={handleAddSingleMarker}
             onDecodeAnalyzer={(analyzerId) => activeSession && handleDecodeAnalyzer(activeSession.id, analyzerId)}
             onClearLogs={handleClearLogs}
+            onCopyLogFiles={handleCopyLogFiles}
             onCopyLogs={handleCopyLogs}
             onSaveLogs={handleSaveLogs}
             onEditAnalyzer={beginEditAnalyzer}
@@ -8024,6 +8052,7 @@ function RightSidebar({
   onCreateSession,
   onDecodeAnalyzer,
   onClearLogs,
+  onCopyLogFiles,
   onCopyLogs,
   onEditAnalyzer,
   onGoToAnalyzerFrame,
@@ -8048,6 +8077,7 @@ function RightSidebar({
   extensions: UiExtensionRecord[];
   logStatus: LogStatus | null;
   onClearLogs: () => void | Promise<void>;
+  onCopyLogFiles: () => void | Promise<void>;
   onCopyLogs: () => void | Promise<void>;
   onSaveLogs: () => void | Promise<void>;
   onChangeExtensions: (updater: (extensions: UiExtensionRecord[]) => UiExtensionRecord[]) => void;
@@ -8160,6 +8190,7 @@ function RightSidebar({
             onDecodeAnalyzer={onDecodeAnalyzer}
             onEditAnalyzer={onEditAnalyzer}
             onClearLogs={onClearLogs}
+            onCopyLogFiles={onCopyLogFiles}
             onCopyLogs={onCopyLogs}
             onSaveLogs={onSaveLogs}
             onGoToAnalyzerFrame={onGoToAnalyzerFrame}
@@ -8228,6 +8259,7 @@ function SidebarPanelContent({
   onCreateSession,
   onDecodeAnalyzer,
   onClearLogs,
+  onCopyLogFiles,
   onCopyLogs,
   onEditAnalyzer,
   onGoToAnalyzerFrame,
@@ -8249,6 +8281,7 @@ function SidebarPanelContent({
   devices: DeviceInfo[];
   extensions: UiExtensionRecord[];
   logStatus: LogStatus | null;
+  onCopyLogFiles: () => void | Promise<void>;
   onClearLogs: () => void | Promise<void>;
   onCopyLogs: () => void | Promise<void>;
   onSaveLogs: () => void | Promise<void>;
@@ -8379,6 +8412,7 @@ function SidebarPanelContent({
           logStatus={logStatus}
           onChangePreferences={onChangePreferences}
           onClearLogs={onClearLogs}
+          onCopyLogFiles={onCopyLogFiles}
           onCopyLogs={onCopyLogs}
           onSaveLogs={onSaveLogs}
           onReset={() => onChangePreferences(() => DEFAULT_UI_PREFERENCES)}

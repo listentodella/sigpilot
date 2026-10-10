@@ -147,7 +147,7 @@ fn trace_decoder_timing(backend: &str, stage: &str, started: Instant, detail: &s
     let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
     crate::performance::record_performance_event("decoder", Some(backend), stage, elapsed, detail);
     tracing::debug!(
-        target: "sigpilot::decoder_performance",
+        target: "sigpilot::decoders",
         backend,
         stage,
         elapsed_ms,
@@ -187,8 +187,17 @@ pub trait DecoderBackend: Send + Sync {
     fn decode_sparse(
         &self,
         _capture: &SparseCaptureData,
-        _settings: &AnalyzerDecodeSettings,
+        settings: &AnalyzerDecodeSettings,
     ) -> Result<DecoderOutput> {
+        // Every backend that does not override this lands here, so this is where
+        // "the analyzer produced nothing" is actually decided. The backend kind
+        // and the protocol together say which catalog entry was tried.
+        tracing::warn!(
+            target: "sigpilot::decoders",
+            backend = ?self.info().kind,
+            protocol = native_protocol_name(settings),
+            "decoder rejected: this backend cannot decode a sparse capture"
+        );
         Err(CoreError::Decode(
             "decoder backend does not support sparse captures".to_string(),
         ))
@@ -2391,6 +2400,34 @@ impl SaleaeNativeDecoder {
 
     pub fn decoder_catalog(&self) -> Result<SigrokDecoderCatalog> {
         let probe = self.probe_with_catalog(true)?;
+        tracing::info!(
+            target: "sigpilot::decoders",
+            backend = "saleae",
+            sidecar = self.sidecar_path.display().to_string(),
+            available = probe.available,
+            abi_match = probe.abi_match,
+            protocols = probe.protocols.len(),
+            decoders = probe.decoder_catalog.len(),
+            c_decoders = probe.c_decoder_count,
+            python_decoders = probe.python_decoder_count,
+            "decoder catalog probed"
+        );
+        if !probe.available || !probe.abi_match {
+            tracing::warn!(
+                target: "sigpilot::decoders",
+                backend = "saleae",
+                available = probe.available,
+                abi_match = probe.abi_match,
+                decoders = probe.decoder_catalog.len(),
+                "the Saleae sidecar answered but is not usable"
+            );
+        } else if probe.decoder_catalog.is_empty() {
+            tracing::warn!(
+                target: "sigpilot::decoders",
+                backend = "saleae",
+                "the Saleae sidecar reported no decoders; analyzers will fall back"
+            );
+        }
         Ok(SigrokDecoderCatalog {
             decoders: probe.decoder_catalog,
             c_decoder_count: probe.c_decoder_count,
@@ -2999,33 +3036,61 @@ impl SaleaeNativeDecoder {
 impl DecoderBackend for SaleaeNativeDecoder {
     fn info(&self) -> DecoderBackendInfo {
         match self.probe() {
-            Ok(probe) => DecoderBackendInfo {
-                kind: DecoderBackendKind::SaleaeNative,
-                display_name: format!("Saleae Native ({})", probe.analyzer_name),
-                available: probe.available && probe.abi_match,
-                protocols: probe.protocols,
-                supports_streaming: probe.supports_streaming,
-                isolation: DecoderBackendIsolation::Sidecar,
-                detail: format!(
-                    "Logic 2.4.43 ABI {}; runtime {}, plugin {}",
-                    if probe.abi_match {
-                        "matched"
-                    } else {
-                        "mismatched"
-                    },
-                    short_hash(&probe.runtime_sha256),
-                    short_hash(&probe.plugin_sha256)
-                ),
-            },
-            Err(error) => DecoderBackendInfo {
-                kind: DecoderBackendKind::SaleaeNative,
-                display_name: "Saleae Native analyzer sidecar".to_string(),
-                available: false,
-                protocols: protocol_names(SALEAE_NATIVE_PROTOCOLS),
-                supports_streaming: false,
-                isolation: DecoderBackendIsolation::Sidecar,
-                detail: error.to_string(),
-            },
+            Ok(probe) => {
+                let available = probe.available && probe.abi_match;
+                // An ABI mismatch is invisible in the UI — the analyzer list
+                // looks fine and simply produces nothing — so it is logged here
+                // where the runtime hashes are known.
+                if !available {
+                    tracing::warn!(
+                        target: "sigpilot::decoders",
+                        backend = "saleae",
+                        available = probe.available,
+                        abi_match = probe.abi_match,
+                        analyzer = probe.analyzer_name.as_str(),
+                        runtime_sha256 = short_hash(&probe.runtime_sha256),
+                        plugin_sha256 = short_hash(&probe.plugin_sha256),
+                        "Saleae backend is present but its ABI does not match the pinned runtime"
+                    );
+                }
+                DecoderBackendInfo {
+                    kind: DecoderBackendKind::SaleaeNative,
+                    display_name: format!("Saleae Native ({})", probe.analyzer_name),
+                    available,
+                    protocols: probe.protocols,
+                    supports_streaming: probe.supports_streaming,
+                    isolation: DecoderBackendIsolation::Sidecar,
+                    detail: format!(
+                        "Logic 2.4.43 ABI {}; runtime {}, plugin {}",
+                        if probe.abi_match {
+                            "matched"
+                        } else {
+                            "mismatched"
+                        },
+                        short_hash(&probe.runtime_sha256),
+                        short_hash(&probe.plugin_sha256)
+                    ),
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "sigpilot::decoders",
+                    backend = "saleae",
+                    sidecar = self.sidecar_path.display().to_string(),
+                    runtime_root = self.runtime_root.display().to_string(),
+                    error = error.to_string(),
+                    "Saleae backend probe failed"
+                );
+                DecoderBackendInfo {
+                    kind: DecoderBackendKind::SaleaeNative,
+                    display_name: "Saleae Native analyzer sidecar".to_string(),
+                    available: false,
+                    protocols: protocol_names(SALEAE_NATIVE_PROTOCOLS),
+                    supports_streaming: false,
+                    isolation: DecoderBackendIsolation::Sidecar,
+                    detail: error.to_string(),
+                }
+            }
         }
     }
 
@@ -3369,6 +3434,43 @@ impl SigrokNativeDecoder {
 
     pub fn decoder_catalog(&self) -> Result<SigrokDecoderCatalog> {
         let probe = self.probe_with_catalog(true)?;
+        tracing::info!(
+            target: "sigpilot::decoders",
+            backend = "sigrok",
+            sidecar = self.sidecar_path.display().to_string(),
+            decoder_id = probe.decoder_id.as_str(),
+            decoder_name = probe.decoder_name.as_str(),
+            api_version = probe.api_version,
+            available = probe.available,
+            protocols = probe.protocols.len(),
+            catalog_included = probe.catalog_included,
+            decoders = probe.decoder_catalog.len(),
+            c_decoders = probe.c_decoder_count,
+            python_decoders = probe.python_decoder_count,
+            "decoder catalog probed"
+        );
+        if !probe.available {
+            tracing::warn!(
+                target: "sigpilot::decoders",
+                backend = "sigrok",
+                decoders = probe.decoder_catalog.len(),
+                "the sigrok sidecar answered but reported itself unavailable"
+            );
+        } else if probe.decoder_catalog.is_empty() {
+            // `catalog_included` distinguishes "asked and got nothing" from
+            // "the sidecar never sent a catalog", which are different bugs.
+            let reason = if probe.catalog_included {
+                "the sigrok sidecar returned an empty decoder catalog"
+            } else {
+                "the sigrok sidecar did not include a decoder catalog in its probe"
+            };
+            tracing::warn!(
+                target: "sigpilot::decoders",
+                backend = "sigrok",
+                catalog_included = probe.catalog_included,
+                "{reason}"
+            );
+        }
         Ok(SigrokDecoderCatalog {
             decoders: probe.decoder_catalog,
             c_decoder_count: probe.c_decoder_count,
@@ -3759,37 +3861,61 @@ fn is_saleae_analyzer_runtime(_path: &Path) -> bool {
 impl DecoderBackend for SigrokNativeDecoder {
     fn info(&self) -> DecoderBackendInfo {
         match self.probe() {
-            Ok(probe) => DecoderBackendInfo {
-                kind: DecoderBackendKind::SigrokNative,
-                display_name: format!("Sigrok Native ({})", probe.decoder_name),
-                available: probe.available && probe.api_version == 4,
-                protocols: probe.protocols,
-                supports_streaming: probe.supports_streaming,
-                isolation: DecoderBackendIsolation::Sidecar,
-                detail: if probe.catalog_included {
-                    format!(
-                        "PXView verified sparse C runner {}, API v{}; catalog contains {} C and {} Python decoders",
-                        probe.decoder_id,
-                        probe.api_version,
-                        probe.c_decoder_count,
-                        probe.python_decoder_count
-                    )
-                } else {
-                    format!(
-                        "PXView verified sparse C runner {}, API v{}; full libsigrokdecode catalog is available through --catalog",
-                        probe.decoder_id, probe.api_version
-                    )
-                },
-            },
-            Err(error) => DecoderBackendInfo {
-                kind: DecoderBackendKind::SigrokNative,
-                display_name: "Sigrok Native analyzer sidecar".to_string(),
-                available: false,
-                protocols: protocol_names(SIGROK_NATIVE_PROTOCOLS),
-                supports_streaming: false,
-                isolation: DecoderBackendIsolation::Sidecar,
-                detail: error.to_string(),
-            },
+            Ok(probe) => {
+                let available = probe.available && probe.api_version == 4;
+                // An API version other than 4 is the failure mode that reads as
+                // "no decoders" in the UI, so it gets said out loud.
+                if !available {
+                    tracing::warn!(
+                        target: "sigpilot::decoders",
+                        backend = "sigrok",
+                        available = probe.available,
+                        api_version = probe.api_version,
+                        required_api_version = 4,
+                        "sigrok backend is present but unusable"
+                    );
+                }
+                DecoderBackendInfo {
+                    kind: DecoderBackendKind::SigrokNative,
+                    display_name: format!("Sigrok Native ({})", probe.decoder_name),
+                    available,
+                    protocols: probe.protocols,
+                    supports_streaming: probe.supports_streaming,
+                    isolation: DecoderBackendIsolation::Sidecar,
+                    detail: if probe.catalog_included {
+                        format!(
+                            "PXView verified sparse C runner {}, API v{}; catalog contains {} C and {} Python decoders",
+                            probe.decoder_id,
+                            probe.api_version,
+                            probe.c_decoder_count,
+                            probe.python_decoder_count
+                        )
+                    } else {
+                        format!(
+                            "PXView verified sparse C runner {}, API v{}; full libsigrokdecode catalog is available through --catalog",
+                            probe.decoder_id, probe.api_version
+                        )
+                    },
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "sigpilot::decoders",
+                    backend = "sigrok",
+                    sidecar = self.sidecar_path.display().to_string(),
+                    error = error.to_string(),
+                    "sigrok backend probe failed"
+                );
+                DecoderBackendInfo {
+                    kind: DecoderBackendKind::SigrokNative,
+                    display_name: "Sigrok Native analyzer sidecar".to_string(),
+                    available: false,
+                    protocols: protocol_names(SIGROK_NATIVE_PROTOCOLS),
+                    supports_streaming: false,
+                    isolation: DecoderBackendIsolation::Sidecar,
+                    detail: error.to_string(),
+                }
+            }
         }
     }
 
@@ -3933,6 +4059,16 @@ fn ensure_protocol_available(
     {
         Ok(())
     } else {
+        // The single point every "this analyzer shows up but produces nothing"
+        // report passes through. The advertised list is logged because the
+        // mismatch is nearly always a catalog the UI never refreshed.
+        tracing::warn!(
+            target: "sigpilot::decoders",
+            backend,
+            decoder = protocol,
+            offered = ?protocols,
+            "decoder rejected: the backend does not offer this protocol"
+        );
         Err(CoreError::Decode(format!(
             "{backend} decoder for {protocol} is not available"
         )))
@@ -4774,13 +4910,43 @@ impl DecoderBackend for LegacyRustDecoder {
             AnalyzerDecodeSettings::I2c(_) => "I2C",
             AnalyzerDecodeSettings::Spi(_) => "SPI",
             AnalyzerDecodeSettings::Native(settings) => {
+                // A rejection, not a crash: the analyzer exists and the catalog
+                // advertised it, but this fallback cannot run it. The protocol
+                // name is the whole diagnostic.
+                tracing::warn!(
+                    target: "sigpilot::decoders",
+                    backend = "legacy-rust",
+                    decoder = settings.protocol_name.as_str(),
+                    samples = capture.metadata.sample_count,
+                    "decoder rejected: the Legacy Rust backend implements only UART, I2C and SPI"
+                );
                 return Err(CoreError::Decode(format!(
                     "{} is not implemented by the Legacy Rust decoder",
                     settings.protocol_name
-                )))
+                )));
             }
         };
-        let frames = crate::decode::decode_analyzer(capture, settings)?
+        tracing::debug!(
+            target: "sigpilot::decoders",
+            backend = "legacy-rust",
+            protocol,
+            samples = capture.metadata.sample_count,
+            sample_rate_hz = capture.metadata.sample_rate_hz,
+            "decode started"
+        );
+        let started = Instant::now();
+        let frames: Vec<DecoderOutputFrame> = crate::decode::decode_analyzer(capture, settings)
+            .map_err(|error| {
+                tracing::error!(
+                    target: "sigpilot::decoders",
+                    backend = "legacy-rust",
+                    protocol,
+                    samples = capture.metadata.sample_count,
+                    error = error.to_string(),
+                    "decode failed"
+                );
+                error
+            })?
             .into_iter()
             .map(|frame| DecoderOutputFrame {
                 frame_id: frame.frame_id,
@@ -4793,6 +4959,16 @@ impl DecoderBackend for LegacyRustDecoder {
                 markers: Vec::new(),
             })
             .collect();
+        let frame_count = frames.len();
+        tracing::info!(
+            target: "sigpilot::decoders",
+            backend = "legacy-rust",
+            protocol,
+            frames = frame_count,
+            samples = capture.metadata.sample_count,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+            "decode finished"
+        );
         Ok(DecoderOutput {
             backend: DecoderBackendKind::LegacyRust,
             protocol: protocol.to_string(),

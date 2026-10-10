@@ -1,4 +1,9 @@
-import { DEFAULT_LOG_LEVEL, isLogLevel, type LogLevel } from "./logger";
+import {
+  DEFAULT_LOG_LEVEL,
+  isLogLevel,
+  normalizeLogModuleLevels,
+  type LogLevel,
+} from "./logger";
 import { migrateLegacyKey } from "./legacyStorage.ts";
 
 export const SUPPORTED_LOCALES = ["en", "zh-CN"] as const;
@@ -23,6 +28,9 @@ export interface UiPreferences {
   animationScale: number;
   /** Verbosity of the frontend log; the backend level follows it. */
   logLevel: LogLevel;
+  /** Per-module overrides on top of `logLevel`, keyed by module id. Empty means
+   *  every module uses the default. */
+  logModuleLevels: Record<string, LogLevel>;
   /** Stop writing logs to disk. Off by default: the run that needs a log is
    *  usually the one that already happened. */
   logPaused: boolean;
@@ -51,6 +59,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   locale: DEFAULT_LOCALE,
   animationScale: 1,
   logLevel: DEFAULT_LOG_LEVEL,
+  logModuleLevels: {},
   logPaused: false,
   matchChannelColors: true,
   panToTrigger: true,
@@ -69,6 +78,7 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
         ? Math.min(ANIMATION_SCALE_MAX, Math.max(ANIMATION_SCALE_MIN, candidate.animationScale))
         : DEFAULT_UI_PREFERENCES.animationScale,
     logLevel: isLogLevel(candidate.logLevel) ? candidate.logLevel : DEFAULT_UI_PREFERENCES.logLevel,
+    logModuleLevels: normalizeLogModuleLevels(candidate.logModuleLevels),
     logPaused:
       typeof candidate.logPaused === "boolean" ? candidate.logPaused : DEFAULT_UI_PREFERENCES.logPaused,
     matchChannelColors:

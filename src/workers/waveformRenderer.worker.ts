@@ -34,16 +34,25 @@ const denseFillAlpha = 1;
 // worker's devtools session and never reaches the log file. Forwarding through
 // `postMessage` lets the main thread put it in the record alongside everything
 // else, which is the whole point of the diagnostics export.
+//
+// The pass is attached because a bare renderer message says nothing about which
+// draw produced it: tiles and viewports share every code path below this.
 const nativeWarn = console.warn.bind(console);
 const nativeError = console.error.bind(console);
 console.warn = (...args: unknown[]) => {
   nativeWarn(...args);
-  self.postMessage({ level: "warn", message: describe(args), type: "log" });
+  self.postMessage({ level: "warn", message: describePass(args), type: "log" });
 };
 console.error = (...args: unknown[]) => {
   nativeError(...args);
-  self.postMessage({ level: "error", message: describe(args), type: "log" });
+  self.postMessage({ level: "error", message: describePass(args), type: "log" });
 };
+
+let currentPass = "startup";
+
+function describePass(args: unknown[]) {
+  return `[${currentPass}] ${describe(args)}`;
+}
 
 function describe(args: unknown[]) {
   return args
@@ -183,6 +192,11 @@ function drainQueue() {
 }
 
 function runTileRender(request: TileRenderRequest) {
+  // The pass label is set before the renderer is built: constructing the
+  // fallback is itself a `console.warn`, and it belongs to the draw that asked
+  // for it. `tile`/`viewport` plus the request id and size is enough to find the
+  // draw in a trace.
+  currentPass = `tile#${request.id} ${request.width}x${request.height}`;
   const renderer = rendererFor("tile");
   if (!renderer) return;
   try {
@@ -193,6 +207,7 @@ function runTileRender(request: TileRenderRequest) {
 }
 
 function runViewportRender(request: ViewportRenderRequest) {
+  currentPass = `viewport#${request.id} ${request.width}x${request.height}`;
   const renderer = rendererFor("viewport");
   if (!renderer) return;
   try {

@@ -20,7 +20,7 @@ import { clearSessionViewport, writeSessionViewport } from "../lib/viewportStore
 import { dispatchSessionViewIntent, hasSessionFrameLoop } from "../lib/frameStore";
 import { useSessionFrameState } from "../lib/useFrameState";
 import { recordWaveformDraw } from "../lib/waveformDrawProbe";
-import { logRecord } from "../lib/logger";
+import { RENDERING_MODULE, logRecord } from "../lib/logger";
 import {
   packedDigitalBinBytes,
   requestViewportRaster,
@@ -282,9 +282,10 @@ export function WaveformCanvas({
     ) => {
       const current = waveLayerWorkerRef.current;
       if (event.data.type === "log") {
-        // Worker output lands in the frontend log; from there it reaches the
-        // backend file like any other frontend record.
-        logRecord(event.data.level, "waveformWorker", event.data.message);
+        // Worker output lands in the frontend log under the `rendering` module,
+        // so it is filtered alongside the tiles and shaders it came from; from
+        // there it reaches the backend file like any other frontend record.
+        logRecord(event.data.level, "waveformWorker", event.data.message, RENDERING_MODULE);
         return;
       }
       if (!current) {

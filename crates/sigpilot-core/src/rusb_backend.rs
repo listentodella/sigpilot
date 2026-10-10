@@ -341,12 +341,29 @@ impl RusbBackend {
         sink: &mut TraceSink<'_>,
     ) -> Result<()> {
         let bitstreams = bitstreams.ok_or(CoreError::MissingBitstreams)?;
+        let prepare_started_at = Instant::now();
+        tracing::info!(
+            target: "sigpilot::device",
+            device_id,
+            reset_bitstream_bytes = bitstreams.reset.len(),
+            main_bitstream_bytes = bitstreams.main.len(),
+            "preparing PXLogic device"
+        );
         trace(sink, "prepare", format!("opening {device_id}"));
         let mut handle = self.open_device(device_id)?;
         trace(sink, "prepare", "claiming USB interfaces 0 and 1");
         Self::claim_pxlogic_interfaces(&mut handle)?;
         let firmware_version = Self::read_register(&mut handle, protocol::REG_FIRMWARE_VERSION)?;
         if firmware_version != protocol::EXPECTED_FIRMWARE_VERSION {
+            // A version mismatch is why `prepare` can take seconds, so it is a
+            // lifecycle transition rather than a curiosity.
+            tracing::warn!(
+                target: "sigpilot::device",
+                device_id,
+                found_firmware = format!("0x{firmware_version:08x}"),
+                expected_firmware = format!("0x{:08x}", protocol::EXPECTED_FIRMWARE_VERSION),
+                "MCU firmware version differs from PXView; reflashing before FPGA prepare"
+            );
             trace_warn(
                 sink,
                 "firmware",
@@ -389,6 +406,15 @@ impl RusbBackend {
         Self::upload_bitstream_with_trace(&mut handle, &bitstreams.main, 4, "main", sink)?;
         trace(sink, "prepare", "FPGA upload complete, waiting 100 ms");
         std::thread::sleep(Duration::from_millis(100));
+        tracing::info!(
+            target: "sigpilot::device",
+            device_id,
+            // The version read *before* the reflash decision, so the branch is
+            // what matters here and not a post-flash claim.
+            firmware_before = format!("0x{firmware_version:08x}"),
+            elapsed_ms = prepare_started_at.elapsed().as_secs_f64() * 1_000.0,
+            "PXLogic device ready"
+        );
         Ok(())
     }
 
@@ -454,6 +480,7 @@ impl RusbBackend {
         on_trigger: &mut dyn FnMut(&CaptureTriggerMetadata),
     ) -> Result<CaptureData> {
         trace(sink, "capture", format!("opening {}", settings.device_id));
+        let capture_started_at = Instant::now();
         let mut handle = self.open_device(&settings.device_id)?;
         let speed = handle.device().speed();
         let superspeed = matches!(speed, rusb::Speed::Super | rusb::Speed::SuperPlus);
@@ -478,6 +505,17 @@ impl RusbBackend {
                 settings.channel_count,
                 settings.sample_rate_hz,
             )?;
+            tracing::debug!(
+                target: "sigpilot::device",
+                device_id = settings.device_id.as_str(),
+                profile_model = profile.model,
+                profile_vendor = profile.vendor,
+                usb_speed = format!("{:?}", profile.usb_speed),
+                logic_mode = profile.logic_mode,
+                hardware_depth_bits,
+                channel_mode = plan.channel_mode.id.pxview_name(),
+                "resolved a PXView device profile for this capture"
+            );
             trace(
                 sink,
                 "profile",
@@ -490,6 +528,17 @@ impl RusbBackend {
                 ),
             );
             if plan.channel_count != settings.channel_count {
+                // The two cappings below are the whole point of the profile
+                // table, and a capture that comes back short looks identical to
+                // a driver bug unless the log says which number was reduced.
+                tracing::warn!(
+                    target: "sigpilot::device",
+                    device_id = settings.device_id.as_str(),
+                    profile_model = plan.profile.model,
+                    requested_channels = settings.channel_count,
+                    granted_channels = plan.channel_count,
+                    "profile capped the requested channel count"
+                );
                 trace_warn(
                     sink,
                     "profile",
@@ -500,6 +549,14 @@ impl RusbBackend {
                 );
             }
             if plan.sample_rate_hz != settings.sample_rate_hz {
+                tracing::warn!(
+                    target: "sigpilot::device",
+                    device_id = settings.device_id.as_str(),
+                    channel_mode = plan.channel_mode.id.pxview_name(),
+                    requested_sample_rate_hz = settings.sample_rate_hz,
+                    granted_sample_rate_hz = plan.sample_rate_hz,
+                    "profile capped the requested sample rate"
+                );
                 trace_warn(
                     sink,
                     "profile",
@@ -512,6 +569,18 @@ impl RusbBackend {
             effective_settings.channel_count = plan.channel_count;
             effective_settings.sample_rate_hz = plan.sample_rate_hz;
         } else {
+            // No profile means the capture runs on generic defaults. Worth a
+            // warning: the UI still offered the user rates and channel counts
+            // that came from somewhere, and this is where they stopped applying.
+            tracing::warn!(
+                target: "sigpilot::device",
+                device_id = settings.device_id.as_str(),
+                vid = format!("{:04x}", desc.vendor_id()),
+                pid = format!("{:04x}", desc.product_id()),
+                speed = format!("{:?}", speed),
+                requested_channels = settings.channel_count,
+                "no PXView profile matched; falling back to generic defaults"
+            );
             effective_settings.channel_count = Self::resolve_capture_channel_count(
                 &mut handle,
                 &settings.device_id,
@@ -548,12 +617,29 @@ impl RusbBackend {
                 .collect(),
             trigger: None,
         };
-        started(&stream_metadata);
         let transfer_size = pxview_capture_transfer_size(
             effective_settings.sample_rate_hz,
             enabled_channel_count,
             superspeed,
         )?;
+        // Logged after the transfer size is resolved so the one line that opens
+        // the capture carries every number a maintainer needs to explain a short
+        // one: rate, geometry, sample count, and the read size itself.
+        tracing::info!(
+            target: "sigpilot::capture",
+            device_id = settings.device_id.as_str(),
+            mode = format!("{:?}", effective_settings.mode),
+            sample_rate_hz = effective_settings.sample_rate_hz,
+            channels = channel_count,
+            enabled_channels = enabled_channels.len(),
+            sample_count,
+            target_raw_bytes,
+            target_decoded_bytes,
+            transfer_size,
+            superspeed,
+            "PXLogic capture started"
+        );
+        started(&stream_metadata);
         trace(
             sink,
             "capture",
@@ -885,6 +971,20 @@ impl RusbBackend {
                         protocol::REG_STREAM_START,
                         protocol::STREAM_STOP_FLAGS,
                     );
+                    // A stall is the failure users actually report, and the two
+                    // numbers that explain it are how far it got and how long it
+                    // had been quiet.
+                    tracing::error!(
+                        target: "sigpilot::transport",
+                        device_id = settings.device_id.as_str(),
+                        endpoint = format!("0x{data_endpoint:02x}"),
+                        bytes_read,
+                        target_raw_bytes,
+                        sample_rate_hz = effective_settings.sample_rate_hz,
+                        idle_ms = idle.as_secs_f64() * 1_000.0,
+                        idle_polls = idle_poll_count,
+                        "bulk endpoint stopped producing data; ending the capture"
+                    );
                     return Err(CoreError::Usb(format!(
                         "bulk endpoint 0x{data_endpoint:02x} produced no data for {:.1} s",
                         idle.as_secs_f64()
@@ -949,6 +1049,12 @@ impl RusbBackend {
             protocol::STREAM_STOP_FLAGS,
         );
         if cancelled && bytes_read == 0 {
+            tracing::info!(
+                target: "sigpilot::capture",
+                device_id = settings.device_id.as_str(),
+                elapsed_ms = capture_started_at.elapsed().as_secs_f64() * 1_000.0,
+                "PXLogic capture cancelled before any data arrived"
+            );
             return Err(CoreError::Cancelled);
         }
         let samples = if decode_cross {
@@ -981,6 +1087,35 @@ impl RusbBackend {
                 .unwrap_or(0)
                 .min(sample_count)
         };
+
+        // One line for the outcome, with the requested count beside the achieved
+        // one. A capture that returned fewer samples than were asked for is the
+        // report, and this is the only place both numbers exist at once.
+        tracing::info!(
+            target: "sigpilot::capture",
+            device_id = settings.device_id.as_str(),
+            outcome = if cancelled { "cancelled" } else { "completed" },
+            samples = captured_sample_count,
+            requested_samples = sample_count,
+            bytes_read,
+            target_raw_bytes,
+            returned_bytes = samples.len(),
+            decode_cross,
+            triggered = hardware_trigger.is_some(),
+            elapsed_ms = capture_started_at.elapsed().as_secs_f64() * 1_000.0,
+            "PXLogic capture finished"
+        );
+        if captured_sample_count < sample_count && !cancelled {
+            tracing::warn!(
+                target: "sigpilot::capture",
+                device_id = settings.device_id.as_str(),
+                samples = captured_sample_count,
+                requested_samples = sample_count,
+                bytes_read,
+                target_raw_bytes,
+                "capture returned fewer samples than requested"
+            );
+        }
 
         Ok(CaptureData {
             metadata: CaptureMetadata {

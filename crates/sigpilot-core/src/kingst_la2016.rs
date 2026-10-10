@@ -1314,6 +1314,13 @@ fn capture_streaming(
     // still has reads queued against it.
     pool.stop();
     if let Some(error) = failure {
+        tracing::error!(
+            target: "sigpilot::capture",
+            samples_read,
+            bytes = samples_read * unit_size,
+            error = error.to_string(),
+            "Kingst stream ended on an error"
+        );
         return Err(error);
     }
 
@@ -1330,6 +1337,7 @@ fn capture_streaming(
         "cancelled by the caller"
     };
     tracing::info!(
+        target: "sigpilot::device",
         samples = samples_read,
         bytes = samples_read * unit_size,
         reason,
@@ -1437,6 +1445,16 @@ pub fn capture(
     progress: &mut dyn FnMut(CaptureProgress),
 ) -> Result<CaptureData> {
     let driver = KingstLa2016Driver::new();
+    let capture_started_at = std::time::Instant::now();
+    tracing::info!(
+        target: "sigpilot::capture",
+        device_id,
+        mode = format!("{:?}", settings.mode),
+        sample_rate_hz = settings.sample_rate_hz,
+        duration_ms = settings.duration_ms,
+        requested_channels = settings.channel_count,
+        "Kingst capture requested"
+    );
     driver.bring_up(device_id, diagnostics)?;
 
     // `bring_up` may have just made the device re-enumerate, so resolve again
@@ -1449,6 +1467,14 @@ pub fn capture(
     let layout = TransferLayout::for_model(model);
 
     if settings.channel_count > model.channels {
+        tracing::error!(
+            target: "sigpilot::capture",
+            device_id,
+            model = model.name,
+            requested_channels = settings.channel_count,
+            max_channels = model.channels,
+            "more channels were asked for than the identified model has"
+        );
         return Err(CoreError::InvalidChannelCount(settings.channel_count));
     }
 
@@ -1500,6 +1526,19 @@ pub fn capture(
         layout.unit_size as u8,
         0,
     ));
+    tracing::info!(
+        target: "sigpilot::capture",
+        device_id = device_id.as_str(),
+        model = model.name,
+        mode = format!("{:?}", settings.mode),
+        effective_sample_rate_hz = effective_rate,
+        requested_sample_rate_hz = settings.sample_rate_hz,
+        channels = channel_count,
+        enabled_channels = enabled_channels.len(),
+        sample_count,
+        threshold_volts = threshold,
+        "Kingst capture started"
+    );
 
     let (mut samples, mut samples_read) = match settings.mode {
         crate::models::CaptureMode::Buffer => {
@@ -1525,9 +1564,40 @@ pub fn capture(
     if matches!(settings.mode, crate::models::CaptureMode::Buffer) && sample_count > 0 {
         let wanted = sample_count as usize * layout.unit_size;
         if samples.len() > wanted {
+            tracing::debug!(
+                target: "sigpilot::capture",
+                device_id = device_id.as_str(),
+                received_samples = samples.len() / layout.unit_size.max(1),
+                kept_samples = sample_count,
+                "trimming capture-to-memory to the requested sample count"
+            );
             samples.truncate(wanted);
             samples_read = sample_count;
         }
+    }
+
+    tracing::info!(
+        target: "sigpilot::capture",
+        device_id = device_id.as_str(),
+        model = model.name,
+        mode = format!("{:?}", settings.mode),
+        samples = samples_read,
+        requested_samples = sample_count,
+        bytes = samples.len(),
+        elapsed_ms = capture_started_at.elapsed().as_secs_f64() * 1_000.0,
+        "Kingst capture completed"
+    );
+    if sample_count > 0 && samples_read < sample_count {
+        // Running out of sample memory is the documented reason, and it looks
+        // identical to a stalled device from the outside.
+        tracing::warn!(
+            target: "sigpilot::capture",
+            device_id = device_id.as_str(),
+            model = model.name,
+            samples = samples_read,
+            requested_samples = sample_count,
+            "capture returned fewer samples than requested; the device may have run out of sample memory"
+        );
     }
 
     Ok(CaptureData {
@@ -1754,17 +1824,43 @@ impl KingstLa2016Driver {
                 .open()
                 .map_err(|error| CoreError::Usb(format!("cannot open Kingst device: {error}")))?;
             return match handle.claim_interface(USB_INTERFACE) {
-                Ok(()) => Ok(handle),
-                Err(rusb::Error::Busy) => Err(CoreError::Usb(
-                    "cannot claim the Kingst interface: another program or driver is using it"
-                        .to_string(),
-                )),
-                Err(rusb::Error::NoDevice) => {
-                    Err(CoreError::Usb("the Kingst device has been disconnected".to_string()))
+                Ok(()) => {
+                    tracing::debug!(
+                        target: "sigpilot::device",
+                        device_id,
+                        vid = format!("{:04x}", desc.vendor_id()),
+                        pid = format!("{:04x}", desc.product_id()),
+                        bus = device.bus_number(),
+                        address = device.address(),
+                        interface = USB_INTERFACE,
+                        "opened Kingst device and claimed its interface"
+                    );
+                    Ok(handle)
                 }
-                Err(error) => Err(CoreError::Usb(format!(
-                    "cannot claim the Kingst interface: {error}"
-                ))),
+                Err(error) => {
+                    // Claiming is the step that fails when another program or
+                    // kernel driver already holds the device, which is the most
+                    // common reason a working analyzer suddenly will not open.
+                    tracing::error!(
+                        target: "sigpilot::device",
+                        device_id,
+                        interface = USB_INTERFACE,
+                        error = error.to_string(),
+                        "cannot claim the Kingst interface; the device stays closed"
+                    );
+                    match error {
+                        rusb::Error::Busy => Err(CoreError::Usb(
+                            "cannot claim the Kingst interface: another program or driver is using it"
+                                .to_string(),
+                        )),
+                        rusb::Error::NoDevice => {
+                            Err(CoreError::Usb("the Kingst device has been disconnected".to_string()))
+                        }
+                        other => Err(CoreError::Usb(format!(
+                            "cannot claim the Kingst interface: {other}"
+                        ))),
+                    }
+                }
             };
         }
         Err(CoreError::UnsupportedDevice)
@@ -1989,7 +2085,19 @@ impl DeviceDriver for KingstLa2016Driver {
         // re-enumeration caused by a firmware upload.
         let handle = match self.open_device(device_id) {
             Ok(handle) => handle,
-            Err(_) => self.open_device(&self.prepared_device_id()?)?,
+            Err(_) => {
+                // Falling back to a different device than the caller asked for
+                // is invisible otherwise: the capabilities look perfectly valid
+                // and belong to another board.
+                let prepared = self.prepared_device_id()?;
+                tracing::warn!(
+                    target: "sigpilot::device",
+                    device_id,
+                    resolved_device_id = prepared.as_str(),
+                    "requested device id would not open; asking the programmed device instead"
+                );
+                self.open_device(&prepared)?
+            }
         };
         let identity = read_identity(&handle)?;
         let model = identity.model();
@@ -2002,7 +2110,7 @@ impl DeviceDriver for KingstLa2016Driver {
             .filter(|depth| *depth > 0)
             .unwrap_or(MEMORY_SAMPLES);
 
-        Ok(HardwareCaptureCapabilities {
+        let capabilities = HardwareCaptureCapabilities {
             device_id: device_id.to_string(),
             profile_vendor: Some("Qingdao Kingst".to_string()),
             profile_model: Some(model.name.to_string()),
@@ -2062,7 +2170,18 @@ impl DeviceDriver for KingstLa2016Driver {
                 }
                 modes
             },
-        })
+        };
+        tracing::debug!(
+            target: "sigpilot::device",
+            device_id,
+            model = model.name,
+            max_channels = model.channels,
+            default_sample_rate_hz = capabilities.default_sample_rate_hz,
+            sample_rates = capabilities.sample_rates.len(),
+            channel_modes = capabilities.channel_modes.len(),
+            "Kingst capabilities resolved"
+        );
+        Ok(capabilities)
     }
 
     fn prepare(&self, device_id: &str, sink: &mut dyn FnMut(DiagnosticEvent)) -> Result<()> {

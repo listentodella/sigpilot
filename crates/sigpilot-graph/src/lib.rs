@@ -62,7 +62,7 @@ fn trace_graph_timing(stage: &str, started: Instant, detail: &str) {
     let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
     sigpilot_core::record_performance_event("graph", None, stage, elapsed, detail);
     tracing::debug!(
-        target: "sigpilot::decoder_performance",
+        target: "sigpilot::graph",
         component = "graph",
         stage,
         elapsed_ms,
@@ -660,7 +660,7 @@ impl DigitalGraph {
                 include_exact,
             )
         };
-        let channels = if requested_channels.len() > 4 {
+        let channels: Vec<ChannelTile> = if requested_channels.len() > 4 {
             requested_channels
                 .into_par_iter()
                 .map(build_channel)
@@ -668,6 +668,21 @@ impl DigitalGraph {
         } else {
             requested_channels.into_iter().map(build_channel).collect()
         };
+
+        tracing::trace!(
+            target: "sigpilot::rendering",
+            start_sample = start,
+            visible_samples,
+            pixels = bin_count,
+            samples_per_pixel = samples_per_bin,
+            channels = channels.len(),
+            // The exact path is dropped once a viewport is dense enough that
+            // individual transitions stop being drawn, which is the switch that
+            // makes a zoomed-out waveform look different from a zoomed-in one.
+            exact = include_exact,
+            exact_limit_samples = exact_limit,
+            "waveform tile built"
+        );
 
         Ok(WaveformTile {
             start_sample: start,
@@ -1202,8 +1217,14 @@ pub struct GraphSession {
 
 impl Default for GraphSession {
     fn default() -> Self {
+        let instance_id = NEXT_GRAPH_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            target: "sigpilot::graph",
+            session_id = instance_id,
+            "graph session created"
+        );
         Self {
-            instance_id: NEXT_GRAPH_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            instance_id,
             graph: RwLock::new(None),
             capture: RwLock::new(None),
             sparse_capture: RwLock::new(None),
@@ -1506,6 +1527,15 @@ impl GraphSession {
     }
 
     pub fn begin_capture(&self, metadata: CaptureMetadata) -> Result<()> {
+        tracing::info!(
+            target: "sigpilot::capture",
+            session_id = self.instance_id,
+            device_id = metadata.source_device.as_str(),
+            sample_rate_hz = metadata.sample_rate_hz,
+            channels = metadata.channel_count,
+            enabled_channels = metadata.enabled_channels.len(),
+            "graph capture opened"
+        );
         *self.graph.write() = Some(DigitalGraph::new(metadata)?);
         *self.capture.write() = None;
         *self.sparse_capture.write() = None;
@@ -1522,6 +1552,17 @@ impl GraphSession {
             .ok_or(GraphError::EmptyGraph)?
             .append_interleaved(samples)?;
         self.bump_revision();
+        // Runs once per streamed chunk, so this stays at trace: the totals are
+        // what explain a graph that stopped growing, and they are logged once at
+        // `finish_capture` rather than per chunk.
+        tracing::trace!(
+            target: "sigpilot::capture",
+            session_id = self.instance_id,
+            appended_samples = count,
+            chunk_bytes = samples.len(),
+            total_samples = self.sample_count(),
+            "appended streamed samples"
+        );
         Ok(count)
     }
 
@@ -1568,7 +1609,19 @@ impl GraphSession {
             .as_ref()
             .map(DigitalGraph::sample_count)
             .unwrap_or(0);
+        // The graph accumulated samples as they streamed in, and the final
+        // metadata counts what the device says it sent. When they disagree, the
+        // graph is rebuilt from the capture rather than relabelled — and that
+        // fallback is invisible from the outside, so it is worth a line: a
+        // rebuilt graph is a capture that visibly jumps at the end.
         if indexed_samples != capture.metadata.sample_count {
+            tracing::warn!(
+                target: "sigpilot::capture",
+                session_id = self.instance_id,
+                streamed_samples = indexed_samples,
+                metadata_samples = capture.metadata.sample_count,
+                "streamed sample count disagrees with the final metadata; rebuilding the graph"
+            );
             return self.replace_capture(capture);
         }
         let finalized = self
@@ -1578,11 +1631,24 @@ impl GraphSession {
             .ok_or(GraphError::EmptyGraph)
             .and_then(|graph| graph.finish_metadata(capture.metadata.clone()));
         if finalized.is_err() {
+            tracing::warn!(
+                target: "sigpilot::capture",
+                session_id = self.instance_id,
+                streamed_samples = indexed_samples,
+                error = finalized.as_ref().err().map(|error| error.to_string()),
+                "finalizing the streamed metadata failed; rebuilding the graph"
+            );
             return self.replace_capture(capture);
         }
         *self.capture.write() = Some(Arc::new(capture));
         *self.sparse_capture.write() = None;
         self.bump_revision();
+        tracing::info!(
+            target: "sigpilot::capture",
+            session_id = self.instance_id,
+            samples = indexed_samples,
+            "capture finished"
+        );
         Ok(())
     }
 
@@ -1597,9 +1663,32 @@ impl GraphSession {
     }
 
     pub fn trim_capture(&self, start: u64, end: u64) -> Result<(CaptureMetadata, usize)> {
+        tracing::info!(
+            target: "sigpilot::capture",
+            session_id = self.instance_id,
+            start_sample = start,
+            end_sample = end,
+            held_samples = self.sample_count(),
+            "trimming capture"
+        );
         let mut graph = self.graph.write();
-        let graph = graph.as_mut().ok_or(GraphError::EmptyGraph)?;
+        let graph = graph.as_mut().ok_or_else(|| {
+            tracing::error!(
+                target: "sigpilot::capture",
+                session_id = self.instance_id,
+                "cannot trim: the session holds no capture"
+            );
+            GraphError::EmptyGraph
+        })?;
         if start >= end || end > graph.sample_count() {
+            tracing::warn!(
+                target: "sigpilot::capture",
+                session_id = self.instance_id,
+                start_sample = start,
+                end_sample = end,
+                held_samples = graph.sample_count(),
+                "trim range is empty or runs past the end of the capture"
+            );
             return Err(GraphError::InvalidTrimRange);
         }
         let metadata = trimmed_metadata(graph.metadata(), start, end)?;
@@ -1611,12 +1700,28 @@ impl GraphSession {
         } else if let Some(capture) = sparse_capture.as_mut() {
             trim_sparse_capture(capture, metadata.clone(), start, end)?
         } else {
+            tracing::error!(
+                target: "sigpilot::capture",
+                session_id = self.instance_id,
+                start_sample = start,
+                end_sample = end,
+                "cannot trim: neither a packed nor a sparse capture is held"
+            );
             return Err(GraphError::EmptyGraph);
         };
 
         graph.trim(start, end)?;
         self.clear_analyzer_caches();
         self.bump_revision();
+        tracing::info!(
+            target: "sigpilot::capture",
+            session_id = self.instance_id,
+            first_sample = start,
+            kept_samples = end - start,
+            metadata_sample_count = metadata.sample_count,
+            kept_bytes = bytes,
+            "capture trimmed"
+        );
         Ok((metadata, bytes))
     }
 
@@ -1683,11 +1788,35 @@ impl GraphSession {
         channel: u8,
         sample: u64,
     ) -> Result<Option<DigitalPointMeasurement>> {
-        self.graph
+        let measurement = self
+            .graph
             .read()
             .as_ref()
             .ok_or(GraphError::EmptyGraph)?
-            .measure_point(channel, sample)
+            .measure_point(channel, sample)?;
+        match &measurement {
+            Some(measured) => tracing::debug!(
+                target: "sigpilot::measurements",
+                session_id = self.instance_id,
+                channel,
+                sample,
+                level = measured.high,
+                width_start_sample = measured.width_start_sample,
+                width_end_sample = measured.width_end_sample,
+                width_samples = measured.width_end_sample.saturating_sub(measured.width_start_sample),
+                "point measurement computed"
+            ),
+            // `None` is a real answer — the cursor sits on a channel with no
+            // transitions around it — so it is logged rather than swallowed.
+            None => tracing::debug!(
+                target: "sigpilot::measurements",
+                session_id = self.instance_id,
+                channel,
+                sample,
+                "no transition near the measured sample; width and period are unavailable"
+            ),
+        }
+        Ok(measurement)
     }
 
     pub fn revision(&self) -> u64 {
@@ -1758,6 +1887,16 @@ impl GraphSession {
             DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust
         ) {
             if let AnalyzerDecodeSettings::Native(settings) = settings {
+                // A rejection with a cause: the analyzer is native-only and the
+                // selected backend cannot run it, which is otherwise reported to
+                // the user as an empty analyzer.
+                tracing::warn!(
+                    target: "sigpilot::decoders",
+                    session_id = self.instance_id,
+                    backend = ?backend,
+                    decoder = settings.protocol_name.as_str(),
+                    "decode rejected: the Legacy Rust backend implements only UART, I2C and SPI"
+                );
                 return Err(GraphError::InvalidAnalyzer(format!(
                     "{} cannot use the Legacy Rust decoder backend",
                     settings.protocol_name
@@ -1771,6 +1910,13 @@ impl GraphSession {
             // Native sidecars are batch decoders. Keep live bubbles available
             // from the indexed graph, then replace them after finish_capture().
             if matches!(settings, AnalyzerDecodeSettings::Native(_)) {
+                tracing::debug!(
+                    target: "sigpilot::decoders",
+                    session_id = self.instance_id,
+                    backend = ?backend,
+                    samples = self.sample_count(),
+                    "no finished capture to decode yet; returning no frames until the capture completes"
+                );
                 return Ok(Arc::new(Vec::new()));
             }
             return self.decode_frames(settings);
@@ -1803,22 +1949,61 @@ impl GraphSession {
         let decode_started = Instant::now();
         let output = match backend {
             DecoderBackendKind::SaleaeNative => {
-                let decoder = SaleaeNativeDecoder::from_env_cached()
-                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+                let decoder = SaleaeNativeDecoder::from_env_cached().map_err(|error| {
+                    tracing::error!(
+                        target: "sigpilot::decoders",
+                        session_id = self.instance_id,
+                        backend = "saleae",
+                        error = error.to_string(),
+                        "the Saleae sidecar could not be located or configured"
+                    );
+                    GraphError::DecoderBackend(error.to_string())
+                })?;
                 decode_indexed(&decoder)
             }
             DecoderBackendKind::SigrokNative => {
-                let decoder = SigrokNativeDecoder::from_env_cached()
-                    .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+                let decoder = SigrokNativeDecoder::from_env_cached().map_err(|error| {
+                    tracing::error!(
+                        target: "sigpilot::decoders",
+                        session_id = self.instance_id,
+                        backend = "sigrok",
+                        error = error.to_string(),
+                        "the sigrok sidecar could not be located or configured"
+                    );
+                    GraphError::DecoderBackend(error.to_string())
+                })?;
                 decode_indexed(&decoder)
             }
             DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust => unreachable!(),
         }
-        .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        .map_err(|error| {
+            // The decoder name travels with the failure because "the analyzer
+            // shows nothing" is otherwise unattributable.
+            tracing::error!(
+                target: "sigpilot::decoders",
+                session_id = self.instance_id,
+                backend = ?backend,
+                samples = sample_count,
+                elapsed_ms = decode_started.elapsed().as_secs_f64() * 1_000.0,
+                error = error.to_string(),
+                "decode failed"
+            );
+            GraphError::DecoderBackend(error.to_string())
+        })?;
+        let output_frame_count = output.frames.len();
+        tracing::info!(
+            target: "sigpilot::decoders",
+            session_id = self.instance_id,
+            backend = ?backend,
+            frames = output_frame_count,
+            samples = sample_count,
+            elapsed_ms = decode_started.elapsed().as_secs_f64() * 1_000.0,
+            "decode finished"
+        );
         trace_graph_timing(
             "backend_decode",
             decode_started,
-            &format!("backend={backend:?} output_frames={}", output.frames.len()),
+            &format!("backend={backend:?} output_frames={output_frame_count}"),
         );
         let conversion_started = Instant::now();
         let frames = Arc::new(output.into_decoded_frames());
@@ -2819,6 +3004,26 @@ impl GraphSession {
         backend: DecoderBackendKind,
         waveform: &WaveformRequest,
     ) -> Result<Arc<Vec<DecodedFrame>>> {
+        // The dispatch decision itself: which representation the frames get
+        // decoded from, and which backend runs them. A capture whose analyzer
+        // shows nothing is usually this line disagreeing with what the user
+        // expected, so the branch taken is recorded rather than inferred.
+        tracing::debug!(
+            target: "sigpilot::decoders",
+            session_id = self.instance_id,
+            backend = ?backend,
+            protocol = match settings {
+                AnalyzerDecodeSettings::Uart(_) => "UART",
+                AnalyzerDecodeSettings::I2c(_) => "I2C",
+                AnalyzerDecodeSettings::Spi(_) => "SPI",
+                AnalyzerDecodeSettings::Native(native) => native.protocol_name.as_str(),
+            },
+            sparse_capture = self.sparse_capture().is_some(),
+            packed_capture = self.capture().is_some(),
+            window_start = waveform.start_sample,
+            window_samples = waveform.sample_count,
+            "dispatching a decode"
+        );
         if matches!(
             backend,
             DecoderBackendKind::SaleaeNative | DecoderBackendKind::SigrokNative
@@ -2947,6 +3152,18 @@ impl GraphSession {
             return self.session_view();
         }
 
+        // Every non-passive intent is a real user gesture, so this is where the
+        // "the graph did not move" reports get answered: the requested numbers
+        // are recorded *before* normalization, because the clamp is exactly what
+        // makes a request and its effect differ.
+        tracing::debug!(
+            target: "sigpilot::graph",
+            session_id = self.instance_id,
+            intent = ?intent,
+            view_before = ?self.session_view(),
+            "applying a view intent"
+        );
+
         // Hold a zoom-in at the finest span worth showing by clamping the *factor*,
         // not the resulting span.
         //
@@ -3060,6 +3277,16 @@ impl GraphSession {
                 .ok_or(GraphError::EmptyGraph)?
                 .build_tile(&waveform)?
         } else {
+            // Not an error, but the reason a frame can arrive with no waveform
+            // in it — worth one line so it is not mistaken for a draw failure.
+            tracing::debug!(
+                target: "sigpilot::rendering",
+                session_id = self.instance_id,
+                frame_id = request.frame_id,
+                start_sample = waveform.start_sample,
+                samples = waveform.sample_count,
+                "frame requested no waveform tile"
+            );
             empty_waveform_tile(&waveform)
         };
         trace_graph_timing(
@@ -3100,6 +3327,19 @@ impl GraphSession {
             tile,
             analyzers,
         };
+        tracing::trace!(
+            target: "sigpilot::graph",
+            session_id = self.instance_id,
+            frame_id = request.frame_id,
+            revision = response.revision,
+            sample_count = response.sample_count,
+            start_sample = response.data_view.start_sample,
+            samples = response.data_view.samples,
+            tile_channels = response.tile.channels.len(),
+            analyzers = response.analyzers.len(),
+            elapsed_ms = total_started.elapsed().as_secs_f64() * 1_000.0,
+            "graph frame produced"
+        );
         trace_graph_timing(
             "graph_frame_total",
             total_started,
@@ -3114,8 +3354,24 @@ impl GraphSession {
         waveform: &WaveformRequest,
     ) -> Result<AnalyzerRenderResult> {
         let decode_started = Instant::now();
-        let frames =
-            self.decode_frames_with_backend_for_view(&request.settings, request.backend, waveform)?;
+        // A decode failure here aborts the whole frame, so the analyzer id and
+        // the reason are logged before it propagates — otherwise the user sees
+        // a blank analyzer row with nothing to explain it.
+        let frames = self
+            .decode_frames_with_backend_for_view(&request.settings, request.backend, waveform)
+            .map_err(|error| {
+                tracing::error!(
+                    target: "sigpilot::decoders",
+                    session_id = self.instance_id,
+                    analyzer_id = request.analyzer_id.as_str(),
+                    backend = ?request.backend,
+                    window_start = waveform.start_sample,
+                    window_samples = waveform.sample_count,
+                    error = error.to_string(),
+                    "analyzer render failed"
+                );
+                error
+            })?;
         trace_graph_timing(
             "analyzer_frames",
             decode_started,
@@ -3165,6 +3421,16 @@ impl GraphSession {
             .unwrap_or(2)
             .min(MAX_PARALLEL_ANALYZER_RENDERS)
             .min(requests.len());
+        // The parallelism actually used, because a frame that renders slowly
+        // with no obvious cause is usually this silently collapsing to one.
+        tracing::debug!(
+            target: "sigpilot::rendering",
+            session_id = self.instance_id,
+            analyzers = requests.len(),
+            workers = worker_count,
+            chunk_size = requests.len().div_ceil(worker_count.max(1)),
+            "dispatching analyzer renders across workers"
+        );
         if worker_count <= 1 {
             return requests
                 .iter()
@@ -3189,6 +3455,20 @@ impl GraphSession {
                         .collect::<Result<Vec<_>>>()
                 }))
                 .unwrap_or_else(|_| {
+                    // A panicking worker loses every analyzer in its chunk, so
+                    // the chunk's analyzer ids are the only way to find out
+                    // which one took the frame down.
+                    tracing::error!(
+                        target: "sigpilot::rendering",
+                        session_id = self.instance_id,
+                        chunk_index,
+                        first_analyzer_index = start_index,
+                        analyzers = ?chunk
+                            .iter()
+                            .map(|request| request.analyzer_id.as_str())
+                            .collect::<Vec<_>>(),
+                        "analyzer render worker panicked"
+                    );
                     Err(GraphError::DecoderBackend(
                         "analyzer render worker panicked".to_string(),
                     ))
@@ -3848,6 +4128,13 @@ impl Drop for GraphSession {
             .filter(|state| state.async_started)
             .map(|state| state.async_decode_id.clone())
             .collect::<Vec<_>>();
+        tracing::info!(
+            target: "sigpilot::graph",
+            session_id = self.instance_id,
+            sample_count = self.sample_count(),
+            live_async_decodes = async_decode_ids.len(),
+            "graph session released"
+        );
         cancel_saleae_async_decode_ids(async_decode_ids.iter().map(String::as_str));
     }
 }

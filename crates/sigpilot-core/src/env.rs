@@ -38,7 +38,7 @@ pub fn product_env(name: &str) -> Option<OsString> {
     }
 
     let value = std::env::var_os(&legacy)?;
-    tracing::warn!("{legacy} is deprecated; please use {name} instead");
+    tracing::warn!(target: "sigpilot::main", "{legacy} is deprecated; please use {name} instead");
     Some(value)
 }
 

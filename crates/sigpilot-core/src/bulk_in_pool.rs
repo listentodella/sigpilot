@@ -127,6 +127,23 @@ struct Slot {
     in_flight: bool,
 }
 
+/// Why a slot came back, so `drain` can report buffer health without libusb's
+/// numeric status codes leaking into the log.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletionKind {
+    /// Came back on time with data.
+    Completed,
+    /// Hit `transfer_timeout_ms`. Legal, and the whole point of the pool — but a
+    /// run of them means the device is producing slower than the timeout.
+    TimedOut,
+    /// Reported as cancelled by a `stop` that raced the callback.
+    Cancelled,
+    /// The device is gone.
+    NoDevice,
+    /// Anything else, kept for the error path.
+    Failed(i32),
+}
+
 /// Called by libusb from inside event handling. Must not panic and must not
 /// touch anything the pool may have freed.
 extern "system" fn on_transfer_complete(transfer: *mut libusb_transfer) {
@@ -166,6 +183,32 @@ pub struct BulkInPool {
     slots: Vec<Slot>,
     shared: Arc<Shared>,
     stopped: bool,
+    /// Health counters, reported at `stop`. A pool that keeps timing out with
+    /// nothing in it is a device that has gone quiet, and that is the one thing
+    /// a caller reading the log afterwards cannot reconstruct.
+    stats: Stats,
+}
+
+/// Running totals for one pool's life. Reset nowhere: `stop` is the only place
+/// they are read, and it is reached once.
+#[derive(Default)]
+struct Stats {
+    /// Depth the pool was started with. Kept because `stop` reports after the
+    /// slots have been drained.
+    depth: usize,
+    transfers_completed: u64,
+    transfers_timed_out: u64,
+    transfers_empty: u64,
+    transfers_cancelled: u64,
+    transfers_failed: u64,
+    bytes: u64,
+    /// Deepest the completion queue ever got. A queue that keeps growing is the
+    /// host falling behind the device, which is the failure this module exists
+    /// to prevent.
+    queue_high_water: usize,
+    /// Transfers `submit` could not replace, i.e. the pool running shallower
+    /// than it was asked for.
+    submit_failures: u64,
 }
 
 /// Rejects a pool that could never carry anything, which would otherwise leave
@@ -206,6 +249,10 @@ impl BulkInPool {
             slots: Vec::with_capacity(depth),
             shared,
             stopped: false,
+            stats: Stats {
+                depth,
+                ..Stats::default()
+            },
         };
 
         for index in 0..depth {
@@ -245,6 +292,15 @@ impl BulkInPool {
                 "the device disappeared while starting a bulk-in pool".to_string(),
             ));
         }
+        tracing::debug!(
+            target: "sigpilot::transport",
+            endpoint = format!("0x{endpoint:02x}"),
+            depth,
+            transfer_size,
+            timeout_ms = pool.transfer_timeout_ms,
+            in_flight = pool.shared.in_flight.load(Ordering::Acquire),
+            "bulk-in pool started"
+        );
         Ok(pool)
     }
 
@@ -275,6 +331,15 @@ impl BulkInPool {
                 // context. Transient, so wait rather than fail the capture.
                 std::thread::sleep(EVENT_SLICE);
             } else if code < 0 {
+                tracing::error!(
+                    target: "sigpilot::transport",
+                    endpoint = format!("0x{:02x}", self.endpoint),
+                    code,
+                    bytes_delivered = self.stats.bytes,
+                    transfers_completed = self.stats.transfers_completed,
+                    transfers_timed_out = self.stats.transfers_timed_out,
+                    "libusb event handling failed; the pool cannot make progress"
+                );
                 return Err(CoreError::Usb(format!(
                     "libusb event handling failed with code {code}"
                 )));
@@ -315,15 +380,20 @@ impl BulkInPool {
                 if queue.is_empty() {
                     break;
                 }
+                self.stats.queue_high_water = self.stats.queue_high_water.max(queue.len());
                 queue.remove(0)
             };
             let slot = &mut self.slots[completion.slot];
             slot.in_flight = false;
 
-            match completion.status {
+            match Self::classify(completion.status) {
                 // A timeout is not a failure: libusb hands back whatever arrived,
                 // and that is the whole reason for not using the synchronous API.
-                LIBUSB_TRANSFER_COMPLETED | LIBUSB_TRANSFER_TIMED_OUT => {
+                CompletionKind::Completed | CompletionKind::TimedOut => {
+                    self.stats.transfers_completed += 1;
+                    if completion.status == LIBUSB_TRANSFER_TIMED_OUT {
+                        self.stats.transfers_timed_out += 1;
+                    }
                     if completion.bytes > 0 {
                         // SAFETY: the buffer is ours, holds `capacity` bytes, and
                         // libusb just reported `bytes <= capacity` written into it.
@@ -333,15 +403,39 @@ impl BulkInPool {
                         on_data(chunk)?;
                         delivered.transfers += 1;
                         delivered.bytes += chunk.len();
+                        self.stats.bytes += chunk.len() as u64;
+                    } else {
+                        // An empty transfer is legal mid-stream, so this only
+                        // matters as a total: a pool that never carries a byte is
+                        // a device that went quiet, not a pool that is busy.
+                        self.stats.transfers_empty += 1;
                     }
                 }
-                LIBUSB_TRANSFER_CANCELLED => {}
-                LIBUSB_TRANSFER_NO_DEVICE => {
+                CompletionKind::Cancelled => self.stats.transfers_cancelled += 1,
+                CompletionKind::NoDevice => {
+                    tracing::warn!(
+                        target: "sigpilot::transport",
+                        endpoint = format!("0x{:02x}", self.endpoint),
+                        slot = completion.slot,
+                        bytes_completed = self.stats.bytes,
+                        transfers_completed = self.stats.transfers_completed,
+                        "the device reported itself gone mid-transfer"
+                    );
                     self.shared.device_gone.store(true, Ordering::Release);
                 }
-                other => {
+                CompletionKind::Failed(status) => {
+                    self.stats.transfers_failed += 1;
+                    tracing::error!(
+                        target: "sigpilot::transport",
+                        endpoint = format!("0x{:02x}", self.endpoint),
+                        slot = completion.slot,
+                        status,
+                        transfers_completed = self.stats.transfers_completed,
+                        bytes_completed = self.stats.bytes,
+                        "USB bulk transfer failed; ending the pool"
+                    );
                     return Err(CoreError::Usb(format!(
-                        "USB bulk transfer on endpoint 0x{:02x} failed with status {other}",
+                        "USB bulk transfer on endpoint 0x{:02x} failed with status {status}",
                         self.endpoint
                     )));
                 }
@@ -349,6 +443,17 @@ impl BulkInPool {
             self.submit(completion.slot);
         }
         Ok(delivered)
+    }
+
+    /// Maps libusb's transfer status onto a name worth putting in a log.
+    fn classify(status: i32) -> CompletionKind {
+        match status {
+            LIBUSB_TRANSFER_COMPLETED => CompletionKind::Completed,
+            LIBUSB_TRANSFER_TIMED_OUT => CompletionKind::TimedOut,
+            LIBUSB_TRANSFER_CANCELLED => CompletionKind::Cancelled,
+            LIBUSB_TRANSFER_NO_DEVICE => CompletionKind::NoDevice,
+            other => CompletionKind::Failed(other),
+        }
     }
 
     /// Puts one slot's transfer back in the queue. A no-op if it is already in
@@ -382,12 +487,16 @@ impl BulkInPool {
         };
         if code < 0 {
             shared.in_flight.fetch_sub(1, Ordering::AcqRel);
+            self.stats.submit_failures += 1;
             if code == LIBUSB_TRANSFER_NO_DEVICE {
                 shared.device_gone.store(true, Ordering::Release);
             } else {
                 tracing::warn!(
+                    target: "sigpilot::transport",
                     endpoint,
                     code,
+                    slot = index,
+                    submit_failures = self.stats.submit_failures,
                     "cannot submit a bulk-in transfer; the pool is one shallower"
                 );
             }
@@ -404,6 +513,7 @@ impl BulkInPool {
             return;
         }
         self.stopped = true;
+        let reclaim_started = Instant::now();
 
         for slot in &self.slots {
             if slot.in_flight {
@@ -425,6 +535,20 @@ impl BulkInPool {
             unsafe {
                 libusb_handle_events_timeout_completed(self.context, &mut slice, &mut completed)
             };
+        }
+        let reclaim_ms = reclaim_started.elapsed().as_secs_f64() * 1_000.0;
+        if self.shared.in_flight.load(Ordering::Acquire) > 0 {
+            // The only place in this module where the reclaim loop can give up,
+            // and the one a maintainer will want the numbers for: it means the
+            // transfers below had to be leaked.
+            tracing::warn!(
+                target: "sigpilot::transport",
+                endpoint = format!("0x{:02x}", self.endpoint),
+                still_in_flight = self.shared.in_flight.load(Ordering::Acquire),
+                reclaim_timeout_ms = RECLAIM_TIMEOUT.as_millis() as u64,
+                waited_ms = reclaim_ms,
+                "cancelled USB transfers did not all come back within the reclaim timeout"
+            );
         }
 
         // Every slot that reported back is safe to free. A slot that never did is
@@ -449,6 +573,7 @@ impl BulkInPool {
         for (index, slot) in self.slots.drain(..).enumerate() {
             if !returned[index] {
                 tracing::warn!(
+                    target: "sigpilot::transport",
                     slot = index,
                     "a USB transfer never came back after cancel; leaking it rather than \
                      freeing memory libusb may still write to"
@@ -466,6 +591,26 @@ impl BulkInPool {
                 )));
             }
         }
+
+        // The pool's whole life in one line. A capture that ended short is
+        // explained by `transfers_timed_out` against `transfers_completed`, and
+        // `queue_high_water` says whether the host ever fell behind the device —
+        // none of which survives the capture in the caller's own bookkeeping.
+        tracing::info!(
+            target: "sigpilot::transport",
+            endpoint = format!("0x{:02x}", self.endpoint),
+            depth = self.stats.depth,
+            bytes = self.stats.bytes,
+            transfers_completed = self.stats.transfers_completed,
+            transfers_timed_out = self.stats.transfers_timed_out,
+            transfers_empty = self.stats.transfers_empty,
+            transfers_cancelled = self.stats.transfers_cancelled,
+            transfers_failed = self.stats.transfers_failed,
+            submit_failures = self.stats.submit_failures,
+            queue_high_water = self.stats.queue_high_water,
+            reclaim_ms,
+            "bulk-in pool stopped"
+        );
     }
 }
 

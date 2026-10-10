@@ -9,10 +9,17 @@
 //!   the crates stop being silently dropped, and
 //! * log files the user can hand over when something goes wrong.
 //!
-//! The level comes from `SIGPILOT_LOG` (`error`, `warn`, `info`, `debug`,
-//! `trace`). Without it the default is `debug` in a debug build and `info`
-//! otherwise, so a development run is verbose by default and a release build is
-//! not. It can also be changed while the app runs; see [`set_level`].
+//! The default level comes from `SIGPILOT_LOG` (`error`, `warn`, `info`,
+//! `debug`, `trace`). Without it the default is `debug` in a debug build and
+//! `info` otherwise, so a development run is verbose by default and a release
+//! build is not. It can also be changed while the app runs; see [`set_level`].
+//!
+//! That default is only the floor. Each module in [`MODULES`] can be given its
+//! own level — `decoders` at `trace` while everything else sits at `warn` —
+//! because the noise that explains one bug drowns the noise from another. A
+//! module is only matchable when the statement carries the matching explicit
+//! `target`, so a log call that omits it inherits the default and cannot be
+//! tuned on its own. See [`set_levels`].
 //!
 //! # Why logging is always on
 //!
@@ -38,7 +45,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use time::OffsetDateTime;
 use tracing::Level;
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -47,6 +54,34 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 /// Environment variable holding the log level.
 const LEVEL_ENV: &str = "SIGPILOT_LOG";
+
+/// Prefix of every per-module target. A module target is
+/// `sigpilot::<module>`; anything else falls to the default level.
+const TARGET_PREFIX: &str = "sigpilot::";
+
+/// The modules the advanced panel can tune separately, in the order it lists
+/// them.
+///
+/// This is the whole set of valid module names, not an example of it: the panel
+/// offers exactly these, and a name outside the list would produce a target no
+/// statement carries, so accepting one would silently do nothing.
+pub const MODULES: [&str; 10] = [
+    "main",
+    "device",
+    "capture",
+    "transport",
+    "decoders",
+    "graph",
+    "rendering",
+    "measurements",
+    "extensions",
+    "webview",
+];
+
+/// Whether `name` is a module a level can be set for.
+pub fn is_module(name: &str) -> bool {
+    MODULES.contains(&name)
+}
 
 /// Prefix every file we own starts with, so pruning never touches anything else
 /// that happens to live in the log directory.
@@ -68,6 +103,10 @@ static SINK: OnceLock<Arc<Mutex<Option<Sink>>>> = OnceLock::new();
 static LEVEL: AtomicU8 = AtomicU8::new(LEVEL_INFO);
 static PAUSED: AtomicBool = AtomicBool::new(false);
 static RELOAD_HANDLE: OnceLock<Mutex<Option<LevelHandle>>> = OnceLock::new();
+/// The per-module levels, kept so [`set_level`] can move the default without
+/// discarding the overrides the panel set. Names are the `&'static str` from
+/// [`MODULES`], so an unknown module cannot be stored in the first place.
+static MODULE_LEVELS: Mutex<Vec<(&'static str, Level)>> = Mutex::new(Vec::new());
 
 // `Level` has no stable numeric ordering to rely on, so the atomic holds a rank
 // of our own. The mapping is duplicated in the frontend's `LOG_LEVELS`.
@@ -84,7 +123,10 @@ const LEVEL_TRACE: u8 = 4;
 /// registered directly with the subscriber, and `reload` swallows that
 /// registration. Every event then trips a `debug_assert!` in `Filtered::id`,
 /// which in a debug build is an abort trap on whichever thread logged it.
-type LevelHandle = reload::Handle<LevelFilter, tracing_subscriber::Registry>;
+///
+/// [`Targets`] is used as a plain layer rather than through `with_filter` for
+/// the same reason.
+type LevelHandle = reload::Handle<Targets, tracing_subscriber::Registry>;
 
 pub fn level_to_str(level: Level) -> &'static str {
     match level {
@@ -127,20 +169,85 @@ fn rank_to_level(rank: u8) -> Level {
     }
 }
 
-/// The level in effect right now.
+/// The level in effect right now — the default, not any module override.
 pub fn current_level() -> Level {
     rank_to_level(LEVEL.load(Ordering::Relaxed))
 }
 
-/// Change the level without restarting. No-op when logging never came up.
+/// The per-module overrides currently in effect, in [`MODULES`] order.
+fn module_levels() -> Vec<(&'static str, Level)> {
+    let Ok(levels) = MODULE_LEVELS.lock() else {
+        return Vec::new();
+    };
+    MODULES
+        .iter()
+        .filter_map(|module| {
+            levels
+                .iter()
+                .find(|(name, _)| name == module)
+                .map(|(name, level)| (*name, *level))
+        })
+        .collect()
+}
+
+/// Change the default level without restarting, keeping any per-module
+/// overrides. No-op when logging never came up.
 pub fn set_level(level: Level) {
     LEVEL.store(rank_of(&level), Ordering::Relaxed);
+    apply(level);
+}
+
+/// Set the default level and every per-module override, reloading once.
+///
+/// Unknown module names are ignored rather than rejected: the name is only
+/// used to build a target prefix, so an unknown one matches nothing and the
+/// statement is better served by the default. The command layer validates
+/// first so the user hears about a typo rather than losing the setting.
+pub fn set_levels(default: Level, modules: &[(String, Level)]) {
+    LEVEL.store(rank_of(&default), Ordering::Relaxed);
+    if let Ok(mut levels) = MODULE_LEVELS.lock() {
+        levels.clear();
+        levels.extend(
+            modules
+                .iter()
+                .filter_map(|(module, level)| known_module(module).map(|name| (name, *level))),
+        );
+    }
+    apply(default);
+}
+
+/// The `&'static str` for a module name, or `None` when it is not one of
+/// [`MODULES`].
+fn known_module(name: &str) -> Option<&'static str> {
+    MODULES.iter().copied().find(|module| *module == name)
+}
+
+/// Rebuild the filter from the default plus the stored overrides and swap it
+/// in.
+///
+/// Only the filter is replaced, so the open log file is never touched and no
+/// record in flight is lost.
+fn apply(default: Level) {
+    let modules = module_levels();
     let Some(slot) = RELOAD_HANDLE.get() else { return };
     let Ok(guard) = slot.lock() else { return };
     let Some(handle) = guard.as_ref() else { return };
-    // Only the filter is swapped, so the open log file is never touched and no
-    // record in flight is lost.
-    let _ = handle.modify(|filter| *filter = LevelFilter::from_level(level));
+    let _ = handle.modify(|filter| {
+        *filter = targets_from(default, &modules);
+    });
+}
+
+/// The filter itself: a default for every unmatched target, plus one entry per
+/// module.
+///
+/// `Targets` matches by prefix, so `sigpilot::device` also covers anything
+/// tagged below it, and a target in no entry falls to the default.
+fn targets_from(default: Level, modules: &[(&'static str, Level)]) -> Targets {
+    let mut targets = Targets::new().with_default(LevelFilter::from_level(default));
+    for (module, level) in modules {
+        targets = targets.with_target(format!("{TARGET_PREFIX}{module}"), LevelFilter::from_level(*level));
+    }
+    targets
 }
 
 /// Stop writing to the file without stopping the app. Stderr keeps going, so a
@@ -216,6 +323,15 @@ pub fn clear() {
     let Some(sink) = guard.as_mut() else { return };
     sink.part = 0;
     sink.open_current();
+}
+
+/// Every retained log file, newest first.
+///
+/// This is what the user actually shares. Pasting a megabyte of log text into a
+/// chat window is worse than useless; pasting the file lets the recipient open
+/// it in whatever they use and lets the sender choose what to attach.
+pub fn retained_files() -> Vec<PathBuf> {
+    log_files_newest_first(&log_directory())
 }
 
 /// Path of the file currently being written, when logging is up.
@@ -575,8 +691,9 @@ pub fn init() -> Option<&'static PathBuf> {
 
     let level = level_from_env();
     // The filter is its own layer ahead of the writer, so it gates everything
-    // behind it and can be swapped without disturbing the file.
-    let (filter, handle) = reload::Layer::new(LevelFilter::from_level(level));
+    // behind it and can be swapped without disturbing the file. It starts as
+    // the default alone — no module overrides until the panel sets some.
+    let (filter, handle) = reload::Layer::new(targets_from(level, &[]));
     let installed = tracing_subscriber::registry()
         .with(filter)
         .with(
@@ -602,10 +719,11 @@ pub fn init() -> Option<&'static PathBuf> {
 mod tests {
     use super::*;
 
-    /// Records reach the file, and the level can be changed afterwards without
-    /// restarting — including through the callsite shape `frontend_log` uses.
+    /// Records reach the file, the default level can be changed afterwards
+    /// without restarting, and a module override beats the default — including
+    /// through the callsite shape `frontend_log` uses.
     ///
-    /// One test rather than two on purpose: the subscriber can only be
+    /// One test rather than several on purpose: the subscriber can only be
     /// installed once per process, so two tests would race on `init`.
     ///
     /// This is also the regression test for a crash. The subscriber used to be
@@ -636,10 +754,23 @@ mod tests {
         // Mirror `frontend_log`: an explicit target is what webview records
         // carry, and it is the callsite shape that used to abort.
         set_level(Level::WARN);
-        tracing::info!(target: "sigpilot_webview", marker = "level-test-suppressed", "must not be written");
+        tracing::info!(target: "sigpilot::webview", marker = "level-test-suppressed", "must not be written");
 
         set_level(Level::INFO);
-        tracing::info!(target: "sigpilot_webview", marker = "level-test-emitted", "must be written");
+        tracing::info!(target: "sigpilot::webview", marker = "level-test-emitted", "must be written");
+
+        // The whole point of the per-module filter: one module opened up to
+        // `trace` while everything else stays at `warn`. Two identical records
+        // differing only in target, one kept and one dropped.
+        set_levels(Level::WARN, &[(String::from("decoders"), Level::TRACE)]);
+        assert_eq!(current_level(), Level::WARN, "the default should still be warn");
+        tracing::debug!(target: "sigpilot::decoders", marker = "module-test-emitted", "must be written");
+        tracing::debug!(target: "sigpilot::device", marker = "module-test-suppressed", "must not be written");
+
+        // Moving the default must not throw the overrides away, or turning one
+        // module up would silently reset the next time the level is touched.
+        set_level(Level::ERROR);
+        tracing::debug!(target: "sigpilot::decoders", marker = "override-kept", "must be written");
 
         let current = log_files_newest_first(&directory)
             .into_iter()
@@ -658,6 +789,18 @@ mod tests {
         assert!(
             contents.contains("level-test-emitted"),
             "the info record is missing after raising the level: {contents:?}"
+        );
+        assert!(
+            contents.contains("module-test-emitted"),
+            "a `debug` record from a module set to `trace` was dropped: {contents:?}"
+        );
+        assert!(
+            !contents.contains("module-test-suppressed"),
+            "a `debug` record from a module left at the `warn` default was written: {contents:?}"
+        );
+        assert!(
+            contents.contains("override-kept"),
+            "`set_level` discarded the per-module overrides: {contents:?}"
         );
 
         let _ = fs::remove_dir_all(&directory);

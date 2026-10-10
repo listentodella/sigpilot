@@ -1,6 +1,6 @@
 import { readFrameState } from "./frameStore";
 import { formatBytes, formatRate, formatSamples } from "./format";
-import { LOG_LEVELS, type LogLevel } from "./logger";
+import { LOG_LEVELS, LOG_MODULES, type LogLevel } from "./logger";
 import type { LogStatus } from "./api";
 import {
   ANIMATION_SCALE_MAX,
@@ -85,6 +85,7 @@ export interface AdvancedOptionsSource {
   onChangePreferences: (updater: (current: UiPreferences) => UiPreferences) => void;
   diagnostics?: AdvancedDiagnostics;
   /** Copies the full diagnostics bundle to the clipboard. */
+  onCopyLogFiles?: () => void | Promise<void>;
   onCopyLogs?: () => void | Promise<void>;
   /** Writes the same bundle to a path the user picks. */
   onSaveLogs?: () => void | Promise<void>;
@@ -163,6 +164,10 @@ function buildDiagnosticsSection(diagnostics: AdvancedDiagnostics): AdvancedSect
  * bundle that is half-verbose is worse than useless: the layer that stayed quiet
  * is usually the one with the answer.
  *
+ * The per-module rows below are an override on that default, not a replacement
+ * for it: a module left alone follows the default, so the common case is still
+ * one control.
+ *
  * Recording is on by default and bounded, not opt-in — see the reasoning on
  * `set_paused` in the backend. What the panel has to do is make the cost
  * visible and give the user one obvious way to get the logs out.
@@ -170,6 +175,7 @@ function buildDiagnosticsSection(diagnostics: AdvancedDiagnostics): AdvancedSect
 function buildLoggingSection({
   logStatus,
   onClearLogs,
+  onCopyLogFiles,
   onCopyLogs,
   onSaveLogs,
   preferences,
@@ -177,6 +183,7 @@ function buildLoggingSection({
 }: {
   logStatus?: LogStatus | null;
   onClearLogs?: () => void | Promise<void>;
+  onCopyLogFiles?: () => void | Promise<void>;
   onCopyLogs?: () => void | Promise<void>;
   onSaveLogs?: () => void | Promise<void>;
   preferences: UiPreferences;
@@ -186,10 +193,10 @@ function buildLoggingSection({
     controls: [
       {
         get: () => preferences.logLevel,
-        hintKey: "logLevelHint",
-        id: "logLevel",
+        hintKey: "logDefaultLevelHint",
+        id: "logDefaultLevel",
         kind: "dropdown",
-        labelKey: "logLevel",
+        labelKey: "logDefaultLevel",
         options: LOG_LEVELS.map((level) => ({ labelKey: `logLevel_${level}`, value: level })),
         set: (value) => setPreference("logLevel", value as LogLevel),
       },
@@ -213,6 +220,13 @@ function buildLoggingSection({
           if (!logStatus?.available) return "—";
           return `${formatBytes(logStatus.totalBytes)} / ${formatBytes(logStatus.maxFileBytes * logStatus.maxFiles)}`;
         },
+      },
+      {
+        hintKey: "copyLogFilesHint",
+        id: "copyLogFiles",
+        kind: "button",
+        labelKey: "copyLogFiles",
+        run: () => onCopyLogFiles?.(),
       },
       {
         hintKey: "copyLogsHint",
@@ -242,17 +256,50 @@ function buildLoggingSection({
   };
 }
 
+/**
+ * Ten rows would bury the buttons that actually get used, so they get their own
+ * collapsible section — the same mechanism every other section uses, rather than
+ * a nesting kind the renderer would then have to know about.
+ */
+function buildLogModuleSection({
+  preferences,
+  setModuleLevel,
+}: {
+  preferences: UiPreferences;
+  setModuleLevel: (moduleId: string, level: LogLevel) => void;
+}): AdvancedSection {
+  return {
+    controls: LOG_MODULES.map((module) => ({
+      get: () => preferences.logModuleLevels[module.id] ?? preferences.logLevel,
+      hintKey: "logModuleHint",
+      id: `logModule_${module.id}`,
+      kind: "dropdown",
+      labelKey: module.labelKey,
+      options: LOG_LEVELS.map((level) => ({ labelKey: `logLevel_${level}`, value: level })),
+      set: (value: string) => setModuleLevel(module.id, value as LogLevel),
+    })),
+    id: "logModules",
+    labelKey: "sectionLogModules",
+  };
+}
+
 export function buildAdvancedSections({
   diagnostics,
   logStatus,
   onChangePreferences,
   onClearLogs,
+  onCopyLogFiles,
   onCopyLogs,
   onSaveLogs,
   preferences,
 }: AdvancedOptionsSource): AdvancedSection[] {
   const setPreference = <K extends keyof UiPreferences>(key: K, value: UiPreferences[K]) =>
     onChangePreferences((current) => ({ ...current, [key]: value }));
+  const setModuleLevel = (moduleId: string, level: LogLevel) =>
+    onChangePreferences((current) => ({
+      ...current,
+      logModuleLevels: { ...current.logModuleLevels, [moduleId]: level },
+    }));
 
   return [
     {
@@ -319,11 +366,13 @@ export function buildAdvancedSections({
     buildLoggingSection({
       logStatus,
       onClearLogs,
+      onCopyLogFiles,
       onCopyLogs,
       onSaveLogs,
       preferences,
       setPreference,
     }),
+    buildLogModuleSection({ preferences, setModuleLevel }),
     ...(diagnostics ? [buildDiagnosticsSection(diagnostics)] : []),
   ];
 }
