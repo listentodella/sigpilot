@@ -24,8 +24,9 @@ pub mod performance_self_test;
 pub mod view_state;
 
 pub use view_state::{
-    default_capture_view_samples, ease_out_cubic, minimum_view_samples, normalize_capture_view,
-    normalize_live_capture_view, SessionView, ViewAnimation, ViewIntent, ViewLimits,
+    default_capture_view_samples, ease_out_cubic, maximum_view_samples, minimum_view_samples,
+    normalize_capture_view, normalize_live_capture_view, SessionView, ViewAnimation, ViewIntent,
+    ViewLimits,
 };
 
 const MAX_CHANNELS: u8 = 32;
@@ -3177,6 +3178,13 @@ impl GraphSession {
         // time a key is held down. Clamping the factor leaves the anchor arithmetic
         // intact: at the limit the span simply stops shrinking, so the start stops
         // moving too.
+        //
+        // The zoom-out direction needs the same treatment against the ceiling, and
+        // for the same reason. Without it the anchor arithmetic runs against a span
+        // that `normalize_view` is about to reduce, so the overshoot that gets
+        // clamped away is left behind as a start offset: at the data limit the span
+        // stops changing while the start marches the other way, which is the graph
+        // sliding sideways on every wheel notch past the end of the zoom range.
         let clamped;
         let intent = match *intent {
             ViewIntent::Zoom {
@@ -3189,6 +3197,25 @@ impl GraphSession {
                 let floor = minimum_view_samples(sample_rate_hz) / current.samples.max(1.0);
                 clamped = ViewIntent::Zoom {
                     factor: factor.max(floor),
+                    anchor_ratio,
+                    duration_ms,
+                };
+                &clamped
+            }
+            ViewIntent::Zoom {
+                factor,
+                anchor_ratio,
+                duration_ms,
+            } if factor > 1.0 => {
+                let current = self.session_view();
+                let ceiling = maximum_view_samples(self.sample_count(), &self.view_limits.lock());
+                // `max(1.0)` keeps this a zoom-out when the current span is already
+                // at or past the ceiling: the factor settles at 1.0, the anchor
+                // arithmetic becomes an identity, and the view holds still while
+                // `normalize_view` brings the span back to the limit.
+                let cap = (ceiling / current.samples.max(1.0)).max(1.0);
+                clamped = ViewIntent::Zoom {
+                    factor: factor.min(cap),
                     anchor_ratio,
                     duration_ms,
                 };
@@ -9805,6 +9832,98 @@ mod tests {
         });
         assert_eq!(clamped.samples, 500_000_000.0);
         assert_eq!(clamped.start_sample, 0.0);
+    }
+
+    /// Scrolling past the widest allowed view must stop the view dead.
+    ///
+    /// A zoom that cannot change the span must not change the start either. The
+    /// anchor arithmetic turns a span into a start, so when the span is reduced
+    /// afterwards by the ceiling, whatever the overshoot implied is left behind as
+    /// a start offset — and because the anchor is a ratio of the window, that
+    /// offset is a translation on screen. At the data limit the waveform slid
+    /// sideways one notch at a time, which is not something the user can undo by
+    /// zooming back in.
+    #[test]
+    fn zooming_out_past_the_ceiling_does_not_translate_the_view() {
+        let session = GraphSession::default();
+        let total = 238_551_040u64;
+        let sample_rate_hz = 25_000_000.0;
+        session.replace_capture(demo_capture(8, total)).unwrap();
+
+        // What `completedCaptureViewport` sends for a finished capture: the data
+        // limit alone, with no live reserve.
+        let ceiling = view_state::maximum_capture_view_samples(total);
+        session.set_view_limits(ViewLimits {
+            live: false,
+            maximum_samples: Some(ceiling),
+            sample_rate_hz,
+        });
+        let at_ceiling = session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: ceiling,
+        });
+        assert_eq!(at_ceiling.samples, ceiling);
+        let settled_start = at_ceiling.start_sample;
+
+        // Ten more notches past the end of the range, at the anchor from the log.
+        for notch in 0..10 {
+            let after = session.apply_view_intent(&ViewIntent::Zoom {
+                factor: 1.4142135623730951,
+                anchor_ratio: 0.1342925659472422,
+                duration_ms: 0.0,
+            });
+            assert_eq!(
+                after.samples, ceiling,
+                "notch {notch} changed the span past the ceiling"
+            );
+            assert!(
+                (after.start_sample - settled_start).abs() < 1.0,
+                "notch {notch} slid the view: start went from {settled_start} to {}",
+                after.start_sample
+            );
+        }
+    }
+
+    /// The same property on a live session, whose ceiling is the live reserve.
+    ///
+    /// Worth its own case because the live ceiling comes from a different
+    /// expression, and a clamp that agrees with one and not the other is exactly
+    /// how the two directions of the bug get introduced one at a time.
+    #[test]
+    fn zooming_out_past_the_live_ceiling_does_not_translate_the_view() {
+        let session = GraphSession::default();
+        let sample_rate_hz = 25_000_000.0;
+        session.replace_capture(demo_capture(8, 1_000_000)).unwrap();
+        session.set_view_limits(ViewLimits {
+            live: true,
+            maximum_samples: None,
+            sample_rate_hz,
+        });
+
+        let ceiling = view_state::maximum_live_capture_view_samples(1_000_000, sample_rate_hz);
+        let at_ceiling = session.apply_view_intent(&ViewIntent::Set {
+            start_sample: 0.0,
+            samples: ceiling,
+        });
+        assert_eq!(at_ceiling.samples, ceiling);
+        let settled_start = at_ceiling.start_sample;
+
+        for notch in 0..10 {
+            let after = session.apply_view_intent(&ViewIntent::Zoom {
+                factor: 1.4142135623730951,
+                anchor_ratio: 0.1342925659472422,
+                duration_ms: 0.0,
+            });
+            assert_eq!(
+                after.samples, ceiling,
+                "notch {notch} changed the span past the live ceiling"
+            );
+            assert!(
+                (after.start_sample - settled_start).abs() < 1.0,
+                "notch {notch} slid the view: start went from {settled_start} to {}",
+                after.start_sample
+            );
+        }
     }
 
     #[test]

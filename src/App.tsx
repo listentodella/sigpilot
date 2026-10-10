@@ -1033,25 +1033,22 @@ function completedCaptureViewport(
   // while `busy`, via `initialCaptureViewport`.
   const dataViewportMaxSamples = maximumCaptureViewportSamples(totalSamples);
   if (session.liveViewportMode === "manual") {
-    // The window the user is looking at is allowed to be wider than the data
-    // limit — that is what the reserved live range is for, and narrowing it
-    // here would yank the view out from under them the moment a capture ends.
+    // The user took control of the view, so keep the window they chose — but
+    // bounded by what this capture can actually fill.
     //
-    // What must NOT happen is feeding that width back as the ceiling. The
-    // backend applies `maximum_samples` by taking the larger of it and the data
-    // limit, so a ceiling derived from the current viewport ratchets: every
-    // zoom-out raised the ceiling, and nothing could ever pull it back. A
-    // 693,108,736-sample capture ended up framed at 6,471,905,066 samples —
-    // 9.3x the data, with the capture squeezed into an eleventh of the width
-    // and a one-sample bus disturbance reduced to a sub-pixel sliver.
-    //
-    // So: normalise the viewport against the wider value, but report the
-    // ceiling as a function of the data alone.
+    // "Manual" only says they moved it; it does not say the width is meaningful
+    // once the capture has stopped. While the capture streamed, the window was
+    // allowed to reach the live reserve (500 s at 25 MHz), and preserving that
+    // width here framed a nine-second capture at five hundred seconds: the trace
+    // came back squeezed into a fortieth of the window, with the disturbance the
+    // user was looking for reduced to a sub-pixel sliver. That is the case the
+    // overview exists to rule out. The span is pulled back to the data limit; the
+    // start is re-derived from the same centre so the view does not jump.
     const viewport = normalizeCaptureViewport(
       session.viewportStart,
       session.viewportSamples,
       totalSamples,
-      Math.max(dataViewportMaxSamples, Math.round(session.viewportSamples)),
+      dataViewportMaxSamples,
     );
     return {
       viewportMaxSamples: dataViewportMaxSamples,
@@ -2596,13 +2593,28 @@ export default function App() {
     });
     if (previousSessionBusyRef.current && !session.busy) {
       // Leaving follow mode must not snap back to the start of the capture, so
-      // pin the viewport the user was already looking at.
+      // pin the viewport the user was already looking at — but pin it against
+      // the ceiling a FINISHED capture has.
+      //
+      // While a capture is running the viewport may legitimately be as wide as
+      // the live reserve (500 s at 25 MHz). Pinning that width here re-applied
+      // the reserve to a capture that is now a few seconds long, and the trace
+      // came back squeezed into a fortieth of the window with the disturbance
+      // the user was looking for reduced to a sub-pixel sliver. The frame state
+      // still holds the live width at this moment, so it cannot be the ceiling.
       const state = readFrameState(session.id);
       if (state?.ready) {
+        const totalSamples = Math.max(1, session.summary.metadata.sample_count);
+        const pinned = normalizeCaptureViewport(
+          state.view.start_sample,
+          state.view.samples,
+          totalSamples,
+          maximumCaptureViewportSamples(totalSamples),
+        );
         dispatchSessionViewIntent(session.id, {
           kind: "set",
-          samples: state.view.samples,
-          start_sample: state.view.start_sample,
+          samples: pinned.samples,
+          start_sample: pinned.start,
         });
       }
     }

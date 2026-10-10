@@ -107,3 +107,32 @@ test("the minimum span stays finite for any sample rate", () => {
   const scaled = minimumViewportSamples(100_000_000);
   assert.ok(Math.abs(scaled - 500) < 1e-6, `expected ~500 samples at 100 MHz, got ${scaled}`);
 });
+
+test("a finished capture is framed by its own length, not the live reserve", () => {
+  // The real numbers from the reproduction: 9.54 s at 25 MHz. The live ceiling
+  // is 500 s — 12.5 billion samples — and while the capture streams that is a
+  // legitimate window to be looking at.
+  const totalSamples = 238_551_040;
+  const sampleRateHz = 25_000_000;
+  const liveCeiling = maximumLiveCaptureViewportSamples(totalSamples, sampleRateHz);
+  assert.equal(liveCeiling, 12_500_000_000);
+
+  // When the capture ends, the same window is re-pinned — and it must come back
+  // bounded by the data. Preserved as-is, a nine-second capture is framed at five
+  // hundred seconds: the trace is squeezed into a fortieth of the window and the
+  // bus disturbance the user was looking for is a sub-pixel sliver. The overview
+  // zoom exists precisely to rule that out.
+  const finishedCeiling = maximumCaptureViewportSamples(totalSamples);
+  assert.equal(finishedCeiling, 596_377_600);
+
+  const pinned = normalizeCaptureViewport(0, liveCeiling, totalSamples, finishedCeiling);
+  assert.equal(pinned.samples, finishedCeiling);
+  // Still 2.5x the data, so the capture keeps its familiar proportion.
+  assert.equal(pinned.samples / totalSamples, 2.5);
+  assert.equal(pinned.start, 0);
+
+  // A window the user had panned keeps its position, only its width is pulled in.
+  const panned = normalizeCaptureViewport(-100_000_000, liveCeiling, totalSamples, finishedCeiling);
+  assert.equal(panned.samples, finishedCeiling);
+  assert.equal(panned.start, -100_000_000);
+});

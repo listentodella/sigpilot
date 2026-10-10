@@ -126,6 +126,22 @@ pub fn maximum_live_capture_view_samples(total_samples: u64, sample_rate_hz: f64
     maximum_capture_view_samples(total_samples).max(reserved)
 }
 
+/// The widest span a session's limits allow.
+///
+/// One definition, used both by the normalizers below and by the zoom-out factor
+/// clamp in `GraphSession::apply_view_intent`. Those two have to agree exactly:
+/// if the zoom is computed against a different ceiling than the one the result is
+/// normalized against, the span and the start disagree by the difference and the
+/// view slides sideways whenever a gesture lands on the limit.
+pub fn maximum_view_samples(total_samples: u64, limits: &ViewLimits) -> f64 {
+    let requested = finite_or(limits.maximum_samples.unwrap_or(0.0), 0.0).round();
+    if limits.live {
+        maximum_live_capture_view_samples(total_samples, limits.sample_rate_hz).max(requested)
+    } else {
+        maximum_capture_view_samples(total_samples).max(requested)
+    }
+}
+
 pub fn normalize_capture_view(
     start: f64,
     samples: f64,
