@@ -3934,9 +3934,9 @@ export default function App() {
     try {
       const bundle = await readDiagnostics(formatLogEntries(logSnapshot()));
       await writeText(bundle);
-      setStartupMessage(statusT("logsCopied"));
+      showToast(statusT("logsCopied"), statusT("logsCopiedHint"), "success");
     } catch (error) {
-      setStartupMessage(String(error));
+      showToast(statusT("logsFailed"), String(error), "error");
     }
   }
 
@@ -3949,18 +3949,18 @@ export default function App() {
     if (!path) return;
     try {
       await exportLogs(path, formatLogEntries(logSnapshot()));
-      setStartupMessage(statusT("logsSaved"));
+      showToast(statusT("logsSaved"), path, "success");
     } catch (error) {
-      setStartupMessage(String(error));
+      showToast(statusT("logsFailed"), String(error), "error");
     }
   }
 
   async function handleClearLogs() {
     try {
       await clearLogs();
-      setStartupMessage(statusT("logsCleared"));
+      showToast(statusT("logsCleared"), statusT("logsClearedHint"), "success");
     } catch (error) {
-      setStartupMessage(String(error));
+      showToast(statusT("logsFailed"), String(error), "error");
     }
   }
 
@@ -4459,6 +4459,18 @@ export default function App() {
       ...notification,
       id: Date.now(),
     });
+  }
+
+  /**
+   * Transient confirmation for an action with no other visible result.
+   *
+   * The status line is the wrong place for this: it reads
+   * `activeSession.message ?? startupMessage`, so once a session is open it
+   * never shows `startupMessage` at all — a failure or a "copied" would be
+   * silently dropped, which is exactly what a user cannot act on.
+   */
+  function showToast(heading: string, body: string, type: "error" | "success") {
+    showScreenshotNotification({ body, heading, type });
   }
 
   function setScreenshotDestination(destination: ScreenshotDestination) {
