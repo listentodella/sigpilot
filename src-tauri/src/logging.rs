@@ -772,6 +772,17 @@ mod tests {
         set_level(Level::ERROR);
         tracing::debug!(target: "sigpilot::decoders", marker = "override-kept", "must be written");
 
+        // The webview is not one module: the waveform worker reports under
+        // `rendering`. If `frontend_log` filed everything under `webview`, the
+        // panel's `rendering` level would control nothing that reaches the
+        // file — which is exactly what it did once.
+        set_level(Level::INFO);
+        crate::frontend_log(
+            Some("warn".to_string()),
+            Some("rendering".to_string()),
+            "worker-module-test".to_string(),
+        );
+
         let current = log_files_newest_first(&directory)
             .into_iter()
             .next()
@@ -793,6 +804,10 @@ mod tests {
         assert!(
             contents.contains("module-test-emitted"),
             "a `debug` record from a module set to `trace` was dropped: {contents:?}"
+        );
+        assert!(
+            contents.contains("worker-module-test") && contents.contains("sigpilot::rendering"),
+            "the webview filed a `rendering` record under the wrong module: {contents:?}"
         );
         assert!(
             !contents.contains("module-test-suppressed"),

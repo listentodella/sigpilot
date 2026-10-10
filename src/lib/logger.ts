@@ -172,7 +172,7 @@ export function logRecord(
   // debug/trace stay webview-only: forwarding them would turn every draw into
   // an IPC round trip and make the log file useless.
   if (level !== "debug" && level !== "trace") {
-    frontendLog(`[${scope}] ${message}`, level);
+    frontendLog(`[${scope}] ${message}`, level, module);
   }
 }
 

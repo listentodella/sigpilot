@@ -417,11 +417,11 @@ async fn configure_pwm(
     // profile for a Kingst device and fail with "unsupported PXLogic device",
     // which points at the wrong thing entirely.
     if sigpilot_core::kingst_la2016::owns(&device_id) {
-        tracing::warn!(device_id, "PWM requested for a Kingst device, which does not implement it");
+        tracing::warn!(target: "sigpilot::device", device_id, "PWM requested for a Kingst device, which does not implement it");
         return Err("PWM output is not implemented for Kingst LA series devices".to_string());
     }
 
-    tracing::debug!(device_id, frequency_hz = settings.frequency_hz, "configure_pwm");
+    tracing::debug!(target: "sigpilot::device", device_id, frequency_hz = settings.frequency_hz, "configure_pwm");
 
     #[cfg(feature = "rusb-transport")]
     {
@@ -454,12 +454,39 @@ async fn configure_pwm(
 /// The target is the `webview` module rather than a free-standing one, so the
 /// panel's per-module filter can quieten the frontend without touching the
 /// backend.
+/// One arm per module so each branch can carry a literal `target:`.
+///
+/// The macro needs the target at compile time, so a `format!`d string is not
+/// usable here — hence the expansion rather than a loop.
+macro_rules! dispatch_webview_log {
+    ($level:ident, $module:expr, $message:expr) => {
+        match $module {
+            "main" => tracing::$level!(target: "sigpilot::main", "{}", $message),
+            "device" => tracing::$level!(target: "sigpilot::device", "{}", $message),
+            "capture" => tracing::$level!(target: "sigpilot::capture", "{}", $message),
+            "transport" => tracing::$level!(target: "sigpilot::transport", "{}", $message),
+            "decoders" => tracing::$level!(target: "sigpilot::decoders", "{}", $message),
+            "graph" => tracing::$level!(target: "sigpilot::graph", "{}", $message),
+            "rendering" => tracing::$level!(target: "sigpilot::rendering", "{}", $message),
+            "measurements" => tracing::$level!(target: "sigpilot::measurements", "{}", $message),
+            "extensions" => tracing::$level!(target: "sigpilot::extensions", "{}", $message),
+            _ => tracing::$level!(target: "sigpilot::webview", "{}", $message),
+        }
+    };
+}
+
 #[tauri::command]
-fn frontend_log(level: Option<String>, message: String) {
+fn frontend_log(level: Option<String>, module: Option<String>, message: String) {
+    // The webview is not one module: the waveform worker reports under
+    // `rendering`. Without carrying the module across, its warnings would land
+    // in the `webview` bucket and the panel's `rendering` level would control
+    // nothing that reaches the file. An unknown name falls back rather than
+    // failing a log call.
+    let module = module.as_deref().unwrap_or("webview");
     match level.as_deref() {
-        Some("warn") => tracing::warn!(target: "sigpilot::webview", "{message}"),
-        Some("error") => tracing::error!(target: "sigpilot::webview", "{message}"),
-        _ => tracing::info!(target: "sigpilot::webview", "{message}"),
+        Some("warn") => dispatch_webview_log!(warn, module, message),
+        Some("error") => dispatch_webview_log!(error, module, message),
+        _ => dispatch_webview_log!(info, module, message),
     }
 }
 
@@ -700,6 +727,7 @@ async fn start_capture(
     // it records which device was asked for and with what configuration, so a
     // later error can be attributed to the request rather than guessed at.
     tracing::info!(
+        target: "sigpilot::capture",
         session_id,
         device_id = %settings.device_id,
         sample_rate_hz = settings.sample_rate_hz,
@@ -742,6 +770,7 @@ async fn start_capture(
                 // the numbers when it fires: "it stopped early" is otherwise
                 // impossible to tell from "the device went quiet".
                 tracing::info!(
+                    target: "sigpilot::capture",
                     samples_read = event.samples_read,
                     sample_memory_bytes = event.sample_memory_bytes,
                     total_bytes = usage.total_bytes,
@@ -815,6 +844,7 @@ async fn start_capture(
                 // continues means this number is wrong. Record it rather than
                 // guessing which layer lost it.
                 tracing::debug!(
+                    target: "sigpilot::capture",
                     sample_count = metadata.sample_count,
                     graph_sample_count = samples_graph.sample_count(),
                     "capture_updated"
@@ -873,7 +903,7 @@ async fn start_capture(
         } else {
             "pxlogic"
         };
-        tracing::debug!(route, device_id = %settings.device_id, "capture route selected");
+        tracing::debug!(target: "sigpilot::device", route, device_id = %settings.device_id, "capture route selected");
 
         let capture = if settings.device_id == FakeBackend::DEVICE_ID {
             FakeBackend::default().capture_streaming_with_analyzers(
@@ -943,6 +973,7 @@ async fn start_capture(
             Ok(capture) => {
                 *active_capture.lock() = None;
                 tracing::info!(
+                    target: "sigpilot::capture",
                     source_device = %capture.metadata.source_device,
                     sample_count = capture.metadata.sample_count,
                     channel_count = capture.metadata.channel_count,
@@ -979,6 +1010,7 @@ async fn start_capture(
                 }
                 let message = error.to_string();
                 tracing::error!(
+                    target: "sigpilot::capture",
                     device_id = %settings.device_id,
                     error = %message,
                     "capture failed"
@@ -2408,8 +2440,9 @@ fn main() {
     // is recorded too. Losing logs is much better than losing the app, so a
     // failure here is not fatal.
     match logging::init() {
-        Some(path) => tracing::info!("SigPilot starting, log file {}", path.display()),
+        Some(path) => tracing::info!(target: "sigpilot::main", path = %path.display(), "SigPilot starting"),
         None => tracing::warn!(
+            target: "sigpilot::main",
             "SigPilot starting without a log file; set SIGPILOT_LOG to control the level"
         ),
     }

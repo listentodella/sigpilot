@@ -896,9 +896,17 @@ function previewBitMask(bits: number) {
  * event that never arrived and a handler that declined to act look identical.
  * Fire-and-forget, because a diagnostic must never break the thing it measures.
  */
-export function frontendLog(message: string, level: "info" | "warn" | "error" = "info") {
+export function frontendLog(
+  message: string,
+  level: "info" | "warn" | "error" = "info",
+  module = "webview",
+) {
   if (!isTauriRuntime()) return;
-  void invoke("frontend_log", { level, message }).catch(() => {});
+  // The module has to travel with the record. The backend picks the file target
+  // from it, so dropping it here would file a waveform-renderer warning under
+  // `webview` — and the `rendering` level in the panel would then control
+  // nothing that reaches the log file.
+  void invoke("frontend_log", { level, message, module }).catch(() => {});
 }
 
 /**
