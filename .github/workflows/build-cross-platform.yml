@@ -21,11 +21,34 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
 jobs:
+  native-windows:
+    name: Windows native runtime
+    uses: ./.github/workflows/native-runtime.yml
+    with:
+      platform: windows
+
+  native-linux:
+    name: Linux native runtime
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' }}
+    uses: ./.github/workflows/native-runtime.yml
+    with:
+      platform: linux
+
+  native-macos:
+    name: macOS native runtime
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' }}
+    uses: ./.github/workflows/native-runtime.yml
+    with:
+      platform: macos
+
   checks:
     name: Tests and frontend
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' }}
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -63,12 +86,18 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js for pnpm
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
+          run_install: false
 
-      - name: Setup Node.js
+      - name: Cache pnpm with Node.js
         uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -79,8 +108,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
-          cache-targets: false
-          shared-key: source-only
+          cache-targets: true
+          shared-key: checks-x86_64-unknown-linux-gnu-debug
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -96,92 +126,37 @@ jobs:
 
   build-windows:
     name: Windows x64
-    needs: checks
+    needs: [checks, native-windows]
     if: >-
       ${{
-        always() &&
+        always() && needs.native-windows.result == 'success' &&
         (needs.checks.result == 'success' ||
          (github.event_name == 'workflow_dispatch' && inputs.platform == 'windows'))
       }}
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: windows-2022
     env:
-      SIGPILOT_SIGROK_BUILD_DIR: C:/sigpilot-native-cache/sigrok-ucrt64
+      SIGPILOT_PREBUILT_NATIVE: '1'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Detect persistent MSYS2 installation
-        id: detect-msys2
-        shell: pwsh
-        run: |
-          $installed = Test-Path "C:\msys64\usr\bin\pacman.exe"
-          "installed=$($installed.ToString().ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Setup persistent MSYS2 environment
-        id: msys2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          location: C:\
-          release: ${{ steps.detect-msys2.outputs.installed != 'true' }}
-          update: false
-          cache: false
-
-      - name: Install missing MSYS2 build dependencies
-        shell: msys2 {0}
-        run: |
-          packages=(
-            base-devel
-            git
-            mingw-w64-ucrt-x86_64-toolchain
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-glib2
-            mingw-w64-ucrt-x86_64-python
-            mingw-w64-ucrt-x86_64-jq
-          )
-          missing_packages=()
-          package_or_group_installed() {
-            if pacman -Q "$1" >/dev/null 2>&1; then
-              return 0
-            fi
-            local members member
-            members="$(pacman -Sgq "$1" 2>/dev/null)" || return 1
-            [[ -n "$members" ]] || return 1
-            while IFS= read -r member; do
-              pacman -Q "$member" >/dev/null 2>&1 || return 1
-            done <<<"$members"
-          }
-          for package in "${packages[@]}"; do
-            package_or_group_installed "$package" || missing_packages+=("$package")
-          done
-          if (( ${#missing_packages[@]} == 0 )); then
-            echo "MSYS2 build dependencies are already installed."
-            exit 0
-          fi
-          pacman --noconfirm -S --needed "${missing_packages[@]}"
-
-      - name: Export MSYS2 paths for resource preparation
-        shell: pwsh
-        run: |
-          $msysRoot = "${{ steps.msys2.outputs.msys2-location }}"
-          "$msysRoot\usr\bin" | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
-          "$msysRoot\ucrt64\bin" | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
-          "MSYSTEM=UCRT64" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          "CHERE_INVOKING=1" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup Node.js for pnpm
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
+          run_install: false
 
-      - name: Setup Node.js
+      - name: Cache pnpm with Node.js
         uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -192,50 +167,27 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
-          cache-targets: false
-          shared-key: source-only
+          cache-targets: true
+          shared-key: client-x86_64-pc-windows-msvc-release
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify native Sigrok decoder
-        shell: msys2 {0}
-        run: native/sigrok-analyzer-sidecar/verify.sh
+      - name: Download native runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: native-runtime-windows-x64
+          path: ${{ runner.temp }}/native-runtime
 
-      - name: Prepare and probe bundled resources
-        shell: msys2 {0}
-        env:
-          SIGPILOT_REUSE_SIGROK_BUILD: "1"
-        run: |
-          scripts/prepare-tauri-resources.sh
-          sidecar="resources/native/sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar.exe"
-          decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
-          python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
-          python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
-          saleae_sidecar="resources/native/saleae-analyzer-sidecar/sigpilot-saleae-analyzer-sidecar.exe"
-          saleae_runtime="resources/native/saleae-analyzer-sidecar/runtime"
-          test -f resources/bitstreams/hspi_ddr.bin
-          test -f resources/bitstreams/hspi_ddr_RST.bin
-          test -x "$sidecar"
-          test -d "$decoder_root"
-          test -d "$python_root"
-          test -d "$python_home"
-          test -x "$saleae_sidecar"
-          find "$saleae_runtime" -maxdepth 1 -type f -iname '*saleae_compat.dll' | grep -q .
-          find "$saleae_runtime" -maxdepth 1 -type f -iname '*spi_analyzer.dll' | grep -q .
-          PYTHONHOME="$python_home" native/sigrok-analyzer-sidecar/smoke-packaged.sh \
-            "$sidecar" "$decoder_root" "$python_root"
-          "$saleae_sidecar" --runtime-root "$saleae_runtime" --probe \
-            | jq -e '.available == true and (.protocols | index("SPI") != null)'
-          jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
-            | "$saleae_sidecar" --runtime-root "$saleae_runtime" --decode \
-            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
+      - name: Install verified native runtime
+        shell: pwsh
+        run: node scripts/native-runtime.mjs install "${{ runner.temp }}/native-runtime/native-runtime-windows-x64.tar.gz" windows-x64
 
       - name: Build portable Tauri executable
         shell: pwsh
         env:
           TAURI_SKIP_DEVTOOLS_CHECK: true
-          SIGPILOT_REUSE_SIGROK_BUILD: "1"
         run: pnpm tauri build --target x86_64-pc-windows-msvc --no-bundle --ci
 
       - name: Stage Windows portable bundle
@@ -269,23 +221,10 @@ jobs:
           }
 
       - name: Smoke test Windows portable bundle
-        shell: msys2 {0}
+        shell: pwsh
         run: |
-          portable_root="target/x86_64-pc-windows-msvc/release/portable"
-          sigrok_root="$portable_root/resources/native/sigrok-analyzer-sidecar"
-          PYTHONHOME="$sigrok_root/python-runtime" \
-            native/sigrok-analyzer-sidecar/smoke-packaged.sh \
-              "$sigrok_root/sigpilot-sigrok-sidecar.exe" \
-              "$sigrok_root/decoders/c_decoders" \
-              "$sigrok_root/decoders/python_decoders"
-          saleae_root="$portable_root/resources/native/saleae-analyzer-sidecar"
-          "$saleae_root/sigpilot-saleae-analyzer-sidecar.exe" \
-            --runtime-root "$saleae_root/runtime" --probe \
-            | jq -e '.available == true and (.protocols | index("SPI") != null)'
-          jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
-            | "$saleae_root/sigpilot-saleae-analyzer-sidecar.exe" \
-                --runtime-root "$saleae_root/runtime" --decode \
-            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
+          $portableRoot = "target/x86_64-pc-windows-msvc/release/portable"
+          node scripts/smoke-native-runtime.mjs "$portableRoot/resources/native"
 
       - name: Archive Windows portable bundle
         shell: pwsh
@@ -308,16 +247,16 @@ jobs:
 
   build-linux:
     name: Linux x64
-    needs: checks
+    needs: [checks, native-linux]
     if: >-
       ${{
         needs.checks.result == 'success' &&
+        needs.native-linux.result == 'success' &&
         (github.event_name != 'workflow_dispatch' || inputs.platform == 'all')
       }}
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-22.04
     env:
-      SIGPILOT_COPY_NATIVE_DEPS: "1"
-      SIGPILOT_SIGROK_BUILD_DIR: /tmp/sigpilot-native-cache/sigrok-linux-x64
+      SIGPILOT_PREBUILT_NATIVE: '1'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -325,13 +264,7 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           packages=(
-            build-essential
-            cmake
             jq
-            ninja-build
-            pkg-config
-            python3-dev
-            libglib2.0-dev
             libwebkit2gtk-4.1-dev
             libgtk-3-dev
             libayatana-appindicator3-dev
@@ -366,12 +299,18 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
+      - name: Setup Node.js for pnpm
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
+          run_install: false
 
-      - name: Setup Node.js
+      - name: Cache pnpm with Node.js
         uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -382,42 +321,21 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
-          cache-targets: false
-          shared-key: source-only
+          cache-targets: true
+          shared-key: client-x86_64-unknown-linux-gnu-release
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify native Sigrok decoder
-        run: native/sigrok-analyzer-sidecar/verify.sh
+      - name: Download native runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: native-runtime-linux-x64
+          path: ${{ runner.temp }}/native-runtime
 
-      - name: Prepare and probe bundled resources
-        env:
-          SIGPILOT_REUSE_SIGROK_BUILD: "1"
-        run: |
-          scripts/prepare-tauri-resources.sh
-          sidecar="resources/native/sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar"
-          decoder_root="resources/native/sigrok-analyzer-sidecar/decoders/c_decoders"
-          python_root="resources/native/sigrok-analyzer-sidecar/decoders/python_decoders"
-          python_home="resources/native/sigrok-analyzer-sidecar/python-runtime"
-          saleae_sidecar="resources/native/saleae-analyzer-sidecar/sigpilot-saleae-analyzer-sidecar"
-          saleae_runtime="resources/native/saleae-analyzer-sidecar/runtime"
-          test -f resources/bitstreams/hspi_ddr.bin
-          test -f resources/bitstreams/hspi_ddr_RST.bin
-          test -x "$sidecar"
-          test -d "$decoder_root"
-          test -d "$python_root"
-          test -d "$python_home"
-          test -x "$saleae_sidecar"
-          test -f "$saleae_runtime/libsaleae_compat.so"
-          test -f "$saleae_runtime/libspi_analyzer.so"
-          PYTHONHOME="$python_home" native/sigrok-analyzer-sidecar/smoke-packaged.sh \
-            "$sidecar" "$decoder_root" "$python_root"
-          "$saleae_sidecar" --runtime-root "$saleae_runtime" --probe \
-            | jq -e '.available == true and (.protocols | index("SPI") != null)'
-          jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
-            | "$saleae_sidecar" --runtime-root "$saleae_runtime" --decode \
-            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
+      - name: Install verified native runtime
+        run: node scripts/native-runtime.mjs install "${{ runner.temp }}/native-runtime/native-runtime-linux-x64.tar.gz" linux-x64
 
       - name: Build Tauri packages
         run: pnpm tauri build --target x86_64-unknown-linux-gnu --bundles appimage,deb --ci
@@ -441,19 +359,7 @@ jobs:
           test -n "$packaged_sidecar"
           packaged_root="$(dirname "$packaged_sidecar")"
           test -f "$(find squashfs-root -type f -name hspi_ddr.bin -print -quit)"
-          PYTHONHOME="$packaged_root/python-runtime" \
-            "$GITHUB_WORKSPACE/native/sigrok-analyzer-sidecar/smoke-packaged.sh" \
-            "$packaged_sidecar" \
-            "$packaged_root/decoders/c_decoders" \
-            "$packaged_root/decoders/python_decoders"
-          packaged_saleae="$(find squashfs-root -type f -name sigpilot-saleae-analyzer-sidecar -print -quit)"
-          test -n "$packaged_saleae"
-          packaged_saleae_runtime="$(dirname "$packaged_saleae")/runtime"
-          "$packaged_saleae" --runtime-root "$packaged_saleae_runtime" --probe \
-            | jq -e '.available == true and (.protocols | index("SPI") != null)'
-          jq '.cases[0]' "$GITHUB_WORKSPACE/testdata/decoders/spi-conformance-v1.json" \
-            | "$packaged_saleae" --runtime-root "$packaged_saleae_runtime" --decode \
-            | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
+          node "$GITHUB_WORKSPACE/scripts/smoke-native-runtime.mjs" "$(dirname "$packaged_root")"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
@@ -467,10 +373,11 @@ jobs:
 
   build-macos:
     name: macOS ${{ matrix.arch }}
-    needs: checks
+    needs: [checks, native-macos]
     if: >-
       ${{
         needs.checks.result == 'success' &&
+        needs.native-macos.result == 'success' &&
         (github.event_name != 'workflow_dispatch' || inputs.platform == 'all')
       }}
     strategy:
@@ -486,24 +393,33 @@ jobs:
             native_arch: x86_64
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
+    env:
+      SIGPILOT_PREBUILT_NATIVE: '1'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install Sigrok build dependencies
-        run: brew install cmake glib jq pkg-config
+      # The restored sigrok runtime still links against Homebrew libraries.
+      - name: Install native runtime dependencies
+        run: brew install glib jq python@3.13
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
+      - name: Setup Node.js for pnpm
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
           version: 11.7.0
+          run_install: false
 
-      - name: Setup Node.js
+      - name: Cache pnpm with Node.js
         uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -514,18 +430,28 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ".->target"
-          cache-targets: false
-          shared-key: source-only
+          cache-targets: true
+          shared-key: client-${{ matrix.target }}-release
+          cache-on-failure: true
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Download native runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: native-runtime-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/native-runtime
+
+      - name: Install verified native runtime
+        run: node scripts/native-runtime.mjs install "${{ runner.temp }}/native-runtime/native-runtime-macos-${{ matrix.arch }}.tar.gz" macos-${{ matrix.arch }}
 
       - name: Build Tauri app bundle
         env:
           SIGPILOT_MACOS_ARCH: ${{ matrix.native_arch }}
         run: pnpm tauri build --target ${{ matrix.target }} --bundles app --ci --no-sign
 
-      - name: Verify bundled Saleae decoder
+      - name: Verify bundled native decoders
         run: |
           set -euo pipefail
           bundle_root="target/${{ matrix.target }}/release/bundle"
@@ -542,6 +468,7 @@ jobs:
           jq '.cases[0]' testdata/decoders/spi-conformance-v1.json \
             | "$sidecar" --runtime-root "$runtime_root" --decode \
             | jq -e '.backend == "saleae_native" and (.frames | length) > 0'
+          node scripts/smoke-native-runtime.mjs "$(dirname "$(dirname "$sidecar")")"
 
       - name: Name macOS artifact
         run: |
@@ -566,6 +493,7 @@ jobs:
     if: >-
       ${{
         always() &&
+        github.event_name == 'push' &&
         startsWith(github.ref, 'refs/tags/v') &&
         (needs.build-windows.result == 'success' ||
          needs.build-linux.result == 'success' ||
@@ -576,9 +504,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download artifacts
+      - name: Download client artifacts
         uses: actions/download-artifact@v8
         with:
+          pattern: sigpilot-*
           path: release-artifacts
           merge-multiple: true
 

@@ -5,10 +5,27 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { nativePlatform, verifyRuntime } from "./native-runtime.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(scriptDir, "..");
 const shellScript = join(scriptDir, "prepare-tauri-resources.sh");
+
+if (process.env.SIGPILOT_PREBUILT_NATIVE === "1") {
+  // Client CI must never silently fall back to native compilation.
+  verifyRuntime();
+  console.log(`Using verified prebuilt native runtime (${nativePlatform()}).`);
+  process.exit(0);
+}
+if (process.env.SIGPILOT_FORCE_NATIVE_BUILD !== "1") {
+  try {
+    verifyRuntime();
+    console.log(`Native resources unchanged (${nativePlatform()}); skipping build and copy.`);
+    process.exit(0);
+  } catch {
+    // Local development rebuilds automatically when source/payload changed.
+  }
+}
 
 function bashCandidates() {
   const candidates = [];

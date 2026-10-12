@@ -28,6 +28,12 @@ fi
 # Positional parameters remain safe to expand when empty under macOS Bash 3.2
 # with `set -u`; an empty array does not.
 set --
+if [[ -n "${SIGPILOT_CMAKE_GENERATOR:-}" ]]; then
+  set -- "$@" -G "$SIGPILOT_CMAKE_GENERATOR"
+fi
+if [[ -n "${SIGPILOT_SIGROK_PYTHON_ROOT:-}" ]]; then
+  set -- "$@" "-DPython3_ROOT_DIR=$SIGPILOT_SIGROK_PYTHON_ROOT"
+fi
 python_fingerprint=""
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)

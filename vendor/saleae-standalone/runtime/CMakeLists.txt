@@ -16,6 +16,18 @@ set(SALEAE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(SALEAE_SDK_ROOT "${SALEAE_ROOT}/sdk/AnalyzerSDK")
 set(SALEAE_TESTLIB_ROOT "${SALEAE_SDK_ROOT}/testlib")
 
+# Configure can run multiple times during resource preparation. Do not touch
+# generated C++ when its content is unchanged: that needlessly relinks plugins.
+function(write_if_changed path content)
+    if(EXISTS "${path}")
+        file(READ "${path}" previous)
+        if(previous STREQUAL content)
+            return()
+        endif()
+    endif()
+    file(WRITE "${path}" "${content}")
+endfunction()
+
 file(READ "${SALEAE_TESTLIB_ROOT}/MockResults.cpp" MOCK_RESULTS_SOURCE)
 string(REPLACE
     "Frame::Frame()\n{\n}"
@@ -23,7 +35,7 @@ string(REPLACE
     MOCK_RESULTS_SOURCE
     "${MOCK_RESULTS_SOURCE}"
 )
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/MockResultsCompat.cpp" "${MOCK_RESULTS_SOURCE}")
+write_if_changed("${CMAKE_CURRENT_BINARY_DIR}/MockResultsCompat.cpp" "${MOCK_RESULTS_SOURCE}")
 
 # The testlib hardcodes Analyzer::GetTriggerSample() to 2, but analyzers use it
 # to render timestamps relative to the trigger, so every exported timestamp came
@@ -42,7 +54,7 @@ string(REPLACE
     ANALYZER_STUBS_SOURCE
     "${ANALYZER_STUBS_SOURCE}"
 )
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/AnalyzerStubsCompat.cpp" "${ANALYZER_STUBS_SOURCE}")
+write_if_changed("${CMAKE_CURRENT_BINARY_DIR}/AnalyzerStubsCompat.cpp" "${ANALYZER_STUBS_SOURCE}")
 
 add_library(saleae_compat SHARED
     "${CMAKE_CURRENT_BINARY_DIR}/AnalyzerStubsCompat.cpp"
@@ -86,6 +98,8 @@ add_library(Saleae::AnalyzerSDK ALIAS saleae_compat)
 # than as a subtly wrong decode. Run with: ctest --test-dir <build dir>
 enable_testing()
 add_executable(saleae_compat_tests cpp/test_pulse_width.cpp)
+set_target_properties(saleae_compat_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 target_include_directories(saleae_compat_tests PRIVATE "${SALEAE_TESTLIB_ROOT}")
 target_link_libraries(saleae_compat_tests PRIVATE saleae_compat)
 add_test(NAME pulse_width COMMAND saleae_compat_tests)

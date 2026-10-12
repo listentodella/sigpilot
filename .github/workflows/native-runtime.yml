@@ -1,0 +1,154 @@
+name: Build Native Runtime
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        type: string
+        default: all
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Native runtime platforms to build or restore
+        type: choice
+        default: all
+        options: [windows, linux, macos, all]
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    name: Native runtime ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.platform == 'windows' && '[{"platform":"windows-x64","runner":"windows-2022"}]' || inputs.platform == 'linux' && '[{"platform":"linux-x64","runner":"ubuntu-22.04"}]' || inputs.platform == 'macos' && '[{"platform":"macos-arm64","runner":"macos-15"},{"platform":"macos-x64","runner":"macos-15-intel"}]' || '[{"platform":"windows-x64","runner":"windows-2022"},{"platform":"linux-x64","runner":"ubuntu-22.04"},{"platform":"macos-arm64","runner":"macos-15"},{"platform":"macos-x64","runner":"macos-15-intel"}]') }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      SIGPILOT_CMAKE_GENERATOR: Ninja
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # These are dynamic runtime dependencies on macOS, including cache hits.
+      - name: Install macOS runtime dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja glib jq pkg-config python@3.13
+
+      - name: Compute native source and image identity
+        id: identity
+        run: |
+          echo "source=$(node scripts/native-runtime.mjs fingerprint)" >> "$GITHUB_OUTPUT"
+          echo "image=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "SIGPILOT_NATIVE_TOOLCHAIN=${{ matrix.runner }}-${ImageVersion:-unknown}" >> "$GITHUB_ENV"
+          dependencies=image
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            dependencies="$(brew list --versions glib python@3.13 | shasum -a 256 | cut -d ' ' -f 1)"
+          fi
+          echo "dependencies=$dependencies" >> "$GITHUB_OUTPUT"
+          native_temp="$(node -p 'process.env.RUNNER_TEMP.replaceAll(String.fromCharCode(92), "/")')"
+          echo "SIGPILOT_SIGROK_BUILD_DIR=$native_temp/native-build/sigrok" >> "$GITHUB_ENV"
+          echo "SIGPILOT_SALEAE_BUILD_DIR=$native_temp/native-build/saleae-sidecar" >> "$GITHUB_ENV"
+          echo "SIGPILOT_SALEAE_RUNTIME_BUILD_DIR=$native_temp/native-build/saleae-runtime" >> "$GITHUB_ENV"
+
+      # Cache only relocatable, verified runtime packages, not CMake directories
+      # that contain absolute runner/compiler paths. No partial restore keys.
+      - name: Restore native runtime package
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/native-package
+          key: native-v1-${{ matrix.platform }}-${{ matrix.runner }}-${{ steps.identity.outputs.image }}-${{ steps.identity.outputs.dependencies }}-${{ steps.identity.outputs.source }}
+
+      - name: Install MSYS2 native toolchain
+        if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: >-
+            base-devel git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-jq
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux' && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config python3-dev libglib2.0-dev jq
+
+      - name: Configure Unix native environment
+        if: runner.os != 'Windows'
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            echo "SIGPILOT_COPY_NATIVE_DEPS=1" >> "$GITHUB_ENV"
+            echo "PATH=/usr/bin:$PATH" >> "$GITHUB_ENV"
+          else
+            python_root="$(brew --prefix python@3.13)"
+            echo "PATH=$python_root/libexec/bin:$PATH" >> "$GITHUB_ENV"
+            echo "SIGPILOT_SIGROK_PYTHON_ROOT=$python_root" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and verify Windows native runtime
+        if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        env:
+          SIGPILOT_REUSE_SIGROK_BUILD: "1"
+        run: |
+          native/sigrok-analyzer-sidecar/verify.sh
+          scripts/prepare-tauri-resources.sh
+          ctest --test-dir "$SIGPILOT_SALEAE_RUNTIME_BUILD_DIR" --output-on-failure
+
+      - name: Build and verify Unix native runtime
+        if: runner.os != 'Windows' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          SIGPILOT_REUSE_SIGROK_BUILD: "1"
+        run: |
+          native/sigrok-analyzer-sidecar/verify.sh
+          scripts/prepare-tauri-resources.sh
+          ctest --test-dir "$SIGPILOT_SALEAE_RUNTIME_BUILD_DIR" --output-on-failure
+
+      - name: Import cached native runtime
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: node scripts/native-runtime.mjs install "${{ runner.temp }}/native-package/native-runtime-${{ matrix.platform }}.tar.gz" "${{ matrix.platform }}"
+
+      - name: Smoke test native runtime payload
+        run: |
+          node scripts/native-runtime.mjs verify "${{ matrix.platform }}"
+          node scripts/smoke-native-runtime.mjs resources/native
+
+      - name: Package native runtime
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: node scripts/native-runtime.mjs pack "${{ runner.temp }}/native-package/native-runtime-${{ matrix.platform }}.tar.gz" "${{ matrix.platform }}"
+
+      - name: Save verified native runtime package
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/native-package
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Upload native runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-runtime-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native-package/native-runtime-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

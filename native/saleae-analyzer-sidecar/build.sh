@@ -65,39 +65,14 @@ esac
 cmake -S "$RUNTIME_SOURCE_DIR" -B "$RUNTIME_BUILD_DIR" -G Ninja "$@" >&2
 cmake --build "$RUNTIME_BUILD_DIR" >&2 || exit $?
 
-if [[ -n "${CXX:-}" ]]; then
-  CXX_COMMAND=("$CXX")
-elif [[ "$HOST_OS" == "Darwin" ]]; then
-  CXX_COMMAND=(xcrun clang++)
-else
-  CXX_COMMAND=(c++)
-fi
+# Keep the executable under Ninja dependency tracking too. The old direct
+# c++ invocation rebuilt the large JSON-based translation unit on every call.
 SIGPILOT_SALEAE_SIDECAR_OPT_LEVEL="${SIGPILOT_SALEAE_SIDECAR_OPT_LEVEL:--O3}"
-COMMON_FLAGS=(
-  -std=c++17
-  "$SIGPILOT_SALEAE_SIDECAR_OPT_LEVEL"
-  -DNDEBUG
-  -I"$RUNTIME_SOURCE_DIR/include"
-  -I"$JSON_INCLUDE_DIR"
-)
-LINKER_FLAGS=(-L"$RUNTIME_BUILD_DIR/lib" -lsaleae_compat)
-case "$HOST_OS" in
-  Darwin)
-    COMMON_FLAGS+=(-arch "$TARGET_ARCH")
-    LINKER_FLAGS+=(-Wl,-rpath,@loader_path/runtime)
-    ;;
-  Linux)
-    LINKER_FLAGS+=('-Wl,-rpath,$ORIGIN/runtime' -ldl)
-    ;;
-  MINGW*|MSYS*|CYGWIN*)
-    COMMON_FLAGS+=(-static-libgcc -static-libstdc++)
-    ;;
-esac
-
-"${CXX_COMMAND[@]}" "${COMMON_FLAGS[@]}" \
-  "$SOURCE_DIR/src/standalone_main.cpp" \
-  "${LINKER_FLAGS[@]}" \
-  -o "$BUILD_DIR/$EXECUTABLE_NAME"
+cmake -S "$SOURCE_DIR" -B "$BUILD_DIR" -G Ninja "$@" \
+  -DSALEAE_RUNTIME_BUILD="$RUNTIME_BUILD_DIR" \
+  -DJSON_INCLUDE_DIR="$JSON_INCLUDE_DIR" \
+  -DSIDECAR_OPT_LEVEL="$SIGPILOT_SALEAE_SIDECAR_OPT_LEVEL" >&2
+cmake --build "$BUILD_DIR" --parallel >&2
 
 rm -rf "$BUILD_DIR/runtime"
 mkdir -p "$BUILD_DIR/runtime"

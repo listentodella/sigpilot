@@ -6,12 +6,24 @@ RESOURCE_DIR="$ROOT_DIR/resources/native"
 HOST_OS="$(uname -s)"
 HOST_ARCH="$(uname -m)"
 
+export PYTHONDONTWRITEBYTECODE=1
+if [[ "${SIGPILOT_FORCE_NATIVE_BUILD:-0}" != "1" ]] && \
+    node "$ROOT_DIR/scripts/native-runtime.mjs" verify >/dev/null 2>&1; then
+  printf 'Native resources unchanged; skipping build and copy.\n'
+  exit 0
+fi
+if [[ "${SIGPILOT_PREBUILT_NATIVE:-0}" == "1" ]]; then
+  printf 'Prebuilt native resources failed validation; native compilation is disabled.\n' >&2
+  exit 1
+fi
+
 mkdir -p "$RESOURCE_DIR"
 rm -rf \
   "$RESOURCE_DIR/saleae-analyzer-sidecar" \
   "$RESOURCE_DIR/saleae-graph-sidecar" \
   "$RESOURCE_DIR/saleae-runtime-2.4.43" \
   "$RESOURCE_DIR/sigrok-analyzer-sidecar"
+rm -f "$RESOURCE_DIR/native-runtime-manifest.json"
 
 copy_file() {
   local source="$1"
@@ -208,3 +220,5 @@ if sigrok_root="$(sigrok_source_root)"; then
 else
   printf 'Skipping Sigrok sidecar: vendor/pxview-sigrokdecode or pxview-fork is not available in this checkout.\n' >&2
 fi
+
+node "$ROOT_DIR/scripts/native-runtime.mjs" seal
