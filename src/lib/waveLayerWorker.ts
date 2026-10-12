@@ -1,4 +1,5 @@
 import type { WaveformTile } from "./api";
+import { activeUiTheme, activeWaveformThemeColors, type WaveformThemeColors } from "./themes.ts";
 
 // The worker-request pipeline for the waveform layer.
 //
@@ -33,6 +34,8 @@ export interface WaveLayerWorkerRequest {
   height: number;
   id: number;
   matchChannelColors: boolean;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   rowHeights: number[];
   rowTopInsets: number[];
   tile: WaveformTile;
@@ -70,6 +73,14 @@ export function sameNumberArray(left: number[], right: number[]) {
   return left === right || (left.length === right.length && left.every((value, index) => value === right[index]));
 }
 
+export function sameChannelColors(left: readonly string[], right: readonly string[]) {
+  return left === right || (left.length === right.length && left.every((color, index) => color === right[index]));
+}
+
+export function sameWaveformThemeColors(left: WaveformThemeColors, right: WaveformThemeColors) {
+  return left === right || (Object.keys(left) as (keyof WaveformThemeColors)[]).every((key) => left[key] === right[key]);
+}
+
 export function sameWaveLayerWorkerRequest(left: WaveLayerWorkerRequest | null, right: WaveLayerWorkerRequest) {
   return Boolean(
     left &&
@@ -77,6 +88,8 @@ export function sameWaveLayerWorkerRequest(left: WaveLayerWorkerRequest | null, 
     left.width === right.width &&
     left.height === right.height &&
     left.dpr === right.dpr &&
+    sameChannelColors(left.channelColors, right.channelColors) &&
+    sameWaveformThemeColors(left.themeColors, right.themeColors) &&
     sameNumberArray(left.rowHeights, right.rowHeights) &&
     sameNumberArray(left.rowTopInsets, right.rowTopInsets) &&
     left.matchChannelColors === right.matchChannelColors,
@@ -92,6 +105,8 @@ export function sameViewportWorkerRequest(left: ViewportWorkerRequest | null, ri
     left.dpr === right.dpr &&
     left.viewStart === right.viewStart &&
     left.viewSamples === right.viewSamples &&
+    sameChannelColors(left.channelColors, right.channelColors) &&
+    sameWaveformThemeColors(left.themeColors, right.themeColors) &&
     sameNumberArray(left.rowHeights, right.rowHeights) &&
     sameNumberArray(left.rowTopInsets, right.rowTopInsets) &&
     left.matchChannelColors === right.matchChannelColors,
@@ -145,6 +160,8 @@ export function startWaveLayerWorkerRequest(state: WaveLayerWorkerState, request
       rowHeights: request.rowHeights,
       rowTopInsets: request.rowTopInsets,
       matchChannelColors: request.matchChannelColors,
+      channelColors: request.channelColors,
+      themeColors: request.themeColors,
       tileStart: tile.start_sample,
       tileSamples: tile.sample_count,
       samplesPerPixel: tile.samples_per_pixel,
@@ -166,6 +183,8 @@ export function startViewportWorkerRequest(state: WaveLayerWorkerState, request:
     rowHeights: request.rowHeights,
     rowTopInsets: request.rowTopInsets,
     matchChannelColors: request.matchChannelColors,
+    channelColors: request.channelColors,
+    themeColors: request.themeColors,
     viewStart: request.viewStart,
     viewSamples: request.viewSamples,
   });
@@ -180,18 +199,25 @@ export function requestWaveLayerRender(
   rowTopInsets: number[],
   matchChannelColors: boolean,
   dpr: number,
+  channelColors: readonly string[] = activeUiTheme().channelColors,
+  themeColors: WaveformThemeColors = activeWaveformThemeColors(),
 ) {
   const request: WaveLayerWorkerRequest = {
     dpr,
     height,
     id: state.nextId++,
     matchChannelColors,
+    channelColors,
+    themeColors,
     rowHeights,
     rowTopInsets,
     tile,
     width,
   };
-  if (sameWaveLayerWorkerRequest(state.active, request)) return;
+  if (sameWaveLayerWorkerRequest(state.active, request)) {
+    state.queued = null;
+    return;
+  }
   if (state.active) {
     if (!sameWaveLayerWorkerRequest(state.queued, request)) state.queued = request;
     return;
@@ -210,12 +236,16 @@ export function requestViewportRender(
   viewStart: number,
   viewSamples: number,
   dpr: number,
+  channelColors: readonly string[] = activeUiTheme().channelColors,
+  themeColors: WaveformThemeColors = activeWaveformThemeColors(),
 ) {
   const request: ViewportWorkerRequest = {
     dpr,
     height,
     id: state.nextId++,
     matchChannelColors,
+    channelColors,
+    themeColors,
     rowHeights,
     rowTopInsets,
     tile,
@@ -223,7 +253,10 @@ export function requestViewportRender(
     viewStart,
     width,
   };
-  if (sameViewportWorkerRequest(state.viewportActive, request)) return;
+  if (sameViewportWorkerRequest(state.viewportActive, request)) {
+    state.viewportQueued = null;
+    return;
+  }
   if (state.viewportActive) {
     // Latest-only: a zoom gesture produces a new viewport every frame and every
     // earlier one is already obsolete by the time it could be rendered.

@@ -1,12 +1,40 @@
 {
   "close": "Close",
-  "closeDialog": "Close Settings",
-  "dialogTitle": "Settings",
+  "closeDialog": "Close Preferences",
+  "dialogTitle": "Preferences",
+  "preferences": "Preferences",
   "matchChannelColors": "Color-match Waveforms",
-  "matchChannelColorsHint": "Color the Waveforms to match the logic analyzer wires.",
+  "matchChannelColorsHint": "Color waveforms to match their channel colors.",
   "panToTrigger": "Pan to Trigger",
   "renameTabToSavedCapture": "When saving a capture rename tab to saved capture filename",
   "sectionCaptureEnd": "When Capture Ends",
   "sectionChannel": "Channel Settings",
-  "sectionSave": "Save Capture"
+  "sectionTheme": "Appearance",
+  "theme": "Color theme",
+  "sectionSave": "Save Capture",
+  "editor": {
+    "copy": "Copy as custom theme", "edit": "Edit theme", "delete": "Delete theme", "import": "Import JSON", "export": "Export JSON",
+    "name": "Theme name", "livePreview": "Live workspace preview", "preview": "Theme preview", "ready": "Ready", "measurementPreview": "Measurement · 10 μs · 100 kHz",
+    "startHint": "Built-in themes are read-only. Copy one to edit interface colors, the eight-color palette and individual channels.",
+    "draftHint": "Unsaved draft. Cancel, Escape or closing Preferences restores the saved colors.",
+    "palette": "Eight-color repeating palette", "paletteHint": "Digital and analog channels repeat colors by physical index. Independent colors do not follow palette changes.",
+    "overrides": "Individual channel colors", "noDevice": "Select a device or open a capture to configure its channels. The base palette is always editable.",
+    "overrideHint": "Saved by device model and channel layout, retained across theme changes. Set a color to override; restore inheritance to follow the palette.",
+    "search": "Search channel ID or name", "filter": "Channel filter", "filters": { "all": "All channels", "enabled": "Enabled only", "overrides": "Overrides only", "D": "Digital", "A": "Analog" },
+    "clearOverrides": "Clear this device's overrides", "expand": "Freeze filtered channels as independent colors", "independent": "Independent", "inherited": "Inherited", "disabled": "Disabled", "inherit": "Restore inheritance", "noResults": "No matching channels",
+    "reset": "Restore base theme colors", "cancel": "Cancel editing", "apply": "Apply and save", "saved": "Theme saved", "deleted": "Theme deleted",
+    "confirmDelete": "Delete custom theme ‘{{name}}’? Device channel overrides will be retained.",
+    "confirmClear": "Clear all overrides for this device and restore palette inheritance?",
+    "confirmExpand": "Freeze the filtered channels as independent colors? They will no longer follow palette changes.",
+    "confirmReset": "Restore interface colors and the eight-color palette to the base theme? Channel overrides will be retained.",
+    "saveFailed": "Save failed:", "importFailed": "Import failed:", "exportFailed": "Export failed:", "fileTooLarge": "The file must be smaller than 256 KB", "imported": "Imported as a new draft. Apply to save. Imported device overrides are merged into the draft.",
+    "invalidHex": "Enter a six-digit #RRGGBB color", "textContrast": "Warning: primary text/panel contrast is below 4.5:1.", "waveContrast": "Warning: some channel/background contrast ratios are below 3:1.",
+    "groups": { "surfaces": "Backgrounds and surfaces", "text": "Text", "accents": "Borders and accents", "states": "Status colors", "waveform": "Waveforms and measurements" },
+    "colors": {
+      "background": "Base background", "workspace": "Workspace background", "panel": "Panel background", "raised": "Raised surface", "input": "Input background", "hover": "Hover background",
+      "text": "Highlight text", "textPrimary": "Primary text", "textSecondary": "Secondary text", "textMuted": "Muted text", "textDisabled": "Disabled text",
+      "border": "Border", "borderStrong": "Strong border", "accent": "Accent", "selection": "Selection", "onAccent": "Text on accent", "neutral": "Neutral control", "onNeutral": "Text on neutral",
+      "success": "Success", "warning": "Warning", "error": "Error", "waveBackground": "Waveform background", "waveText": "Waveform text", "gridPrimary": "Primary grid", "gridSecondary": "Secondary grid", "separator": "Channel separator", "measurement": "Measurement", "cursor": "Cursor", "monochrome": "Monochrome waveform"
+    }
+  }
 }

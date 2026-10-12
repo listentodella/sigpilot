@@ -82,7 +82,10 @@ import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
+import { ThemeSettings } from "./components/ThemeSettings";
 import { PreferencesDialog } from "./components/PreferencesDialog";
+import type { ThemePreview } from "./components/CustomThemeEditor";
+import { loadThemeLibrary, saveThemeLibrary, themeChannelProfile, type ThemeChannelContext, type ThemeLibrary } from "./lib/customThemes";
 import { SaleaeIcon } from "./components/SaleaeIcon";
 import { AnalyzerLibraryMenu } from "./components/AnalyzerLibraryMenu";
 import type { AnalyzerLibraryChoice } from "./components/AnalyzerLibraryMenu";
@@ -315,7 +318,12 @@ import {
   UiTimingMarker,
   UiTimingMarkerPlacement,
 } from "./lib/timingMarkers";
-
+import {
+  applyUiTheme,
+  getUiTheme,
+  setActiveUiTheme,
+  unregisterUiTheme,
+} from "./lib/themes";
 type FooterPopover = "devices" | "newSession" | "zoom" | "language" | null;
 
 const GRAPH_MIN_WIDTH = 50;
@@ -1526,8 +1534,11 @@ export default function App() {
   const [pendingChannelTrim, setPendingChannelTrim] = useState<PendingChannelTrim | null>(null);
   const [screenshotNotification, setScreenshotNotification] = useState<ScreenshotNotification | null>(null);
   const [screenshotSettings, setScreenshotSettings] = useState(loadScreenshotSettings);
+  const [themeLibrary, setThemeLibrary] = useState(loadThemeLibrary);
+  const [themePreview, setThemePreview] = useState<ThemePreview | null>(null);
   const [preferences, setPreferences] = useState(loadUiPreferences);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [themeRevision, setThemeRevision] = useState(0);
   const [analyzerInEdit, setAnalyzerInEdit] = useState<AnalyzerEditState | null>(null);
   const [graphViewportHeight, setGraphViewportHeight] = useState(0);
   const [graphRequestEpoch, setGraphRequestEpoch] = useState(0);
@@ -1617,6 +1628,7 @@ export default function App() {
   useEffect(() => {
     persistUiPreferences(preferences);
   }, [preferences]);
+
 
   // The advanced panel's Animation Scale feeds the glide duration. Pushed into
   // the module rather than read from preferences at gesture time so the hot path
@@ -1763,6 +1775,44 @@ export default function App() {
     [devices, selectedDevice],
   );
   const selectedCapabilities = deviceCapabilitiesById[selectedDevice] ?? null;
+  const themeChannelContext = useMemo<ThemeChannelContext | null>(() => {
+    const digitalCount = activeSession?.readOnly
+      ? activeSession.summary?.metadata.channel_count ?? activeSession.settings.channel_count
+      : selectedCapabilities?.max_channels ?? 0;
+    const analogCount = activeSession?.readOnly
+      ? activeSession.deviceSettings.analogChannels.length
+      : analogChannelCountForCapabilities(selectedCapabilities);
+    if (!digitalCount && !analogCount) return null;
+    const model = activeSession?.readOnly ? activeSession.summary?.metadata.source_device ?? "capture"
+      : selectedCapabilities?.profile_model ?? selected?.profile_model ?? selected?.product
+        ?? (selected ? `${selected.kind}-${selected.vid}-${selected.pid}` : "capture");
+    return {
+      profileId: themeChannelProfile(model, digitalCount, analogCount),
+      label: selected?.label ?? activeSession?.name ?? "Capture",
+      channels: [
+        ...Array.from({ length: digitalCount }, (_, index) => ({ id: `D${index}`, label: activeSession?.channelLabels[index] ?? `D${index}`, enabled: activeSession ? isDigitalChannelEnabled(activeSession, index) : true })),
+        ...Array.from({ length: analogCount }, (_, index) => ({ id: `A${index}`, label: activeSession?.deviceSettings.analogChannels[index]?.label ?? `A${index}`, enabled: activeSession?.deviceSettings.analogChannels[index]?.enabled ?? false })),
+      ],
+    };
+  }, [activeSession?.readOnly, activeSession?.summary, activeSession?.settings.channel_count, activeSession?.channelLabels, activeSession?.deviceSettings.digitalChannels, activeSession?.deviceSettings.analogChannels, selected, selectedCapabilities]);
+
+  useLayoutEffect(() => {
+    const theme = themePreview?.theme ?? getUiTheme(preferences.themeId);
+    const profiles = themePreview?.channelOverrides ?? themeLibrary.channelOverrides;
+    setActiveUiTheme(theme, profiles[themeChannelContext?.profileId ?? ""] ?? {});
+    applyUiTheme(theme);
+    setThemeRevision((revision) => revision + 1);
+  }, [preferences.themeId, themePreview, themeLibrary, themeChannelContext?.profileId]);
+
+  function saveCustomThemes(library: ThemeLibrary, themeId: string) {
+    const saved = saveThemeLibrary(library);
+    for (const previous of themeLibrary.themes) {
+      if (!saved.themes.some((theme) => theme.id === previous.id)) unregisterUiTheme(previous.id);
+    }
+    setThemeLibrary(saved);
+    setThemePreview(null);
+    setPreferences((current) => ({ ...current, themeId }));
+  }
   const capabilitiesForDevice = useCallback(
     (deviceId: string) => deviceCapabilitiesById[deviceId] ?? null,
     [deviceCapabilitiesById],
@@ -5471,6 +5521,7 @@ export default function App() {
                         rowTopInsets={visibleAnalyzerInsets}
                         tile={visibleTile}
                         matchChannelColors={preferences.matchChannelColors}
+                        themeRevision={themeRevision}
                         onWidthChange={(width) =>
                           updateSession(activeSession.id, (session) => ({
                             ...session,
@@ -5514,6 +5565,7 @@ export default function App() {
                         isLive={activeSession.busy}
                         layouts={visibleAnalogLayouts}
                         matchChannelColors={preferences.matchChannelColors}
+                        themeRevision={themeRevision}
                         onChange={updateAnalogChannel}
                         onViewportChange={(start, samples) => updateViewport(activeSession.id, start, samples)}
                         onViewportInteractionChange={(active) =>
@@ -5526,6 +5578,7 @@ export default function App() {
                       />
                       <AnalyzerBubblesOverlay
                         analyzers={activeSession.analyzers}
+                        themeRevision={themeRevision}
                         onGoToFrame={(analyzerId, frameIndex, frame) =>
                           goToAnalyzerFrame(analyzerId, frameIndex, false, frame)
                         }
@@ -5673,6 +5726,7 @@ export default function App() {
             logStatus={logStatus}
             onChangeExtensions={(updater) => setExtensions((current) => updater(current))}
             onChangePreferences={(updater) => setPreferences(updater)}
+            onOpenPreferences={() => setPreferencesOpen(true)}
             onCreateSession={createSessionFromFooter}
             onAddAnalyzer={handleAddAnalyzer}
             onAddRangeMeasurement={handleAddRangeMeasurement}
@@ -5762,8 +5816,12 @@ export default function App() {
         {preferencesOpen && (
           <PreferencesDialog
             onChange={setPreferences}
-            onClose={() => setPreferencesOpen(false)}
+            onClose={() => { setThemePreview(null); setPreferencesOpen(false); }}
             preferences={preferences}
+            themeLibrary={themeLibrary}
+            channelContext={themeChannelContext}
+            onSaveThemes={saveCustomThemes}
+            onPreviewTheme={setThemePreview}
           />
         )}
 
@@ -5960,7 +6018,7 @@ function AnalogChannelLabelRow({
   return (
     <div
       className="analogChannelLabelRow"
-      style={{ "--analog-channel-color": saleaeLegacyChannelColor(index) } as CSSProperties}
+      style={{ "--analog-channel-color": saleaeLegacyChannelColor(index, "A") } as CSSProperties}
       title={`${settings.label} analog channel`}
     >
       <span className="analogChannelRail">
@@ -8118,6 +8176,7 @@ function RightSidebar({
   onEditAnalyzer,
   onGoToAnalyzerFrame,
   onNotify,
+  onOpenPreferences,
   onRefreshDevices,
   onSaveLogs,
   onSelectDevice,
@@ -8152,6 +8211,7 @@ function RightSidebar({
   onEditAnalyzer: (analyzerId: string) => void;
   onGoToAnalyzerFrame: (analyzerId: string, frameIndex: number, zoom: boolean, frame?: DecodedFrame) => void;
   onNotify: (message: string) => void;
+  onOpenPreferences: () => void;
   onRefreshDevices: () => void;
   onSelectDevice: (deviceId: string) => void;
   onSelectPanel: (panel: SidebarPanel | undefined) => void;
@@ -8167,6 +8227,7 @@ function RightSidebar({
   session: UiSession | null;
 }) {
   const { t: panelsT } = useTranslation("panels");
+  const { t: settingsT } = useTranslation("settings");
   const resizeHandleRef = useRef<HTMLDivElement | null>(null);
   const resizeDragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const resizeListenersCleanupRef = useRef<(() => void) | null>(null);
@@ -8301,6 +8362,17 @@ function RightSidebar({
             );
           })}
         </div>
+        <button
+          aria-label={settingsT("preferences")}
+          className="singleSwitcher selectableSwitcher preferencesSwitcher"
+          data-help-tooltip={settingsT("preferences")}
+          data-help-tooltip-at="left"
+          data-testid="sidebar-preferences"
+          onClick={onOpenPreferences}
+          type="button"
+        >
+          <Settings2 aria-hidden size={20} />
+        </button>
       </nav>
     </aside>
   );
@@ -8380,6 +8452,12 @@ function SidebarPanelContent({
             {panelsT(meta.labelKey)}
           </span>
         </header>
+      )}
+      {(panel === "devices" || panel === "recordingSettings" || panel === "advanced") && (
+        <ThemeSettings
+          themeId={preferences.themeId}
+          onChange={(themeId) => onChangePreferences((current) => ({ ...current, themeId }))}
+        />
       )}
       {panel === "devices" && session && (
         <DeviceSettingsPanel
@@ -8685,7 +8763,6 @@ function DeviceSettingsPanel({
       setPwmBusy(false);
     }
   }
-
   return (
     <div className="deviceSettingsPanel">
       <section className="deviceSettingsHeader">
@@ -8808,7 +8885,7 @@ function DeviceSettingsPanel({
               className={`channelPickerButton ${channel.enabled ? "enabled" : ""}`}
               key={index}
               onClick={() => toggleAnalogChannel(index)}
-              style={{ "--channel-color": saleaeLegacyChannelColor(index) } as CSSProperties}
+              style={{ "--channel-color": saleaeLegacyChannelColor(index, "A") } as CSSProperties}
               title={deviceT(channel.enabled ? "hideAndDisable" : "showAndEnable", { channel: `A${index}` })}
               type="button"
             >

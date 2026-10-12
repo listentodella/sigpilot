@@ -2,7 +2,7 @@ import {
   getSaleaeGraphChannelLayout,
   type SaleaeGraphChannelLayout,
 } from "../lib/saleaeGraphLayout";
-import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
+import { channelColorForPalette, type WaveformThemeColors } from "../lib/themes";
 
 // Packed digital bins are 16 bytes: flags, edge count, first edge offset,
 // last edge offset. That maps 1:1 onto one RGBA32UI texel, so the GPU can read
@@ -24,7 +24,6 @@ const quadsPerBin = 5;
 const verticesPerQuad = 6;
 const verticesPerBin = quadsPerBin * verticesPerQuad;
 
-const separatorAlpha = 0.075;
 // Logic fills a ONE_OR_MORE_TRANSITIONS run at full opacity (see
 // `DigitalCanvas.tsx` in the recovered source). A translucent fill makes a
 // busy region look washed out and its vertical edges muddy.
@@ -86,6 +85,8 @@ interface TileRenderRequest {
   height: number;
   id: number;
   matchChannelColors: boolean;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   packedBins: Uint8Array | null;
   rowHeights: number[];
   rowTopInsets: number[];
@@ -101,6 +102,8 @@ interface ViewportRenderRequest {
   height: number;
   id: number;
   matchChannelColors: boolean;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   rowHeights: number[];
   rowTopInsets: number[];
   viewSamples: number;
@@ -286,6 +289,8 @@ interface ChannelDraw {
 interface LayoutArgs {
   dpr: number;
   matchChannelColors: boolean;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   rowHeights: number[];
   rowTopInsets: number[];
 }
@@ -308,7 +313,7 @@ function channelDraws(args: LayoutArgs, channels: WorkerChannel[]) {
       binCount: channel.binCount,
       binOffset: channel.binOffset,
       color: colorToRgba(
-        args.matchChannelColors ? saleaeLegacyChannelColor(channel.channel) : "#ffffff",
+        args.matchChannelColors ? channelColorForPalette(args.channelColors, channel.channel) : args.themeColors.monochrome,
       ),
       highY: geometry.highY,
       lowY: geometry.lowY,
@@ -329,33 +334,28 @@ function geometryForLayout(layout: SaleaeGraphChannelLayout, dpr: number): Chann
 }
 
 function colorToRgba(color: string): [number, number, number, number] {
-  const hex = color.trim();
-  if (hex.startsWith("#")) {
-    const body = hex.slice(1);
-    if (body.length === 3) {
-      return [
-        Number.parseInt(body[0] + body[0], 16) / 255,
-        Number.parseInt(body[1] + body[1], 16) / 255,
-        Number.parseInt(body[2] + body[2], 16) / 255,
-        1,
-      ];
-    }
-    if (body.length >= 6) {
+  const value = color.trim();
+  if (value.startsWith("#")) {
+    let body = value.slice(1);
+    if (body.length === 3 || body.length === 4) body = [...body].map((digit) => digit + digit).join("");
+    if (body.length === 6 || body.length === 8) {
       return [
         Number.parseInt(body.slice(0, 2), 16) / 255,
         Number.parseInt(body.slice(2, 4), 16) / 255,
         Number.parseInt(body.slice(4, 6), 16) / 255,
-        1,
+        body.length === 8 ? Number.parseInt(body.slice(6, 8), 16) / 255 : 1,
       ];
     }
   }
+  const rgb = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/i);
+  if (rgb) return [Number(rgb[1]) / 255, Number(rgb[2]) / 255, Number(rgb[3]) / 255, rgb[4] === undefined ? 1 : Number(rgb[4])];
   return [1, 1, 1, 1];
 }
 
 function rgbaCss(color: [number, number, number, number], alpha: number) {
   return `rgba(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(
     color[2] * 255,
-  )},${alpha})`;
+  )},${color[3] * alpha})`;
 }
 
 // The binary frame path already hands over packed bins laid out back to back.
@@ -600,6 +600,8 @@ interface DrawArgs {
   channels: WorkerChannel[];
   dpr: number;
   matchChannelColors: boolean;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   packedBins: Uint32Array | null;
   packedBinCount: number;
   rowHeights: number[];
@@ -702,6 +704,8 @@ class WebGlLayerRenderer implements LayerRenderer {
       dpr: request.dpr,
       height: request.height,
       matchChannelColors: request.matchChannelColors,
+      channelColors: request.channelColors,
+      themeColors: request.themeColors,
       packedBins: layer.packedBins,
       packedBinCount: layer.packedBinCount,
       rowHeights: request.rowHeights,
@@ -720,6 +724,8 @@ class WebGlLayerRenderer implements LayerRenderer {
       dpr: request.dpr,
       height: request.height,
       matchChannelColors: request.matchChannelColors,
+      channelColors: request.channelColors,
+      themeColors: request.themeColors,
       packedBins: layer.packedBins,
       packedBinCount: layer.packedBinCount,
       rowHeights: request.rowHeights,
@@ -745,13 +751,15 @@ class WebGlLayerRenderer implements LayerRenderer {
       {
         dpr: args.dpr,
         matchChannelColors: args.matchChannelColors,
+        channelColors: args.channelColors,
+        themeColors: args.themeColors,
         rowHeights: args.rowHeights,
         rowTopInsets: args.rowTopInsets,
       },
       args.channels,
     );
 
-    this.drawSeparators(width, height, separators);
+    this.drawSeparators(width, height, separators, args.themeColors.separator);
 
     const layer = retainedLayer;
     if (!args.packedBins || args.packedBinCount <= 0 || draws.length === 0 || !layer) {
@@ -803,7 +811,7 @@ class WebGlLayerRenderer implements LayerRenderer {
     return this.canvas.transferToImageBitmap();
   }
 
-  private drawSeparators(width: number, height: number, separators: number[]) {
+  private drawSeparators(width: number, height: number, separators: number[], color: string) {
     if (separators.length === 0) return;
     const gl = this.gl;
     const needed = separators.length * 4;
@@ -818,7 +826,8 @@ class WebGlLayerRenderer implements LayerRenderer {
     gl.useProgram(this.solidProgram);
     gl.bindVertexArray(this.solidVao);
     gl.uniform2f(this.solidUniforms.uResolution, width, height);
-    gl.uniform4f(this.solidUniforms.uColor, 1, 1, 1, separatorAlpha);
+    const rgba = colorToRgba(color);
+    gl.uniform4f(this.solidUniforms.uColor, rgba[0], rgba[1], rgba[2], rgba[3]);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.rectBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, rects.subarray(0, needed), gl.DYNAMIC_DRAW);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, verticesPerQuad, separators.length);
@@ -919,6 +928,8 @@ class Canvas2dLayerRenderer implements LayerRenderer {
       dpr: request.dpr,
       height: request.height,
       matchChannelColors: request.matchChannelColors,
+      channelColors: request.channelColors,
+      themeColors: request.themeColors,
       packedBins: layer.packedBins,
       rowHeights: request.rowHeights,
       rowTopInsets: request.rowTopInsets,
@@ -936,6 +947,8 @@ class Canvas2dLayerRenderer implements LayerRenderer {
       dpr: request.dpr,
       height: request.height,
       matchChannelColors: request.matchChannelColors,
+      channelColors: request.channelColors,
+      themeColors: request.themeColors,
       packedBins: layer.packedBins,
       rowHeights: request.rowHeights,
       rowTopInsets: request.rowTopInsets,
@@ -960,13 +973,15 @@ class Canvas2dLayerRenderer implements LayerRenderer {
       {
         dpr: args.dpr,
         matchChannelColors: args.matchChannelColors,
+        channelColors: args.channelColors,
+        themeColors: args.themeColors,
         rowHeights: args.rowHeights,
         rowTopInsets: args.rowTopInsets,
       },
       args.channels,
     );
 
-    context.strokeStyle = `rgba(255,255,255,${separatorAlpha})`;
+    context.strokeStyle = args.themeColors.separator;
     context.lineWidth = 1;
     for (const y of separators) {
       context.beginPath();

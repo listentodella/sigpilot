@@ -1,12 +1,40 @@
 {
   "close": "关闭",
-  "closeDialog": "关闭设置",
-  "dialogTitle": "设置",
+  "closeDialog": "关闭偏好设置",
+  "dialogTitle": "偏好设置",
+  "preferences": "偏好设置",
   "matchChannelColors": "波形同色显示",
-  "matchChannelColorsHint": "让波形颜色与逻辑分析仪的导线颜色一致。",
+  "matchChannelColorsHint": "让波形颜色与对应通道颜色一致。",
   "panToTrigger": "自动平移到触发点",
   "renameTabToSavedCapture": "保存采集时，将标签页重命名为保存的文件名",
   "sectionCaptureEnd": "采集结束时",
   "sectionChannel": "通道设置",
-  "sectionSave": "保存采集"
+  "sectionTheme": "外观",
+  "theme": "配色主题",
+  "sectionSave": "保存采集",
+  "editor": {
+    "copy": "复制为自定义主题", "edit": "编辑主题", "delete": "删除主题", "import": "导入 JSON", "export": "导出 JSON",
+    "name": "主题名称", "livePreview": "实时预览整个工作区", "preview": "主题预览", "ready": "就绪", "measurementPreview": "测量 · 10 μs · 100 kHz",
+    "startHint": "内置主题只读。复制后可编辑全局界面配色、8 色循环色板和逐通道独立颜色。",
+    "draftHint": "正在编辑草稿，尚未保存。取消、Esc 或关闭偏好设置会恢复原配色。",
+    "palette": "8 色循环调色板", "paletteHint": "数字与模拟通道分别按物理编号循环取色。独立设色的通道不会随色板变化。",
+    "overrides": "逐通道独立颜色", "noDevice": "选择设备或打开采集后，可配置其全部通道；无设备时仍可编辑基础色板。",
+    "overrideHint": "按设备型号和通道布局保存，切换主题保留独立颜色。设色会创建覆盖，恢复继承后跟随色板。",
+    "search": "搜索通道 ID 或名称", "filter": "通道筛选", "filters": { "all": "全部通道", "enabled": "仅启用", "overrides": "仅独立设色", "D": "数字通道", "A": "模拟通道" },
+    "clearOverrides": "清除本设备独立颜色", "expand": "将筛选通道展开为独立色", "independent": "独立颜色", "inherited": "继承色板", "disabled": "未启用", "inherit": "恢复继承", "noResults": "没有匹配通道",
+    "reset": "恢复基底主题配色", "cancel": "取消编辑", "apply": "应用并保存", "saved": "主题已保存", "deleted": "主题已删除",
+    "confirmDelete": "删除自定义主题“{{name}}”？设备独立颜色将保留。",
+    "confirmClear": "清除本设备的所有独立颜色，让通道重新继承循环色板？",
+    "confirmExpand": "将当前筛选通道的颜色固定为独立色？之后它们不会随基础色板变化。",
+    "confirmReset": "将界面配色和8色调色板恢复到基底主题？独立通道颜色将保留。",
+    "saveFailed": "保存失败：", "importFailed": "导入失败：", "exportFailed": "导出失败：", "fileTooLarge": "文件需小于 256 KB", "imported": "已导入为新草稿，应用后才保存。文件中的设备覆盖会合并到草稿。",
+    "invalidHex": "请输入 #RRGGBB 六位十六进制颜色", "textContrast": "提示：主文字与面板对比度低于 4.5:1，可能难以阅读。", "waveContrast": "提示：部分通道与波形背景对比度低于 3:1。",
+    "groups": { "surfaces": "背景与表面", "text": "文字", "accents": "边框与强调", "states": "状态颜色", "waveform": "波形与测量" },
+    "colors": {
+      "background": "基础背景", "workspace": "工作区背景", "panel": "面板背景", "raised": "浮层背景", "input": "输入区背景", "hover": "悬停背景",
+      "text": "高亮文字", "textPrimary": "主要文字", "textSecondary": "次要文字", "textMuted": "弱化文字", "textDisabled": "禁用文字",
+      "border": "普通边框", "borderStrong": "强调边框", "accent": "强调色", "selection": "选中颜色", "onAccent": "强调色上的文字", "neutral": "中性控件", "onNeutral": "中性控件上的文字",
+      "success": "成功", "warning": "警告", "error": "错误", "waveBackground": "波形背景", "waveText": "波形文字", "gridPrimary": "主网格", "gridSecondary": "次网格", "separator": "通道分隔线", "measurement": "测量标注", "cursor": "游标", "monochrome": "单色波形"
+    }
+  }
 }

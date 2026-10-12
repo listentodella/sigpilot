@@ -1,3 +1,4 @@
+import { normalizeThemeId } from "./themes.ts";
 import {
   DEFAULT_LOG_LEVEL,
   isLogLevel,
@@ -34,6 +35,8 @@ export interface UiPreferences {
   /** Stop writing logs to disk. Off by default: the run that needs a log is
    *  usually the one that already happened. */
   logPaused: boolean;
+  /** Registered theme id; unknown ids normalize to the built-in default. */
+  themeId: string;
   matchChannelColors: boolean;
   panToTrigger: boolean;
   renameTabToSavedCapture: boolean;
@@ -61,6 +64,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = {
   logLevel: DEFAULT_LOG_LEVEL,
   logModuleLevels: {},
   logPaused: false,
+  themeId: "saleae-dark",
   matchChannelColors: true,
   panToTrigger: true,
   renameTabToSavedCapture: false,
@@ -81,6 +85,7 @@ export function normalizeUiPreferences(value: unknown): UiPreferences {
     logModuleLevels: normalizeLogModuleLevels(candidate.logModuleLevels),
     logPaused:
       typeof candidate.logPaused === "boolean" ? candidate.logPaused : DEFAULT_UI_PREFERENCES.logPaused,
+    themeId: normalizeThemeId(candidate.themeId),
     matchChannelColors:
       typeof candidate.matchChannelColors === "boolean"
         ? candidate.matchChannelColors

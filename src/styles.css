@@ -334,27 +334,27 @@ input[type="range"] {
 }
 
 button:disabled {
-  color: rgba(var(--white-base), 0.28);
+  color: var(--on-background-40);
   cursor: default;
   opacity: 0.72;
 }
 
 .capture-button {
   min-width: 70px;
-  border-color: #057b23;
+  border-color: var(--positive);
   background: var(--green);
-  color: white;
+  color: var(--on-primary);
   font-size: 12px;
   font-weight: 700;
 }
 
 .capture-button:hover:not(:disabled) {
-  border-color: #1aca5c;
+  border-color: var(--positive);
   background: var(--green2);
 }
 
 .stop-tool:not(:disabled) {
-  color: #ffb8d1;
+  color: var(--red);
 }
 
 .compact-field {
@@ -504,7 +504,7 @@ button:disabled {
   right: 5px;
   border: 2px solid var(--border-20);
   border-radius: 50%;
-  background: #ed5074;
+  background: var(--red);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
@@ -731,10 +731,10 @@ button:disabled {
   right: 55px;
   bottom: 35px;
   z-index: 260;
-  border: 1px solid #56575f;
+  border: 1px solid var(--border-20);
   border-radius: 5px;
-  color: #a6a6aa;
-  background: #202124;
+  color: var(--on-background-20);
+  background: var(--background-20);
   box-shadow: 0 4px 4px rgba(0, 0, 0, 0.15);
   display: flex;
   flex-direction: column;
@@ -773,7 +773,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 4px;
-  color: #a6a6aa;
+  color: var(--on-background-20);
   font-size: 13px;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
@@ -783,13 +783,13 @@ button:disabled {
   width: 100%;
   height: 4px;
   overflow: hidden;
-  background: #151516;
+  background: var(--background-10);
 }
 
 .captureMemoryProgressFill {
   height: 100%;
   min-width: 0;
-  background: #f3dc64;
+  background: var(--yellow);
 }
 
 .saleaeAuxButton {
@@ -1208,7 +1208,7 @@ button:disabled {
 }
 
 .channelLabels.reorderingActive .channelDragWaveformGhost {
-  background: #101013;
+  background: var(--wave-background, var(--background-10));
 }
 
 .channelDragWaveformPreview {
@@ -1453,7 +1453,7 @@ button:disabled {
   z-index: 80;
   border: 1px solid var(--border-20);
   border-radius: 3px;
-  background: #2a2a2e;
+  background: var(--background-30);
   box-shadow: var(--box-shadow);
   padding: 4px 0;
   color: var(--on-background-0);
@@ -1551,7 +1551,7 @@ button:disabled {
   overflow: hidden;
   border: 1px solid var(--border-20);
   border-radius: 3px;
-  background: #2a2a2e;
+  background: var(--background-30);
   box-shadow: var(--box-shadow);
   padding: 4px 0;
 }
@@ -1578,7 +1578,7 @@ button:disabled {
 }
 
 .channelVisibilityRows::-webkit-scrollbar-thumb {
-  border: 2px solid #2a2a2e;
+  border: 2px solid var(--background-30);
   border-radius: 6px;
   background: var(--grey100);
 }
@@ -1618,14 +1618,14 @@ button:disabled {
 
 .preferencesDialog {
   width: min(680px, calc(100vw - 32px));
-  max-height: min(599px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-20);
   border-radius: 3px;
   color: var(--on-background-10);
-  background: #212224;
+  background: var(--background-20);
   box-shadow: var(--box-shadow);
 }
 
@@ -1708,7 +1708,7 @@ button:disabled {
   grid-row: 1;
   position: relative;
   overflow: hidden;
-  background: #101013;
+  background: var(--wave-background, var(--background-10));
 }
 
 .channelTrimOverlay {
@@ -1775,7 +1775,7 @@ button:disabled {
   border: 1px solid var(--border-20);
   border-radius: 3px;
   color: var(--on-background-10);
-  background: #212224;
+  background: var(--background-20);
   box-shadow: var(--box-shadow);
   animation: analyzerDialogEnter 180ms ease both;
 }
@@ -2130,7 +2130,7 @@ button:disabled {
   border: 1px solid var(--border-20);
   border-radius: 3px;
   color: var(--on-background-0);
-  background: #343438;
+  background: var(--background-30);
   box-shadow: 0 2px 7px rgba(var(--black-base), 0.4);
   font-size: 10px;
   font-weight: 500;
@@ -2189,7 +2189,7 @@ button:disabled {
   padding: 0 4px;
   border-radius: 2px;
   color: var(--on-background-0);
-  background: rgba(26, 26, 29, 0.8);
+  background: var(--background-30);
   font-family: "Roboto Mono", ui-monospace, monospace;
   font-size: 12px;
   font-weight: 500;
@@ -2238,7 +2238,7 @@ button:disabled {
   padding: 0 4px;
   border-radius: 2px;
   color: var(--on-background-0);
-  background: rgba(26, 26, 29, 0.8);
+  background: var(--background-30);
   font-size: 12px;
   font-weight: 500;
   line-height: 16px;
@@ -2931,7 +2931,7 @@ button:disabled {
   align-items: center;
   gap: 8px;
   border: 0;
-  border-top: 1px solid #4d4d4d;
+  border-top: 1px solid var(--border-20);
   color: var(--on-background-0);
   background: transparent;
   margin-top: 7px;
@@ -3207,7 +3207,7 @@ button:disabled {
   height: 10px;
   flex: 0 0 10px;
   padding-left: var(--channel-label-width);
-  background: #1b1b1c;
+  background: var(--background-20);
 }
 
 .stripChartScrollBar {
@@ -3215,7 +3215,7 @@ button:disabled {
   height: 10px;
   position: relative;
   overflow: hidden;
-  background: #1b1b1c;
+  background: var(--background-20);
   touch-action: none;
   user-select: none;
 }
@@ -3468,26 +3468,13 @@ button:disabled {
 }
 
 .trace-error span {
-  color: #ff90b4;
+  color: var(--red);
 }
 
 .saleaeSidebarRoot {
-  /* Logic 2.4.43 DarkTheme tokens, scoped to the sidebar subtree. */
-  --background-0: #141415;
-  --background-10: #1b1b1c;
-  --background-20: #212224;
-  --background-30: #2c2c2e;
-  --hover-background: #3a3a3e;
-  --border-10: #303136;
-  --border-20: #57575e;
-  --border-focused: #ffffff;
-  --border-hover: #ffffff;
-  --border-highlight: #ffffff;
-  --on-background-0: #ffffff;
-  --on-background-10: #e0e0e0;
-  --on-background-20: #909091;
-  --on-background-30: #5c5c5d;
-  --on-background-40: #4a4a4b;
+  --border-focused: var(--lightBlue);
+  --border-hover: var(--on-background-0);
+  --border-highlight: var(--selected-highlight);
   height: 100%;
   min-width: var(--sidebar-tabs-width);
   display: flex;
@@ -3561,6 +3548,11 @@ button:disabled {
   color: var(--on-background-20);
   background: transparent;
   cursor: pointer;
+}
+
+.preferencesSwitcher {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-20);
 }
 
 .singleSwitcher[data-help-tooltip]::before,
@@ -4147,7 +4139,7 @@ button:disabled {
   flex: 0 0 142px;
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) 34px;
-  border: 1px solid #57575e;
+  border: 1px solid var(--border-20);
   border-radius: 4px;
   overflow: hidden;
   color: var(--on-background-0);
@@ -4166,11 +4158,11 @@ button:disabled {
 }
 
 .memoryBufferValueSetter button:first-child {
-  border-right: 1px solid #57575e;
+  border-right: 1px solid var(--border-20);
 }
 
 .memoryBufferValueSetter button:last-child {
-  border-left: 1px solid #57575e;
+  border-left: 1px solid var(--border-20);
 }
 
 .memoryBufferValueSetter button:hover:not(:disabled) {
@@ -4880,7 +4872,7 @@ button:disabled {
   overflow: auto;
   border: 1px solid var(--border-20);
   border-radius: 4px;
-  background: #2a2a2e;
+  background: var(--background-30);
   box-shadow: var(--box-shadow);
   padding: 4px 0;
 }
@@ -5398,7 +5390,7 @@ button:disabled {
 }
 
 .rangeItemMenu button.purple {
-  color: #b79cff;
+  color: var(--lightBlue);
 }
 
 .rangeItemPopoverHost .rangeMeasurementAddMenu,
@@ -6367,7 +6359,7 @@ body.timing-marker-col-resize * {
   overflow: auto;
   border: 1px solid var(--border-20);
   border-radius: 4px;
-  background: #05080b;
+  background: var(--background-10);
   margin: 0 12px 12px;
   padding: 8px;
 }
@@ -6817,7 +6809,7 @@ body.timing-marker-col-resize * {
   width: 0;
   height: 0;
   border-right: 5px solid transparent;
-  border-bottom: 10px solid #a4ec9e;
+  border-bottom: 10px solid var(--positive);
   border-left: 5px solid transparent;
 }
 
@@ -6829,11 +6821,11 @@ body.timing-marker-col-resize * {
 
 .extensionCircle {
   border-radius: 999px;
-  background: #ecc180;
+  background: var(--yellow);
 }
 
 .extensionSquare {
-  background: #f88585;
+  background: var(--red);
 }
 
 .createExtensionCard > strong {
@@ -7054,7 +7046,7 @@ body.timing-marker-col-resize * {
 }
 
 .extensionDangerButton {
-  background: #a63b3b;
+  background: var(--red);
 }
 
 .extensionPrimaryButton:disabled,
@@ -7743,10 +7735,10 @@ body.timing-marker-col-resize * {
   overflow-y: auto;
   border: 1px solid var(--border-20);
   border-radius: 4px;
-  background: #2a2a2e;
+  background: var(--background-30);
   box-shadow: var(--box-shadow);
   padding: 4px 0;
-  scrollbar-color: var(--grey100) #2a2a2e;
+  scrollbar-color: var(--grey100) var(--background-30);
   scrollbar-width: thin;
 }
 
@@ -8100,3 +8092,80 @@ body.timing-marker-col-resize * {
   border-color: var(--red, #b4544a);
   color: var(--red, #d97b6f);
 }
+
+/* The same global appearance control is available in the sidebar and dialog. */
+.themeSettings {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-20);
+}
+
+.themeSettings h3 {
+  margin: 0 0 12px;
+  color: var(--on-background-0);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.themeSettingsField {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--on-background-10);
+}
+
+.themeSettingsField select {
+  width: 100%;
+  min-height: 28px;
+}
+
+.preferencesContent > .themeSettings {
+  padding: 0 0 20px;
+  margin-bottom: 24px;
+}
+
+.customThemeEditor { margin: 18px 0 28px; font-size: 12px; }
+.themeEditorActions, .themeEditorFilters, .themeEditorFooter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.customThemeEditor button { padding: 7px 10px; border: 1px solid var(--border-20); border-radius: 4px; color: var(--on-background-10); background: var(--background-30); cursor: pointer; }
+.customThemeEditor button:hover:not(:disabled) { background: var(--hover-background); }
+.customThemeEditor button:disabled { opacity: .45; cursor: default; }
+.customThemeEditor input[type="text"], .themeEditorIdentity input, .themeEditorFilters input { padding: 6px 8px; border: 1px solid var(--border-20); border-radius: 4px; min-width: 0; color: var(--on-background-10); background: var(--background-40); }
+.customThemeEditor input:focus-visible, .customThemeEditor button:focus-visible, .customThemeEditor summary:focus-visible { outline: 2px solid var(--lightBlue); outline-offset: 2px; }
+.themeEditorIdentity { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; align-items: center; }
+.themeEditorIdentity > label:first-child { display: grid; gap: 6px; flex: 1 1 220px; }
+.themeEditorHint { color: var(--on-background-20); line-height: 1.6; margin: 8px 0; }
+.themeEditorError { color: var(--red); line-height: 1.6; }
+.themeEditorWarning { padding: 8px 12px; margin: 12px 0; border: 1px solid var(--yellow); border-radius: 4px; color: var(--yellow); }
+.themeEditorWarning p { margin: 4px 0; }
+.customThemeEditor details { border-top: 1px solid var(--border-20); padding: 12px 0; }
+.customThemeEditor summary { cursor: pointer; font-size: 13px; font-weight: 500; }
+.themeColorGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; padding-top: 14px; }
+.themeColorField { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.themeColorField > div { display: flex; align-items: center; gap: 6px; }
+.themeColorField input[type="color"] { width: 36px; height: 30px; padding: 2px; border: 1px solid var(--border-20); border-radius: 4px; background: transparent; cursor: pointer; }
+.themeColorField input[type="text"] { width: 90px; font-family: "Roboto Mono", monospace; }
+.themeColorField input[aria-invalid="true"] { border-color: var(--red); }
+.themeEditorFilters { margin: 12px 0; }
+.themeEditorFilters input { flex: 1 1 180px; }
+.themeChannelList { max-height: 300px; overflow-y: auto; margin-top: 12px; }
+.themeChannelRow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border-10); }
+.themeEditorFooter { position: sticky; bottom: -42px; padding: 14px 0; background: var(--background-20); border-top: 1px solid var(--border-20); margin-top: 12px; z-index: 1; }
+.themeEditorFooter .themeEditorApply { background: var(--lightBlue); color: var(--on-primary); margin-left: auto; }
+.themePreview { border: 1px solid; border-radius: 5px; overflow: hidden; margin: 14px 0; padding-bottom: 10px; }
+.themePreview > div:last-child { padding-left: 12px; }
+.themePreviewToolbar { display: flex; justify-content: space-between; padding: 10px 12px; }
+.themePreviewSignal { display: flex; gap: 12px; align-items: center; padding: 6px 12px; border-bottom: 1px solid; }
+.themePreviewSignal svg { width: 100%; height: 30px; }
+@media (max-width: 520px) {
+  .themeColorGrid { grid-template-columns: 1fr; }
+  .themeChannelRow { grid-template-columns: 1fr auto; }
+  .themeChannelRow > .themeEditorHint { display: none; }
+}
+
+/* Graph overlays share the same semantic colors as the canvas renderer. */
+.xCursorLine { border-left-color: var(--wave-cursor, var(--selected-highlight)); }
+.xCursorLine span { background: var(--wave-cursor, var(--selected-highlight)); }
+.analogMeasurementVertical { border-right-color: var(--wave-measurement, var(--on-background-20)); }
+.analogMeasurementArrow { border-bottom-color: var(--wave-measurement, var(--on-background-20)); }
+.analogMeasurementArrowLeft { border-right-color: var(--wave-measurement, var(--on-background-20)); }
+.analogMeasurementArrowRight { border-left-color: var(--wave-measurement, var(--on-background-20)); }
+.analogHoverVoltage, .analogMeasurementLabel { color: var(--wave-text, var(--on-background-0)); background: var(--wave-background, var(--background-30)); }

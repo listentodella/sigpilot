@@ -2,13 +2,11 @@ import { MouseEvent as ReactMouseEvent, PointerEvent, useEffect, useRef, useStat
 import { frontendLog, measureDigitalPoint, type WaveformTile } from "../lib/api";
 import { normalizeCaptureViewport, normalizeLiveCaptureViewport } from "../lib/captureViewport";
 import { findSaleaeGraphChannelIndexAtY, getSaleaeGraphChannelLayout } from "../lib/saleaeGraphLayout";
-import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
+import { activeUiTheme, activeThemeChannelColor, activeWaveformThemeColors, type WaveformThemeColors } from "../lib/themes";
 import { isPhysicalWheelZoom, wheelZoomFactor, zoomAnimationDurationMs } from "../lib/wheelZoom";
 import {
   getHorizontalGraphTicks,
   minimumHorizontalTickSpacingPx,
-  SALEAE_DARK_GRIDLINE_PRIMARY,
-  SALEAE_DARK_GRIDLINE_SECONDARY,
 } from "../lib/saleaeTimingDisplay";
 import {
   rasterMagnification,
@@ -26,6 +24,8 @@ import {
   requestViewportRaster,
   requestWaveLayerRender,
   sameNumberArray,
+  sameChannelColors,
+  sameWaveformThemeColors,
   startViewportWorkerRequest,
   startWaveLayerWorkerRequest,
   type WaveLayerWorkerRef,
@@ -40,6 +40,7 @@ interface WaveformCanvasProps {
   tile: WaveformTile | null;
   onWidthChange: (width: number) => void;
   matchChannelColors?: boolean;
+  themeRevision?: number;
   maximumViewportSamples?: number;
   sampleRateHz: number;
   timeOriginSample?: number;
@@ -79,6 +80,8 @@ interface WaveLayerCache {
   canvas: HTMLCanvasElement | ImageBitmap;
   height: number;
   matchChannelColors: boolean;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   rowHeights: number[];
   rowTopInsets: number[];
   tile: WaveformTile;
@@ -97,6 +100,8 @@ interface ViewportLayerCache {
   canvas: ImageBitmap;
   height: number;
   matchChannelColors: boolean;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   rowHeights: number[];
   rowTopInsets: number[];
   samples: number;
@@ -159,6 +164,7 @@ export function WaveformCanvas({
   tile: tileProp,
   onWidthChange,
   matchChannelColors = true,
+  themeRevision = 0,
   maximumViewportSamples,
   sampleRateHz,
   timeOriginSample = 0,
@@ -323,6 +329,8 @@ export function WaveformCanvas({
           canvas: response.bitmap,
           height: request.height,
           matchChannelColors: request.matchChannelColors,
+          channelColors: request.channelColors,
+          themeColors: request.themeColors,
           rowHeights: request.rowHeights,
           rowTopInsets: request.rowTopInsets,
           samples: request.viewSamples,
@@ -347,6 +355,8 @@ export function WaveformCanvas({
         canvas: response.bitmap,
         height: request.height,
         matchChannelColors: request.matchChannelColors,
+        channelColors: request.channelColors,
+        themeColors: request.themeColors,
         rowHeights: request.rowHeights,
         rowTopInsets: request.rowTopInsets,
         tile: request.tile,
@@ -389,6 +399,10 @@ export function WaveformCanvas({
       workerTileRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    scheduleDraw();
+  }, [themeRevision]);
 
   useEffect(() => {
     const tileChanged = tileRef.current !== tile;
@@ -495,14 +509,19 @@ export function WaveformCanvas({
     return () => {
       if (viewportFrameRef.current !== null) {
         cancelAnimationFrame(viewportFrameRef.current);
+        viewportFrameRef.current = null;
       }
       if (drawFrameRef.current !== null) {
         cancelAnimationFrame(drawFrameRef.current);
+        // StrictMode replays effects with the same refs. Leaving a cancelled
+        // frame ID here prevents every later scheduleDraw from running.
+        drawFrameRef.current = null;
       }
       cancelViewportAnimation();
       cancelLiveViewportAnimation();
       if (wheelInteractionTimerRef.current !== null) {
         window.clearTimeout(wheelInteractionTimerRef.current);
+        wheelInteractionTimerRef.current = null;
       }
       cancelHoverMeasurementRequest();
       setViewportInteractionActive(false);
@@ -1312,7 +1331,7 @@ function drawEdgeJumpMeasurement(
   const startY = startLayout.top + startLayout.height / 2;
   const endY = measurement.snapped ? endLayout.top + endLayout.height / 2 : measurement.pointerY * dpr;
   const deltaSamples = Math.abs(Math.round(measurement.endSample - measurement.startSample));
-  const color = "rgb(255, 166, 64)";
+  const color = activeWaveformThemeColors().cursor;
 
   ctx.save();
   ctx.strokeStyle = color;
@@ -1356,12 +1375,12 @@ function drawEdgeJumpPopup(
   const rawX = preferLeft ? pointerX - width - 14 * dpr : pointerX + 14 * dpr;
   const x = clamp(rawX, 4 * dpr, Math.max(4 * dpr, canvas.width - width - 4 * dpr));
   const y = clamp(pointerY - height - 10 * dpr, 4 * dpr, Math.max(4 * dpr, canvas.height - height - 4 * dpr));
-  ctx.fillStyle = "rgba(30, 30, 34, 0.96)";
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.24)";
+  ctx.fillStyle = activeWaveformThemeColors().background;
+  ctx.strokeStyle = activeWaveformThemeColors().separator;
   roundRect(ctx, x, y, width, height, 3 * dpr);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+  ctx.fillStyle = activeWaveformThemeColors().text;
   ctx.fillText(label, x + paddingX, y + height * 0.68);
 }
 
@@ -1505,7 +1524,7 @@ function draw(
   const width = canvas.width;
   const height = canvas.height;
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#101013";
+  ctx.fillStyle = activeWaveformThemeColors().background;
   ctx.fillRect(0, 0, width, height);
 
   if (showGridLines) {
@@ -1513,7 +1532,7 @@ function draw(
   }
 
   if (!tile || tile.channels.length === 0) {
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.fillStyle = activeWaveformThemeColors().text;
     ctx.font = `${12 * devicePixelRatio}px Roboto, Helvetica, Arial, sans-serif`;
     ctx.fillText(tile ? "No channels visible" : "No capture loaded", 24 * devicePixelRatio, 24 * devicePixelRatio);
     return;
@@ -1551,7 +1570,7 @@ function draw(
 }
 
 function sameLayerLayout(
-  cache: { height: number; matchChannelColors: boolean; rowHeights: number[]; rowTopInsets: number[] },
+  cache: { height: number; matchChannelColors: boolean; channelColors: readonly string[]; themeColors: WaveformThemeColors; rowHeights: number[]; rowTopInsets: number[] },
   canvas: HTMLCanvasElement,
   rowHeights: number[],
   rowTopInsets: number[],
@@ -1560,6 +1579,8 @@ function sameLayerLayout(
   return (
     cache.height === canvas.height &&
     cache.matchChannelColors === matchChannelColors &&
+    sameChannelColors(cache.channelColors, activeUiTheme().channelColors) &&
+    sameWaveformThemeColors(cache.themeColors, activeWaveformThemeColors()) &&
     sameNumberArray(cache.rowHeights, rowHeights) &&
     sameNumberArray(cache.rowTopInsets, rowTopInsets)
   );
@@ -1779,6 +1800,8 @@ function drawCachedWaveLayer(
     cache.tile === tile &&
     cache.width === layerWidth &&
     cache.height === canvas.height &&
+    sameChannelColors(cache.channelColors, activeUiTheme().channelColors) &&
+    sameWaveformThemeColors(cache.themeColors, activeWaveformThemeColors()) &&
     sameNumberArray(cache.rowHeights, rowHeights) &&
     sameNumberArray(cache.rowTopInsets, rowTopInsets) &&
     cache.matchChannelColors === matchChannelColors,
@@ -1787,6 +1810,8 @@ function drawCachedWaveLayer(
     const canReusePreviousCache = Boolean(
       cache &&
       cache.height === canvas.height &&
+      sameChannelColors(cache.channelColors, activeUiTheme().channelColors) &&
+      sameWaveformThemeColors(cache.themeColors, activeWaveformThemeColors()) &&
       sameNumberArray(cache.rowHeights, rowHeights) &&
       sameNumberArray(cache.rowTopInsets, rowTopInsets) &&
       cache.matchChannelColors === matchChannelColors,
@@ -1803,6 +1828,15 @@ function drawCachedWaveLayer(
         dpr,
       );
       if (!canReusePreviousCache) {
+        // Theme/layout changes invalidate the old bitmap. Exact segments alone
+        // cannot keep aggregated channels visible while the worker recolors it.
+        // Paint the bins at viewport scale until a matching raster arrives.
+        recordWaveformDraw({
+          path: "view-space-render",
+          stretch: 1,
+          viewportSamplesPerPixel: viewportSamples / canvas.width,
+        });
+        renderWaveLayer(canvas, tile, rowHeights, rowTopInsets, matchChannelColors, viewportStart, viewportSamples);
         drawExactWaveSegments(
           ctx,
           canvas,
@@ -1824,6 +1858,8 @@ function drawCachedWaveLayer(
         canvas: layer,
         height: canvas.height,
         matchChannelColors,
+        channelColors: activeUiTheme().channelColors,
+        themeColors: activeWaveformThemeColors(),
         rowHeights,
         rowTopInsets,
         tile,
@@ -1961,7 +1997,7 @@ function drawExactWaveSegments(
     const transitionHeight = Math.max(dpr, Math.round(layout.height - 2 * gutter));
     const lowY = highY + transitionHeight - dpr;
     drawDigitalSegments(ctx, {
-      color: matchChannelColors ? saleaeLegacyChannelColor(channel.channel) : "#ffffff",
+      color: matchChannelColors ? activeThemeChannelColor(channel.channel, "D") : activeWaveformThemeColors().monochrome,
       highY,
       lowY,
       left,
@@ -2000,13 +2036,13 @@ function renderWaveLayer(
     const highY = layout.top + gutter + 0.5 * dpr;
     const transitionHeight = Math.max(dpr, Math.round(laneHeight - 2 * gutter));
     const lowY = highY + transitionHeight - dpr;
-    ctx.strokeStyle = "rgba(255,255,255,0.075)";
+    ctx.strokeStyle = activeWaveformThemeColors().separator;
     ctx.beginPath();
     ctx.moveTo(0, Math.floor(layout.outerTop) + 0.5);
     ctx.lineTo(width, Math.floor(layout.outerTop) + 0.5);
     ctx.stroke();
 
-    const channelColor = matchChannelColors ? saleaeLegacyChannelColor(channel.channel) : "#ffffff";
+    const channelColor = matchChannelColors ? activeThemeChannelColor(channel.channel, "D") : activeWaveformThemeColors().monochrome;
     if (channel.segments.length === 0) {
       drawDigitalChannel(ctx, {
         color: channelColor,
@@ -2339,7 +2375,7 @@ function drawDistanceMeasurement(ctx: CanvasRenderingContext2D, args: DistanceMe
   const clippedEnd = clamp(endX, graphLeft, graphRight);
   if (clippedEnd - clippedStart <= 5 * dpr) return;
 
-  const color = "rgba(255, 255, 255, 0.46)";
+  const color = activeWaveformThemeColors().measurement;
   ctx.save();
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
@@ -2437,11 +2473,11 @@ function drawMeasurementLabel(ctx: CanvasRenderingContext2D, args: MeasurementLa
   const boxX = clamp(preferredX, minX, maxX);
   const boxY = placement === "top" ? arrowY + 1 * dpr : arrowY - labelHeight - 1 * dpr;
 
-  ctx.fillStyle = "rgba(43, 43, 48, 0.84)";
+  ctx.fillStyle = activeWaveformThemeColors().background;
   roundRect(ctx, boxX, boxY, labelWidth, labelHeight, 2 * dpr);
   ctx.fill();
 
-  ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+  ctx.fillStyle = activeWaveformThemeColors().text;
   ctx.fillText(label, boxX + paddingX, boxY + labelHeight * 0.72);
 }
 
@@ -2520,14 +2556,14 @@ function drawDigitalExtraData(ctx: CanvasRenderingContext2D, args: DigitalExtraD
       ? rowBottom - boxHeight - 5 * dpr
       : rowTop + (rowBottom - rowTop - boxHeight) / 2;
 
-  ctx.fillStyle = "rgba(16, 16, 19, 0.9)";
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+  ctx.fillStyle = activeWaveformThemeColors().background;
+  ctx.strokeStyle = activeWaveformThemeColors().separator;
   ctx.lineWidth = Math.max(1, dpr);
   roundRect(ctx, boxX, boxY, boxWidth, boxHeight, 4 * dpr);
   ctx.fill();
   ctx.stroke();
 
-  ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+  ctx.fillStyle = activeWaveformThemeColors().text;
   lines.forEach((line, index) =>
     drawDigitalExtraDataLine(ctx, line, boxX + padding, boxY + padding + (index + 0.78) * lineHeight, dpr),
   );
@@ -2956,7 +2992,8 @@ function drawVerticalGridLine(
 ) {
   if (x < 0 || x > ctx.canvas.width) return;
   ctx.save();
-  ctx.strokeStyle = level === "major" ? SALEAE_DARK_GRIDLINE_PRIMARY : SALEAE_DARK_GRIDLINE_SECONDARY;
+  const colors = activeWaveformThemeColors();
+  ctx.strokeStyle = level === "major" ? colors.gridPrimary : colors.gridSecondary;
   ctx.lineWidth = Math.max(1, dpr);
   ctx.setLineDash([3 * dpr, 3 * dpr]);
   ctx.beginPath();

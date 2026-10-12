@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { WaveformTile } from "../src/lib/api.ts";
+import { activeUiTheme, activeWaveformThemeColors, getUiTheme, setActiveUiTheme, type WaveformThemeColors } from "../src/lib/themes.ts";
 import {
   requestViewportRaster,
   requestWaveLayerRender,
+  requestViewportRender,
+  sameChannelColors,
+  sameWaveformThemeColors,
   startWaveLayerWorkerRequest,
   type WaveLayerWorkerState,
 } from "../src/lib/waveLayerWorker.ts";
@@ -22,6 +26,8 @@ interface SentMessage {
   dpr: number;
   height: number;
   width: number;
+  channelColors: readonly string[];
+  themeColors: WaveformThemeColors;
   tileStart?: number;
   tileSamples?: number;
   viewStart?: number;
@@ -248,6 +254,8 @@ test("a display scale change is a different request, not a duplicate", () => {
     height: 400,
     id: harness.state.nextId++,
     matchChannelColors: true,
+    channelColors: activeUiTheme().channelColors,
+    themeColors: activeWaveformThemeColors(),
     rowHeights: rows,
     rowTopInsets: insets,
     tile,
@@ -315,4 +323,90 @@ test("a structurally identical tile is still a different tile", () => {
   // fresh object means fresh bins that the worker has not been given.
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.sent[0].type, "render");
+});
+
+test("tile and viewport messages carry the main thread theme palette", () => {
+  const previous = activeUiTheme();
+  try {
+    const theme = getUiTheme("midnight-aurora");
+    setActiveUiTheme(theme);
+    const harness = makeHarness();
+    const tile = makeTile(0, 100_000, 1);
+    requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, true, 1);
+    harness.workerTileRef.current = tile;
+    requestViewportRaster(tile, 50_000, 1_000, target, rows, insets, true,
+      harness.workerRef, harness.workerTileRef, 1_200, 1);
+    assert.deepEqual(harness.sent.map((message) => message.type), ["render", "transform"]);
+    for (const message of harness.sent) {
+      assert.deepEqual(message.channelColors, activeUiTheme().channelColors);
+      assert.deepEqual(message.themeColors, activeWaveformThemeColors());
+    }
+  } finally {
+    setActiveUiTheme(previous);
+  }
+});
+
+test("a palette change queues a fresh tile and viewport even without a viewport or tile change", () => {
+  const harness = makeHarness();
+  const tile = makeTile(0, 100_000, 1);
+  const first = getUiTheme("saleae-dark").channelColors;
+  const next = getUiTheme("lab-light").channelColors;
+  requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, true, 1, first);
+  requestViewportRender(harness.state, tile, 1_200, 400, rows, insets, true, 0, 1_000, 1, first);
+  requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, true, 1, [...first]);
+  assert.equal(harness.state.queued, null, "equivalent palettes are deduplicated");
+  requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, true, 1, next);
+  requestViewportRender(harness.state, tile, 1_200, 400, rows, insets, true, 0, 1_000, 1, next);
+  assert.deepEqual(harness.state.queued?.channelColors, next);
+  assert.deepEqual(harness.state.viewportQueued?.channelColors, next);
+  assert.equal(sameChannelColors(first, next), false, "old-color raster cannot be reused");
+});
+
+test("rapid palette changes retain only the newest queued palette", () => {
+  const harness = makeHarness();
+  const tile = makeTile(0, 100_000, 1);
+  for (const theme of ["saleae-dark", "midnight-aurora", "terminal-green"]) {
+    const palette = getUiTheme(theme).channelColors;
+    requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, true, 1, palette);
+    requestViewportRender(harness.state, tile, 1_200, 400, rows, insets, true, 0, 1_000, 1, palette);
+  }
+  assert.equal(harness.sent.length, 2);
+  assert.deepEqual(harness.state.queued?.channelColors, getUiTheme("terminal-green").channelColors);
+  assert.deepEqual(harness.state.viewportQueued?.channelColors, getUiTheme("terminal-green").channelColors);
+});
+
+test("switching back to the in-flight palette cancels the obsolete queued palette", () => {
+  const harness = makeHarness();
+  const tile = makeTile(0, 100_000, 1);
+  for (const theme of ["saleae-dark", "lab-light", "saleae-dark"]) {
+    const palette = getUiTheme(theme).channelColors;
+    requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, true, 1, palette);
+    requestViewportRender(harness.state, tile, 1_200, 400, rows, insets, true, 0, 1_000, 1, palette);
+  }
+  assert.equal(harness.state.queued, null);
+  assert.equal(harness.state.viewportQueued, null);
+  assert.equal(harness.sent.length, 2);
+});
+
+test("semantic render colors invalidate tile and viewport requests with an unchanged palette", () => {
+  const harness = makeHarness();
+  const tile = makeTile(0, 100_000, 1);
+  const palette = activeUiTheme().channelColors;
+  const first = activeWaveformThemeColors();
+  for (const key of ["separator", "monochrome", "text"] as const) {
+    const next = { ...first, [key]: "#123456" };
+    harness.state.active = null;
+    harness.state.viewportActive = null;
+    requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, false, 1, palette, first);
+    requestViewportRender(harness.state, tile, 1_200, 400, rows, insets, false, 0, 1_000, 1, palette, first);
+    requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, false, 1, palette, { ...first });
+    requestViewportRender(harness.state, tile, 1_200, 400, rows, insets, false, 0, 1_000, 1, palette, { ...first });
+    assert.equal(harness.state.queued, null);
+    assert.equal(harness.state.viewportQueued, null);
+    requestWaveLayerRender(harness.state, tile, 1_200, 400, rows, insets, false, 1, palette, next);
+    requestViewportRender(harness.state, tile, 1_200, 400, rows, insets, false, 0, 1_000, 1, palette, next);
+    assert.deepEqual(harness.state.queued?.themeColors, next);
+    assert.deepEqual(harness.state.viewportQueued?.themeColors, next);
+    assert.equal(sameWaveformThemeColors(first, next), false, `${key} invalidates cached render colors`);
+  }
 });

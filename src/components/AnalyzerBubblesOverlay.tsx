@@ -13,6 +13,7 @@ import {
 import { useSessionViewport } from "../lib/useSessionViewport";
 import { useSessionFrameState } from "../lib/useFrameState";
 import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
+import { activeUiTheme, activeWaveformThemeColors } from "../lib/themes";
 import { SALEAE_ROW_V2_SPACING_PX } from "../lib/saleaeChannelLayout";
 import {
   mergeSortedSamples,
@@ -91,6 +92,7 @@ interface AnalyzerBubblesOverlayProps {
   rowTopInsets: number[];
   sessionId?: string;
   tile: WaveformTile | null;
+  themeRevision?: number;
   viewportSamples: number;
   viewportStart: number;
   visibleChannelIndexes: number[];
@@ -111,6 +113,7 @@ export function AnalyzerBubblesOverlay({
   rowTopInsets,
   sessionId,
   tile,
+  themeRevision = 0,
   viewportSamples: viewportSamplesProp,
   viewportStart: viewportStartProp,
   visibleChannelIndexes,
@@ -421,6 +424,7 @@ export function AnalyzerBubblesOverlay({
     viewportStart,
     visibleChannelIndexes,
     visibleChannelRows,
+    themeRevision,
   ]);
 
   const renderedContent = useMemo(
@@ -684,11 +688,11 @@ function drawProtocolMarker(
   context.shadowBlur = 1;
   context.fillStyle =
     kind === "start"
-      ? "#00A86B"
+      ? activeUiTheme().cssVars["--positive"]
       : kind === "stop"
-        ? "#FF8A00"
+        ? activeUiTheme().cssVars["--yellow"]
         : kind.startsWith("error_")
-          ? "#E34850"
+          ? activeUiTheme().cssVars["--red"]
           : channelColor;
   context.strokeStyle = context.fillStyle;
   context.lineWidth = 1.25;
@@ -712,7 +716,7 @@ function drawProtocolMarker(
     context.fill();
   } else if (kind === "one" || kind === "zero") {
     drawRoundedRect(context, centerX - 6.5, centerY - 6.5, 13, 13, 2);
-    context.fillStyle = "#131316";
+    context.fillStyle = activeWaveformThemeColors().background;
     context.fill();
     context.stroke();
     context.fillStyle = channelColor;

@@ -11,7 +11,7 @@ import {
 } from "../lib/analogChannels";
 import type { SaleaeGraphChannelLayout } from "../lib/saleaeGraphLayout";
 import { useSessionViewport } from "../lib/useSessionViewport";
-import { saleaeLegacyChannelColor } from "../lib/saleaeChannelColors";
+import { activeThemeChannelColor, activeWaveformThemeColors } from "../lib/themes";
 import { wheelZoomFactor } from "../lib/wheelZoom";
 import { SaleaeIcon, type SaleaeIconName } from "./SaleaeIcon";
 
@@ -97,6 +97,7 @@ interface AnalogWaveformOverlayProps {
   isLive: boolean;
   layouts: SaleaeGraphChannelLayout[];
   matchChannelColors: boolean;
+  themeRevision?: number;
   onChange: (index: number, patch: Partial<UiAnalogChannelSettings>) => void;
   onViewportChange: (start: number, samples: number) => void;
   onViewportInteractionChange?: (active: boolean) => void;
@@ -121,6 +122,7 @@ export function AnalogWaveformOverlay({
   isLive,
   layouts,
   matchChannelColors,
+  themeRevision = 0,
   onChange,
   onViewportChange,
   onViewportInteractionChange,
@@ -199,7 +201,7 @@ export function AnalogWaveformOverlay({
         if (!layout) return;
         drawAnalogRow(context, {
           analogSampleRateHz,
-          color: matchChannelColors ? saleaeLegacyChannelColor(index) : "#d4d4d4",
+          color: matchChannelColors ? activeThemeChannelColor(index, "A") : activeWaveformThemeColors().monochrome,
           digitalSampleRateHz,
           hasData: hasCapture && hasDemoData,
           height: layout.height,
@@ -227,6 +229,7 @@ export function AnalogWaveformOverlay({
     hasDemoData,
     layouts,
     matchChannelColors,
+    themeRevision,
     totalSamples,
     viewportSamples,
     viewportStart,
@@ -570,7 +573,7 @@ export function AnalogWaveformOverlay({
             key={index}
             style={
               {
-                "--analog-channel-color": saleaeLegacyChannelColor(index),
+                "--analog-channel-color": activeThemeChannelColor(index, "A"),
                 height: layout.height,
                 top: layout.top,
               } as CSSProperties
@@ -955,12 +958,13 @@ function drawAnalogRow(
   } = options;
   const graphTop = top + ANALOG_GRAPH_INSET_PX;
   const graphHeight = Math.max(30, height - ANALOG_GRAPH_INSET_PX * 2);
+  const themeColors = activeWaveformThemeColors();
 
   context.save();
   context.beginPath();
   context.rect(0, top, width, height);
   context.clip();
-  context.fillStyle = "#101013";
+  context.fillStyle = themeColors.background;
   context.fillRect(0, top, width, height);
 
   context.font = '10px "Roboto Mono", ui-monospace, monospace';
@@ -970,19 +974,19 @@ function drawAnalogRow(
     const ratio = tick / 4;
     const y = graphTop + ratio * graphHeight;
     const value = settings.viewOffsetVolts + settings.viewRangeVolts * (0.5 - ratio);
-    context.strokeStyle = tick === 2 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.10)";
+    context.strokeStyle = tick === 2 ? themeColors.gridPrimary : themeColors.gridSecondary;
     context.lineWidth = 1;
     context.beginPath();
     context.moveTo(ANALOG_GRAPH_LEFT_GUTTER_PX, y + 0.5);
     context.lineTo(width, y + 0.5);
     context.stroke();
-    context.fillStyle = "rgba(255,255,255,0.78)";
+    context.fillStyle = themeColors.text;
     context.fillText(formatVoltage(value, settings.unit), 6, y);
   }
   context.setLineDash([]);
 
   if (!hasData || totalSamples <= 0 || viewportSamples <= 0) {
-    context.fillStyle = "rgba(255,255,255,0.38)";
+    context.fillStyle = themeColors.text;
     context.font = '11px Roboto, "Helvetica Neue", sans-serif';
     context.textAlign = "center";
     context.fillText(
