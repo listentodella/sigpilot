@@ -2,6 +2,7 @@
 #define SIMPLEPARALLEL_ANALYZER_H
 
 #include <Analyzer.h>
+#include <stdint.h>
 #include "SimpleParallelAnalyzerResults.h"
 #include "SimpleParallelSimulationDataGenerator.h"
 
