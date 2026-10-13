@@ -14,6 +14,40 @@ SigPilot 的主题采用“主题定义 + CSS 变量 + 通道色板”的管理�
 
 右侧栏底部的“偏好设置”按钮是全局入口，无需连接设备或打开采集。也保留设备设置、采集设置和高级设置面板顶部的“外观 → 配色主题”快捷入口。两个入口使用相同组件和全局偏好，选择会保存到 `sigpilot.preferences.v1`。
 
+## 主题预览
+
+以下五张截图来自实际运行的 SigPilot 前端，使用同一段浏览器演示采集、相同缩放与串口解码视图。它们是完整原图，没有总览图中的透明度、阴影或层叠效果；演示数据不代表硬件或原生 sidecar 实测。[返回项目介绍](../README.md#主题画廊)。
+
+### Saleae Dark
+
+默认深色工作台，搭配经典通道色板。
+
+![Saleae Dark 完整工作台](images/workbench-dark.png)
+
+### Midnight Aurora
+
+深蓝背景，以青色与紫色强调选中状态和信号。
+
+![Midnight Aurora 完整工作台](images/workbench-midnight-aurora.png)
+
+### Solarized Night
+
+蓝绿色底色与暖色信号组合，整体色调更柔和。
+
+![Solarized Night 完整工作台](images/workbench-solarized-night.png)
+
+### Terminal Green
+
+黑绿色仪表风格，保留多通道的独立配色。
+
+![Terminal Green 完整工作台](images/workbench-terminal-green.png)
+
+### Lab Light
+
+明亮的浅色工作台，适合光线充足的桌面环境。
+
+![Lab Light 完整工作台](images/workbench-light.png)
+
 ## 创建主题
 
 主题定义位于 `src/lib/themes.ts`，接口如下：
