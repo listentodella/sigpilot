@@ -16,7 +16,8 @@ const SCHEMA = 1;
 const SOURCE_PATHS = ["native/sigrok-analyzer-sidecar", "native/saleae-analyzer-sidecar",
   "vendor/pxview-sigrokdecode", "vendor/saleae-standalone", "vendor/nlohmann-json",
   "scripts/prepare-tauri-resources.sh", "scripts/prepare-tauri-resources.mjs", "scripts/native-runtime.mjs",
-  "scripts/smoke-native-runtime.mjs", ".github/workflows/native-runtime.yml", "testdata/decoders"];
+  "scripts/smoke-native-runtime.mjs", "scripts/normalize-python-runtime.mjs", "scripts/install-macos-native-deps.sh",
+  ".github/workflows/native-runtime.yml", "testdata/decoders"];
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 const TAR = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:/Windows", "System32/tar.exe") : "tar";

@@ -138,6 +138,9 @@ copy_python_runtime() {
   copy_directory "$python_source" "$python_target"
   rm -rf "$python_target/site-packages" "$python_target"/config-*
   find "$python_target" -type d -name __pycache__ -prune -exec rm -rf {} +
+  # Debian stdlib links (such as sitecustomize.py -> /etc/python*/...) must
+  # become self-contained before the runtime manifest rejects external links.
+  node "$ROOT_DIR/scripts/normalize-python-runtime.mjs" "$python_target"
 }
 
 run_build_script() {

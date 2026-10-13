@@ -1519,6 +1519,7 @@ export default function App() {
   const { t: statusT } = useTranslation("status");
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [deviceCapabilitiesById, setDeviceCapabilitiesById] = useState<Record<string, HardwareCaptureCapabilities>>({});
+  const [deviceCapabilityErrorsById, setDeviceCapabilityErrorsById] = useState<Record<string, string>>({});
   const [draftSelectedDevice, setDraftSelectedDevice] = useState(DEFAULT_DEVICE_ID);
   const [sessions, setSessions] = useState<UiSession[]>([]);
   const [extensions, setExtensions] = useState<UiExtensionRecord[]>(loadUiExtensions);
@@ -2014,6 +2015,12 @@ export default function App() {
     void deviceCapabilities(selectedDevice)
       .then((capabilities) => {
         if (cancelled) return;
+        setDeviceCapabilityErrorsById((current) => {
+          const next = { ...current };
+          delete next[selectedDevice];
+          delete next[capabilities.device_id];
+          return next;
+        });
         setDeviceCapabilitiesById((current) => ({
           ...current,
           [selectedDevice]: capabilities,
@@ -2022,6 +2029,7 @@ export default function App() {
       })
       .catch((error) => {
         if (cancelled) return;
+        setDeviceCapabilityErrorsById((current) => ({ ...current, [selectedDevice]: String(error) }));
         setDeviceCapabilitiesById((current) => {
           const next = { ...current };
           delete next[selectedDevice];
@@ -3297,7 +3305,9 @@ export default function App() {
     if (!capabilitiesForDevice(deviceId)) {
       updateSession(session.id, (current) => ({
         ...current,
-        message: "Device capabilities are unavailable. Refresh the device before capturing.",
+        message: deviceCapabilityErrorsById[deviceId]
+          ? `Cannot access device: ${deviceCapabilityErrorsById[deviceId]}`
+          : "Device capabilities are unavailable. Refresh the device before capturing.",
       }));
       return;
     }

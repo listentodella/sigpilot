@@ -1773,6 +1773,24 @@ fn sample_count_from_duration(sample_rate_hz: u64, duration_ms: u64) -> u64 {
 // Driver
 // ---------------------------------------------------------------------------
 
+fn kingst_open_error(error: rusb::Error) -> CoreError {
+    let mut message = format!("cannot open Kingst device: {error}");
+    if error == rusb::Error::Access {
+        if cfg!(target_os = "windows") {
+            message.push_str(
+                "; close KingstVIS and other capture applications, then check the Kingst USB \
+                 driver in Device Manager. SigPilot uses libusb and requires a compatible \
+                 driver such as WinUSB. If changing the driver with Zadig, select only the \
+                 Kingst device; replacing its vendor driver may affect KingstVIS. Reconnect \
+                 the device and refresh after correcting access",
+            );
+        } else {
+            message.push_str("; check USB access permissions and close other capture applications");
+        }
+    }
+    CoreError::Usb(message)
+}
+
 /// [`DeviceDriver`] for the Kingst LA series.
 pub struct KingstLa2016Driver {
     descriptor: DeviceDescriptor,
@@ -1822,7 +1840,7 @@ impl KingstLa2016Driver {
 
             let handle = device
                 .open()
-                .map_err(|error| CoreError::Usb(format!("cannot open Kingst device: {error}")))?;
+                .map_err(kingst_open_error)?;
             return match handle.claim_interface(USB_INTERFACE) {
                 Ok(()) => {
                     tracing::debug!(

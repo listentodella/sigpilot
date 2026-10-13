@@ -43,7 +43,7 @@ jobs:
       # These are dynamic runtime dependencies on macOS, including cache hits.
       - name: Install macOS runtime dependencies
         if: runner.os == 'macOS'
-        run: brew install cmake ninja glib jq pkg-config python@3.13
+        run: bash scripts/install-macos-native-deps.sh cmake ninja pkg-config
 
       - name: Compute native source and image identity
         id: identity

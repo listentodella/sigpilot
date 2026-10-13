@@ -670,7 +670,7 @@ extern "C" uint64_t sr_session_progress_sample(const sr_session* session)
     for(const auto& [title, channel] : session->channel_data)
     {
         static_cast<void>(title);
-        progress = std::max(progress, channel->GetCurrentSample());
+        progress = std::max(progress, static_cast<uint64_t>(channel->GetCurrentSample()));
     }
     return progress;
 }

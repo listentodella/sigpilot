@@ -401,7 +401,7 @@ jobs:
 
       # The restored sigrok runtime still links against Homebrew libraries.
       - name: Install native runtime dependencies
-        run: brew install glib jq python@3.13
+        run: bash scripts/install-macos-native-deps.sh
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

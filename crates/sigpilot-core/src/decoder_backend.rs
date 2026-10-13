@@ -32,6 +32,18 @@ use crate::{
     models::{CaptureData, SparseCaptureData, SparseCaptureView, SparseDigitalChannel},
 };
 
+fn sidecar_command(path: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(path);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DecoderBackendKind {
@@ -1828,7 +1840,7 @@ impl SaleaePersistentWorker {
         } else {
             Stdio::null()
         };
-        let mut command = Command::new(&sidecar_path);
+        let mut command = sidecar_command(&sidecar_path);
         command
             .arg("--runtime-root")
             .arg(&runtime_root)
@@ -2600,7 +2612,7 @@ impl SaleaeNativeDecoder {
                 return Ok(probe.clone());
             }
         }
-        let mut command = Command::new(&self.sidecar_path);
+        let mut command = sidecar_command(&self.sidecar_path);
         command
             .arg("--runtime-root")
             .arg(&self.runtime_root)
@@ -2901,7 +2913,7 @@ impl SaleaeNativeDecoder {
         total_started: Instant,
     ) -> Result<DecoderOutput> {
         let spawn_started = Instant::now();
-        let mut child = Command::new(&self.sidecar_path)
+        let mut child = sidecar_command(&self.sidecar_path)
             .arg("--runtime-root")
             .arg(&self.runtime_root)
             .arg("--decode")
@@ -3015,7 +3027,7 @@ impl SaleaeNativeDecoder {
             sample_count,
             decoder: native_sidecar_settings(settings),
         };
-        let mut child = Command::new(&self.sidecar_path)
+        let mut child = sidecar_command(&self.sidecar_path)
             .arg("--runtime-root")
             .arg(&self.runtime_root)
             .arg("--simulate")
@@ -3605,7 +3617,7 @@ impl SigrokNativeDecoder {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.sidecar_path);
+        let mut command = sidecar_command(&self.sidecar_path);
         command.arg("--decoder-root").arg(&self.decoder_root);
         if let Some(root) = &self.python_decoder_root {
             command.arg("--python-decoder-root").arg(root);

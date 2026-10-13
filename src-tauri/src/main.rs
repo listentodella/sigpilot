@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::{
     collections::HashMap,
     fs,
@@ -619,9 +621,14 @@ fn bundle_staging_path() -> PathBuf {
         .map(PathBuf::from)
         .map(|home| home.join("Library/Caches"))
         .unwrap_or_else(std::env::temp_dir);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
 
     let directory = base.join("SigPilot");
@@ -679,14 +686,24 @@ fn copy_log_files(frontend_log: String) -> CommandResult<CopiedLogFiles> {
     })
 }
 
-/// Windows and Linux have no equivalent wired up here. "Save as file..." still
-/// works everywhere, so the failure is a clear message rather than a dead
-/// button.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn copy_log_files(frontend_log: String) -> CommandResult<CopiedLogFiles> {
-    let _ = frontend_log;
-    Err("copying log files to the clipboard is only implemented on macOS; use Save as file instead".to_string())
+    if logging::retained_files().is_empty() {
+        return Err("there are no log files to copy".to_string());
+    }
+    let path = bundle_staging_path();
+    let files = logging::write_bundle(&path, &frontend_log).map_err(to_string)?;
+    if files.is_empty() {
+        return Err("there are no log files to copy".to_string());
+    }
+    file_clipboard::copy_files(&path)?;
+    Ok(CopiedLogFiles {
+        name: path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+        bytes: fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+        path: path.to_string_lossy().into_owned(),
+        files,
+    })
 }
 
 /// Publishes capture UI updates from a thread of its own.
@@ -2487,6 +2504,8 @@ fn warm_sigrok_native_catalog_async(delay: Duration) {
 }
 
 mod logging;
+#[cfg(not(target_os = "macos"))]
+mod file_clipboard;
 
 fn main() {
     // Install the log sink before anything else, so a failure during start-up
@@ -2504,6 +2523,12 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // ICO decoding selects its first (16px) entry. Use the full PNG
+            // for the live window/taskbar while the exe retains its multi-size ICO.
+            let icon = tauri::include_image!("icons/icon.png");
+            for window in app.webview_windows().values() {
+                window.set_icon(icon.clone())?;
+            }
             configure_bundled_resources(app)?;
             warm_saleae_native_sidecar_async(None, Duration::from_millis(350));
             warm_sigrok_native_catalog_async(Duration::from_millis(350));
