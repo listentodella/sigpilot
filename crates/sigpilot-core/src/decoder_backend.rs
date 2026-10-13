@@ -2166,16 +2166,31 @@ impl SaleaePersistentWorker {
         Ok(SaleaeAsyncDecodeStep::Complete(decoded))
     }
 
+    // A pipe write only fails with ERROR_BROKEN_PIPE once the sidecar process
+    // is gone, which the sidecar does after any request-level protocol error
+    // (a failed frame read leaves std::cin in a fail state, so the serve loop
+    // exits on the next peek). Reporting the bare OS error hides that; include
+    // the exit status so the failure points at the sidecar, not the pipe.
+    fn ipc_write_error(&mut self, error: std::io::Error) -> SaleaePersistentDecodeError {
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => format!("exited with {status}"),
+            Ok(None) => "still running".to_string(),
+            Err(error) => format!("exit status unavailable: {error}"),
+        };
+        SaleaePersistentDecodeError::Ipc(format!(
+            "Saleae persistent sidecar pipe write failed ({error}); process {status}"
+        ))
+    }
+
     fn transact(
         &mut self,
         request: &SaleaePersistentRequestFrame,
     ) -> std::result::Result<SaleaePersistentResponseFrame, SaleaePersistentDecodeError> {
         let write_started = Instant::now();
-        if request.binary.is_empty() {
+        let write_result = if request.binary.is_empty() {
             self.stdin
                 .write_all(&request.json)
                 .and_then(|_| self.stdin.write_all(b"\n"))
-                .map_err(|error| SaleaePersistentDecodeError::Ipc(error.to_string()))?;
         } else {
             self.stdin
                 .write_all(b"PXLQ1")
@@ -2189,11 +2204,13 @@ impl SaleaePersistentWorker {
                 })
                 .and_then(|_| self.stdin.write_all(&request.json))
                 .and_then(|_| self.stdin.write_all(&request.binary))
-                .map_err(|error| SaleaePersistentDecodeError::Ipc(error.to_string()))?;
+        };
+        if let Err(error) = write_result {
+            return Err(self.ipc_write_error(error));
         }
-        self.stdin
-            .flush()
-            .map_err(|error| SaleaePersistentDecodeError::Ipc(error.to_string()))?;
+        if let Err(error) = self.stdin.flush() {
+            return Err(self.ipc_write_error(error));
+        }
         trace_decoder_timing(
             "saleae",
             "persistent_request_write",

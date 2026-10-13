@@ -24,11 +24,31 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace
 {
+
+// The framed transport (PXLQ1 requests, PXLF1 responses) carries raw edge and
+// payload bytes. The Windows CRT opens the standard streams in text mode, where
+// 0x1A reads as EOF and "\n" is expanded to "\r\n" on write, so a varint stream
+// containing either byte truncates the request or corrupts the response. Unix
+// hosts perform no such translation, which is why only Windows was affected.
+// The JSON-only modes are unaffected either way, but switching the whole
+// process keeps every mode consistent.
+void UseBinaryStandardStreams()
+{
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+}
 
 using Clock = std::chrono::steady_clock;
 using ConfiguredChannelMap = std::unordered_map<std::string, unsigned>;
@@ -2577,6 +2597,7 @@ void Serve(const fs::path& root)
 
 int main(int argc, char** argv)
 {
+    UseBinaryStandardStreams();
     try
     {
         fs::path runtime_root;

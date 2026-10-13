@@ -84,6 +84,20 @@ target_include_directories(saleae_compat
 )
 if(WIN32)
     set_target_properties(saleae_compat PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    # WINDOWS_EXPORT_ALL_SYMBOLS is implemented only for MS-compatible tools
+    # (per the CMake property docs), so MinGW links ignore it and the DLL ends
+    # up exporting nothing beyond the explicit dllexport C API. Unix hosts
+    # export every global symbol by default, which is what saleae_compat_tests
+    # and the sidecar rely on for AnalyzerTest:: symbols. Ask the GNU linker
+    # directly so Windows behaves like the Unix hosts.
+    # --exclude-libs keeps the statically linked runtime archives (libgcc,
+    # libstdc++, mingwwex) out of the export table: re-exporting them would
+    # put import stubs such as _Unwind_Resume into the import library, which
+    # then collides with the analyzer plugins' own static runtime copies.
+    if(MINGW)
+        target_link_options(saleae_compat PRIVATE
+            "-Wl,--export-all-symbols" "-Wl,--exclude-libs,ALL")
+    endif()
 elseif(APPLE)
     set_target_properties(saleae_compat PROPERTIES BUILD_RPATH "@loader_path")
 else()

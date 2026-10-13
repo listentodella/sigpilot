@@ -1463,6 +1463,24 @@ async fn capture_screenshot_png(_app: AppHandle) -> CommandResult<String> {
 mod screenshot_tests {
     use super::*;
 
+    // Rust names test threads after the test path ("screenshot_tests::…").
+    // ':' and path separators are illegal in Windows path components, so the
+    // raw name cannot be embedded in a temp file name on that platform.
+    fn temp_file_tag() -> String {
+        std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+
     fn request(
         previous_path: Option<&str>,
         session_name: Option<&str>,
@@ -1535,7 +1553,7 @@ mod screenshot_tests {
         let path = std::env::temp_dir().join(format!(
             "sigpilot-screenshot-{}-{}.png",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            temp_file_tag()
         ));
         write_screenshot_file(WriteScreenshotRequest {
             data_base64: "data:image/png;base64,c25hcHNob3Q=".to_string(),
@@ -1560,7 +1578,7 @@ mod screenshot_tests {
         let path = std::env::temp_dir().join(format!(
             "sigpilot-analyzer-export-{}-{}.csv",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            temp_file_tag()
         ));
         write_text_file(WriteTextFileRequest {
             contents: "Type,Value\nData,0x5A\n".to_string(),
