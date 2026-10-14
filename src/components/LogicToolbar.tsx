@@ -8,6 +8,7 @@ import {
   MeasurementCommands,
   UiCommand,
 } from "../lib/sidebar";
+import { analyzerCatalogChoiceKey } from "../lib/analyzers";
 import { CaptureMemoryUsage } from "../lib/api";
 import { AnalyzerLibraryChoice, AnalyzerLibraryMenu } from "./AnalyzerLibraryMenu";
 import { MemoryBufferControl } from "./MemoryBufferControl";
@@ -93,9 +94,10 @@ export function LogicToolbar({
               onSelect={(choice) => {
                 setOpenMenu(null);
                 onCommand(AnalyzerCommands.AddAnalyzer, {
-                  analyzerCatalogId: choice.catalogItem?.id ?? undefined,
-                  analyzerName: choice.name,
                   analyzerBackend: choice.backend,
+                  analyzerCatalogId: choice.catalogItem?.id ?? undefined,
+                  analyzerKey: analyzerCatalogChoiceKey(choice),
+                  analyzerName: choice.name,
                 });
               }}
             />

@@ -55,6 +55,9 @@ export type UiCommand =
 export interface CommandPayload {
   analyzerBackend?: "auto" | "saleae_native" | "sigrok_native" | "legacy_rust";
   analyzerCatalogId?: string;
+  /** `analyzerCatalogChoiceKey` of the chosen entry, so the handler can restore
+   *  the full choice (including HLA metadata) instead of rebuilding it. */
+  analyzerKey?: string;
   analyzerName?: string;
 }
 

@@ -1219,6 +1219,25 @@ export function analyzerCatalogChoiceKey(choice: {
   ].join(":");
 }
 
+/**
+ * The toolbar and the sidebar both add analyzers, but the toolbar goes through
+ * a command payload. Resolving the payload's stable key back to the original
+ * choice keeps every field the menu carried — including the HLA entry point —
+ * so both entries behave the same.
+ */
+export function analyzerChoiceForCommandKey<
+  T extends {
+    backend: DecoderBackendKind;
+    catalogItem?: SigrokDecoderCatalogItem;
+    name: string;
+    source?: string;
+    hla?: { manifestPath: string; entryPoint: string };
+  },
+>(choices: T[], key: string | undefined): T | undefined {
+  if (!key) return undefined;
+  return choices.find((choice) => analyzerCatalogChoiceKey(choice) === key);
+}
+
 export function normalizeAnalyzerDisplayRadix(value: unknown): AnalyzerDisplayRadix {
   return DISPLAY_RADIX_OPTIONS.includes(value as AnalyzerDisplayRadix)
     ? (value as AnalyzerDisplayRadix)

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  analyzerCatalogChoiceKey, analyzerDecodeSettings, analyzerDecodeSignature,
-  analyzerChannelRoles, analyzerCanRunDecoder, createAnalyzerInstance,
-  hlaUpstreamAnalyzers, reconcileHlaAnalyzers, restoreSaleaeAnalyzer,
-  saleaeAnalyzerMetadata, validateHlaAnalyzer,
+  analyzerCatalogChoiceKey, analyzerChoiceForCommandKey, analyzerDecodeSettings, analyzerDecodeSignature,
+  analyzerChannelRoles, analyzerCanRunDecoder, createAnalyzerInstance, hlaUpstreamAnalyzers,
+  reconcileHlaAnalyzers, restoreSaleaeAnalyzer, saleaeAnalyzerMetadata, validateHlaAnalyzer,
 } from "../src/lib/analyzers.ts";
 import type { UiAnalyzerInstance } from "../src/lib/analyzers.ts";
+import type { SigrokDecoderCatalogItem } from "../src/lib/api.ts";
 import { inspectHlaExtension, cancelHlaDecodes, decodeAnalyzerFrames } from "../src/lib/api.ts";
 import { extensionAnalyzerChoices, extensionRecordFromPackage } from "../src/lib/extensions.ts";
 
@@ -118,4 +118,33 @@ test("installed enabled HLA packages appear in the real analyzer menu with their
   assert.deepEqual(extensionAnalyzerChoices([{ ...extension, enabled: false }]), []);
   assert.deepEqual(extensionAnalyzerChoices([{ ...extension, installed: false }]), []);
   assert.deepEqual(extensionAnalyzerChoices([{ ...extension, localPath: undefined }]), []);
+});
+
+test("the toolbar command path restores the full choice, HLA metadata included", () => {
+  const extension = extensionRecordFromPackage({ path: "/extensions/qst/extension.json", manifest: {
+    name: "QST Sensor Decoders", apiVersion: "1.0.0", author: "Qst", version: "0.5.0", extensions: {
+      QMI8660: { type: "HighLevelAnalyzer", entryPoint: "HighLevelAnalyzer.Qmi8660Hla" },
+      QMI8658: { type: "HighLevelAnalyzer", entryPoint: "HighLevelAnalyzer.Qmi8658Hla" },
+    },
+  } });
+  const choices = [
+    ...extensionAnalyzerChoices([extension]),
+    { backend: "sigrok_native" as const, name: "PWM", source: "Sigrok C Decoders" },
+  ];
+  const qmi8660 = choices[0];
+  // The toolbar sends only this key; the handler must find the same object back.
+  const key = analyzerCatalogChoiceKey(qmi8660);
+  assert.equal(analyzerChoiceForCommandKey(choices, key), qmi8660);
+  assert.deepEqual(analyzerChoiceForCommandKey(choices, key)?.hla, qmi8660.hla);
+  assert.notEqual(analyzerChoiceForCommandKey(choices, key), choices[1]);
+  // A stale key resolves to nothing so the caller can fall back explicitly.
+  assert.equal(analyzerChoiceForCommandKey(choices, undefined), undefined);
+  assert.equal(analyzerChoiceForCommandKey(choices, "sigrok_native::PWM::"), undefined);
+  const catalogChoice = { backend: "saleae_native" as const, name: "MDIO",
+    catalogItem: { id: "mdio", name: "MDIO", kind: "c" } as SigrokDecoderCatalogItem,
+    source: "Saleae Native" };
+  assert.equal(
+    analyzerChoiceForCommandKey([catalogChoice], analyzerCatalogChoiceKey(catalogChoice)),
+    catalogChoice,
+  );
 });

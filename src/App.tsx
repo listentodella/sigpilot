@@ -220,6 +220,7 @@ import {
   AnalyzerDisplayRadix,
   analyzerCanRunDecoder,
   analyzerCatalogChoiceKey,
+  analyzerChoiceForCommandKey,
   analyzerChannelIndexes,
   analyzerChannelRoleLabel,
   analyzerChannelRoles,
@@ -4858,6 +4859,14 @@ export default function App() {
     }
 
     if (command === AnalyzerCommands.AddAnalyzer) {
+      // The toolbar sends a stable key: resolving it restores the original
+      // choice (HLA entry point included) instead of rebuilding a guess from
+      // the catalog id and display name.
+      const chosen = analyzerChoiceForCommandKey(availableAnalyzers, payload?.analyzerKey);
+      if (chosen) {
+        handleAddAnalyzer(chosen);
+        return;
+      }
       const catalogItem = payload?.analyzerCatalogId
         ? (payload.analyzerBackend === "saleae_native" ? saleaeCatalog : sigrokCatalog)?.decoders.find(
             (item) => item.id === payload.analyzerCatalogId,
