@@ -1690,6 +1690,27 @@ async fn measure_digital_range(
 }
 
 #[tauri::command]
+async fn inspect_hla_extension(manifest_path: String, entry_point: String) -> CommandResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = serde_json::from_value(serde_json::json!({
+            "manifest_path": manifest_path, "entry_point": entry_point,
+            "settings": {}, "upstream_id": "inspect-only",
+            "upstream": { "protocol": "Uart", "settings": {
+                "channel": 0, "baud_rate": 115200, "inverted": false,
+                "data_bits": 8, "stop_bits": 1, "parity": "none", "msb_first": false
+            } }
+        })).map_err(to_string)?;
+        sigpilot_core::hla_backend::HlaDecoder::discover().map_err(to_string)?
+            .inspect(&settings).map_err(to_string)
+    }).await.map_err(to_string)?
+}
+
+#[tauri::command]
+fn cancel_hla_decodes() {
+    sigpilot_core::hla_backend::HlaDecoder::cancel_all();
+}
+
+#[tauri::command]
 async fn decode_analyzer_frames(
     session_id: String,
     backend: DecoderBackendKind,
@@ -2406,6 +2427,9 @@ fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
     };
     #[cfg(not(debug_assertions))]
     let native_dir = bundled_native_dir;
+    let python_executable = if cfg!(windows) { "bin/python.exe" } else { "bin/python3" };
+    set_bundled_path("SIGPILOT_HLA_PYTHON", native_dir.join("python-runtime").join(python_executable), false);
+    set_bundled_path("SIGPILOT_HLA_HOST", native_dir.join("hla-analyzer-sidecar/main.py"), false);
     let sigrok_dir = native_dir.join("sigrok-analyzer-sidecar");
     #[cfg(target_os = "windows")]
     let sigrok_executable = "sigpilot-sigrok-sidecar.exe";
@@ -2579,6 +2603,8 @@ fn main() {
             set_graph_view_limits,
             read_extension_package,
             create_extension_template,
+            inspect_hla_extension,
+            cancel_hla_decodes,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SigPilot");

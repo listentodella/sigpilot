@@ -205,3 +205,16 @@ function isUiExtensionRecord(value: unknown): value is UiExtensionRecord {
     (record.source === "BuiltIn" || record.source === "Local" || record.source === "Marketplace")
   );
 }
+
+/** Runnable local HLA choices keep the manifest/entry point as their identity. */
+export function extensionAnalyzerChoices(extensions: UiExtensionRecord[]) {
+  return extensions.filter((extension) => extension.installed && extension.enabled && extension.localPath)
+    .flatMap((extension) => Object.entries(extension.manifest.extensions)
+      .filter(([, feature]) => feature.type === "HighLevelAnalyzer")
+      .map(([name, feature]) => ({ name, backend: "saleae_native" as const, source: "Extension",
+        description: extension.manifest.description,
+        hla: { manifestPath: extension.localPath!.replace(/\/$/, "").endsWith(".json")
+          ? extension.localPath! : `${extension.localPath!.replace(/\/$/, "")}/extension.json`,
+          entryPoint: feature.entryPoint },
+      })));
+}

@@ -99,6 +99,7 @@ interface AnalyzerBubblesOverlayProps {
   onGoToFrame: (analyzerId: string, frameIndex: number, frame?: AnalyzerFrameRef) => void;
   onOpenTableFrame: (analyzerId: string, frameIndex: number) => void;
   onSelectFrame: (analyzerId: string, frameIndex: number) => void;
+  onAnalyzerError?: (message: string) => void;
   onZoomBubble: (analyzerId: string, startSample: number, endSample: number, frameIndex: number) => void;
 }
 
@@ -121,6 +122,7 @@ export function AnalyzerBubblesOverlay({
   onOpenTableFrame,
   onSelectFrame,
   onZoomBubble,
+  onAnalyzerError,
 }: AnalyzerBubblesOverlayProps) {
   // Once the workbench has wired this session into the backend frame loop, the
   // analyzer tracks arrive on every frame — already aggregated for the viewport
@@ -129,10 +131,24 @@ export function AnalyzerBubblesOverlay({
   // request round trip, which is what made the bubbles look wrong while moving.
   const frameState = useSessionFrameState(sessionId);
   const liveFrame = frameState?.ready ? frameState : null;
+  const analyzerErrorMessage = useMemo(
+    () => liveFrame?.analyzers.find((result) => result.error)?.error ?? null,
+    [liveFrame],
+  );
+  const reportedAnalyzerErrorRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!analyzerErrorMessage || reportedAnalyzerErrorRef.current === analyzerErrorMessage) return;
+    reportedAnalyzerErrorRef.current = analyzerErrorMessage;
+    onAnalyzerError?.(analyzerErrorMessage);
+  }, [analyzerErrorMessage, onAnalyzerError]);
   const effectiveAnalyzers = useMemo(() => {
     if (!liveFrame || liveFrame.analyzers.length === 0) return analyzers;
+    // A failed analyzer reports no tracks; keeping the previous ones avoids
+    // blanking a row that is still showing its last good bubbles.
     const tracksById = new Map<string, AnalyzerTrackWindow[]>(
-      liveFrame.analyzers.map((result) => [result.analyzer_id, result.tracks] as const),
+      liveFrame.analyzers
+        .filter((result) => !result.error)
+        .map((result) => [result.analyzer_id, result.tracks] as const),
     );
     return analyzers.map((analyzer) => {
       const tracks = tracksById.get(analyzer.id);

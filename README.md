@@ -116,6 +116,7 @@ SigPilot 使用独立 sidecar 承载协议解码，避免把硬件采集、界�
 - UART、I²C、SPI、I²S、CAN、LIN、Simple Parallel 等已有 fixture 验证。CAN-FD 尚需更完整的 FD/BRS fixture，不能据此声称完整协议符合性。
 
 后端细节与验证方式见 [Saleae sidecar](native/saleae-analyzer-sidecar/README.md) 和 [Sigrok sidecar](native/sigrok-analyzer-sidecar/README.md)。
+HLA 的首版兼容边界、运行时布局、信任边界与验证记录见 [Saleae HLA 兼容说明](docs/hla-compatibility.md)。HLA 使用项目原创的兼容层和独立 CPython 宿主，不复制 Logic 2 的私有运行时；这不是对全部 Saleae HLA API 的兼容承诺。
 
 ## 参与共建
 

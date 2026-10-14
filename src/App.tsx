@@ -79,6 +79,9 @@ import { AdvancedOptionsPanel } from "./components/AdvancedOptionsPanel";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
+import { HlaSettingsDialog } from "./components/HlaSettingsDialog";
+import { reconcileHlaAnalyzers } from "./lib/analyzers";
+import { cancelHlaDecodes } from "./lib/api";
 import { DeviceStartScreen } from "./components/DeviceStartScreen";
 import { ExtensionsPanel } from "./components/ExtensionsPanel";
 import { LogicToolbar } from "./components/LogicToolbar";
@@ -263,6 +266,7 @@ import {
   UiAnalogChannelSettings,
 } from "./lib/analogChannels";
 import {
+  extensionAnalyzerChoices,
   loadUiExtensions,
   saveUiExtensions,
   UiExtensionRecord,
@@ -1853,13 +1857,7 @@ export default function App() {
           runnerStatus: item.runner_status,
           source: "Saleae Native",
         })),
-      ...extensions
-        .filter((extension) => extension.installed && extension.enabled)
-        .flatMap((extension) =>
-          Object.entries(extension.manifest.extensions)
-            .filter(([, feature]) => feature.type === "HighLevelAnalyzer")
-            .map(([name]) => ({ name, backend: "legacy_rust" as const, source: "Extension" })),
-        ),
+      ...extensionAnalyzerChoices(extensions),
     ];
     const seen = new Set<string>();
     return choices.filter((choice) => {
@@ -1875,7 +1873,10 @@ export default function App() {
       let changed = false;
       const next = current.map((session) => {
         if (session.id !== sessionId) return session;
-        const updated = updater(session);
+        let updated = updater(session);
+        if (updated.analyzers !== session.analyzers) {
+          updated = { ...updated, analyzers: reconcileHlaAnalyzers(session.analyzers, updated.analyzers) };
+        }
         if (updated !== session) changed = true;
         return updated;
       });
@@ -2225,7 +2226,7 @@ export default function App() {
   visibleChannelIndexesRef.current = visibleChannelIndexes;
   const graphAnalyzerDecodeSignature =
     activeSession?.analyzers
-      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}:${analyzer.displayRadix}`)
+      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer, activeSession?.analyzers)}:${analyzer.displayRadix}`)
       .join("|") ?? "";
   const visibleChannelLabels = useMemo(
     () => visibleChannelIndexes.map((channelIndex) => channelLabels[channelIndex] ?? `D${channelIndex}`),
@@ -2553,7 +2554,7 @@ export default function App() {
         const live = currentSession();
         if (!live) return [];
         return live.analyzers.flatMap((analyzer) => {
-          const settings = analyzerDecodeSettings(analyzer);
+          const settings = analyzerDecodeSettings(analyzer, live.analyzers);
           if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
           const tracks = analyzerTrackRequestsForAnalyzer(analyzer);
           if (tracks.length === 0) return [];
@@ -2598,7 +2599,7 @@ export default function App() {
         // never draws bubbles merged for a scale the user has left behind.
         const analyzers = live
           ? live.analyzers.flatMap((analyzer) => {
-              const settings = analyzerDecodeSettings(analyzer);
+              const settings = analyzerDecodeSettings(analyzer, live.analyzers);
               if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
               const tracks = analyzerTrackRequestsForAnalyzer(analyzer);
               if (tracks.length === 0) return [];
@@ -2921,11 +2922,11 @@ export default function App() {
         startSample: requestStart,
       };
       const analyzerRequestItems = sessionSnapshot.analyzers.flatMap((analyzer) => {
-        const settings = analyzerDecodeSettings(analyzer);
+        const settings = analyzerDecodeSettings(analyzer, sessionSnapshot.analyzers);
         if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
         const tracks = analyzerTrackRequestsForAnalyzer(analyzer);
         if (tracks.length === 0) return [];
-        const signature = getAnalyzerDecodeSignature(analyzer);
+        const signature = getAnalyzerDecodeSignature(analyzer, sessionSnapshot.analyzers);
         return [
           {
             analyzer,
@@ -3388,7 +3389,7 @@ export default function App() {
       const demoAnalyzers = session.analyzers
         .filter(analyzerCanRunDecoder)
         .flatMap((analyzer) => {
-          const settings = analyzerDecodeSettings(analyzer);
+          const settings = analyzerDecodeSettings(analyzer, session.analyzers);
           return settings === null ? [] : [{ backend: analyzer.decoderBackend, settings }];
         });
       const next = await startCapture(
@@ -3467,8 +3468,9 @@ export default function App() {
     const session = sessionsRef.current.find((item) => item.id === sessionId);
     const analyzer = session?.analyzers.find((item) => item.id === analyzerId);
     if (!session?.summary || !analyzer || !analyzerCanRunDecoder(analyzer)) return;
-    const settings = analyzerDecodeSettings(analyzer);
+    const settings = analyzerDecodeSettings(analyzer, session.analyzers);
     if (!settings) return;
+    const decodeSignature = getAnalyzerDecodeSignature(analyzer, session.analyzers);
     const requestKey = `${sessionId}:${analyzerId}`;
     const requestSeq = (analyzerRequestSeq.current[requestKey] ?? 0) + 1;
     analyzerRequestSeq.current[requestKey] = requestSeq;
@@ -3496,7 +3498,7 @@ export default function App() {
       ),
     }));
     try {
-      const useLazySummary = analyzerUsesLazyNativeSummary(analyzer.decoderBackend);
+      const useLazySummary = !analyzer.hla && analyzerUsesLazyNativeSummary(analyzer.decoderBackend);
       const frames = useLazySummary
         ? []
         : normalizeDecodedFrameOrder(
@@ -3507,14 +3509,14 @@ export default function App() {
       updateSession(session.id, (current) => ({
         ...current,
         analyzers: current.analyzers.map((item) =>
-          item.id === analyzerId
+          item.id === analyzerId && getAnalyzerDecodeSignature(item, current.analyzers) === decodeSignature
             ? {
                 ...item,
                 protocolBubbles: [],
                 decodedFrameCount: frameCount,
                 decodedFrames: frames,
                 decodedFramesComplete: !useLazySummary,
-                decodedDecodeSignature: getAnalyzerDecodeSignature(item),
+                decodedDecodeSignature: decodeSignature,
                 previousFrame: null,
                 nextFrame: null,
                 decodeBusy: false,
@@ -3550,8 +3552,8 @@ export default function App() {
     const requestedIds = new Set(analyzerIds);
     const requests = session.analyzers.flatMap((analyzer) => {
       if (!requestedIds.has(analyzer.id) || !analyzerCanRunDecoder(analyzer)) return [];
-      const settings = analyzerDecodeSettings(analyzer);
-      const signature = getAnalyzerDecodeSignature(analyzer);
+      const settings = analyzerDecodeSettings(analyzer, session.analyzers);
+      const signature = getAnalyzerDecodeSignature(analyzer, session.analyzers);
       if (!settings || analyzer.decodedDecodeSignature === signature) return [];
       return [{
         analyzer,
@@ -3592,7 +3594,7 @@ export default function App() {
 
     try {
       const lazySummaryRequests = requests.filter((request) =>
-        analyzerUsesLazyNativeSummary(request.backend),
+        !request.analyzer.hla && analyzerUsesLazyNativeSummary(request.backend),
       );
       const fullRequests = requests.filter((request) => !lazySummaryRequests.includes(request));
       const decoded = fullRequests.length > 0
@@ -3632,6 +3634,7 @@ export default function App() {
         ...current,
         analyzers: current.analyzers.map((item) => {
           if (!validIds.has(item.id)) return item;
+          if (getAnalyzerDecodeSignature(item, current.analyzers) !== signaturesByAnalyzer.get(item.id)) return item;
           const frames = decodedByAnalyzer.get(item.id);
           const summarizedFrameCount = summarizedByAnalyzer.get(item.id);
           if (!frames && summarizedFrameCount === undefined) {
@@ -3644,7 +3647,7 @@ export default function App() {
               decodedFrameCount: summarizedFrameCount,
               decodedFrames: [],
               decodedFramesComplete: false,
-              decodedDecodeSignature: signaturesByAnalyzer.get(item.id) ?? getAnalyzerDecodeSignature(item),
+              decodedDecodeSignature: signaturesByAnalyzer.get(item.id) ?? getAnalyzerDecodeSignature(item, current.analyzers),
               previousFrame: null,
               nextFrame: null,
               decodeBusy: false,
@@ -3659,7 +3662,7 @@ export default function App() {
             decodedFrameCount: completeFrames.length,
             decodedFrames: completeFrames,
             decodedFramesComplete: true,
-            decodedDecodeSignature: signaturesByAnalyzer.get(item.id) ?? getAnalyzerDecodeSignature(item),
+            decodedDecodeSignature: signaturesByAnalyzer.get(item.id) ?? getAnalyzerDecodeSignature(item, current.analyzers),
             previousFrame: null,
             nextFrame: null,
             decodeBusy: false,
@@ -3691,7 +3694,7 @@ export default function App() {
     const captureIdentity = `${session.summary.metadata.captured_at}:${session.summary.metadata.sample_count}`;
     const requestedIds = new Set(analyzerIds);
     const requests = session.analyzers.flatMap((analyzer) => {
-      const signature = getAnalyzerDecodeSignature(analyzer);
+      const signature = getAnalyzerDecodeSignature(analyzer, session.analyzers);
       if (
         !requestedIds.has(analyzer.id) ||
         analyzer.decoderBackend !== "saleae_native" ||
@@ -3704,7 +3707,7 @@ export default function App() {
       ) {
         return [];
       }
-      const settings = analyzerDecodeSettings(analyzer);
+      const settings = analyzerDecodeSettings(analyzer, session.analyzers);
       if (!settings) return [];
       return [{
         analyzer,
@@ -3765,7 +3768,7 @@ export default function App() {
             if (!validIds.has(item.id)) return item;
             const progress = progressByAnalyzer.get(item.id);
             const signature = signaturesByAnalyzer.get(item.id);
-            if (!progress || !signature || getAnalyzerDecodeSignature(item) !== signature) {
+            if (!progress || !signature || getAnalyzerDecodeSignature(item, current.analyzers) !== signature) {
               return { ...item, decodeBusy: false, decodeProgress: 0 };
             }
             const progressPercent = progress.complete
@@ -3806,13 +3809,13 @@ export default function App() {
 
   const analyzerDecodeSignature =
     activeSession?.analyzers
-      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer)}`)
+      .map((analyzer) => `${analyzer.id}:${getAnalyzerDecodeSignature(analyzer, activeSession?.analyzers)}`)
       .join("|") ?? "";
 
   const saleaeNativeBackgroundDecodeSignature =
     activeSession?.analyzers
       .flatMap((analyzer) => {
-        const signature = getAnalyzerDecodeSignature(analyzer);
+        const signature = getAnalyzerDecodeSignature(analyzer, activeSession?.analyzers);
         if (
           analyzer.decoderBackend !== "saleae_native" ||
           analyzer.decodedFramesComplete ||
@@ -3858,7 +3861,7 @@ export default function App() {
       !saleaeNativeBackgroundDecodeSignature
     ) return;
     const analyzerIds = activeSession.analyzers.flatMap((analyzer) => {
-      const signature = getAnalyzerDecodeSignature(analyzer);
+      const signature = getAnalyzerDecodeSignature(analyzer, activeSession.analyzers);
       if (
         analyzer.decoderBackend !== "saleae_native" ||
         analyzer.decodedFramesComplete ||
@@ -4028,7 +4031,7 @@ export default function App() {
         await saveCapture(activeSession.id, outputPath, {
           name: activeSession.name,
           notes: activeSession.notes,
-          analyzers: activeSession.analyzers.map(saleaeAnalyzerMetadata),
+          analyzers: activeSession.analyzers.map((analyzer) => saleaeAnalyzerMetadata(analyzer, activeSession.analyzers)),
         });
       }
       const savedName =
@@ -4906,6 +4909,13 @@ export default function App() {
       beginAddAnalyzer(choiceOrName, undefined, backend);
       return;
     }
+    if (choiceOrName.hla && activeSession) {
+      setAnalyzerInEdit({ analyzer: {
+        ...createAnalyzerInstance(choiceOrName.name, activeSession.analyzers, 0, "saleae_native"),
+        hla: { ...choiceOrName.hla, upstreamId: "", settings: {} },
+      }, isNew: true, sessionId: activeSession.id });
+      return;
+    }
     beginAddAnalyzer(choiceOrName.name, undefined, choiceOrName.backend, choiceOrName.catalogItem);
   }
 
@@ -5601,6 +5611,9 @@ export default function App() {
                         rowTopInsets={visibleAnalyzerInsets}
                         sessionId={activeSession.id}
                         tile={visibleTile}
+                        onAnalyzerError={(message) =>
+                          updateSession(activeSession.id, (current) => ({ ...current, message }))
+                        }
                         viewportSamples={activeSession.viewportSamples}
                         viewportStart={activeSession.viewportStart}
                         visibleChannelIndexes={visibleChannelIndexes}
@@ -5807,7 +5820,11 @@ export default function App() {
             type={screenshotNotification.type}
           />
         )}
-        {analyzerInEdit && analyzerEditSession && (
+        {analyzerInEdit?.analyzer.hla && analyzerEditSession && (
+          <HlaSettingsDialog analyzer={analyzerInEdit.analyzer} analyzers={analyzerEditSession.analyzers}
+            onCancel={() => setAnalyzerInEdit(null)} onSave={saveAnalyzerSettings} />
+        )}
+        {analyzerInEdit && !analyzerInEdit.analyzer.hla && analyzerEditSession && (
           <AnalyzerSettingsDialog
             analyzer={analyzerInEdit.analyzer}
             capturedChannelCount={analyzerEditSession.summary?.metadata.channel_count ?? 0}
@@ -9744,7 +9761,7 @@ function AnalyzersPanel({
         analyzer.showInDataTable &&
         !analyzerHasLazyNativeFramePlaceholder(analyzer) &&
         Math.max(analyzer.decodedFrameCount, analyzer.decodedFrames.length) > 0 &&
-        analyzer.decodedDecodeSignature === getAnalyzerDecodeSignature(analyzer),
+        analyzer.decodedDecodeSignature === getAnalyzerDecodeSignature(analyzer, session.analyzers),
     );
     if (
       enabledAnalyzers.length === 0 ||
@@ -9755,7 +9772,7 @@ function AnalyzersPanel({
       return [];
     }
     const requests = enabledAnalyzers.flatMap((analyzer) => {
-      const settings = analyzerDecodeSettings(analyzer);
+      const settings = analyzerDecodeSettings(analyzer, session.analyzers);
       if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
       return [
         {
@@ -9802,7 +9819,7 @@ function AnalyzersPanel({
       (analyzer) =>
         analyzer.showInDataTable &&
         Math.max(analyzer.decodedFrameCount, analyzer.decodedFrames.length) > 0 &&
-        analyzer.decodedDecodeSignature === getAnalyzerDecodeSignature(analyzer),
+        analyzer.decodedDecodeSignature === getAnalyzerDecodeSignature(analyzer, session.analyzers),
     );
     if (enabledAnalyzers.length === 0) return [];
     if (
@@ -9813,7 +9830,7 @@ function AnalyzersPanel({
       return [];
     }
     const requests = enabledAnalyzers.flatMap((analyzer) => {
-      const settings = analyzerDecodeSettings(analyzer);
+      const settings = analyzerDecodeSettings(analyzer, session.analyzers);
       if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
       return [
         {
@@ -9858,18 +9875,18 @@ function AnalyzersPanel({
         !analyzer.showInDataTable ||
         analyzer.decodedFramesComplete ||
         analyzer.decodedFrameCount <= 0 ||
-        analyzer.decodedDecodeSignature !== getAnalyzerDecodeSignature(analyzer)
+        analyzer.decodedDecodeSignature !== getAnalyzerDecodeSignature(analyzer, session.analyzers)
       ) {
         return [];
       }
-      const settings = analyzerDecodeSettings(analyzer);
+      const settings = analyzerDecodeSettings(analyzer, session.analyzers);
       if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
       return [
         {
           analyzerId: analyzer.id,
           backend: analyzer.decoderBackend,
           settings,
-          signature: getAnalyzerDecodeSignature(analyzer),
+          signature: getAnalyzerDecodeSignature(analyzer, session.analyzers),
         },
       ];
     });
@@ -9972,7 +9989,7 @@ function AnalyzersPanel({
       (analyzer) =>
         analyzer.streamToTerminal &&
         Math.max(analyzer.decodedFrameCount, analyzer.decodedFrames.length) > 0 &&
-        analyzer.decodedDecodeSignature === getAnalyzerDecodeSignature(analyzer),
+        analyzer.decodedDecodeSignature === getAnalyzerDecodeSignature(analyzer, session.analyzers),
     );
     if (
       enabledAnalyzers.length === 0 ||
@@ -9983,7 +10000,7 @@ function AnalyzersPanel({
       return [];
     }
     const requests = enabledAnalyzers.flatMap((analyzer) => {
-      const settings = analyzerDecodeSettings(analyzer);
+      const settings = analyzerDecodeSettings(analyzer, session.analyzers);
       if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
       return [
         {
@@ -10247,7 +10264,7 @@ function AnalyzersPanel({
         ...current,
         analyzers: current.analyzers.map((analyzer) => {
           const result = resultsByAnalyzer.get(analyzer.id);
-          if (!result || getAnalyzerDecodeSignature(analyzer) !== result.signature) return analyzer;
+          if (!result || getAnalyzerDecodeSignature(analyzer, current.analyzers) !== result.signature) return analyzer;
           return {
             ...analyzer,
             decodedFrameCount: result.frames.length,
@@ -10326,7 +10343,7 @@ function AnalyzersPanel({
     try {
       let analyzerForExport = analyzer;
       if (!analyzer.decodedFramesComplete) {
-        const settings = analyzerDecodeSettings(analyzer);
+        const settings = analyzerDecodeSettings(analyzer, session.analyzers);
         if (!settings || !analyzerCanRunDecoder(analyzer)) return;
         const frames = normalizeDecodedFrameOrder(
           await decodeAnalyzerFrames(session.id, settings, analyzer.decoderBackend),
@@ -10336,7 +10353,7 @@ function AnalyzersPanel({
           decodedFrameCount: frames.length,
           decodedFrames: frames,
           decodedFramesComplete: true,
-          decodedDecodeSignature: getAnalyzerDecodeSignature(analyzer),
+          decodedDecodeSignature: getAnalyzerDecodeSignature(analyzer, session.analyzers),
         };
         onUpdateSession((current) => ({
           ...current,
@@ -10483,6 +10500,13 @@ function AnalyzersPanel({
             <Plus size={13} />
           </button>
         </div>
+        {session.analyzers.some((analyzer) => analyzer.hla) && <button type="button"
+          onClick={() => void cancelHlaDecodes().then(() => onUpdateSession((current) => ({ ...current,
+            message: "Running HLA decodes cancelled", analyzers: current.analyzers.map((analyzer) => analyzer.hla
+              ? { ...analyzer, decodeBusy: false, renderBusy: false, decodeProgress: 0, renderProgress: 0 } : analyzer),
+          }))).catch((error) => onUpdateSession((current) => ({ ...current, message: String(error) })))}>
+          Cancel running HLA decodes
+        </button>}
 
         {selectorOpen && selectorAnchorRect && (
           <AnalyzerSelectionPopover
@@ -10605,6 +10629,8 @@ function AnalyzersPanel({
                                 <MoreVertical size={15} />
                               </button>
                             </div>
+                            {analyzer.hla && !analyzerDecodeSettings(analyzer, session.analyzers) &&
+                              <p role="alert">HLA input or settings are invalid. Open settings to select a Saleae Native UART, I2C or SPI input.</p>}
                           </div>
                         );
                       }}

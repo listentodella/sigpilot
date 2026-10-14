@@ -7,6 +7,7 @@ pub mod decoder_backend;
 pub mod device;
 pub mod env;
 pub mod error;
+pub mod hla_backend;
 pub mod fake;
 pub mod models;
 pub mod performance;

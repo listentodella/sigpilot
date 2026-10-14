@@ -12,15 +12,21 @@ function temporary(run: (root: string) => void) {
 }
 function payload(root: string) {
   for (const path of ["saleae-analyzer-sidecar/runtime", "sigrok-analyzer-sidecar/decoders/c_decoders",
-    "sigrok-analyzer-sidecar/decoders/python_decoders", "sigrok-analyzer-sidecar/python-runtime"]) {
+    "sigrok-analyzer-sidecar/decoders/python_decoders", "python-runtime/bin", "python-runtime/lib/python3.14/encodings", "hla-analyzer-sidecar/saleae"]) {
     mkdirSync(join(root, path), { recursive: true });
     writeFileSync(join(root, path, "fixture.txt"), "runtime fixture");
   }
   for (const path of ["saleae-analyzer-sidecar/sigpilot-saleae-analyzer-sidecar",
-    "sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar"]) {
+    "sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar", "python-runtime/bin/python3"]) {
     writeFileSync(join(root, path), "executable fixture");
     chmodSync(join(root, path), 0o755);
   }
+  writeFileSync(join(root, "python-runtime/runtime.json"), JSON.stringify({ implementation: "cpython", version: "3.14.6",
+    stdlib: "lib/python3.14", shared_library: "lib/libpython3.14.so" }));
+  writeFileSync(join(root, "python-runtime/lib/libpython3.14.so"), "shared python library");
+  writeFileSync(join(root, "python-runtime/lib/python3.14/encodings/__init__.py"), "# encodings");
+  for (const path of ["hla-analyzer-sidecar/main.py", "hla-analyzer-sidecar/saleae/analyzers.py",
+    "hla-analyzer-sidecar/saleae/data.py", "hla-analyzer-sidecar/saleae/__init__.py"]) writeFileSync(join(root, path), "# original host");
 }
 
 test("runtime manifests validate contents, source identity and platform", () => temporary((root) => {
@@ -84,6 +90,16 @@ test("validated tar import restores executable modes and does not replace on mis
   if (process.platform !== "win32") assert.equal(statSync(executable).mode & 0o777, 0o755);
   assert.throws(() => installRuntime(archive, "linux-x64", destination, "source-b"), /mismatch/);
   assert.equal(readFileSync(executable, "utf8"), "executable fixture");
+}));
+
+test("runtime requires a single shared CPython and complete HLA host", () => temporary((root) => {
+  payload(root);
+  sealRuntime(root, "macos-arm64", "source-a");
+  mkdirSync(join(root, "sigrok-analyzer-sidecar/python-runtime"));
+  assert.throws(() => sealRuntime(root, "macos-arm64", "source-a"), /Duplicate/);
+  rmSync(join(root, "sigrok-analyzer-sidecar/python-runtime"), { recursive: true });
+  rmSync(join(root, "hla-analyzer-sidecar/saleae/data.py"));
+  assert.throws(() => sealRuntime(root, "macos-arm64", "source-a"), /missing/);
 }));
 
 test("client CI consumes native artifacts on hosted runners without native builds", () => {

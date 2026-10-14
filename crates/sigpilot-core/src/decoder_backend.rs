@@ -2387,6 +2387,23 @@ struct I2cSidecarOptions {
 }
 
 impl SaleaeNativeDecoder {
+    pub fn raw_frames(&self, capture: &CaptureData, settings: &AnalyzerDecodeSettings) -> Result<Vec<crate::hla_backend::HlaInputFrame>> {
+        let request = build_native_sidecar_request(capture, settings, true)?;
+        self.raw_request(&request)
+    }
+
+    pub fn raw_frames_sparse_view(&self, capture: &SparseCaptureView<'_>, settings: &AnalyzerDecodeSettings) -> Result<Vec<crate::hla_backend::HlaInputFrame>> {
+        let request = build_sparse_view_native_sidecar_request(capture, settings, true)?;
+        self.raw_request(&request)
+    }
+
+    fn raw_request<T: Serialize>(&self, request: &T) -> Result<Vec<crate::hla_backend::HlaInputFrame>> {
+        let mut value = serde_json::to_value(request).map_err(|e| CoreError::Decode(e.to_string()))?;
+        value["raw_frames"] = serde_json::Value::Bool(true);
+        value["include_fields"] = serde_json::Value::Bool(true);
+        crate::hla_backend::native_raw_decode(&self.sidecar_path, &self.runtime_root, value)
+    }
+
     pub fn new(sidecar_path: impl Into<PathBuf>, runtime_root: impl Into<PathBuf>) -> Self {
         Self {
             sidecar_path: sidecar_path.into(),
@@ -3128,6 +3145,9 @@ impl DecoderBackend for SaleaeNativeDecoder {
         capture: &CaptureData,
         settings: &AnalyzerDecodeSettings,
     ) -> Result<DecoderOutput> {
+        if let AnalyzerDecodeSettings::Hla(settings) = settings {
+            return crate::hla_backend::HlaDecoder::discover()?.decode(capture, settings);
+        }
         let persistent_request =
             prefer_saleae_binary_v1(build_native_sidecar_request(capture, settings, true)?);
         if let Some(output) = self.decode_request_persistent_only(&persistent_request)? {
@@ -3153,6 +3173,15 @@ impl DecoderBackend for SaleaeNativeDecoder {
         capture: &SparseCaptureData,
         settings: &AnalyzerDecodeSettings,
     ) -> Result<DecoderOutput> {
+        if let AnalyzerDecodeSettings::Hla(settings) = settings {
+            let view = SparseCaptureView {
+                metadata: &capture.metadata,
+                channels: capture.channels.iter().map(|channel| crate::models::SparseDigitalChannelView {
+                    channel: channel.channel, initial_high: channel.initial_high, transitions: &channel.transitions,
+                }).collect(),
+            };
+            return crate::hla_backend::HlaDecoder::discover()?.decode_sparse_view(&view, settings);
+        }
         let persistent_request = prefer_saleae_binary_v1(build_sparse_native_sidecar_request(
             capture, settings, true,
         )?);
@@ -3179,6 +3208,9 @@ impl DecoderBackend for SaleaeNativeDecoder {
         capture: &SparseCaptureView<'_>,
         settings: &AnalyzerDecodeSettings,
     ) -> Result<DecoderOutput> {
+        if let AnalyzerDecodeSettings::Hla(settings) = settings {
+            return crate::hla_backend::HlaDecoder::discover()?.decode_sparse_view(capture, settings);
+        }
         let persistent_request = prefer_saleae_binary_v1(build_sparse_view_native_sidecar_request(
             capture, settings, true,
         )?);
@@ -3207,6 +3239,11 @@ impl DecoderBackend for SaleaeNativeDecoder {
         end_sample: u64,
         settings: &AnalyzerDecodeSettings,
     ) -> Result<DecoderOutput> {
+        if let AnalyzerDecodeSettings::Hla(settings) = settings {
+            let mut output = crate::hla_backend::HlaDecoder::discover()?.decode_sparse_view(capture, settings)?;
+            output.frames.retain(|frame| frame.end_sample >= start_sample && frame.start_sample < end_sample);
+            return Ok(output);
+        }
         let persistent_request =
             prefer_saleae_binary_v1(build_sparse_view_window_native_sidecar_request(
                 capture,
@@ -3623,8 +3660,14 @@ impl SigrokNativeDecoder {
             command.arg("--python-decoder-root").arg(root);
         }
         if let Some(sidecar_dir) = self.sidecar_path.parent() {
-            let python_home = sidecar_dir.join("python-runtime");
+            let shared_home = sidecar_dir.parent().map(|root| root.join("python-runtime"));
+            let python_home = shared_home.filter(|p| p.is_dir()).unwrap_or_else(|| sidecar_dir.join("python-runtime"));
             if python_home.is_dir() {
+                #[cfg(windows)] {
+                    let mut paths = vec![python_home.join("bin")];
+                    if let Some(path) = std::env::var_os("PATH") { paths.extend(std::env::split_paths(&path)); }
+                    if let Ok(path) = std::env::join_paths(paths) { command.env("PATH", path); }
+                }
                 command.env("PYTHONHOME", python_home);
             }
         }
@@ -4039,6 +4082,7 @@ fn native_protocol_name(settings: &AnalyzerDecodeSettings) -> &str {
         AnalyzerDecodeSettings::I2c(_) => "I2C",
         AnalyzerDecodeSettings::Spi(_) => "SPI",
         AnalyzerDecodeSettings::Native(settings) => &settings.protocol_name,
+        AnalyzerDecodeSettings::Hla(_) => "HLA",
     }
 }
 
@@ -4109,6 +4153,7 @@ fn configured_native_channels(
     channel_count: u8,
 ) -> Result<BTreeSet<u8>> {
     let channels = match settings {
+        AnalyzerDecodeSettings::Hla(_) => return Err(CoreError::Decode("HLA cannot use a sample decoder directly".into())),
         AnalyzerDecodeSettings::Uart(settings) => BTreeSet::from([settings.channel]),
         AnalyzerDecodeSettings::I2c(settings) => {
             BTreeSet::from([settings.sda_channel, settings.scl_channel])
@@ -4349,6 +4394,9 @@ where
 }
 
 fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSettings {
+    if let AnalyzerDecodeSettings::Hla(settings) = settings {
+        return native_sidecar_settings(&settings.upstream);
+    }
     let (protocol, primary_channel, channels, options) = match settings {
         AnalyzerDecodeSettings::Uart(settings) => (
             "uart".to_string(),
@@ -4411,6 +4459,7 @@ fn native_sidecar_settings(settings: &AnalyzerDecodeSettings) -> NativeSidecarSe
             serde_json::to_value(&settings.channels).expect("native sidecar channels serialize"),
             serde_json::to_value(&settings.options).expect("native sidecar options serialize"),
         ),
+        AnalyzerDecodeSettings::Hla(_) => unreachable!("HLA handled above"),
     };
     NativeSidecarSettings {
         protocol,
@@ -4938,6 +4987,7 @@ impl DecoderBackend for LegacyRustDecoder {
             AnalyzerDecodeSettings::Uart(_) => "UART",
             AnalyzerDecodeSettings::I2c(_) => "I2C",
             AnalyzerDecodeSettings::Spi(_) => "SPI",
+            AnalyzerDecodeSettings::Hla(_) => return Err(CoreError::Decode("HLA requires the independent CPython host".into())),
             AnalyzerDecodeSettings::Native(settings) => {
                 // A rejection, not a crash: the analyzer exists and the catalog
                 // advertised it, but this fallback cannot run it. The protocol
@@ -6610,6 +6660,61 @@ mod tests {
             .channel_values
             .iter()
             .any(|value| value.role == "MISO" && value.value == 0x3C));
+    }
+
+    #[test]
+    #[ignore = "requires built standalone runtime and explicit SIGPILOT_HLA_PYTHON"]
+    fn hla_raw_frames_and_host_preserve_uart_i2c_spi() {
+        use crate::hla_backend::{HlaDecodeSettings, HlaDecoder, HlaValue};
+        let native = SaleaeNativeDecoder::from_env().unwrap();
+        let host = HlaDecoder::discover().unwrap();
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/hla/original/extension.json");
+        for (capture, upstream) in [uart_capture_and_settings(), i2c_capture_and_settings(), mode_zero_capture_and_settings()] {
+            let raw = native.raw_frames(&capture, &upstream).unwrap();
+            assert!(!raw.is_empty());
+            match &upstream {
+                AnalyzerDecodeSettings::Uart(_) => {
+                    assert!(raw.iter().any(|f| f.frame_type == "data" && f.data.get("data") == Some(&HlaValue::Bytes(vec![0xa5]))));
+                }
+                AnalyzerDecodeSettings::I2c(_) => {
+                    assert!(raw.iter().any(|f| f.frame_type == "start"));
+                    assert!(raw.iter().any(|f| f.frame_type == "stop"));
+                    assert!(raw.iter().any(|f| f.data.contains_key("ack")));
+                }
+                AnalyzerDecodeSettings::Spi(_) => {
+                    assert_eq!(raw.iter().map(|f| f.frame_type.as_str()).collect::<Vec<_>>(), vec!["enable", "result", "disable"]);
+                    assert_eq!(raw[1].data["mosi"], HlaValue::Bytes(vec![0xa5]));
+                    assert_eq!(raw[1].data["miso"], HlaValue::Bytes(vec![0x3c]));
+                    assert_eq!((raw[1].start_sample, raw[1].end_sample), (10, 86));
+                }
+                _ => unreachable!(),
+            }
+            let settings = HlaDecodeSettings { manifest_path: manifest.to_string_lossy().into_owned(), entry_point: "fixture.Echo".into(),
+                settings: BTreeMap::new(), upstream_id: "original".into(), upstream: Box::new(upstream),
+                time_origin: crate::hla_backend::RationalTime { numerator: 1_800_000_000, denominator: 1 } };
+            let echoed = host.run_frames(&raw, capture.metadata.sample_rate_hz, &settings).unwrap();
+            assert_eq!(echoed.into_iter().map(|o| o.frame).collect::<Vec<_>>(), raw);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires explicit SIGPILOT_HLA_PYTHON"]
+    fn hla_host_settings_and_restart_are_deterministic() {
+        use crate::hla_backend::{HlaDecodeSettings, HlaDecoder, HlaInputFrame, HlaValue};
+        let host = HlaDecoder::discover().unwrap();
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/hla/original/extension.json");
+        let mut settings = HlaDecodeSettings { manifest_path: manifest.to_string_lossy().into_owned(), entry_point: "fixture.Counter".into(),
+            settings: BTreeMap::from([("step".into(), serde_json::json!(3)), ("label".into(), serde_json::json!("configured"))]),
+            upstream_id: "uart".into(), upstream: Box::new(AnalyzerDecodeSettings::Uart(Default::default())), time_origin: Default::default() };
+        assert!(host.inspect(&settings).unwrap()["settings"].is_array());
+        let input: Vec<_> = (0..2050).map(|index| HlaInputFrame { frame_type: "data".into(), start_sample: index*2, end_sample: index*2+1,
+            data: BTreeMap::new() }).collect();
+        let first = host.run_frames(&input, 3, &settings).unwrap();
+        assert_eq!(first, host.run_frames(&input, 3, &settings).unwrap());
+        assert_eq!(first[1024].frame.data["count"], HlaValue::Signed(3075));
+        settings.entry_point = "fixture.Raises".into();
+        settings.settings.clear();
+        assert!(host.run_frames(&input[..1], 3, &settings).unwrap_err().to_string().contains("fixture decode error"));
     }
 
     #[test]

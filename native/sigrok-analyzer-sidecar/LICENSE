@@ -1,14 +1,18 @@
 PXLogic Sigrok Analyzer Sidecar
 
-This sidecar is licensed under the GNU General Public License, version 2 or
-later (GPL-2.0-or-later). It links PXView's libsigrokdecode fork and loads its
-native C protocol decoder modules. See the PXView source tree and individual
-decoder source headers for copyright and license details.
+The distributed linked sidecar is governed by the GNU General Public License,
+version 3 or later (GPL-3.0-or-later). PXView's libsigrokdecode contains
+GPL-3.0-or-later sources; a GPL-2.0-or-later notice on sidecar or decoder source
+files does not make the combined executable distributable under GPL version 2.
+See the PXView source tree and individual decoder headers for copyright and
+license details; retain their notices and provide corresponding source when
+redistributing the sidecar and its decoder modules.
 
 The sidecar is a separate executable and is not linked into the PXLogic Tauri
 process. No GPL source or object code is linked into the MIT/Apache Rust
-workspace libraries.
+workspace libraries. The independent HLA host is original code, not derived
+from libsigrokdecode; sharing a CPython installation does not link it to Sigrok.
+CPython and bundled dependent libraries retain their own licenses.
 
-The full GPL-2.0 text is available at:
-https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
-
+The full GPL-3.0 text is available at:
+https://www.gnu.org/licenses/gpl-3.0.txt

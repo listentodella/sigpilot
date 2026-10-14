@@ -1900,6 +1900,29 @@ json DecodeWithEdges(
         observer->progress_sample = input.at("sample_count").get<std::uint64_t>();
     }
 
+    // HLA consumes the original FrameV2 contract, never display-normalized fields.
+    if(input.value("raw_frames", false))
+    {
+        json raw = json::array();
+        const auto count = sr_session_frame_count(session.get());
+        for(size_t index = 0; index < count; ++index)
+        {
+            sr_frame_view frame{};
+            Check(session.get(), sr_session_frame(session.get(), index, &frame), "read raw frame");
+            json data = json::object();
+            for(size_t field_index = 0; field_index < frame.field_count; ++field_index)
+            {
+                sr_field_view field{};
+                Check(session.get(), sr_session_frame_field(session.get(), index, field_index, &field), "read raw field");
+                data[field.key ? field.key : "value"] = field.kind == SR_FIELD_DOUBLE
+                    ? json{{"Float", field.double_value}} : FieldValue(field);
+            }
+            raw.push_back({{"type", frame.type ? frame.type : ""},
+                {"start_sample", frame.start_sample}, {"end_sample", frame.end_sample}, {"data", std::move(data)}});
+        }
+        return {{"format", "sigpilot.hla.raw.v1"}, {"frames", std::move(raw)}};
+    }
+
     const auto output_started = Clock::now();
     const bool binary_response = response_format == ResponseFormat::BinaryV1;
     json frames = json::array();

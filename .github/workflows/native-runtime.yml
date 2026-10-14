@@ -40,8 +40,8 @@ jobs:
         with:
           node-version: "22"
 
-      # These are dynamic runtime dependencies on macOS, including cache hits.
-      - name: Install macOS runtime dependencies
+      # Build-time dependencies only: the resulting package carries its Python/GLib ABI.
+      - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         run: bash scripts/install-macos-native-deps.sh cmake ninja pkg-config
 
@@ -91,7 +91,7 @@ jobs:
         if: runner.os == 'Linux' && steps.cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config python3-dev libglib2.0-dev jq
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config python3-dev libglib2.0-dev jq patchelf
 
       - name: Configure Unix native environment
         if: runner.os != 'Windows'
@@ -99,10 +99,13 @@ jobs:
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             echo "SIGPILOT_COPY_NATIVE_DEPS=1" >> "$GITHUB_ENV"
             echo "PATH=/usr/bin:$PATH" >> "$GITHUB_ENV"
+            echo "SIGPILOT_PYTHON_EXECUTABLE=/usr/bin/python3" >> "$GITHUB_ENV"
+            echo "SIGPILOT_SIGROK_PYTHON_ROOT=/usr" >> "$GITHUB_ENV"
           else
             python_root="$(brew --prefix python@3.13)"
             echo "PATH=$python_root/libexec/bin:$PATH" >> "$GITHUB_ENV"
             echo "SIGPILOT_SIGROK_PYTHON_ROOT=$python_root" >> "$GITHUB_ENV"
+            echo "SIGPILOT_PYTHON_EXECUTABLE=$python_root/bin/python3.13" >> "$GITHUB_ENV"
           fi
 
       - name: Build and verify Windows native runtime
@@ -131,6 +134,7 @@ jobs:
       - name: Smoke test native runtime payload
         run: |
           node scripts/native-runtime.mjs verify "${{ matrix.platform }}"
+          node scripts/test-shared-python-runtime.mjs
           node scripts/smoke-native-runtime.mjs resources/native
 
       - name: Package native runtime

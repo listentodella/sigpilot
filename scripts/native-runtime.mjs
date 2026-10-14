@@ -12,11 +12,11 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RESOURCE_ROOT = join(ROOT, "resources/native");
 const MANIFEST = "native-runtime-manifest.json";
-const SCHEMA = 1;
-const SOURCE_PATHS = ["native/sigrok-analyzer-sidecar", "native/saleae-analyzer-sidecar",
+const SCHEMA = 2;
+const SOURCE_PATHS = ["native/hla-analyzer-sidecar", "native/sigrok-analyzer-sidecar", "native/saleae-analyzer-sidecar",
   "vendor/pxview-sigrokdecode", "vendor/saleae-standalone", "vendor/nlohmann-json",
   "scripts/prepare-tauri-resources.sh", "scripts/prepare-tauri-resources.mjs", "scripts/native-runtime.mjs",
-  "scripts/smoke-native-runtime.mjs", "scripts/normalize-python-runtime.mjs", "scripts/install-macos-native-deps.sh",
+  "scripts/smoke-native-runtime.mjs", "scripts/package-python-runtime.py", "scripts/normalize-python-runtime.mjs", "scripts/install-macos-native-deps.sh",
   ".github/workflows/native-runtime.yml", "testdata/decoders"];
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
@@ -83,9 +83,18 @@ function requirePayload(root, platform) {
   for (const path of [`saleae-analyzer-sidecar/sigpilot-saleae-analyzer-sidecar${exe}`,
     "saleae-analyzer-sidecar/runtime", `sigrok-analyzer-sidecar/sigpilot-sigrok-sidecar${exe}`,
     "sigrok-analyzer-sidecar/decoders/c_decoders", "sigrok-analyzer-sidecar/decoders/python_decoders",
-    ...(!platform.startsWith("macos") ? ["sigrok-analyzer-sidecar/python-runtime"] : [])]) {
+    `python-runtime/bin/${exe ? "python.exe" : "python3"}`, "python-runtime/runtime.json",
+    "hla-analyzer-sidecar/main.py", "hla-analyzer-sidecar/saleae/analyzers.py",
+    "hla-analyzer-sidecar/saleae/data.py", "hla-analyzer-sidecar/saleae/__init__.py"]) {
     if (!existsSync(join(root, path))) throw new Error(`Native runtime is missing ${path}`);
   }
+  if (existsSync(join(root, "sigrok-analyzer-sidecar/python-runtime"))) throw new Error("Duplicate Sigrok Python runtime");
+  const metadata = JSON.parse(readFileSync(join(root, "python-runtime/runtime.json"), "utf8"));
+  if (metadata.implementation !== "cpython" || !/^3\.\d+\.\d+/.test(metadata.version)) throw new Error("Invalid CPython metadata");
+  for (const path of [metadata.stdlib, metadata.shared_library]) {
+    if (!existsSync(join(root, "python-runtime", safePath(path)))) throw new Error(`Missing Python payload: ${path}`);
+  }
+  if (!existsSync(join(root, "python-runtime", metadata.stdlib, "encodings/__init__.py"))) throw new Error("Missing Python encodings stdlib");
 }
 
 export function sealRuntime(root = RESOURCE_ROOT, platform = nativePlatform(), fingerprint = sourceFingerprint()) {
@@ -147,7 +156,7 @@ export function installRuntime(archive, platform, destination = RESOURCE_ROOT, f
 export function packRuntime(archive, platform = nativePlatform()) {
   verifyRuntime(RESOURCE_ROOT, platform);
   mkdirSync(dirname(resolve(archive)), { recursive: true });
-  run(TAR, ["-czf", resolve(archive), "-C", RESOURCE_ROOT, MANIFEST, "saleae-analyzer-sidecar", "sigrok-analyzer-sidecar"]);
+  run(TAR, ["-czf", resolve(archive), "-C", RESOURCE_ROOT, MANIFEST, "saleae-analyzer-sidecar", "sigrok-analyzer-sidecar", "python-runtime", "hla-analyzer-sidecar"]);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

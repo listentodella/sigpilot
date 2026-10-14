@@ -187,6 +187,7 @@ pub enum AnalyzerDecodeSettings {
     I2c(I2cDecodeSettings),
     Spi(SpiDecodeSettings),
     Native(NativeDecodeSettings),
+    Hla(crate::hla_backend::HlaDecodeSettings),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,6 +283,7 @@ pub fn decode_analyzer(
             "{} requires a Saleae Native or Sigrok Native decoder backend",
             settings.protocol_name
         ))),
+        AnalyzerDecodeSettings::Hla(_) => Err(CoreError::Decode("HLA requires the independent CPython host".into())),
     }
 }
 

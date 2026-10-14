@@ -354,11 +354,45 @@ export interface NativeDecodeSettings {
   primary_channel: number;
 }
 
+export interface HlaSettingMetadata {
+  id: string;
+  kind: "string" | "number" | "choices";
+  default: string | number;
+  min?: number;
+  max?: number;
+  choices?: Array<string | number>;
+}
+
+export interface HlaExtensionMetadata {
+  settings: HlaSettingMetadata[];
+  result_types: Record<string, unknown>;
+}
+
+export interface HlaDecodeSettings {
+  manifest_path: string;
+  entry_point: string;
+  settings: Record<string, unknown>;
+  upstream_id: string;
+  upstream: AnalyzerDecodeSettings;
+  time_origin?: { numerator: number; denominator: number };
+}
+
+export function inspectHlaExtension(manifestPath: string, entryPoint: string): Promise<HlaExtensionMetadata> {
+  if (!isTauriRuntime()) return Promise.reject(new Error("HLA extensions require the desktop runtime; browser preview cannot execute Python."));
+  return callBackend("inspect_hla_extension", { manifestPath, entryPoint });
+}
+
+export function cancelHlaDecodes(): Promise<void> {
+  if (!isTauriRuntime()) return Promise.reject(new Error("HLA cancellation requires the desktop runtime."));
+  return callBackend("cancel_hla_decodes");
+}
+
 export type AnalyzerDecodeSettings =
   | { protocol: "Uart"; settings: UartDecodeSettings }
   | { protocol: "I2c"; settings: I2cDecodeSettings }
   | { protocol: "Spi"; settings: SpiDecodeSettings }
-  | { protocol: "Native"; settings: NativeDecodeSettings };
+  | { protocol: "Native"; settings: NativeDecodeSettings }
+  | { protocol: "Hla"; settings: HlaDecodeSettings };
 
 export type DecoderBackendKind = "auto" | "saleae_native" | "sigrok_native" | "legacy_rust";
 
@@ -488,6 +522,8 @@ export interface AnalyzerProtocolMarker {
 export interface AnalyzerRenderResult {
   analyzer_id: string;
   tracks: AnalyzerTrackWindow[];
+  /** Set when this analyzer failed; the rest of the frame still rendered. */
+  error?: string | null;
 }
 
 export interface AnalyzerDecodeBatchRequest {
@@ -814,7 +850,7 @@ function buildPreviewDemoSignals(
       return;
     }
 
-    if (analyzer.protocol === "Native") return;
+    if (analyzer.protocol === "Native" || analyzer.protocol === "Hla") return;
 
     const roles = [
       analyzer.settings.mosi_channel === null
@@ -2110,6 +2146,7 @@ export function releaseGraphSession(sessionId: string): Promise<void> {
 }
 
 function buildPreviewAnalyzerFrames(settings: AnalyzerDecodeSettings): DecodedFrame[] {
+  if (settings.protocol === "Hla") throw new Error("HLA extensions require the desktop runtime; browser preview cannot execute Python.");
   if (settings.protocol === "Uart") return buildPreviewUartFrames(settings.settings);
   if (settings.protocol === "Native") return [];
   const metadata = previewCapture.metadata;

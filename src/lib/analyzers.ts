@@ -4,6 +4,7 @@ import type {
   AnalyzerTrackWindow,
   DecoderBackendKind,
   DecodedFrame,
+  HlaSettingMetadata,
   SaleaeAnalyzerMetadata,
   SigrokDecoderCatalogItem,
   SigrokDecoderChannel,
@@ -73,6 +74,13 @@ export interface UiAnalyzerInstance {
   name: string;
   color: string;
   decoderBackend: DecoderBackendKind;
+  hla?: {
+    manifestPath: string;
+    entryPoint: string;
+    upstreamId: string;
+    settings: Record<string, unknown>;
+    settingMetadata?: HlaSettingMetadata[];
+  };
   configurationValid: boolean;
   channel: number;
   baudRate: number;
@@ -575,6 +583,7 @@ export function createAnalyzerInstanceFromSaleaeCatalog(
 }
 
 export function analyzerChannelRoles(analyzer: UiAnalyzerInstance): AnalyzerChannelRole[] {
+  if (analyzer.hla) return [{ channel: analyzer.channel, hasBubbles: true, hasMarkers: false, title: "HLA" }];
   if (analyzer.type === "I2C") {
     return [
       {
@@ -686,9 +695,9 @@ export function analyzerStripInsetForChannel(analyzers: UiAnalyzerInstance[], ch
 }
 
 export function analyzerSupportsDecoding(
-  analyzer: Pick<UiAnalyzerInstance, "type" | "nativeDecoderId" | "nativeCatalogChannels">,
+  analyzer: Pick<UiAnalyzerInstance, "type" | "nativeDecoderId" | "nativeCatalogChannels" | "hla">,
 ) {
-  return CORE_ANALYZER_TYPES.includes(analyzer.type as (typeof CORE_ANALYZER_TYPES)[number]) ||
+  return Boolean(analyzer.hla) || CORE_ANALYZER_TYPES.includes(analyzer.type as (typeof CORE_ANALYZER_TYPES)[number]) ||
     nativeAnalyzerDefinition(analyzer.type) !== null ||
     Boolean(analyzer.nativeDecoderId && Array.isArray(analyzer.nativeCatalogChannels));
 }
@@ -696,7 +705,7 @@ export function analyzerSupportsDecoding(
 export function analyzerCanRunDecoder(
   analyzer: Pick<
     UiAnalyzerInstance,
-    "type" | "nativeDecoderId" | "nativeCatalogChannels" | "nativeRunnerStatus"
+    "type" | "nativeDecoderId" | "nativeCatalogChannels" | "nativeRunnerStatus" | "hla"
   >,
 ) {
   if (!analyzerSupportsDecoding(analyzer)) return false;
@@ -710,8 +719,21 @@ export function analyzerCanRunDecoder(
   );
 }
 
-export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance): AnalyzerDecodeSettings | null {
+export function analyzerDecodeSettings(analyzer: UiAnalyzerInstance, analyzers: UiAnalyzerInstance[] = []): AnalyzerDecodeSettings | null {
   if (!analyzer.configurationValid) return null;
+  if (analyzer.hla) {
+    if (validateHlaAnalyzer(analyzer, analyzers)) return null;
+    const source = analyzers.find((item) => item.id === analyzer.hla!.upstreamId)!;
+    const upstream = analyzerDecodeSettings(source);
+    if (!upstream) return null;
+    return { protocol: "Hla", settings: {
+      manifest_path: analyzer.hla.manifestPath,
+      entry_point: analyzer.hla.entryPoint,
+      settings: analyzer.hla.settings,
+      upstream_id: source.id,
+      upstream,
+    } };
+  }
   if (analyzer.type === "Async Serial") {
     return {
       protocol: "Uart",
@@ -799,6 +821,18 @@ export function restoreSaleaeAnalyzer(
     saleaeMetadata: metadata.saleae_metadata ?? null,
   };
 
+  const persisted = metadata.saleae_metadata as { uiAnalyzerId?: string; hla?: UiAnalyzerInstance["hla"] } | undefined;
+  if (typeof persisted?.uiAnalyzerId === "string") restored.id = persisted.uiAnalyzerId;
+  if (settings?.protocol === "Hla" || persisted?.hla) {
+    const hla = persisted?.hla ?? (settings?.protocol === "Hla" ? {
+      manifestPath: settings.settings.manifest_path,
+      entryPoint: settings.settings.entry_point,
+      upstreamId: settings.settings.upstream_id,
+      settings: settings.settings.settings,
+    } : undefined);
+    return { ...restored, decoderBackend: "saleae_native", configurationValid: true, hla };
+  }
+
   if (settings?.protocol === "Uart") {
     return {
       ...restored,
@@ -878,8 +912,8 @@ export function restoreSaleaeAnalyzer(
   return restored;
 }
 
-export function saleaeAnalyzerMetadata(analyzer: UiAnalyzerInstance): SaleaeAnalyzerMetadata {
-  const decodeSettings = analyzerDecodeSettings(analyzer);
+export function saleaeAnalyzerMetadata(analyzer: UiAnalyzerInstance, analyzers: UiAnalyzerInstance[] = []): SaleaeAnalyzerMetadata {
+  const decodeSettings = analyzerDecodeSettings(analyzer, analyzers);
   const nativeCatalogMetadata =
     analyzer.nativeCatalogChannels?.length || analyzer.nativeRunnerStatus
       ? {
@@ -909,7 +943,11 @@ export function saleaeAnalyzerMetadata(analyzer: UiAnalyzerInstance): SaleaeAnal
     stream_to_terminal: analyzer.streamToTerminal,
     decoder_backend: analyzer.decoderBackend,
     ...(decodeSettings ? { decode_settings: decodeSettings } : {}),
-    ...(saleaeMetadata == null ? {} : { saleae_metadata: saleaeMetadata }),
+    saleae_metadata: {
+      ...(saleaeMetadata && typeof saleaeMetadata === "object" ? saleaeMetadata : {}),
+      uiAnalyzerId: analyzer.id,
+      ...(analyzer.hla ? { hla: analyzer.hla } : {}),
+    },
   };
 }
 
@@ -917,8 +955,9 @@ export function analyzerChannelIndexes(analyzer: UiAnalyzerInstance) {
   return [...new Set(analyzerChannelRoles(analyzer).map((role) => role.channel))];
 }
 
-export function analyzerDecodeSignature(analyzer: UiAnalyzerInstance) {
-  return JSON.stringify([analyzer.decoderBackend, analyzerDecodeSettings(analyzer)]);
+export function analyzerDecodeSignature(analyzer: UiAnalyzerInstance, analyzers: UiAnalyzerInstance[] = []) {
+  return JSON.stringify([analyzer.decoderBackend, analyzerDecodeSettings(analyzer, analyzers),
+    ...(analyzer.hla ? [analyzer.hla] : [])]);
 }
 
 export function mergeAnalyzerTrackFrames(
@@ -1167,6 +1206,7 @@ export function analyzerCatalogChoiceKey(choice: {
   catalogItem?: SigrokDecoderCatalogItem;
   name: string;
   source?: string;
+  hla?: { manifestPath: string; entryPoint: string };
 }) {
   return [
     choice.backend,
@@ -1174,6 +1214,8 @@ export function analyzerCatalogChoiceKey(choice: {
     choice.catalogItem?.id ?? "",
     choice.name,
     choice.source ?? "",
+    choice.hla?.manifestPath ?? "",
+    choice.hla?.entryPoint ?? "",
   ].join(":");
 }
 
@@ -1269,4 +1311,66 @@ function formatAsciiValue(value: number): string {
                 ? String.fromCharCode(byte)
                 : null;
   return escaped === null ? formatAnalyzerValue(normalizedValue, "Hexadecimal", bitsForValue(value)) : `'${escaped}'`;
+}
+
+export function hlaUpstreamAnalyzers(analyzers: UiAnalyzerInstance[], selfId?: string) {
+  return analyzers.filter((item) => item.id !== selfId && !item.hla &&
+    item.decoderBackend === "saleae_native" && CORE_ANALYZER_TYPES.includes(item.type as typeof CORE_ANALYZER_TYPES[number]) &&
+    item.configurationValid && hlaUpstreamConfigValid(item));
+}
+
+function hlaUpstreamConfigValid(item: UiAnalyzerInstance) {
+  const channelValid = (channel: number) => Number.isInteger(channel) && channel >= 0 && channel < 32;
+  if (item.type === "Async Serial") return channelValid(item.channel) && Number.isInteger(item.baudRate) && item.baudRate > 0 &&
+    Number.isInteger(item.uartDataBits) && item.uartDataBits >= 5 && item.uartDataBits <= 9 &&
+    [1, 1.5, 2].includes(item.uartStopBits) && ["none", "even", "odd"].includes(item.uartParity);
+  if (item.type === "I2C") return channelValid(item.i2cSdaChannel) && channelValid(item.i2cSclChannel) && item.i2cSdaChannel !== item.i2cSclChannel;
+  if (item.type === "SPI") {
+    const channels = [item.spiMosiChannel, item.spiMisoChannel, item.spiClockChannel, item.spiEnableChannel]
+      .filter((channel): channel is number => channel !== null);
+    return item.spiClockChannel !== null && (item.spiMosiChannel !== null || item.spiMisoChannel !== null) &&
+      channels.every(channelValid) && new Set(channels).size === channels.length &&
+      Number.isInteger(item.spiBitsPerTransfer) && item.spiBitsPerTransfer >= 1 && item.spiBitsPerTransfer <= 64;
+  }
+  return false;
+}
+
+export function validateHlaAnalyzer(analyzer: UiAnalyzerInstance, analyzers: UiAnalyzerInstance[]): string | null {
+  const hla = analyzer.hla;
+  if (!hla) return "Missing HLA extension configuration.";
+  if (analyzer.decoderBackend !== "saleae_native") return "HLA requires the Saleae Native backend.";
+  if (!hla.manifestPath.trim() || !hla.entryPoint.trim()) return "Missing extension manifest or entry point.";
+  if (!hlaUpstreamAnalyzers(analyzers, analyzer.id).some((item) => item.id === hla.upstreamId)) {
+    return "Select a valid Saleae Native UART, I2C or SPI input analyzer (not another HLA).";
+  }
+  if (!hla.settingMetadata) return "Inspect the extension before saving its settings.";
+  for (const field of hla.settingMetadata) {
+    const value = hla.settings[field.id];
+    if (field.kind === "string" && typeof value !== "string") return `${field.id} must be a string.`;
+    if (field.kind === "number" && (typeof value !== "number" || !Number.isFinite(value) ||
+      (field.min != null && value < field.min) || (field.max != null && value > field.max))) {
+      return `${field.id} must be a finite number within its allowed range.`;
+    }
+    if (field.kind === "choices" && !field.choices?.some((choice) => choice === value)) return `Select a valid ${field.id}.`;
+  }
+  return null;
+}
+
+/** Drop dependent results whenever an input changes, disappears or becomes invalid. */
+export function reconcileHlaAnalyzers(previous: UiAnalyzerInstance[], next: UiAnalyzerInstance[]) {
+  return next.map((analyzer) => {
+    if (!analyzer.hla) return analyzer;
+    const before = previous.find((item) => item.id === analyzer.id);
+    const source = next.find((item) => item.id === analyzer.hla!.upstreamId);
+    const changed = !before || analyzerDecodeSignature(before, previous) !== analyzerDecodeSignature(analyzer, next);
+    if (!changed && (!source || source.channel === analyzer.channel)) return analyzer;
+    return {
+      ...analyzer, channel: source?.channel ?? analyzer.channel,
+      protocolBubbles: [], decodedFrames: [], decodedFrameCount: 0,
+      decodedFramesComplete: false, decodedDecodeSignature: null,
+      previousFrame: null, nextFrame: null, renderedTracks: [], renderedViewport: null,
+      renderedDecodeSignature: null, decodeBusy: false, decodeProgress: 0,
+      renderBusy: false, renderProgress: 0,
+    };
+  });
 }

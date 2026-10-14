@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 export interface AnalyzerLibraryChoice {
   backend: DecoderBackendKind;
   catalogItem?: SigrokDecoderCatalogItem;
+  hla?: { manifestPath: string; entryPoint: string };
   description?: string | null;
   name: string;
   runnerStatus?: string | null;

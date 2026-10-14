@@ -22,7 +22,9 @@ rm -rf \
   "$RESOURCE_DIR/saleae-analyzer-sidecar" \
   "$RESOURCE_DIR/saleae-graph-sidecar" \
   "$RESOURCE_DIR/saleae-runtime-2.4.43" \
-  "$RESOURCE_DIR/sigrok-analyzer-sidecar"
+  "$RESOURCE_DIR/sigrok-analyzer-sidecar" \
+  "$RESOURCE_DIR/python-runtime" \
+  "$RESOURCE_DIR/hla-analyzer-sidecar"
 rm -f "$RESOURCE_DIR/native-runtime-manifest.json"
 
 copy_file() {
@@ -80,68 +82,13 @@ saleae_executable_name() {
   esac
 }
 
-copy_shared_dependencies() {
-  local binary="$1"
-  local target_dir="$2"
-  local line dep
-
-  case "$HOST_OS" in
-    MINGW*|MSYS*|CYGWIN*)
-      command -v ldd >/dev/null 2>&1 || return 0
-      while IFS= read -r line; do
-        dep="$(printf '%s\n' "$line" | awk '{print $3}')"
-        if [[ -f "$dep" && "$dep" == /*/bin/*.dll ]]; then
-          copy_file "$dep" "$target_dir/$(basename "$dep")"
-        fi
-      done < <(ldd "$binary" 2>/dev/null || true)
-      ;;
-    Linux)
-      [[ "${SIGPILOT_COPY_NATIVE_DEPS:-0}" == "1" ]] || return 0
-      command -v ldd >/dev/null 2>&1 || return 0
-      while IFS= read -r line; do
-        dep="$(printf '%s\n' "$line" | awk '{print $3}')"
-        if [[ ! -f "$dep" ]]; then
-          continue
-        fi
-        case "$(basename "$dep")" in
-          ld-linux*|libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libgcc_s.so.*)
-            continue
-            ;;
-        esac
-        copy_file "$dep" "$target_dir/$(basename "$dep")"
-      done < <(ldd "$binary" 2>/dev/null || true)
-      ;;
-  esac
-}
-
-copy_python_runtime() {
-  local target_dir="$1"
-  local python_prefix python_version python_source python_target
-
-  case "$HOST_OS" in
-    Darwin) return 0 ;;
-  esac
-  command -v python3 >/dev/null 2>&1 || {
-    printf 'python3 is required to bundle the Sigrok runtime.\n' >&2
-    return 1
-  }
-
-  python_prefix="$(python3 -c 'import sys; print(sys.base_prefix)')"
-  python_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  python_source="$python_prefix/lib/python$python_version"
-  python_target="$target_dir/python-runtime/lib/python$python_version"
-  if [[ ! -d "$python_source" ]]; then
-    printf 'Python standard library was not found at %s.\n' "$python_source" >&2
-    return 1
-  fi
-
-  copy_directory "$python_source" "$python_target"
-  rm -rf "$python_target/site-packages" "$python_target"/config-*
-  find "$python_target" -type d -name __pycache__ -prune -exec rm -rf {} +
-  # Debian stdlib links (such as sitecustomize.py -> /etc/python*/...) must
-  # become self-contained before the runtime manifest rejects external links.
-  node "$ROOT_DIR/scripts/normalize-python-runtime.mjs" "$python_target"
-}
+# Select one interpreter for packaging and require CMake to link that installation.
+PYTHON_BIN="${SIGPILOT_PYTHON_EXECUTABLE:-$(command -v python3 || true)}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  printf 'CPython is required to bundle the shared native runtime.\n' >&2
+  exit 1
+fi
+export SIGPILOT_SIGROK_PYTHON_ROOT="${SIGPILOT_SIGROK_PYTHON_ROOT:-$("$PYTHON_BIN" -c 'import sys; print(sys.base_prefix)')}"
 
 run_build_script() {
   local script="$1"
@@ -192,17 +139,8 @@ if sigrok_root="$(sigrok_source_root)"; then
   sigrok_target_name="$(sigrok_executable_name)"
   copy_executable "$sigrok_sidecar" \
     "$RESOURCE_DIR/sigrok-analyzer-sidecar/$sigrok_target_name"
-  copy_shared_dependencies "$sigrok_sidecar" "$RESOURCE_DIR/sigrok-analyzer-sidecar"
-  case "$HOST_OS" in
-    MINGW*|MSYS*|CYGWIN*)
-      for runtime_dll in "$sigrok_build_dir"/*.dll; do
-        [[ -f "$runtime_dll" ]] || continue
-        copy_file "$runtime_dll" \
-          "$RESOURCE_DIR/sigrok-analyzer-sidecar/$(basename "$runtime_dll")"
-      done
-      ;;
-  esac
-  copy_python_runtime "$RESOURCE_DIR/sigrok-analyzer-sidecar"
+  # Validate before copying/relocating; stale CMake selections must never ship.
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/package-python-runtime.py" "$RESOURCE_DIR" "$sigrok_build_dir" --check
   if [[ -d "$sigrok_build_dir/decoders/c_decoders" ]]; then
     mkdir -p "$RESOURCE_DIR/sigrok-analyzer-sidecar/decoders"
     cp -R "$sigrok_build_dir/decoders/c_decoders" \
@@ -223,5 +161,16 @@ if sigrok_root="$(sigrok_source_root)"; then
 else
   printf 'Skipping Sigrok sidecar: vendor/pxview-sigrokdecode or pxview-fork is not available in this checkout.\n' >&2
 fi
+
+if [[ ! -f "$ROOT_DIR/native/hla-analyzer-sidecar/main.py" ]]; then
+  printf 'HLA host source native/hla-analyzer-sidecar/main.py is required.\n' >&2
+  exit 1
+fi
+mkdir -p "$RESOURCE_DIR/hla-analyzer-sidecar"
+copy_file "$ROOT_DIR/native/hla-analyzer-sidecar/main.py" "$RESOURCE_DIR/hla-analyzer-sidecar/main.py"
+copy_directory "$ROOT_DIR/native/hla-analyzer-sidecar/saleae" "$RESOURCE_DIR/hla-analyzer-sidecar/saleae"
+find "$RESOURCE_DIR/hla-analyzer-sidecar" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$RESOURCE_DIR/hla-analyzer-sidecar" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+"$PYTHON_BIN" "$ROOT_DIR/scripts/package-python-runtime.py" "$RESOURCE_DIR" "${sigrok_build_dir:?Sigrok build is required for a matching shared Python runtime}"
 
 node "$ROOT_DIR/scripts/native-runtime.mjs" seal

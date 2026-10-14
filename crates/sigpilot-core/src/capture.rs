@@ -1050,6 +1050,7 @@ fn demo_signals_for_analyzers(
 
 fn demo_channels_for_settings(settings: &AnalyzerDecodeSettings) -> Vec<u8> {
     let mut channels = match settings {
+        AnalyzerDecodeSettings::Hla(settings) => demo_channels_for_settings(&settings.upstream),
         AnalyzerDecodeSettings::Uart(settings) => vec![settings.channel],
         AnalyzerDecodeSettings::I2c(settings) => vec![settings.sda_channel, settings.scl_channel],
         AnalyzerDecodeSettings::Spi(settings) => [
@@ -1176,6 +1177,7 @@ fn legacy_demo_signals_for_analyzers(
                 roles
             }
             AnalyzerDecodeSettings::Native(_) => continue,
+            AnalyzerDecodeSettings::Hla(_) => continue,
         };
 
         for (channel, signal) in roles {
@@ -1191,6 +1193,7 @@ fn demo_protocol_name(settings: &AnalyzerDecodeSettings) -> &str {
         AnalyzerDecodeSettings::I2c(_) => "I2C",
         AnalyzerDecodeSettings::Spi(_) => "SPI",
         AnalyzerDecodeSettings::Native(settings) => &settings.protocol_name,
+        AnalyzerDecodeSettings::Hla(_) => "HLA",
     }
 }
 

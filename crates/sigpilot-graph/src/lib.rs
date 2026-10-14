@@ -191,6 +191,9 @@ pub struct GraphFrameResponse {
 pub struct AnalyzerRenderResult {
     pub analyzer_id: String,
     pub tracks: Vec<AnalyzerTrackWindow>,
+    /// Set when this analyzer failed; the rest of the frame still renders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -778,6 +781,9 @@ impl DigitalGraph {
                 "{} requires a Saleae Native or Sigrok Native decoder backend",
                 settings.protocol_name
             ))),
+            AnalyzerDecodeSettings::Hla(_) => Err(GraphError::InvalidAnalyzer(
+                "HLA requires the Saleae Native decoder backend".to_string(),
+            )),
         }
     }
 
@@ -1205,6 +1211,7 @@ pub struct GraphSession {
     capture: RwLock<Option<Arc<CaptureData>>>,
     sparse_capture: RwLock<Option<Arc<SparseCaptureData>>>,
     analyzer_cache: Mutex<HashMap<String, AnalyzerCacheEntry>>,
+    hla_decode_lock: Mutex<()>,
     native_window_cache: Mutex<HashMap<NativeWindowCacheKey, NativeWindowCacheEntry>>,
     native_background_cache: Mutex<HashMap<String, NativeBackgroundDecodeState>>,
     analyzer_generation: AtomicU64,
@@ -1233,6 +1240,7 @@ impl Default for GraphSession {
             capture: RwLock::new(None),
             sparse_capture: RwLock::new(None),
             analyzer_cache: Mutex::new(HashMap::new()),
+            hla_decode_lock: Mutex::new(()),
             native_window_cache: Mutex::new(HashMap::new()),
             native_background_cache: Mutex::new(HashMap::new()),
             analyzer_generation: AtomicU64::new(0),
@@ -1886,6 +1894,9 @@ impl GraphSession {
         settings: &AnalyzerDecodeSettings,
         backend: DecoderBackendKind,
     ) -> Result<Arc<Vec<DecodedFrame>>> {
+        if matches!(settings, AnalyzerDecodeSettings::Hla(_)) {
+            return self.decode_hla_frames(settings, backend);
+        }
         if matches!(
             backend,
             DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust
@@ -2022,10 +2033,60 @@ impl GraphSession {
         Ok(frames)
     }
 
+    fn hla_cache_key(&self, settings: &AnalyzerDecodeSettings) -> Result<String> {
+        Ok(format!("hla-full-{}-{}", self.revision.load(Ordering::Acquire),
+            native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, settings)?))
+    }
+
+    /// Stateful extensions never use window/edge-budget decoding. Reuse the
+    /// existing full-frame cache, but include capture revision even for equal lengths.
+    fn decode_hla_frames(&self, settings: &AnalyzerDecodeSettings, backend: DecoderBackendKind) -> Result<Arc<Vec<DecodedFrame>>> {
+        if backend != DecoderBackendKind::SaleaeNative {
+            return Err(GraphError::InvalidAnalyzer("HLA requires the Saleae Native decoder backend".to_string()));
+        }
+        let AnalyzerDecodeSettings::Hla(hla) = settings else { unreachable!() };
+        let cancellation = sigpilot_core::hla_backend::HlaDecoder::cancellation_epoch();
+        let _decode_guard = self.hla_decode_lock.lock();
+        sigpilot_core::hla_backend::HlaDecoder::check_cancellation(cancellation)
+            .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        let key = self.hla_cache_key(settings)?;
+        let revision = self.revision.load(Ordering::Acquire);
+        let generation = self.analyzer_generation.load(Ordering::Acquire);
+        let sample_count = self.sample_count();
+        if let Some(entry) = self.analyzer_cache.lock().get(&key) {
+            if entry.complete && entry.decoded_sample_count == sample_count {
+                return Ok(entry.frames.clone());
+            }
+        }
+        if self.capture().is_none() && self.sparse_capture().is_none() {
+            return Ok(Arc::new(Vec::new()));
+        }
+        let decoder = sigpilot_core::hla_backend::HlaDecoder::discover()
+            .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        let output = if let Some(capture) = self.sparse_capture() {
+            decoder.decode_sparse_view(&sparse_capture_view(capture.as_ref()), hla)
+        } else {
+            let graph = self.graph.read();
+            let capture = graph.as_ref().ok_or(GraphError::EmptyGraph)?.sparse_view();
+            decoder.decode_sparse_view(&capture, hla)
+        }.map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        let frames = Arc::new(hla_frames_for_track(output.into_decoded_frames(), &hla.upstream)?);
+        sigpilot_core::hla_backend::HlaDecoder::check_cancellation(cancellation)
+            .map_err(|error| GraphError::DecoderBackend(error.to_string()))?;
+        if self.revision.load(Ordering::Acquire) != revision || self.analyzer_generation.load(Ordering::Acquire) != generation {
+            return Err(GraphError::DecoderBackend("capture changed during HLA decode; retry".to_string()));
+        }
+        self.analyzer_cache.lock().insert(key, analyzer_cache_entry(sample_count, frames.clone()));
+        Ok(frames)
+    }
+
     pub fn decode_saleae_native_frames_batch(
         &self,
         settings: &[AnalyzerDecodeSettings],
     ) -> Result<Vec<Arc<Vec<DecodedFrame>>>> {
+        if settings.iter().any(|setting| matches!(setting, AnalyzerDecodeSettings::Hla(_))) {
+            return settings.iter().map(|setting| self.decode_frames_with_backend(setting, DecoderBackendKind::SaleaeNative)).collect();
+        }
         if settings.is_empty() {
             return Ok(Vec::new());
         }
@@ -2181,6 +2242,18 @@ impl GraphSession {
         &self,
         settings: &[AnalyzerDecodeSettings],
     ) -> Result<Vec<NativeAnalyzerDecodeProgress>> {
+        if settings.iter().any(|setting| matches!(setting, AnalyzerDecodeSettings::Hla(_))) {
+            return settings.iter().map(|setting| {
+                if matches!(setting, AnalyzerDecodeSettings::Hla(_)) {
+                    let frames = self.decode_frames_with_backend(setting, DecoderBackendKind::SaleaeNative)?;
+                    Ok(NativeAnalyzerDecodeProgress { frame_count: frames.len(), processed_edges: 1,
+                        total_edges: 1, progress: 1.0, complete: true, cancelled: false })
+                } else {
+                    self.decode_saleae_native_background_step_batch(std::slice::from_ref(setting))
+                        .map(|mut progress| progress.remove(0))
+                }
+            }).collect();
+        }
         if settings.is_empty() {
             return Ok(Vec::new());
         }
@@ -2937,7 +3010,9 @@ impl GraphSession {
         frames: &Arc<Vec<DecodedFrame>>,
     ) -> Result<Option<AnalyzerCacheEntry>> {
         let sample_count = self.sample_count();
-        let cache_key = if matches!(
+        let cache_key = if matches!(settings, AnalyzerDecodeSettings::Hla(_)) {
+            self.hla_cache_key(settings)?
+        } else if matches!(
             backend,
             DecoderBackendKind::Auto | DecoderBackendKind::LegacyRust
         ) {
@@ -3008,6 +3083,9 @@ impl GraphSession {
         backend: DecoderBackendKind,
         waveform: &WaveformRequest,
     ) -> Result<Arc<Vec<DecodedFrame>>> {
+        if matches!(settings, AnalyzerDecodeSettings::Hla(_)) {
+            return self.decode_frames_with_backend(settings, backend);
+        }
         // The dispatch decision itself: which representation the frames get
         // decoded from, and which backend runs them. A capture whose analyzer
         // shows nothing is usually this line disagreeing with what the user
@@ -3021,6 +3099,7 @@ impl GraphSession {
                 AnalyzerDecodeSettings::I2c(_) => "I2C",
                 AnalyzerDecodeSettings::Spi(_) => "SPI",
                 AnalyzerDecodeSettings::Native(native) => native.protocol_name.as_str(),
+                AnalyzerDecodeSettings::Hla(_) => "HLA",
             },
             sparse_capture = self.sparse_capture().is_some(),
             packed_capture = self.capture().is_some(),
@@ -3452,7 +3531,26 @@ impl GraphSession {
         Ok(AnalyzerRenderResult {
             analyzer_id: request.analyzer_id.clone(),
             tracks,
+            error: None,
         })
+    }
+
+    /// One analyzer must never take the whole frame down with it: the waveform
+    /// tile and every other analyzer still have to update, otherwise a single
+    /// broken extension freezes the viewport. The failure rides with the result.
+    fn render_analyzer_isolated(
+        &self,
+        request: &AnalyzerRenderRequest,
+        waveform: &WaveformRequest,
+    ) -> AnalyzerRenderResult {
+        match self.render_analyzer(request, waveform) {
+            Ok(result) => result,
+            Err(error) => AnalyzerRenderResult {
+                analyzer_id: request.analyzer_id.clone(),
+                tracks: Vec::new(),
+                error: Some(error.to_string()),
+            },
+        }
     }
 
     fn render_analyzers(
@@ -3461,18 +3559,31 @@ impl GraphSession {
         waveform: &WaveformRequest,
     ) -> Result<Vec<AnalyzerRenderResult>> {
         if requests.len() <= 1 {
-            return requests
+            return Ok(requests
                 .iter()
-                .map(|request| self.render_analyzer(request, waveform))
-                .collect();
+                .map(|request| self.render_analyzer_isolated(request, waveform))
+                .collect());
         }
 
         if requests
             .iter()
             .all(|request| request.backend == DecoderBackendKind::SaleaeNative)
         {
-            if let Some(rendered) = self.render_saleae_native_analyzers(requests, waveform)? {
-                return Ok(rendered);
+            match self.render_saleae_native_analyzers(requests, waveform) {
+                Ok(Some(rendered)) => return Ok(rendered),
+                Ok(None) => {}
+                Err(error) => {
+                    // The batched native path shares one decode across analyzers,
+                    // so a shared failure would land on all of them. Isolating
+                    // keeps the frame alive and reports per analyzer instead.
+                    tracing::warn!(
+                        target: "sigpilot::decoders",
+                        session_id = self.instance_id,
+                        analyzers = requests.len(),
+                        error = error.to_string(),
+                        "batched analyzer render failed; isolating per analyzer"
+                    );
+                }
             }
         }
 
@@ -3492,10 +3603,10 @@ impl GraphSession {
             "dispatching analyzer renders across workers"
         );
         if worker_count <= 1 {
-            return requests
+            return Ok(requests
                 .iter()
-                .map(|request| self.render_analyzer(request, waveform))
-                .collect();
+                .map(|request| self.render_analyzer_isolated(request, waveform))
+                .collect());
         }
 
         let chunk_size = requests.len().div_ceil(worker_count);
@@ -3509,10 +3620,12 @@ impl GraphSession {
                         .iter()
                         .enumerate()
                         .map(|(index, request)| {
-                            self.render_analyzer(request, waveform)
-                                .map(|result| (start_index + index, result))
+                            (
+                                start_index + index,
+                                self.render_analyzer_isolated(request, waveform),
+                            )
                         })
-                        .collect::<Result<Vec<_>>>()
+                        .collect::<Vec<_>>()
                 }))
                 .unwrap_or_else(|_| {
                     // A panicking worker loses every analyzer in its chunk, so
@@ -3529,9 +3642,20 @@ impl GraphSession {
                             .collect::<Vec<_>>(),
                         "analyzer render worker panicked"
                     );
-                    Err(GraphError::DecoderBackend(
-                        "analyzer render worker panicked".to_string(),
-                    ))
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .map(|(index, request)| {
+                            (
+                                start_index + index,
+                                AnalyzerRenderResult {
+                                    analyzer_id: request.analyzer_id.clone(),
+                                    tracks: Vec::new(),
+                                    error: Some("analyzer render worker panicked".to_string()),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect::<Vec<_>>();
@@ -3539,7 +3663,7 @@ impl GraphSession {
         let mut indexed_results: Vec<(usize, AnalyzerRenderResult)> =
             Vec::with_capacity(requests.len());
         for output in worker_outputs {
-            let mut results = output?;
+            let mut results = output;
             indexed_results.append(&mut results);
         }
         indexed_results.sort_by_key(|(index, _)| *index);
@@ -3554,6 +3678,9 @@ impl GraphSession {
         requests: &[AnalyzerRenderRequest],
         waveform: &WaveformRequest,
     ) -> Result<Option<Vec<AnalyzerRenderResult>>> {
+        if requests.iter().any(|request| matches!(request.settings, AnalyzerDecodeSettings::Hla(_))) {
+            return Ok(None);
+        }
         if requests.len() <= 1 {
             return Ok(None);
         }
@@ -3599,6 +3726,7 @@ impl GraphSession {
                     rendered[request_index] = Some(AnalyzerRenderResult {
                         analyzer_id: request.analyzer_id.clone(),
                         tracks,
+                        error: None,
                     });
                     continue;
                 }
@@ -3623,6 +3751,7 @@ impl GraphSession {
                 rendered[request_index] = Some(AnalyzerRenderResult {
                     analyzer_id: request.analyzer_id.clone(),
                     tracks,
+                    error: None,
                 });
                 continue;
             }
@@ -3689,6 +3818,7 @@ impl GraphSession {
                 rendered[request_index] = Some(AnalyzerRenderResult {
                     analyzer_id: request.analyzer_id.clone(),
                     tracks,
+                    error: None,
                 });
             } else {
                 pending.push(SaleaeBatchRenderState {
@@ -4179,6 +4309,22 @@ impl GraphSession {
     }
 }
 
+fn hla_frames_for_track(mut frames: Vec<DecodedFrame>, upstream: &AnalyzerDecodeSettings) -> Result<Vec<DecodedFrame>> {
+    let channel = match upstream {
+        AnalyzerDecodeSettings::Uart(settings) => settings.channel,
+        AnalyzerDecodeSettings::I2c(settings) => settings.sda_channel,
+        AnalyzerDecodeSettings::Spi(settings) => settings.mosi_channel.or(settings.miso_channel).unwrap_or(settings.clock_channel),
+        _ => return Err(GraphError::InvalidAnalyzer("HLA input must be UART, I2C or SPI".to_string())),
+    };
+    // The HLA output has no physical channels of its own. Associate its labels
+    // with the input's primary channel so existing track/table renderers see it.
+    for frame in &mut frames {
+        frame.channel_values = vec![DecodedChannelValue { channel, role: "HLA".to_string(),
+            label: frame.label.clone(), texts: vec![frame.label.clone()], value: frame.value }];
+    }
+    Ok(frames)
+}
+
 impl Drop for GraphSession {
     fn drop(&mut self) {
         let async_decode_ids = self
@@ -4221,6 +4367,7 @@ fn native_driver_channel<'capture, 'data>(
         AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
         AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
         AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
+        AnalyzerDecodeSettings::Hla(settings) => return native_driver_channel(capture, &settings.upstream),
     };
     capture
         .channels
@@ -4545,6 +4692,7 @@ fn finalize_saleae_batch_render_state(
         render: AnalyzerRenderResult {
             analyzer_id: state.request.analyzer_id.clone(),
             tracks,
+            error: None,
         },
     })
 }
@@ -4604,6 +4752,7 @@ fn native_windows_cover_all_driver_edges(
         AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
         AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
         AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
+        AnalyzerDecodeSettings::Hla(_) => return Ok(windows == [(0, capture.metadata.sample_count)]),
     };
     let driver = capture
         .channels
@@ -4770,6 +4919,7 @@ fn sparse_native_analysis_windows(
         AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
         AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
         AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
+        AnalyzerDecodeSettings::Hla(_) => return Ok(vec![(0, capture.metadata.sample_count)]),
     };
     let driver = capture
         .channels
@@ -4876,6 +5026,7 @@ fn native_decode_window_for_cache(
         AnalyzerDecodeSettings::I2c(settings) => settings.scl_channel,
         AnalyzerDecodeSettings::Spi(settings) => settings.clock_channel,
         AnalyzerDecodeSettings::Native(settings) => settings.primary_channel,
+        AnalyzerDecodeSettings::Hla(_) => return Ok((0, capture.metadata.sample_count)),
     };
     let driver = capture
         .channels
@@ -10424,5 +10575,151 @@ mod tests {
                 vec![(350, "stop")],
             ]
         );
+    }
+
+    fn hla_test_settings() -> AnalyzerDecodeSettings {
+        serde_json::from_value(serde_json::json!({
+            "protocol": "Hla", "settings": {
+                "manifest_path": "/extension/extension.json", "entry_point": "Example.Hla",
+                "settings": { "prefix": "test" }, "upstream_id": "uart",
+                "upstream": { "protocol": "Uart", "settings": {
+                    "channel": 0, "baud_rate": 115200, "inverted": false,
+                    "data_bits": 8, "stop_bits": 1, "parity": "none", "msb_first": false
+                } }
+            }
+        })).unwrap()
+    }
+
+    #[test]
+    fn hla_views_and_batch_reuse_full_state_cache_without_window_decode() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(4, 20_000)).unwrap();
+        let settings = hla_test_settings();
+        let frames = Arc::new(vec![decoded_frame_for_graph_test(100, 100),
+            decoded_frame_for_graph_test(10_000, 10_000)]);
+        let key = session.hla_cache_key(&settings).unwrap();
+        session.analyzer_cache.lock().insert(key,
+            analyzer_cache_entry(session.sample_count(), frames.clone()));
+        for start_sample in [0, 8_000, 15_000] {
+            let view = WaveformRequest { start_sample, sample_count: 1000, pixels: 600, channels: vec![0] };
+            let graph = session.graph.read();
+            let capture = graph.as_ref().unwrap().sparse_view();
+            assert_eq!(sparse_native_analysis_windows(&capture, &settings, &view).unwrap(), vec![(0, 20_000)]);
+            assert_eq!(native_decode_window_for_cache(&capture, &settings, start_sample, start_sample + 1000).unwrap(), (0, 20_000));
+            drop(graph);
+            let result = session.decode_frames_with_backend_for_view(&settings,
+                DecoderBackendKind::SaleaeNative, &view).unwrap();
+            assert!(Arc::ptr_eq(&frames, &result));
+        }
+        assert!(session.native_window_cache.lock().is_empty());
+        let batch = session.decode_saleae_native_frames_batch(&[settings.clone(), settings.clone()]).unwrap();
+        assert!(batch.iter().all(|result| Arc::ptr_eq(&frames, result)));
+        let progress = session.decode_saleae_native_background_step_batch(&[settings.clone()]).unwrap();
+        assert!(progress[0].complete);
+        assert_eq!(progress[0].frame_count, 2);
+        let (_, _, cached) = session.decode_frames_and_table_roles_with_backend(&settings, DecoderBackendKind::SaleaeNative).unwrap();
+        assert!(cached.is_some());
+        let render_request = AnalyzerRenderRequest { analyzer_id: "hla".to_string(),
+            settings: settings.clone(), backend: DecoderBackendKind::SaleaeNative, tracks: vec![] };
+        assert!(session.render_saleae_native_analyzers(&[render_request.clone(), render_request],
+            &WaveformRequest { start_sample: 0, sample_count: 1000, pixels: 600, channels: vec![0] }).unwrap().is_none());
+    }
+
+    #[test]
+    fn hla_full_cache_keys_change_with_input_settings_and_equal_length_capture_revision() {
+        let session = GraphSession::default();
+        session.replace_capture(demo_capture(4, 20_000)).unwrap();
+        let settings = hla_test_settings();
+        let before = session.hla_cache_key(&settings).unwrap();
+        let mut edited = settings.clone();
+        if let AnalyzerDecodeSettings::Hla(hla) = &mut edited {
+            if let AnalyzerDecodeSettings::Uart(uart) = hla.upstream.as_mut() { uart.baud_rate = 9600; }
+        }
+        assert_ne!(before, session.hla_cache_key(&edited).unwrap());
+        session.replace_capture(demo_capture(4, 20_000)).unwrap();
+        assert_ne!(before, session.hla_cache_key(&settings).unwrap());
+        assert!(session.decode_frames_with_backend(&settings, DecoderBackendKind::SigrokNative).is_err());
+        assert!(session.decode_frames_with_backend(&settings, DecoderBackendKind::LegacyRust).is_err());
+    }
+
+    #[test]
+    fn hla_labels_attach_to_input_channel_for_existing_track_renderer() {
+        let settings = AnalyzerDecodeSettings::Uart(UartDecodeSettings { channel: 2, ..UartDecodeSettings::default() });
+        let mut frame = decoded_frame_for_graph_test(100, 100);
+        frame.channel_values.clear();
+        frame.label = "extension label".to_string();
+        let frames = hla_frames_for_track(vec![frame], &settings).unwrap();
+        assert_eq!(frames[0].channel_values[0].channel, 2);
+        assert_eq!(frames[0].channel_values[0].role, "HLA");
+        assert_eq!(frames[0].channel_values[0].label, "extension label");
+        let tracks = render_analyzer_tracks(&frames,
+            &[AnalyzerTrackRequest { channel: 2, role: "HLA".to_string() }],
+            &WaveformRequest { start_sample: 0, sample_count: 1000, pixels: 600, channels: vec![2] }).unwrap();
+        assert!(!tracks[0].bubbles.is_empty());
+    }
+    #[test]
+    #[ignore = "requires packaged HLA Python and standalone native runtime"]
+    fn hla_host_runs_through_graph_session_and_reuses_stateful_results() {
+        let session = GraphSession::default();
+        session.finish_capture(demo_capture(4, 20_000)).unwrap();
+        let mut settings = hla_test_settings();
+        if let AnalyzerDecodeSettings::Hla(hla) = &mut settings {
+            hla.manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../testdata/hla/original/extension.json").to_string_lossy().into_owned();
+            hla.entry_point = "fixture.Counter".into();
+            hla.settings = std::collections::BTreeMap::from([("step".into(), serde_json::json!(3))]);
+        }
+        let first = session.decode_frames_with_backend(&settings, DecoderBackendKind::SaleaeNative).unwrap();
+        assert!(!first.is_empty());
+        assert!(first[0].label.ends_with(" 3"));
+        assert_eq!(first[0].channel_values[0].role, "HLA");
+        let view = WaveformRequest { start_sample: 1000, sample_count: 5000, pixels: 600, channels: vec![0] };
+        let viewed = session.decode_frames_with_backend_for_view(&settings, DecoderBackendKind::SaleaeNative, &view).unwrap();
+        assert!(Arc::ptr_eq(&first, &viewed));
+        let tracks = render_analyzer_tracks(&first, &[AnalyzerTrackRequest { channel: 0, role: "HLA".into() }],
+            &WaveformRequest { start_sample: 0, sample_count: 20_000, pixels: 1000, channels: vec![0] }).unwrap();
+        assert!(!tracks[0].bubbles.is_empty());
+        let (_, _, cached) = session.decode_frames_and_table_roles_with_backend(&settings, DecoderBackendKind::SaleaeNative).unwrap();
+        assert!(cached.is_some());
+        if let AnalyzerDecodeSettings::Hla(hla) = &mut settings {
+            hla.settings.insert("step".into(), serde_json::json!(5));
+        }
+        let changed = session.decode_frames_with_backend(&settings, DecoderBackendKind::SaleaeNative).unwrap();
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert!(changed[0].label.ends_with(" 5"));
+    }
+
+    #[test]
+    fn analyzer_failure_is_isolated_so_the_frame_still_renders() {
+        let session = GraphSession::default();
+        session.finish_capture(demo_capture(4, 20_000)).unwrap();
+        let uart = AnalyzerDecodeSettings::Uart(UartDecodeSettings {
+            channel: 0,
+            baud_rate: 100_000,
+            ..UartDecodeSettings::default()
+        });
+        let hla = hla_test_settings();
+        let requests = vec![
+            AnalyzerRenderRequest {
+                analyzer_id: "uart".to_string(),
+                settings: uart,
+                backend: DecoderBackendKind::LegacyRust,
+                tracks: vec![AnalyzerTrackRequest { channel: 0, role: "data".to_string() }],
+            },
+            AnalyzerRenderRequest {
+                analyzer_id: "hla".to_string(),
+                settings: hla,
+                backend: DecoderBackendKind::SaleaeNative,
+                tracks: vec![AnalyzerTrackRequest { channel: 0, role: "HLA".to_string() }],
+            },
+        ];
+        let waveform = WaveformRequest { start_sample: 0, sample_count: 5_000, pixels: 600, channels: vec![0] };
+        let rendered = session.render_analyzers(&requests, &waveform).unwrap();
+        assert_eq!(rendered.len(), 2);
+        // The healthy analyzer still renders; the failing one reports why
+        // instead of failing the frame and freezing the viewport.
+        assert!(rendered[0].error.is_none(), "{:?}", rendered[0].error);
+        assert!(rendered[1].error.is_some());
+        assert!(rendered[1].tracks.is_empty());
     }
 }

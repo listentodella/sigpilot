@@ -1,0 +1,18 @@
+{
+  "name": "pxlogic original HLA test fixture",
+  "version": "1.0.0",
+  "apiVersion": "1.0.0",
+  "author": "pxlogic contributors",
+  "extensions": {
+    "Counter": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.Counter"},
+    "Echo": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.Echo"},
+    "Variants": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.Variants"},
+    "BadTemplate": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.BadTemplate"},
+    "OffGrid": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.OffGrid"},
+    "Negative": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.Negative"},
+    "BadReturn": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.BadReturn"},
+    "Raises": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.Raises"},
+    "Legacy": {"type": "HighLevelAnalyzer", "entryPoint": "fixture.Legacy"},
+    "NotHLA": {"type": "Other", "entryPoint": "fixture.NotHLA"}
+  }
+}
