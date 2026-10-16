@@ -79,6 +79,7 @@ import { AdvancedOptionsPanel } from "./components/AdvancedOptionsPanel";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
+import { AnalyzerFrameDetail } from "./components/AnalyzerFrameDetail";
 import { HlaSettingsDialog } from "./components/HlaSettingsDialog";
 import { reconcileHlaAnalyzers } from "./lib/analyzers";
 import { cancelHlaDecodes } from "./lib/api";
@@ -151,6 +152,12 @@ import {
   type AnalyzerFrameListRef,
   type AnalyzerFrameListRow,
 } from "./lib/analyzerFrameList";
+import {
+  analyzerFrameDetailKey,
+  analyzerFrameDetailNeighbors,
+  resolveAnalyzerFrameDetail,
+  type AnalyzerFrameDetail as AnalyzerFrameDetailData,
+} from "./lib/analyzerFrameDetail";
 import {
 	  cancelCapture,
 	  AnalyzerFrameRef,
@@ -10395,6 +10402,149 @@ function AnalyzersPanel({
       frameIndex: analyzer.highlightedFrameIndex,
       }))
     .find(({ frameIndex }) => frameIndex !== null);
+  // Frame detail: the highlighted frame resolved to its full backend frame,
+  // held in memory first and fetched as a single backend row otherwise (the
+  // table and terminal panes only keep a window of frames). The async answer
+  // is keyed by analyzer + frame so a late reply cannot paint a stale frame.
+  const highlightedAnalyzerId = highlightedFrame?.analyzerId ?? null;
+  const highlightedFrameIndex = highlightedFrame?.frameIndex ?? null;
+  const highlightedAnalyzer = useMemo(
+    () =>
+      highlightedAnalyzerId === null
+        ? null
+        : session.analyzers.find((analyzer) => analyzer.id === highlightedAnalyzerId) ?? null,
+    [highlightedAnalyzerId, session.analyzers],
+  );
+  const analyzerFrameDetailLocal = useMemo(
+    () =>
+      resolveAnalyzerFrameDetail({
+        analyzers: session.analyzers,
+        analyzerId: highlightedAnalyzerId,
+        frameIndex: highlightedFrameIndex,
+        rows: visibleTableFrames,
+      }),
+    [highlightedAnalyzerId, highlightedFrameIndex, session.analyzers, visibleTableFrames],
+  );
+  const analyzerFrameDetailTargetKey =
+    highlightedAnalyzerId !== null && highlightedFrameIndex !== null
+      ? analyzerFrameDetailKey(highlightedAnalyzerId, highlightedFrameIndex)
+      : "";
+  const analyzerFrameDetailRequest = useMemo(() => {
+    if (
+      highlightedAnalyzer === null ||
+      highlightedFrameIndex === null ||
+      analyzerFrameDetailLocal !== null ||
+      !session.summary ||
+      !analyzerCanRunDecoder(highlightedAnalyzer)
+    ) {
+      return null;
+    }
+    const settings = analyzerDecodeSettings(highlightedAnalyzer, session.analyzers);
+    if (!settings) return null;
+    return {
+      analyzer: highlightedAnalyzer,
+      request: {
+        analyzer_id: highlightedAnalyzer.id,
+        analyzer_name: highlightedAnalyzer.name,
+        backend: highlightedAnalyzer.decoderBackend,
+        display_radix: highlightedAnalyzer.displayRadix,
+        settings,
+      },
+    };
+  }, [
+    analyzerFrameDetailLocal,
+    highlightedAnalyzer,
+    highlightedFrameIndex,
+    session.analyzers,
+    session.summary,
+  ]);
+  const [analyzerFrameDetailBackend, setAnalyzerFrameDetailBackend] = useState<{
+    key: string;
+    detail: AnalyzerFrameDetailData | null;
+  } | null>(null);
+  const analyzerFrameDetailSeqRef = useRef(0);
+
+  useEffect(() => {
+    if (analyzerFrameDetailRequest === null || highlightedFrameIndex === null) return;
+    const targetKey = analyzerFrameDetailTargetKey;
+    if (analyzerFrameDetailBackend?.key === targetKey) return;
+    const { analyzer, request } = analyzerFrameDetailRequest;
+    const seq = analyzerFrameDetailSeqRef.current + 1;
+    analyzerFrameDetailSeqRef.current = seq;
+    void decodeAnalyzerFrameTableWindow(
+      session.id,
+      [request],
+      highlightedFrameIndex,
+      highlightedFrameIndex + 1,
+    )
+      .then((window) => {
+        if (analyzerFrameDetailSeqRef.current !== seq) return;
+        const row = window.rows.find(
+          (candidate) =>
+            candidate.analyzer_id === analyzer.id && candidate.frame_index === highlightedFrameIndex,
+        );
+        setAnalyzerFrameDetailBackend({
+          detail: row
+            ? {
+                analyzerId: analyzer.id,
+                frame: row.frame,
+                frameIndex: highlightedFrameIndex,
+                frameNumber: row.frame_number,
+              }
+            : null,
+          key: targetKey,
+        });
+      })
+      .catch((error) => {
+        if (analyzerFrameDetailSeqRef.current !== seq) return;
+        setAnalyzerFrameDetailBackend({ detail: null, key: targetKey });
+        onUpdateSession((current) => ({ ...current, message: String(error) }));
+      });
+  }, [
+    analyzerFrameDetailBackend?.key,
+    analyzerFrameDetailRequest,
+    analyzerFrameDetailTargetKey,
+    highlightedFrameIndex,
+    onUpdateSession,
+    session.id,
+  ]);
+
+  const analyzerFrameDetail =
+    analyzerFrameDetailLocal ??
+    (analyzerFrameDetailBackend?.key === analyzerFrameDetailTargetKey
+      ? analyzerFrameDetailBackend.detail
+      : null);
+  const analyzerFrameDetailNeighborFrames = useMemo(
+    () => analyzerFrameDetailNeighbors(highlightedAnalyzer, highlightedFrameIndex),
+    [highlightedAnalyzer, highlightedFrameIndex],
+  );
+
+  function selectAnalyzerDetailFrame(analyzerId: string, frameIndex: number, frame?: DecodedFrame) {
+    const localFrame =
+      frame ??
+      resolveAnalyzerFrameDetail({
+        analyzers: session.analyzers,
+        analyzerId,
+        frameIndex,
+        rows: visibleTableFrames,
+      })?.frame;
+    if (localFrame) {
+      onGoToAnalyzerFrame(analyzerId, frameIndex, false, localFrame);
+      return;
+    }
+    // Not loaded locally: still move the highlight, and let the detail panel
+    // backfill the frame from the backend.
+    onUpdateSession((current) => highlightAnalyzerFrameInSession(current, analyzerId, frameIndex));
+  }
+
+  function openAnalyzerDetailInTable(analyzerId: string, frameIndex: number) {
+    onUpdateSession((current) => {
+      const highlighted = highlightAnalyzerFrameInSession(current, analyzerId, frameIndex);
+      return highlighted.analyzerDataPane === "table"
+        ? highlighted
+        : { ...highlighted, analyzerDataPane: "table" };
+    });
+  }
   const suggestedAnalyzers = availableAnalyzers.filter((choice) => !choice.catalogItem).slice(0, 4);
   const openAnalyzerMenu = activeAnalyzerMenu
     ? session.analyzers.find((analyzer) => analyzer.id === activeAnalyzerMenu.analyzerId) ?? null
@@ -10702,6 +10852,15 @@ function AnalyzersPanel({
             </button>
           </div>
         </div>
+
+        <AnalyzerFrameDetail
+          analyzer={highlightedAnalyzer}
+          detail={analyzerFrameDetail}
+          neighbors={analyzerFrameDetailNeighborFrames}
+          onOpenInTable={openAnalyzerDetailInTable}
+          onSelectFrame={selectAnalyzerDetailFrame}
+          sampleRateHz={sampleRateHz}
+        />
 
         {session.analyzerDataPane === "table" ? (
           <div className="analyzerDataTable">

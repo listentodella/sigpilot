@@ -6216,6 +6216,142 @@ body.timing-marker-col-resize * {
   margin: 0;
 }
 
+.analyzerFrameDetail {
+  max-height: 50%;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-20);
+  border-bottom: 1px solid var(--border-20);
+  background: var(--background-20);
+  margin: 0 0 6px;
+  padding: 7px 12px 8px;
+}
+
+.analyzerFrameDetailHeader {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.analyzerFrameDetailName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--on-background-0);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.analyzerFrameDetailNumber,
+.analyzerFrameDetailType {
+  flex: 0 0 auto;
+  color: var(--on-background-20);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.analyzerFrameDetailType {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analyzerFrameDetailActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.analyzerFrameDetailActions button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  color: var(--on-background-20);
+  background: var(--background-30);
+  padding: 0;
+  cursor: pointer;
+}
+
+.analyzerFrameDetailActions button:hover:not(:disabled) {
+  border-color: var(--border-focused);
+  color: var(--on-background-0);
+}
+
+.analyzerFrameDetailMeta {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 14px;
+}
+
+.analyzerFrameDetailMetaItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--on-background-20);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.analyzerFrameDetailMetaLabel {
+  color: var(--on-background-30);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.analyzerFrameDetailMetaValue {
+  color: var(--on-background-10);
+}
+
+/* The untruncated frame text. No `text-overflow` or `nowrap` may be added
+   here: the point of the block is that long HLA labels stay readable. */
+.analyzerFrameDetailText {
+  max-height: 10em;
+  overflow: auto;
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  color: var(--on-background-0);
+  background: var(--background-10);
+  padding: 5px 6px;
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  scrollbar-color: var(--grey100) var(--background-20);
+  scrollbar-width: thin;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.analyzerFrameDetailChannels {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  color: var(--on-background-20);
+  font-family: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.analyzerFrameDetailChannelRole {
+  color: var(--on-background-30);
+}
+
+.analyzerFrameDetailChannelValue {
+  color: var(--on-background-0);
+}:
 .analyzerDataTable,
 .analyzerTerminal {
   min-height: 0;
