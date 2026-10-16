@@ -1,0 +1,392 @@
+{
+  "format": "pxlogic.device-catalog",
+  "version": 1,
+  "defaults": {
+    "threshold_volts": [
+      1.8,
+      2.5,
+      3.3,
+      5.0
+    ]
+  },
+  "channel_modes": [
+    {
+      "id": "BufferLogic250x32",
+      "kind": "buffer",
+      "channels": 32,
+      "default_sample_rate_hz": 250000000,
+      "default_sample_limit": 250000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 250000000,
+      "description": "Use 32 Channels (Max 250MHz)"
+    },
+    {
+      "id": "BufferLogic250x16",
+      "kind": "buffer",
+      "channels": 16,
+      "default_sample_rate_hz": 250000000,
+      "default_sample_limit": 250000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 250000000,
+      "description": "Use 16 Channels (Max 250MHz)"
+    },
+    {
+      "id": "BufferLogic500x16",
+      "kind": "buffer",
+      "channels": 16,
+      "default_sample_rate_hz": 500000000,
+      "default_sample_limit": 500000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 500000000,
+      "description": "Use 16 Channels (Max 500MHz)"
+    },
+    {
+      "id": "BufferLogic1000x8",
+      "kind": "buffer",
+      "channels": 8,
+      "default_sample_rate_hz": 1000000000,
+      "default_sample_limit": 1000000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 1000000000,
+      "description": "Use 8 Channels (Max 1000MHz)"
+    },
+    {
+      "id": "StreamLogic50x32",
+      "kind": "stream",
+      "channels": 32,
+      "default_sample_rate_hz": 50000000,
+      "default_sample_limit": 50000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 50000000,
+      "description": "Use 32 Channels (Max50MHz)"
+    },
+    {
+      "id": "StreamLogic125x16",
+      "kind": "stream",
+      "channels": 16,
+      "default_sample_rate_hz": 125000000,
+      "default_sample_limit": 125000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 125000000,
+      "description": "Use 16 Channels (Max 125MHz)"
+    },
+    {
+      "id": "StreamLogic250x8",
+      "kind": "stream",
+      "channels": 8,
+      "default_sample_rate_hz": 250000000,
+      "default_sample_limit": 250000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 250000000,
+      "description": "Use 8 Channels (Max 250MHz)"
+    },
+    {
+      "id": "StreamLogic500x4",
+      "kind": "stream",
+      "channels": 4,
+      "default_sample_rate_hz": 500000000,
+      "default_sample_limit": 500000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 500000000,
+      "description": "Use 4 Channels (Max 500MHz)"
+    },
+    {
+      "id": "StreamLogic1000x2",
+      "kind": "stream",
+      "channels": 2,
+      "default_sample_rate_hz": 1000000000,
+      "default_sample_limit": 1000000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 1000000000,
+      "description": "Use 2 Channels (Max 1000MHz)"
+    },
+    {
+      "id": "StreamLogic200x1",
+      "kind": "stream",
+      "channels": 1,
+      "default_sample_rate_hz": 200000000,
+      "default_sample_limit": 200000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 200000000,
+      "description": "Use 1 Channels (Max200MHz)"
+    },
+    {
+      "id": "StreamLogic100x2",
+      "kind": "stream",
+      "channels": 2,
+      "default_sample_rate_hz": 100000000,
+      "default_sample_limit": 100000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 100000000,
+      "description": "Use 2 Channels (Max100MHz)"
+    },
+    {
+      "id": "StreamLogic50x4",
+      "kind": "stream",
+      "channels": 4,
+      "default_sample_rate_hz": 50000000,
+      "default_sample_limit": 50000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 50000000,
+      "description": "Use 4 Channels (Max50MHz)"
+    },
+    {
+      "id": "StreamLogic25x8",
+      "kind": "stream",
+      "channels": 8,
+      "default_sample_rate_hz": 25000000,
+      "default_sample_limit": 25000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 25000000,
+      "description": "Use 8 Channels (Max25MHz)"
+    },
+    {
+      "id": "StreamLogic10x16",
+      "kind": "stream",
+      "channels": 16,
+      "default_sample_rate_hz": 10000000,
+      "default_sample_limit": 10000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 10000000,
+      "description": "Use 16 Channels (Max10MHz)"
+    },
+    {
+      "id": "StreamLogic5x32",
+      "kind": "stream",
+      "channels": 32,
+      "default_sample_rate_hz": 5000000,
+      "default_sample_limit": 5000000,
+      "min_sample_rate_hz": 2000,
+      "max_sample_rate_hz": 5000000,
+      "description": "Use 32 Channels (Max5MHz)"
+    }
+  ],
+  "devices": [
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U3 channel 32",
+      "match": {
+        "vid": "0x1A86",
+        "pid": "0x5237",
+        "usb_speed": "super",
+        "variant_code": 0
+      },
+      "hardware_depth_bits": 4000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic250x32",
+        "BufferLogic500x16",
+        "BufferLogic1000x8",
+        "StreamLogic50x32",
+        "StreamLogic125x16",
+        "StreamLogic250x8",
+        "StreamLogic500x4",
+        "StreamLogic1000x2"
+      ],
+      "default_mode": "BufferLogic250x32"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U2 channel 32",
+      "match": {
+        "vid": "0x1A86",
+        "pid": "0x5237",
+        "usb_speed": "high",
+        "variant_code": 0
+      },
+      "hardware_depth_bits": 4000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic250x32",
+        "BufferLogic500x16",
+        "BufferLogic1000x8",
+        "StreamLogic200x1",
+        "StreamLogic100x2",
+        "StreamLogic50x4",
+        "StreamLogic25x8",
+        "StreamLogic10x16",
+        "StreamLogic5x32"
+      ],
+      "default_mode": "BufferLogic500x16"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U3 channel 32",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "super",
+        "variant_code": 0
+      },
+      "hardware_depth_bits": 4000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic250x32",
+        "BufferLogic500x16",
+        "BufferLogic1000x8",
+        "StreamLogic50x32",
+        "StreamLogic125x16",
+        "StreamLogic250x8",
+        "StreamLogic500x4",
+        "StreamLogic1000x2"
+      ],
+      "default_mode": "BufferLogic250x32"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U2 channel 32",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "high",
+        "variant_code": 0
+      },
+      "hardware_depth_bits": 4000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic250x32",
+        "BufferLogic500x16",
+        "BufferLogic1000x8",
+        "StreamLogic200x1",
+        "StreamLogic100x2",
+        "StreamLogic50x4",
+        "StreamLogic25x8",
+        "StreamLogic10x16",
+        "StreamLogic5x32"
+      ],
+      "default_mode": "BufferLogic500x16"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U3 channel 16 Pro",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "super",
+        "variant_code": 1
+      },
+      "hardware_depth_bits": 4000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic500x16",
+        "BufferLogic1000x8",
+        "StreamLogic125x16",
+        "StreamLogic250x8",
+        "StreamLogic500x4",
+        "StreamLogic1000x2"
+      ],
+      "default_mode": "BufferLogic500x16"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U2 channel 16 Pro",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "high",
+        "variant_code": 1
+      },
+      "hardware_depth_bits": 4000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic500x16",
+        "BufferLogic1000x8",
+        "StreamLogic200x1",
+        "StreamLogic100x2",
+        "StreamLogic50x4",
+        "StreamLogic25x8",
+        "StreamLogic10x16"
+      ],
+      "default_mode": "BufferLogic500x16"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U3 channel 16 Plus",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "super",
+        "variant_code": 2
+      },
+      "hardware_depth_bits": 2000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic500x16",
+        "StreamLogic125x16",
+        "StreamLogic250x8",
+        "StreamLogic500x4"
+      ],
+      "default_mode": "BufferLogic500x16"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U2 channel 16 Plus",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "high",
+        "variant_code": 2
+      },
+      "hardware_depth_bits": 2000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic500x16",
+        "StreamLogic200x1",
+        "StreamLogic100x2",
+        "StreamLogic50x4",
+        "StreamLogic25x8",
+        "StreamLogic10x16"
+      ],
+      "default_mode": "BufferLogic500x16"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U3 channel 16 Base",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "super",
+        "variant_code": 3
+      },
+      "hardware_depth_bits": 1000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic250x16",
+        "StreamLogic125x16",
+        "StreamLogic250x8"
+      ],
+      "default_mode": "BufferLogic250x16"
+    },
+    {
+      "backend": "rusb",
+      "vendor": "PX_Tool",
+      "model": "PX-Logic U2 channel 16 Base",
+      "match": {
+        "vid": "0x16C0",
+        "pid": "0x05DC",
+        "usb_speed": "high",
+        "variant_code": 3
+      },
+      "hardware_depth_bits": 1000000000,
+      "analog_channels": 0,
+      "modes": [
+        "BufferLogic250x16",
+        "StreamLogic200x1",
+        "StreamLogic100x2",
+        "StreamLogic50x4",
+        "StreamLogic25x8",
+        "StreamLogic10x16"
+      ],
+      "default_mode": "BufferLogic250x16"
+    }
+  ]
+}
