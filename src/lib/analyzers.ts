@@ -69,6 +69,8 @@ export interface NativeCatalogOptionMetadata {
 }
 
 export interface UiAnalyzerInstance {
+  // Transient failure for one capture/configuration; do not auto-retry it.
+  decodeFailureKey?: string;
   id: string;
   type: string;
   name: string;

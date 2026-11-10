@@ -1,5 +1,6 @@
 import { ANALOG_CHANNEL_COUNT, ANALOG_SAMPLE_RATE_OPTIONS } from "./analogChannels.ts";
 import { invoke } from "@tauri-apps/api/core";
+import { ANALYZER_TABLE_PAGE_SIZE } from "./analyzerTableRequests.ts";
 import {
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
@@ -1635,6 +1636,7 @@ export function decodeAnalyzerFrameTableWindow(
   start: number,
   end: number,
 ): Promise<AnalyzerFrameTableWindow> {
+  end = Math.min(end, start + ANALYZER_TABLE_PAGE_SIZE);
   if (!isTauriRuntime()) {
     return Promise.resolve(
       withPreviewCapture(sessionId, () =>
@@ -1652,6 +1654,7 @@ export function decodeAnalyzerFrameTableSearchWindow(
   start: number,
   end: number,
 ): Promise<AnalyzerFrameTableWindow> {
+  end = Math.min(end, start + ANALYZER_TABLE_PAGE_SIZE);
   if (!isTauriRuntime()) {
     return Promise.resolve(
       withPreviewCapture(sessionId, () =>

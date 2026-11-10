@@ -1,3 +1,7 @@
+mod protocol_marker;
+pub use protocol_marker::ProtocolMarkerKind;
+mod memory;
+pub use memory::release_unused_memory;
 pub mod capture;
 /// Concurrent bulk-IN transfers for devices with small endpoint buffering.
 #[cfg(feature = "rusb-transport")]

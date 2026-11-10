@@ -24,6 +24,10 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -2550,6 +2554,9 @@ void Serve(const fs::path& root)
     const auto plugins = Plugins(root);
     const auto probe = Probe(root, false);
     std::unordered_map<std::string, std::unique_ptr<AsyncDecodeJob>> async_jobs;
+#if defined(__GLIBC__)
+    auto last_memory_release = Clock::now();
+#endif
     std::cout << json{{"ok", true}, {"ready", true},
                       {"analyzer_name", probe.value("analyzer_name", "")},
                       {"protocols", probe.value("protocols", json::array())},
@@ -2560,6 +2567,16 @@ void Serve(const fs::path& root)
 
     while(true)
     {
+#if defined(__GLIBC__)
+        // The previous request/response has been destroyed at this point.
+        // Return large temporary decode allocations before blocking for input.
+        // Active jobs own their arenas; leave them alone until completion.
+        if(async_jobs.empty() && Clock::now() - last_memory_release >= std::chrono::seconds(1))
+        {
+            malloc_trim(0);
+            last_memory_release = Clock::now();
+        }
+#endif
         bool framed_binary_transport = false;
         try
         {

@@ -1206,6 +1206,9 @@ impl SaleaeAsyncMarkerPayload {
         let mut reader = SaleaeBinaryReader::new(bytes);
         reader.expect_magic(b"PXLM1")?;
         let marker_count = reader.read_usize("async marker count")?;
+        if marker_count > 256 * 1024 * 1024 / std::mem::size_of::<DecodedProtocolMarker>() {
+            return Err(CoreError::Decode("Protocol markers exceed the 256 MiB decode memory budget; use a shorter capture".to_owned()));
+        }
         let mut markers = Vec::with_capacity(marker_count);
         const KINDS: [&str; 12] = [
             "dot",
@@ -1228,7 +1231,7 @@ impl SaleaeAsyncMarkerPayload {
             markers.push(DecodedProtocolMarker {
                 channel: Some(channel),
                 sample,
-                kind: KINDS.get(kind).copied().unwrap_or("dot").to_string(),
+                kind: KINDS.get(kind).copied().unwrap_or("dot").into(),
             });
         }
         reader.expect_eof()?;
@@ -4754,7 +4757,7 @@ impl DecoderOutput {
                     crate::decode::DecodedProtocolMarker {
                         channel: marker.channel,
                         sample: marker.sample,
-                        kind: marker.kind,
+                        kind: marker.kind.into(),
                     }
                 }));
             }
@@ -4810,6 +4813,7 @@ impl DecoderOutput {
         }
         normalize_protocol_markers(&mut markers);
         attach_protocol_markers(&mut frames, markers);
+        for frame in &mut frames { frame.compact_storage(); }
         frames
     }
 }
@@ -5261,7 +5265,7 @@ mod tests {
         DecodedProtocolMarker {
             channel: Some(0),
             sample,
-            kind: kind.to_string(),
+            kind: kind.into(),
         }
     }
 
@@ -6507,12 +6511,12 @@ mod tests {
                 DecodedProtocolMarker {
                     channel: Some(2),
                     sample: 110,
-                    kind: "up_arrow".to_string(),
+                    kind: "up_arrow".into(),
                 },
                 DecodedProtocolMarker {
                     channel: Some(1),
                     sample: 140,
-                    kind: "zero".to_string(),
+                    kind: "zero".into(),
                 },
             ]
         );

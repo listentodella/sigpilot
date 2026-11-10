@@ -1,3 +1,5 @@
+import { AnalyzerTableRequestQueue, visitAnalyzerTablePages } from "./lib/analyzerTableRequests";
+import type { AnalyzerFrameTableWindow } from "./lib/api";
 import { maxDigitalChannelsForCapabilities as maxChannelsForCapabilities } from "./lib/deviceCapabilities";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -1892,6 +1894,10 @@ export default function App() {
     });
   }, []);
 
+  const updateActiveSession = useCallback((updater: (session: UiSession) => UiSession) => {
+    if (activeSessionId) updateSession(activeSessionId, updater);
+  }, [activeSessionId, updateSession]);
+
   const queueCaptureUiUpdate = useCallback((sessionId: string, update: PendingCaptureUiUpdate) => {
     const pending = pendingCaptureUiRef.current;
     pending.set(sessionId, { ...pending.get(sessionId), ...update });
@@ -3501,7 +3507,7 @@ export default function App() {
       ...current,
       analyzers: current.analyzers.map((item) =>
         item.id === analyzerId
-          ? { ...item, decodeBusy: true, decodeProgress: Math.max(5, item.decodeProgress) }
+          ? { ...item, decodeFailureKey: undefined, decodeBusy: true, decodeProgress: Math.max(5, item.decodeProgress) }
           : item,
       ),
     }));
@@ -3705,6 +3711,7 @@ export default function App() {
       const signature = getAnalyzerDecodeSignature(analyzer, session.analyzers);
       if (
         !requestedIds.has(analyzer.id) ||
+        analyzer.decodeFailureKey === JSON.stringify([captureIdentity, signature]) ||
         analyzer.decoderBackend !== "saleae_native" ||
         analyzer.decodedFramesComplete ||
         analyzer.decodeBusy ||
@@ -3805,11 +3812,30 @@ export default function App() {
         await new Promise<void>((resolve) => window.setTimeout(resolve, 16));
       }
     } catch (error) {
+      const currentSession = sessionsRef.current.find((item) => item.id === sessionId);
+      const currentCaptureIdentity = currentSession?.summary
+        ? `${currentSession.summary.metadata.captured_at}:${currentSession.summary.metadata.sample_count}`
+        : null;
+      if (currentCaptureIdentity !== captureIdentity) return;
+      const failedRequests = new Map(requests.filter((request) =>
+        analyzerRequestSeq.current[`${sessionId}:${request.analyzer.id}`] === request.requestSeq,
+      ).map((request) => [request.analyzer.id, request]));
+      if (failedRequests.size === 0) return;
       updateSession(sessionId, (current) => ({
         ...current,
-        analyzers: current.analyzers.map((item) =>
-          requestIds.has(item.id) ? { ...item, decodeBusy: false, decodeProgress: 0 } : item,
-        ),
+        analyzers: current.analyzers.map((item) => {
+          const request = failedRequests.get(item.id);
+          if (!request || getAnalyzerDecodeSignature(item, current.analyzers) !== request.signature) return item;
+          return {
+            ...item,
+            decodeFailureKey: JSON.stringify([captureIdentity, request.signature]),
+            decodeBusy: false,
+            decodeProgress: 0,
+            decodedFrameCount: 0,
+            decodedFrames: [],
+            decodedFramesComplete: false,
+          };
+        }),
         message: String(error),
       }));
     }
@@ -3824,7 +3850,11 @@ export default function App() {
     activeSession?.analyzers
       .flatMap((analyzer) => {
         const signature = getAnalyzerDecodeSignature(analyzer, activeSession?.analyzers);
+        const captureIdentity = activeSession?.summary
+          ? `${activeSession.summary.metadata.captured_at}:${activeSession.summary.metadata.sample_count}`
+          : null;
         if (
+          analyzer.decodeFailureKey === JSON.stringify([captureIdentity, signature]) ||
           analyzer.decoderBackend !== "saleae_native" ||
           analyzer.decodedFramesComplete ||
           analyzer.decodeBusy ||
@@ -3870,7 +3900,9 @@ export default function App() {
     ) return;
     const analyzerIds = activeSession.analyzers.flatMap((analyzer) => {
       const signature = getAnalyzerDecodeSignature(analyzer, activeSession.analyzers);
+      const captureIdentity = `${activeSession.summary!.metadata.captured_at}:${activeSession.summary!.metadata.sample_count}`;
       if (
+        analyzer.decodeFailureKey === JSON.stringify([captureIdentity, signature]) ||
         analyzer.decoderBackend !== "saleae_native" ||
         analyzer.decodedFramesComplete ||
         analyzer.decodeBusy ||
@@ -5791,9 +5823,7 @@ export default function App() {
             onSelectDevice={setSelectedDeviceForActive}
             onSelectPanel={toggleSidebarPanel}
             onSidebarPanelWidthChange={(width) => setSidebarPanelWidth(clampSidebarPanelWidth(width))}
-            onUpdateSession={(updater) => {
-              if (activeSession) updateSession(activeSession.id, updater);
-            }}
+            onUpdateSession={updateActiveSession}
             onUpdateSettings={updateActiveSettings}
             onViewportChange={(start, samples) => {
               if (activeSession) {
@@ -9637,6 +9667,23 @@ function RecordingSettingsPanel({
   );
 }
 
+function AnalyzerWindowPlaceholder({ window, rowHeight, minWidth, children }: {
+  window: ReturnType<typeof virtualListWindow>;
+  rowHeight: number;
+  minWidth?: number;
+  children: ReactNode;
+}) {
+  // Preserve the same scroll extent while a page is in flight. Removing the
+  // spacers here changes clientHeight/scrollTop and can trigger another fetch.
+  return <>
+    <div aria-hidden="true" className="analyzerVirtualSpacer" style={{ height: window.startPaddingPx, minWidth }} />
+    <div className="analyzerWindowLoading" role="status" style={{ height: (window.end - window.start) * rowHeight, minWidth }}>
+      {children}
+    </div>
+    <div aria-hidden="true" className="analyzerVirtualSpacer" style={{ height: window.endPaddingPx, minWidth }} />
+  </>;
+}
+
 function AnalyzersPanel({
   availableAnalyzers,
   onAddAnalyzer,
@@ -9659,6 +9706,7 @@ function AnalyzersPanel({
   const [selectorAnchorRect, setSelectorAnchorRect] = useState<DOMRect | null>(null);
   const [activeAnalyzerMenu, setActiveAnalyzerMenu] = useState<{ analyzerId: string; anchorRect: DOMRect } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [copyBusy, setCopyBusy] = useState(false);
   const [tableViewport, setTableViewport] = useState({ height: 0, scrollTop: 0 });
   const [tableBackendWindow, setTableBackendWindow] = useState<{
     end: number;
@@ -9687,10 +9735,8 @@ function AnalyzersPanel({
   const selectorButtonRef = useRef<HTMLButtonElement>(null);
   const tableBodyRef = useRef<HTMLDivElement>(null);
   const terminalBodyRef = useRef<HTMLDivElement>(null);
-  const tableBackendWindowSeqRef = useRef(0);
-  const tableSearchBackendWindowSeqRef = useRef(0);
   const tableSearchHydrationSeqRef = useRef(0);
-  const terminalBackendWindowSeqRef = useRef(0);
+  const tableRequestQueue = useRef(new AnalyzerTableRequestQueue<AnalyzerFrameTableWindow>());
 
   function addAnalyzer(choice: AnalyzerLibraryChoice) {
     setSelectorOpen(false);
@@ -9811,24 +9857,20 @@ function AnalyzersPanel({
     session.summary,
   ]);
   const tableBackendWindowEnabled = tableBackendRequests.length > 0;
-  const tableBackendRequestKey = useMemo(
-    () =>
-      tableBackendWindowEnabled
-        ? JSON.stringify(
-            tableBackendRequests.map(({ analyzer, request }) => [
-              analyzer.id,
-              analyzer.name,
-              analyzer.color,
-              analyzer.displayRadix,
-              analyzer.decodedDecodeSignature,
-              analyzer.decodedFrameCount,
-              request.backend,
-              request.settings,
-            ]),
-          )
-        : "",
-    [tableBackendRequests, tableBackendWindowEnabled],
-  );
+  // JSON strings compare by value: progress-only object replacements must not
+  // refetch a page. Capture identity also prevents showing a previous capture's
+  // rows when it happens to have the same analyzer settings and frame count.
+  const tableCaptureKey = JSON.stringify([
+    session.id,
+    session.summary?.metadata.captured_at,
+    session.summary?.metadata.sample_count,
+  ]);
+  const tableBackendRequestKey = JSON.stringify([
+    tableCaptureKey,
+    tableBackendRequests.map(({ analyzer, request }) => [
+      request, analyzer.color, analyzer.decodedFrameCount,
+    ]),
+  ]);
   const tableSearchBackendRequests = useMemo(() => {
     if (!normalizedSearch || session.analyzerDataPane !== "table" || !session.summary) return [];
     const enabledAnalyzers = session.analyzers.filter(
@@ -9864,25 +9906,13 @@ function AnalyzersPanel({
     return requests.length === enabledAnalyzers.length ? requests : [];
   }, [normalizedSearch, session.analyzerDataPane, session.analyzers, session.summary]);
   const tableSearchBackendWindowEnabled = tableSearchBackendRequests.length > 0;
-  const tableSearchBackendRequestKey = useMemo(
-    () =>
-      tableSearchBackendWindowEnabled
-        ? JSON.stringify([
-            normalizedSearch,
-            tableSearchBackendRequests.map(({ analyzer, request }) => [
-              analyzer.id,
-              analyzer.name,
-              analyzer.color,
-              analyzer.displayRadix,
-              analyzer.decodedDecodeSignature,
-              analyzer.decodedFrameCount,
-              request.backend,
-              request.settings,
-            ]),
-          ])
-        : "",
-    [normalizedSearch, tableSearchBackendRequests, tableSearchBackendWindowEnabled],
-  );
+  const tableSearchBackendRequestKey = JSON.stringify([
+    tableCaptureKey,
+    normalizedSearch,
+    tableSearchBackendRequests.map(({ analyzer, request }) => [
+      request, analyzer.color, analyzer.decodedFrameCount,
+    ]),
+  ]);
   const tableSearchHydrationRequests = useMemo(() => {
     if (tableSearchBackendWindowEnabled) return [];
     if (!normalizedSearch || session.analyzerDataPane !== "table" || !session.summary) return [];
@@ -10034,23 +10064,12 @@ function AnalyzersPanel({
     return requests.length === enabledAnalyzers.length ? requests : [];
   }, [session.analyzerDataPane, session.analyzers, session.summary]);
   const terminalBackendWindowEnabled = terminalBackendRequests.length > 0;
-  const terminalBackendRequestKey = useMemo(
-    () =>
-      terminalBackendWindowEnabled
-        ? JSON.stringify(
-            terminalBackendRequests.map(({ analyzer, request }) => [
-              analyzer.id,
-              analyzer.name,
-              analyzer.displayRadix,
-              analyzer.decodedDecodeSignature,
-              analyzer.decodedFrameCount,
-              request.backend,
-              request.settings,
-            ]),
-          )
-        : "",
-    [terminalBackendRequests, terminalBackendWindowEnabled],
-  );
+  const terminalBackendRequestKey = JSON.stringify([
+    tableCaptureKey,
+    terminalBackendRequests.map(({ analyzer, request }) => [
+      request, analyzer.color, analyzer.decodedFrameCount,
+    ]),
+  ]);
   const syncTerminalViewport = useCallback(() => {
     const terminal = terminalBodyRef.current;
     if (!terminal) return;
@@ -10137,123 +10156,58 @@ function AnalyzersPanel({
   );
   const sampleRateHz = session.summary?.metadata.sample_rate_hz ?? session.settings.sample_rate_hz;
 
+  // Read request objects through a ref; only semantic keys/ranges schedule IPC.
+  // Browsing, searching and terminal output share the same single-flight queue.
+  const tableRequestContext = useRef({ tableBackendRequests, tableSearchBackendRequests, terminalBackendRequests, onUpdateSession });
+  tableRequestContext.current = { tableBackendRequests, tableSearchBackendRequests, terminalBackendRequests, onUpdateSession };
   useEffect(() => {
-    if (!tableBackendWindowEnabled || session.analyzerDataPane !== "table" || normalizedSearch) {
+    const queue = tableRequestQueue.current;
+    const context = tableRequestContext.current;
+    const terminal = session.analyzerDataPane === "terminal";
+    const search = !terminal && Boolean(normalizedSearch);
+    const enabled = terminal ? terminalBackendWindowEnabled : search ? tableSearchBackendWindowEnabled : tableBackendWindowEnabled;
+    if (!enabled) {
+      queue.clear();
       return;
     }
-    const requestKey = tableBackendRequestKey;
-    const requestStart = tableWindow.start;
-    const requestEnd = tableWindow.end;
-    const seq = tableBackendWindowSeqRef.current + 1;
-    tableBackendWindowSeqRef.current = seq;
-    const analyzerById = new Map(tableBackendRequests.map(({ analyzer }) => [analyzer.id, analyzer]));
-    const started = performance.now();
-    void decodeAnalyzerFrameTableWindow(
-      session.id,
-      tableBackendRequests.map(({ request }) => request),
-      requestStart,
-      requestEnd,
-    ).then((window) => {
-      if (tableBackendWindowSeqRef.current !== seq) return;
-      const rows = window.rows.flatMap((row): AnalyzerFrameListRow[] => {
-        const analyzer = analyzerById.get(row.analyzer_id);
-        if (!analyzer) return [];
-        return [
-          {
-            analyzer,
-            frame: row.frame,
-            frameIndex: row.frame_index,
-            frameNumber: row.frame_number,
-          },
-        ];
-      });
-      traceAnalyzerPerformance(
-        "table_backend_window",
-        started,
-        `rows=${rows.length} total=${window.row_count} start=${requestStart} end=${requestEnd}`,
-      );
-      setTableBackendWindow({
-        end: requestEnd,
-        key: requestKey,
-        roles: window.roles,
-        rowCount: window.row_count,
-        rows,
-        start: requestStart,
-      });
-    }).catch((error) => {
-      if (tableBackendWindowSeqRef.current !== seq) return;
-      onUpdateSession((current) => ({ ...current, message: String(error) }));
+    const requests = terminal ? context.terminalBackendRequests : search ? context.tableSearchBackendRequests : context.tableBackendRequests;
+    const key = terminal ? terminalBackendRequestKey : search ? tableSearchBackendRequestKey : tableBackendRequestKey;
+    const start = terminal ? terminalWindow.start : tableWindow.start;
+    const end = terminal ? terminalWindow.end : tableWindow.end;
+    const analyzerById = new Map(requests.map(({ analyzer }) => [analyzer.id, analyzer]));
+    const payload = requests.map(({ request }) => request);
+    queue.request({
+      key: JSON.stringify([terminal, search, key, start, end]),
+      run: () => search
+        ? decodeAnalyzerFrameTableSearchWindow(session.id, payload, normalizedSearch, start, end)
+        : decodeAnalyzerFrameTableWindow(session.id, payload, start, end),
+      accept: (window) => {
+        const rows = window.rows.flatMap((row): AnalyzerFrameListRow[] => {
+          const analyzer = analyzerById.get(row.analyzer_id);
+          return analyzer ? [{ analyzer, frame: row.frame, frameIndex: row.frame_index, frameNumber: row.frame_number }] : [];
+        });
+        const result = { end, key, roles: window.roles, rowCount: window.row_count, rows, start };
+        if (terminal) setTerminalBackendWindow(result);
+        else if (search) setTableSearchBackendWindow(result);
+        else setTableBackendWindow(result);
+      },
+      reject: (error) => context.onUpdateSession((current) => ({ ...current, message: String(error) })),
     });
+    return () => queue.clear();
   }, [
-    normalizedSearch,
-    onUpdateSession,
-    session.analyzerDataPane,
     session.id,
+    session.analyzerDataPane,
+    normalizedSearch,
     tableBackendRequestKey,
-    tableBackendRequests,
-    tableBackendWindowEnabled,
-    tableWindow.end,
-    tableWindow.start,
-  ]);
-
-  useEffect(() => {
-    if (!tableSearchBackendWindowEnabled || session.analyzerDataPane !== "table" || !normalizedSearch) {
-      return;
-    }
-    const requestKey = tableSearchBackendRequestKey;
-    const requestStart = tableWindow.start;
-    const requestEnd = tableWindow.end;
-    const seq = tableSearchBackendWindowSeqRef.current + 1;
-    tableSearchBackendWindowSeqRef.current = seq;
-    const analyzerById = new Map(tableSearchBackendRequests.map(({ analyzer }) => [analyzer.id, analyzer]));
-    const started = performance.now();
-    void decodeAnalyzerFrameTableSearchWindow(
-      session.id,
-      tableSearchBackendRequests.map(({ request }) => request),
-      normalizedSearch,
-      requestStart,
-      requestEnd,
-    ).then((window) => {
-      if (tableSearchBackendWindowSeqRef.current !== seq) return;
-      const rows = window.rows.flatMap((row): AnalyzerFrameListRow[] => {
-        const analyzer = analyzerById.get(row.analyzer_id);
-        if (!analyzer) return [];
-        return [
-          {
-            analyzer,
-            frame: row.frame,
-            frameIndex: row.frame_index,
-            frameNumber: row.frame_number,
-          },
-        ];
-      });
-      traceAnalyzerPerformance(
-        "table_backend_search_window",
-        started,
-        `rows=${rows.length} matches=${window.row_count} start=${requestStart} end=${requestEnd}`,
-      );
-      setTableSearchBackendWindow({
-        end: requestEnd,
-        key: requestKey,
-        roles: window.roles,
-        rowCount: window.row_count,
-        rows,
-        start: requestStart,
-      });
-    }).catch((error) => {
-      if (tableSearchBackendWindowSeqRef.current !== seq) return;
-      onUpdateSession((current) => ({ ...current, message: String(error) }));
-    });
-  }, [
-    normalizedSearch,
-    onUpdateSession,
-    session.analyzerDataPane,
-    session.id,
     tableSearchBackendRequestKey,
-    tableSearchBackendRequests,
+    terminalBackendRequestKey,
+    tableBackendWindowEnabled,
     tableSearchBackendWindowEnabled,
-    tableWindow.end,
+    terminalBackendWindowEnabled,
     tableWindow.start,
+    tableWindow.end,
+    terminalWindow.start,
+    terminalWindow.end,
   ]);
 
   useEffect(() => {
@@ -10296,62 +10250,53 @@ function AnalyzersPanel({
     });
   }, [onUpdateSession, session.id, tableSearchHydrationRequests]);
 
-  useEffect(() => {
-    if (!terminalBackendWindowEnabled || session.analyzerDataPane !== "terminal") {
-      return;
-    }
-    const requestKey = terminalBackendRequestKey;
-    const requestStart = terminalWindow.start;
-    const requestEnd = terminalWindow.end;
-    const seq = terminalBackendWindowSeqRef.current + 1;
-    terminalBackendWindowSeqRef.current = seq;
-    const analyzerById = new Map(terminalBackendRequests.map(({ analyzer }) => [analyzer.id, analyzer]));
-    const started = performance.now();
-    void decodeAnalyzerFrameTableWindow(
-      session.id,
-      terminalBackendRequests.map(({ request }) => request),
-      requestStart,
-      requestEnd,
-    ).then((window) => {
-      if (terminalBackendWindowSeqRef.current !== seq) return;
-      const rows = window.rows.flatMap((row): AnalyzerFrameListRow[] => {
-        const analyzer = analyzerById.get(row.analyzer_id);
-        if (!analyzer) return [];
-        return [
-          {
-            analyzer,
-            frame: row.frame,
-            frameIndex: row.frame_index,
-            frameNumber: row.frame_number,
+  async function copyAnalyzerData() {
+    if (copyBusy) return;
+    setCopyBusy(true);
+    try {
+      const rows: string[] = [];
+      let columns = tableDataColumns;
+      const appendRow = ({ analyzer, frame, frameNumber }: AnalyzerFrameListRow) => {
+        rows.push([
+          frameNumber,
+          frame.frame_type,
+          formatSeconds(frame.start_sample / Math.max(1, sampleRateHz)),
+          formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz)),
+          ...columns.map((role) => {
+            const value = frame.channel_values.find((item) => item.role === role);
+            return value ? formatAnalyzerChannelValue(analyzer, value) : "";
+          }),
+        ].join("\t"));
+      };
+      if (tableSearchBackendWindowEnabled || (tableBackendWindowEnabled && !filteredTableFrameRefs)) {
+        const requests = tableSearchBackendWindowEnabled ? tableSearchBackendRequests : tableBackendRequests;
+        const payload = requests.map(({ request }) => request);
+        const analyzerById = new Map(requests.map(({ analyzer }) => [analyzer.id, analyzer]));
+        await visitAnalyzerTablePages(
+          (start, end) => tableSearchBackendWindowEnabled
+            ? decodeAnalyzerFrameTableSearchWindow(session.id, payload, normalizedSearch, start, end)
+            : decodeAnalyzerFrameTableWindow(session.id, payload, start, end),
+          (page) => {
+            columns = page.roles;
+            for (const row of page.rows) {
+              const analyzer = analyzerById.get(row.analyzer_id);
+              if (analyzer) appendRow({ analyzer, frame: row.frame, frameIndex: row.frame_index, frameNumber: row.frame_number });
+            }
           },
-        ];
-      });
-      traceAnalyzerPerformance(
-        "terminal_backend_window",
-        started,
-        `rows=${rows.length} total=${window.row_count} start=${requestStart} end=${requestEnd}`,
-      );
-      setTerminalBackendWindow({
-        end: requestEnd,
-        key: requestKey,
-        rowCount: window.row_count,
-        rows,
-        start: requestStart,
-      });
-    }).catch((error) => {
-      if (terminalBackendWindowSeqRef.current !== seq) return;
+        );
+      } else if (filteredTableFrameRefs) {
+        analyzerFrameListRowsFromRefs(tableFrameSources, filteredTableFrameRefs).forEach(appendRow);
+      } else {
+        forEachAnalyzerFrameListRow(tableFrameSources, appendRow);
+      }
+      const header = [analyzerT("frame"), analyzerT("type"), analyzerT("start"), analyzerT("duration"), ...columns].join("\t");
+      await navigator.clipboard?.writeText([header, ...rows].join("\n"));
+    } catch (error) {
       onUpdateSession((current) => ({ ...current, message: String(error) }));
-    });
-  }, [
-    onUpdateSession,
-    session.analyzerDataPane,
-    session.id,
-    terminalBackendRequestKey,
-    terminalBackendRequests,
-    terminalBackendWindowEnabled,
-    terminalWindow.end,
-    terminalWindow.start,
-  ]);
+    } finally {
+      setCopyBusy(false);
+    }
+  }
 
   async function exportAnalyzer(analyzerId: string, format: "csv" | "txt") {
     const analyzer = session.analyzers.find((item) => item.id === analyzerId);
@@ -10877,77 +10822,8 @@ function AnalyzersPanel({
               </div>
               <button
                 aria-label={analyzerT("copyAnalyzerData")}
-                disabled={filteredTableFrameCount === 0}
-                onClick={async () => {
-                  const rows: string[] = [];
-                  let columns = tableDataColumns;
-                  const appendRow = ({ analyzer, frame, frameNumber }: AnalyzerFrameListRow, roles = columns) => {
-                    rows.push([
-                      frameNumber,
-                      frame.frame_type,
-                      formatSeconds(frame.start_sample / Math.max(1, sampleRateHz)),
-                      formatSeconds((frame.end_sample - frame.start_sample) / Math.max(1, sampleRateHz)),
-                      ...roles.map(
-                        (role) => {
-                          const value = frame.channel_values.find((item) => item.role === role);
-                          return value ? formatAnalyzerChannelValue(analyzer, value) : "";
-                        },
-                      ),
-                    ].join("\t"));
-                  };
-                  if (tableSearchBackendWindowEnabled) {
-                    const analyzerById = new Map(tableSearchBackendRequests.map(({ analyzer }) => [analyzer.id, analyzer]));
-                    const window = await decodeAnalyzerFrameTableSearchWindow(
-                      session.id,
-                      tableSearchBackendRequests.map(({ request }) => request),
-                      normalizedSearch,
-                      0,
-                      filteredTableFrameCount,
-                    );
-                    columns = window.roles;
-                    window.rows.forEach((row) => {
-                      const analyzer = analyzerById.get(row.analyzer_id);
-                      if (!analyzer) return;
-                      appendRow({
-                        analyzer,
-                        frame: row.frame,
-                        frameIndex: row.frame_index,
-                        frameNumber: row.frame_number,
-                      }, columns);
-                    });
-                  } else if (tableBackendWindowEnabled && !filteredTableFrameRefs) {
-                    const analyzerById = new Map(tableBackendRequests.map(({ analyzer }) => [analyzer.id, analyzer]));
-                    const window = await decodeAnalyzerFrameTableWindow(
-                      session.id,
-                      tableBackendRequests.map(({ request }) => request),
-                      0,
-                      filteredTableFrameCount,
-                    );
-                    columns = window.roles;
-                    window.rows.forEach((row) => {
-                      const analyzer = analyzerById.get(row.analyzer_id);
-                      if (!analyzer) return;
-                      appendRow({
-                        analyzer,
-                        frame: row.frame,
-                        frameIndex: row.frame_index,
-                        frameNumber: row.frame_number,
-                      }, columns);
-                    });
-                  } else if (filteredTableFrameRefs) {
-                    analyzerFrameListRowsFromRefs(tableFrameSources, filteredTableFrameRefs).forEach((row) => appendRow(row));
-                  } else {
-                    forEachAnalyzerFrameListRow(tableFrameSources, appendRow);
-                  }
-                  const header = [
-                    analyzerT("frame"),
-                    analyzerT("type"),
-                    analyzerT("start"),
-                    analyzerT("duration"),
-                    ...columns,
-                  ].join("\t");
-                  void navigator.clipboard?.writeText([header, ...rows].join("\n"));
-                }}
+                disabled={copyBusy || filteredTableFrameCount === 0}
+                onClick={() => void copyAnalyzerData()}
                 title={analyzerT("copy")}
                 type="button"
               >
@@ -10975,11 +10851,11 @@ function AnalyzersPanel({
                   {session.analyzers.some((analyzer) => analyzer.decodeBusy) ? analyzerT("analyzing") : analyzerT("noFrames")}
                 </div>
               ) : tableSearchBackendWindowEnabled && !tableSearchBackendWindowRowsMatch ? (
-                <div className="empty-result">{analyzerT("loadingMatchingData")}</div>
+                <AnalyzerWindowPlaceholder window={tableWindow} rowHeight={ANALYZER_TABLE_ROW_HEIGHT_PX} minWidth={tableMinimumWidth}>{analyzerT("loadingMatchingData")}</AnalyzerWindowPlaceholder>
               ) : filteredTableFrameCount === 0 ? (
                 <div className="empty-result">{analyzerT("noMatchingFrames")}</div>
               ) : tableBackendWindowEnabled && !tableBackendWindowMatches ? (
-                <div className="empty-result">{analyzerT("loadingData")}</div>
+                <AnalyzerWindowPlaceholder window={tableWindow} rowHeight={ANALYZER_TABLE_ROW_HEIGHT_PX} minWidth={tableMinimumWidth}>{analyzerT("loadingData")}</AnalyzerWindowPlaceholder>
               ) : (
                 <>
                   <div
@@ -11055,7 +10931,7 @@ function AnalyzersPanel({
             {terminalEffectiveFrameCount === 0 ? (
               <div className="empty-result">{analyzerT("noTerminalData")}</div>
             ) : terminalBackendWindowEnabled && !terminalBackendWindowMatches ? (
-              <div className="empty-result">{analyzerT("loadingTerminalData")}</div>
+              <AnalyzerWindowPlaceholder window={terminalWindow} rowHeight={ANALYZER_TERMINAL_ROW_HEIGHT_PX}>{analyzerT("loadingTerminalData")}</AnalyzerWindowPlaceholder>
             ) : (
               <>
                 <div

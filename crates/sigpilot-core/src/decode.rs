@@ -204,7 +204,7 @@ pub struct DecodedChannelValue {
 pub struct DecodedProtocolMarker {
     pub channel: Option<u8>,
     pub sample: u64,
-    pub kind: String,
+    pub kind: crate::ProtocolMarkerKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,6 +218,58 @@ pub struct DecodedFrame {
     pub channel_values: Vec<DecodedChannelValue>,
     #[serde(default)]
     pub protocol_markers: Vec<DecodedProtocolMarker>,
+}
+
+impl DecodedFrame {
+    /// Heap capacity owned by this frame, excluding the frame struct itself.
+    pub fn allocated_bytes(&self) -> usize {
+        let mut bytes = self
+            .frame_type
+            .capacity()
+            .saturating_add(self.label.capacity())
+            .saturating_add(
+                self.channel_values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<DecodedChannelValue>()),
+            )
+            .saturating_add(
+                self.protocol_markers
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<DecodedProtocolMarker>()),
+            );
+        for value in &self.channel_values {
+            bytes = bytes
+                .saturating_add(value.role.capacity())
+                .saturating_add(value.label.capacity())
+                .saturating_add(
+                    value
+                        .texts
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                );
+            for text in &value.texts {
+                bytes = bytes.saturating_add(text.capacity());
+            }
+        }
+        for marker in &self.protocol_markers {
+            bytes = bytes.saturating_add(marker.kind.allocated_bytes());
+        }
+        bytes
+    }
+
+    /// Empty candidate texts already mean "use label" in the renderer. Avoid
+    /// storing the same display label twice for every native byte result.
+    pub fn compact_storage(&mut self) {
+        for value in &mut self.channel_values {
+            if value.texts.len() == 1 && value.texts[0] == value.label {
+                value.texts = Vec::new();
+            } else {
+                value.texts.shrink_to_fit();
+            }
+        }
+        self.channel_values.shrink_to_fit();
+        self.protocol_markers.shrink_to_fit();
+    }
 }
 
 struct FrameCollector {

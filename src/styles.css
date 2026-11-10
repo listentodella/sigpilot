@@ -6351,7 +6351,8 @@ body.timing-marker-col-resize * {
 
 .analyzerFrameDetailChannelValue {
   color: var(--on-background-0);
-}:
+}
+
 .analyzerDataTable,
 .analyzerTerminal {
   min-height: 0;
@@ -6486,6 +6487,15 @@ body.timing-marker-col-resize * {
   width: 1px;
   flex: 0 0 auto;
   pointer-events: none;
+}
+
+.analyzerWindowLoading {
+  display: flex;
+  align-items: flex-start;
+  flex: 0 0 auto;
+  padding: 8px;
+  overflow: hidden;
+  color: var(--on-background-20);
 }
 
 .analyzerTerminal {

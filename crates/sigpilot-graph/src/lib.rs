@@ -31,6 +31,13 @@ pub use view_state::{
 
 const MAX_CHANNELS: u8 = 32;
 const MAX_DECODED_FRAMES: usize = 100_000;
+// Bound IPC response allocations even if the frontend reports a bad viewport.
+const MAX_ANALYZER_TABLE_WINDOW_ROWS: usize = 1_024;
+const MAX_ANALYZER_SEARCH_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ANALYZER_SEARCH_QUERIES: usize = 8;
+// A result that exceeds this budget must fail explicitly, never silently lose
+// rows. This bounds retained decoded objects, not total process/sidecar RSS.
+const MAX_NATIVE_RESULT_BYTES: u64 = 256 * 1024 * 1024;
 
 // Logic 2.4.43 BaseAnalyzerManager render limits. Bubble responses may grow
 // with the viewport; the fixed 300-result limit is reserved for marker lists.
@@ -1211,6 +1218,7 @@ pub struct GraphSession {
     capture: RwLock<Option<Arc<CaptureData>>>,
     sparse_capture: RwLock<Option<Arc<SparseCaptureData>>>,
     analyzer_cache: Mutex<HashMap<String, AnalyzerCacheEntry>>,
+    native_decode_errors: Mutex<HashMap<String, String>>,
     hla_decode_lock: Mutex<()>,
     native_window_cache: Mutex<HashMap<NativeWindowCacheKey, NativeWindowCacheEntry>>,
     native_background_cache: Mutex<HashMap<String, NativeBackgroundDecodeState>>,
@@ -1240,6 +1248,7 @@ impl Default for GraphSession {
             capture: RwLock::new(None),
             sparse_capture: RwLock::new(None),
             analyzer_cache: Mutex::new(HashMap::new()),
+            native_decode_errors: Mutex::new(HashMap::new()),
             hla_decode_lock: Mutex::new(()),
             native_window_cache: Mutex::new(HashMap::new()),
             native_background_cache: Mutex::new(HashMap::new()),
@@ -1283,7 +1292,7 @@ struct NativeBackgroundDecodeState {
     decoded_sample_count: u64,
     next_driver_edge: usize,
     total_driver_edges: usize,
-    frames: Vec<DecodedFrame>,
+    frames: Arc<Vec<DecodedFrame>>,
     async_decode_id: String,
     async_started: bool,
 }
@@ -1375,34 +1384,39 @@ fn partial_analyzer_cache_entry(
     entry
 }
 
+fn ensure_native_result_budget(bytes: u64) -> Result<()> {
+    if bytes > MAX_NATIVE_RESULT_BYTES {
+        return Err(GraphError::DecoderBackend(format!(
+            "Decoded results exceed the {} MiB memory budget; decode stopped. Use a shorter capture.",
+            MAX_NATIVE_RESULT_BYTES / 1024 / 1024)));
+    }
+    Ok(())
+}
+
+fn ensure_native_append_budget(
+    current: &Vec<DecodedFrame>,
+    incoming: &Vec<DecodedFrame>,
+) -> Result<()> {
+    // Vec append may double capacity; include that allocation before appending.
+    let required = current.len().saturating_add(incoming.len());
+    let capacity = if required > current.capacity() {
+        required.max(current.capacity().saturating_mul(2))
+    } else {
+        current.capacity()
+    };
+    let bytes = current.iter().chain(incoming).fold(
+        capacity.saturating_mul(std::mem::size_of::<DecodedFrame>()) as u64,
+        |bytes, frame| bytes.saturating_add(frame.allocated_bytes() as u64),
+    );
+    ensure_native_result_budget(bytes)
+}
+
 fn decoded_frame_vec_allocated_bytes(frames: &Vec<DecodedFrame>) -> u64 {
     frames.iter().fold(
-        u64::try_from(
-            frames
-                .capacity()
-                .saturating_mul(std::mem::size_of::<DecodedFrame>()),
-        )
-        .unwrap_or(u64::MAX),
-        |bytes, frame| {
-            let frame_strings = frame
-                .frame_type
-                .capacity()
-                .saturating_add(frame.label.capacity());
-            let channel_values = frame.channel_values.iter().fold(
-                frame
-                    .channel_values
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<DecodedChannelValue>()),
-                |channel_bytes, value| {
-                    channel_bytes
-                        .saturating_add(value.role.capacity())
-                        .saturating_add(value.label.capacity())
-                },
-            );
-            bytes
-                .saturating_add(u64::try_from(frame_strings).unwrap_or(u64::MAX))
-                .saturating_add(u64::try_from(channel_values).unwrap_or(u64::MAX))
-        },
+        frames
+            .capacity()
+            .saturating_mul(std::mem::size_of::<DecodedFrame>()) as u64,
+        |bytes, frame| bytes.saturating_add(frame.allocated_bytes() as u64),
     )
 }
 
@@ -1506,27 +1520,38 @@ impl GraphSession {
                 })
             })
             .unwrap_or(0);
-        let analyzer_bytes =
-            self.analyzer_cache
-                .lock()
-                .values()
-                .fold(0u64, |bytes, entry| {
-                    bytes.saturating_add(decoded_frames_allocated_bytes(entry))
-                })
-                .saturating_add(self.native_window_cache.lock().values().fold(
-                    0u64,
-                    |bytes, entry| {
-                        bytes.saturating_add(decoded_frame_vec_allocated_bytes(
-                            entry.frames.as_ref(),
-                        ))
-                    },
-                ))
-                .saturating_add(self.native_background_cache.lock().values().fold(
-                    0u64,
-                    |bytes, state| {
-                        bytes.saturating_add(decoded_frame_vec_allocated_bytes(&state.frames))
-                    },
-                ));
+        let mut seen_frames = HashSet::new();
+        let mut analyzer_bytes = 0u64;
+        {
+            let cache = self.analyzer_cache.lock();
+            for entry in cache.values() {
+                let frame_bytes = decoded_frame_vec_allocated_bytes(&entry.frames);
+                analyzer_bytes = analyzer_bytes.saturating_add(
+                    decoded_frames_allocated_bytes(entry).saturating_sub(frame_bytes),
+                );
+                if seen_frames.insert(Arc::as_ptr(&entry.frames)) {
+                    analyzer_bytes = analyzer_bytes.saturating_add(frame_bytes);
+                }
+            }
+        }
+        {
+            let cache = self.native_window_cache.lock();
+            for entry in cache.values() {
+                if seen_frames.insert(Arc::as_ptr(&entry.frames)) {
+                    analyzer_bytes = analyzer_bytes
+                        .saturating_add(decoded_frame_vec_allocated_bytes(&entry.frames));
+                }
+            }
+        }
+        {
+            let cache = self.native_background_cache.lock();
+            for state in cache.values() {
+                if seen_frames.insert(Arc::as_ptr(&state.frames)) {
+                    analyzer_bytes = analyzer_bytes
+                        .saturating_add(decoded_frame_vec_allocated_bytes(&state.frames));
+                }
+            }
+        }
         CaptureMemoryUsage {
             buffer_bytes,
             sample_bytes,
@@ -1654,6 +1679,9 @@ impl GraphSession {
         }
         *self.capture.write() = Some(Arc::new(capture));
         *self.sparse_capture.write() = None;
+        // Live Rust previews are superseded by the completed capture. Keeping
+        // their separate keys retained tens of MiB alongside native results.
+        self.clear_analyzer_caches();
         self.bump_revision();
         tracing::info!(
             target: "sigpilot::capture",
@@ -1938,6 +1966,7 @@ impl GraphSession {
         }
 
         let key = native_full_analyzer_cache_key(backend, settings)?;
+        self.check_native_decode_error(&key)?;
         let sample_count = self.sample_count();
         if let Some(entry) = self.analyzer_cache.lock().get(&key) {
             if entry.decoded_sample_count == sample_count {
@@ -2027,10 +2056,28 @@ impl GraphSession {
             conversion_started,
             &format!("backend={backend:?} frames={}", frames.len()),
         );
+        self.check_native_result_budget(&key, &frames)?;
         self.analyzer_cache
             .lock()
             .insert(key, analyzer_cache_entry(sample_count, frames.clone()));
         Ok(frames)
+    }
+
+    fn check_native_decode_error(&self, key: &str) -> Result<()> {
+        match self.native_decode_errors.lock().get(key) {
+            Some(error) => Err(GraphError::DecoderBackend(error.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn check_native_result_budget(&self, key: &str, frames: &Vec<DecodedFrame>) -> Result<()> {
+        if let Err(error) = ensure_native_result_budget(decoded_frame_vec_allocated_bytes(frames)) {
+            self.native_decode_errors
+                .lock()
+                .insert(key.to_owned(), error.to_string());
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn hla_cache_key(&self, settings: &AnalyzerDecodeSettings) -> Result<String> {
@@ -2105,6 +2152,7 @@ impl GraphSession {
 
         for (index, setting) in settings.iter().enumerate() {
             let key = native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, setting)?;
+            self.check_native_decode_error(&key)?;
             if let Some(entry) = self.analyzer_cache.lock().get(&key) {
                 if entry.decoded_sample_count == sample_count {
                     results[index] = Some(entry.frames.clone());
@@ -2212,6 +2260,7 @@ impl GraphSession {
             .zip(pending_keys)
             .zip(decoded_frames)
         {
+            self.check_native_result_budget(&key, &frames)?;
             self.analyzer_cache
                 .lock()
                 .insert(key, analyzer_cache_entry(sample_count, frames.clone()));
@@ -2282,6 +2331,7 @@ impl GraphSession {
         let mut seen_keys = HashSet::new();
         for setting in settings {
             let key = native_full_analyzer_cache_key(DecoderBackendKind::SaleaeNative, setting)?;
+            self.check_native_decode_error(&key)?;
             if seen_keys.insert(key.clone()) {
                 unique_settings.push((key, setting));
             }
@@ -2302,14 +2352,41 @@ impl GraphSession {
                 .collect::<HashMap<_, _>>()
         };
 
-        if let Some(progress) = self.try_decode_saleae_native_async_background_step(
+        let async_result = self.try_decode_saleae_native_async_background_step(
             &capture,
             settings,
             &unique_settings,
             &complete_keys,
             sample_count,
             generation,
-        )? {
+        );
+        if let Err(error) = &async_result {
+            let mut ids = Vec::new();
+            {
+                let mut analyzer = self.analyzer_cache.lock();
+                let mut background = self.native_background_cache.lock();
+                let mut failures = self.native_decode_errors.lock();
+                // A failed request from the previous capture must not poison
+                // a new capture's cache or cancel its jobs.
+                if self.analyzer_generation.load(Ordering::Acquire) == generation {
+                    for (key, _) in &unique_settings {
+                        if complete_keys.contains_key(key) {
+                            continue;
+                        }
+                        analyzer.remove(key);
+                        if let Some(state) = background.remove(key) {
+                            ids.push(state.async_decode_id);
+                        }
+                        failures.insert(key.clone(), error.to_string());
+                    }
+                }
+            }
+            cancel_saleae_async_decode_ids(ids.iter().map(String::as_str));
+            if !ids.is_empty() {
+                sigpilot_core::release_unused_memory();
+            }
+        }
+        if let Some(progress) = async_result? {
             trace_graph_timing(
                 "saleae_background_async_step",
                 started,
@@ -2345,7 +2422,7 @@ impl GraphSession {
                             decoded_sample_count: sample_count,
                             next_driver_edge: 0,
                             total_driver_edges,
-                            frames: Vec::new(),
+                            frames: Arc::new(Vec::new()),
                             async_decode_id: native_async_decode_id(
                                 self.instance_id,
                                 generation,
@@ -2362,7 +2439,7 @@ impl GraphSession {
                         decoded_sample_count: sample_count,
                         next_driver_edge: 0,
                         total_driver_edges,
-                        frames: Vec::new(),
+                        frames: Arc::new(Vec::new()),
                         async_decode_id: native_async_decode_id(self.instance_id, generation, key),
                         async_started: false,
                     };
@@ -2535,10 +2612,10 @@ impl GraphSession {
                 for frame in &mut retained {
                     frame.frame_id = frame.start_sample;
                 }
-                append_native_background_frames(&mut state.frames, retained);
+                append_native_background_frames(Arc::make_mut(&mut state.frames), retained);
                 state.next_driver_edge = result.window.body_edge_end;
                 if state.next_driver_edge >= state.total_driver_edges {
-                    completed.push((result.key, Arc::new(std::mem::take(&mut state.frames))));
+                    completed.push((result.key, std::mem::take(&mut state.frames)));
                 }
             }
         }
@@ -2609,9 +2686,9 @@ impl GraphSession {
                         || state.total_driver_edges != total_driver_edges
                 });
                 if reset_state {
-                    let frames = seeded_frames.get(key).cloned().unwrap_or_default();
+                    let frames = Arc::new(seeded_frames.get(key).cloned().unwrap_or_default());
                     if !frames.is_empty() {
-                        seeded_partial.push((key.clone(), Arc::new(frames.clone())));
+                        seeded_partial.push((key.clone(), frames.clone()));
                     }
                     background.insert(
                         key.clone(),
@@ -2732,8 +2809,19 @@ impl GraphSession {
         let mut completed = Vec::new();
         let mut partial = Vec::new();
         let mut cancelled = false;
-        {
+        let mut completed_large_result = false;
+        let update_result = (|| -> Result<()> {
+            // Keep the cache locked while replacing a partial snapshot. A table
+            // request must not see a missing entry and start a second full decode.
+            // Remove our previous reference before make_mut: normally the only
+            // owner left is the accumulator. In-flight readers keep a stable COW
+            // snapshot and pay for a copy only while they actually need it.
+            let mut analyzer = self.analyzer_cache.lock();
             let mut background = self.native_background_cache.lock();
+            if self.analyzer_generation.load(Ordering::Acquire) != generation {
+                cancelled = true;
+                return Ok(());
+            }
             for (key, _, step) in steps {
                 let Some(step) = step else {
                     continue;
@@ -2741,6 +2829,16 @@ impl GraphSession {
                 let Some(state) = background.get_mut(&key) else {
                     continue;
                 };
+                if matches!(
+                    &step,
+                    SaleaeAsyncDecodeStep::Pending {
+                        output: Some(_),
+                        ..
+                    } | SaleaeAsyncDecodeStep::Complete(_)
+                        | SaleaeAsyncDecodeStep::CompleteDelta { .. }
+                ) {
+                    analyzer.remove(&key);
+                }
                 match step {
                     SaleaeAsyncDecodeStep::Pending {
                         progress_sample,
@@ -2750,8 +2848,12 @@ impl GraphSession {
                         if let Some(output) = output {
                             let mut frames = output.into_decoded_frames();
                             normalize_native_decoded_frames(&mut frames);
-                            append_native_background_frames(&mut state.frames, frames);
-                            partial.push((key.clone(), Arc::new(state.frames.clone())));
+                            ensure_native_append_budget(&state.frames, &frames)?;
+                            append_native_background_frames(
+                                Arc::make_mut(&mut state.frames),
+                                frames,
+                            );
+                            partial.push((key.clone(), state.frames.clone()));
                         }
                         if let Some((_, settings)) = unique_settings
                             .iter()
@@ -2768,6 +2870,8 @@ impl GraphSession {
                     }
                     SaleaeAsyncDecodeStep::Complete(output) => {
                         let frames = output.into_decoded_frames();
+                        ensure_native_result_budget(decoded_frame_vec_allocated_bytes(&frames))?;
+                        state.frames = Arc::default();
                         state.next_driver_edge = state.total_driver_edges;
                         state.async_started = false;
                         completed.push((key, Arc::new(frames)));
@@ -2779,17 +2883,39 @@ impl GraphSession {
                     } => {
                         let mut frames = output.into_decoded_frames();
                         normalize_native_decoded_frames(&mut frames);
-                        append_native_background_frames(&mut state.frames, frames);
+                        ensure_native_append_budget(&state.frames, &frames)?;
+                        let marker_bytes = markers.iter().fold(
+                            markers
+                                .len()
+                                .saturating_mul(std::mem::size_of::<DecodedProtocolMarker>())
+                                as u64,
+                            |bytes, marker| {
+                                bytes.saturating_add(marker.kind.allocated_bytes() as u64)
+                            },
+                        );
+                        ensure_native_result_budget(
+                            decoded_frame_vec_allocated_bytes(&state.frames)
+                                .saturating_add(decoded_frame_vec_allocated_bytes(&frames))
+                                .saturating_add(marker_bytes),
+                        )?;
+                        append_native_background_frames(Arc::make_mut(&mut state.frames), frames);
                         if state.frames.len() != expected_frame_count {
                             return Err(GraphError::DecoderBackend(format!(
                                 "Saleae async decoder completed with {} accumulated frames, expected {expected_frame_count}",
                                 state.frames.len()
                             )));
                         }
-                        attach_native_completion_markers(&mut state.frames, markers);
+                        attach_native_completion_markers(
+                            Arc::make_mut(&mut state.frames).as_mut_slice(),
+                            markers,
+                        );
+                        Arc::make_mut(&mut state.frames).shrink_to_fit();
+                        ensure_native_result_budget(decoded_frame_vec_allocated_bytes(
+                            &state.frames,
+                        ))?;
                         state.next_driver_edge = state.total_driver_edges;
                         state.async_started = false;
-                        completed.push((key, Arc::new(std::mem::take(&mut state.frames))));
+                        completed.push((key, std::mem::take(&mut state.frames)));
                     }
                     SaleaeAsyncDecodeStep::Cancelled => {
                         state.async_started = false;
@@ -2797,22 +2923,26 @@ impl GraphSession {
                     }
                 }
             }
-        }
-        if !partial.is_empty() {
-            let mut analyzer = self.analyzer_cache.lock();
+            drop(background);
             for (key, frames) in partial {
                 analyzer.insert(key, partial_analyzer_cache_entry(sample_count, frames));
             }
-        }
-        if !completed.is_empty() {
-            let mut analyzer = self.analyzer_cache.lock();
             for (key, frames) in completed {
+                completed_large_result |= frames.len() >= 10_000;
                 analyzer.insert(key, analyzer_cache_entry(sample_count, frames));
             }
-        }
+            Ok(())
+        })();
+        // The caller removes partial results, latches the failure and cancels
+        // jobs for both transport errors and errors while applying this update.
+        update_result?;
 
-        self.native_background_progress(requested_settings, sample_count, cancelled)
-            .map(Some)
+        let progress =
+            self.native_background_progress(requested_settings, sample_count, cancelled)?;
+        if completed_large_result {
+            sigpilot_core::release_unused_memory();
+        }
+        Ok(Some(progress))
     }
 
     fn native_background_progress(
@@ -4288,11 +4418,12 @@ impl GraphSession {
     }
 
     fn clear_analyzer_caches(&self) {
-        self.analyzer_generation.fetch_add(1, Ordering::AcqRel);
-        self.analyzer_cache.lock().clear();
-        self.native_window_cache.lock().clear();
         let async_decode_ids = {
+            let mut analyzer = self.analyzer_cache.lock();
             let mut background = self.native_background_cache.lock();
+            self.analyzer_generation.fetch_add(1, Ordering::AcqRel);
+            self.native_decode_errors.lock().clear();
+            analyzer.clear();
             let ids = background
                 .values()
                 .filter(|state| state.async_started)
@@ -4301,6 +4432,7 @@ impl GraphSession {
             background.clear();
             ids
         };
+        self.native_window_cache.lock().clear();
         cancel_saleae_async_decode_ids(async_decode_ids.iter().map(String::as_str));
     }
 
@@ -4518,12 +4650,17 @@ fn attach_native_completion_markers(
     if frames.is_empty() || markers.is_empty() {
         return;
     }
-    markers.sort_by(|left, right| {
-        left.sample
-            .cmp(&right.sample)
-            .then_with(|| left.channel.cmp(&right.channel))
-            .then_with(|| left.kind.cmp(&right.kind))
-    });
+    if !markers.windows(2).all(|pair| {
+        (pair[0].sample, pair[0].channel, &pair[0].kind)
+            <= (pair[1].sample, pair[1].channel, &pair[1].kind)
+    }) {
+        markers.sort_by(|left, right| {
+            left.sample
+                .cmp(&right.sample)
+                .then_with(|| left.channel.cmp(&right.channel))
+                .then_with(|| left.kind.cmp(&right.kind))
+        });
+    }
     markers.dedup();
     let mut frame_index = 0usize;
     for marker in markers {
@@ -4533,6 +4670,9 @@ fn attach_native_completion_markers(
             frame_index += 1;
         }
         frames[frame_index].protocol_markers.push(marker);
+    }
+    for frame in frames {
+        frame.protocol_markers.shrink_to_fit();
     }
 }
 
@@ -5704,7 +5844,7 @@ fn analyzer_frame_table_window_from_sources(
         .sum::<usize>();
     let roles = analyzer_frame_table_roles(sources);
     let start = start.min(row_count);
-    let end = end.min(row_count).max(start);
+    let end = end.min(row_count).max(start).min(start.saturating_add(MAX_ANALYZER_TABLE_WINDOW_ROWS));
     if start >= end || sources.is_empty() {
         return AnalyzerFrameTableWindow {
             roles,
@@ -5798,7 +5938,7 @@ fn analyzer_frame_table_search_window_from_sources(
         .map(|source| source.matches.len())
         .sum::<usize>();
     let start = start.min(row_count);
-    let end = end.min(row_count).max(start);
+    let end = end.min(row_count).max(start).min(start.saturating_add(MAX_ANALYZER_TABLE_WINDOW_ROWS));
     if start >= end || match_sources.is_empty() {
         return AnalyzerFrameTableWindow {
             roles,
@@ -5921,7 +6061,14 @@ fn analyzer_search_texts_for_entry(
     if let Some(cached) = cache.get(&cache_key).cloned() {
         return cached;
     }
-    cache.insert(cache_key, built.clone());
+    cache.clear();
+    let bytes = built
+        .capacity()
+        .saturating_mul(std::mem::size_of::<String>())
+        .saturating_add(built.iter().map(String::capacity).sum::<usize>());
+    if bytes <= MAX_ANALYZER_SEARCH_CACHE_BYTES {
+        cache.insert(cache_key, built.clone());
+    }
     built
 }
 
@@ -5953,7 +6100,20 @@ fn analyzer_search_matches_for_entry(
     if let Some(cached) = cache.get(&cache_key).cloned() {
         return cached;
     }
-    cache.insert(cache_key, built.clone());
+    let bytes = built
+        .capacity()
+        .saturating_mul(std::mem::size_of::<usize>());
+    let retained = cache.values().fold(0usize, |sum, rows| {
+        sum.saturating_add(rows.capacity().saturating_mul(std::mem::size_of::<usize>()))
+    });
+    if cache.len() >= MAX_ANALYZER_SEARCH_QUERIES
+        || retained.saturating_add(bytes) > MAX_ANALYZER_SEARCH_CACHE_BYTES
+    {
+        cache.clear();
+    }
+    if bytes <= MAX_ANALYZER_SEARCH_CACHE_BYTES {
+        cache.insert(cache_key, built.clone());
+    }
     built
 }
 
@@ -7210,7 +7370,7 @@ mod tests {
 
     use super::*;
 
-    fn demo_capture(channel_count: u8, sample_count: u64) -> CaptureData {
+    pub(super) fn demo_capture(channel_count: u8, sample_count: u64) -> CaptureData {
         let mut settings = CaptureSettings::default();
         settings.channel_count = channel_count;
         let unit_size = if channel_count > 16 {
@@ -7897,6 +8057,46 @@ mod tests {
         assert_eq!(search.row_count, 1);
         assert_eq!(search.rows[0].analyzer_id, "i2c");
         assert_eq!(search.rows[0].frame.label, "i2c-second");
+    }
+
+    #[test]
+    fn analyzer_frame_table_windows_bound_oversized_requests_and_preserve_pagination() {
+        for source_count in [1, 2] {
+            let per_source = MAX_ANALYZER_TABLE_WINDOW_ROWS + 7;
+            let sources = (0..source_count)
+                .map(|source| {
+                    let frames = (0..per_source)
+                        .map(|index| {
+                            let sample = (index * source_count + source) as u64;
+                            decoded_frame_for_graph_test(sample, sample)
+                        })
+                        .collect();
+                    analyzer_table_source_for_graph_test(
+                        &format!("source-{source}"), "shared", "Hexadecimal", frames,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let total = per_source * source_count;
+            for search in [false, true] {
+                let page = |start| {
+                    if search {
+                        analyzer_frame_table_search_window_from_sources(&sources, "shared", start, usize::MAX)
+                    } else {
+                        analyzer_frame_table_window_from_sources(&sources, start, usize::MAX)
+                    }
+                };
+                let mut samples = Vec::new();
+                while samples.len() < total {
+                    let window = page(samples.len());
+                    assert_eq!(window.row_count, total);
+                    assert!(!window.rows.is_empty());
+                    assert!(window.rows.len() <= MAX_ANALYZER_TABLE_WINDOW_ROWS);
+                    samples.extend(window.rows.iter().map(|row| row.frame.start_sample));
+                }
+                assert_eq!(samples, (0..total as u64).collect::<Vec<_>>());
+                assert!(page(usize::MAX).rows.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -8848,6 +9048,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut previous_processed_edges = vec![0usize; settings.len()];
         let mut saw_partial_frames = false;
+        let mut held_snapshots = Vec::new();
         let completed = loop {
             let progress = session
                 .decode_saleae_native_background_step_batch(&settings)
@@ -8858,6 +9059,13 @@ mod tests {
                 assert!((0.0..=1.0).contains(&item.progress));
                 saw_partial_frames |= !item.complete && item.frame_count > 0;
                 previous_processed_edges[index] = item.processed_edges;
+            }
+            if held_snapshots.is_empty() && saw_partial_frames {
+                // A table request may still hold a partial snapshot when the
+                // next batch arrives. Its rows must remain immutable.
+                for entry in session.analyzer_cache.lock().values().filter(|entry| !entry.complete && !entry.frames.is_empty()) {
+                    held_snapshots.push((entry.frames.clone(), entry.frames.as_ref().clone()));
+                }
             }
             if progress.iter().all(|item| item.complete) {
                 break progress;
@@ -8879,6 +9087,10 @@ mod tests {
         assert_eq!(actual.len(), expected.len());
         for (actual_frames, expected_frames) in actual.iter().zip(expected.iter()) {
             assert_eq!(actual_frames.as_ref(), expected_frames.as_ref());
+        }
+        assert!(!held_snapshots.is_empty());
+        for (snapshot, original) in held_snapshots {
+            assert_eq!(snapshot.as_ref(), &original);
         }
     }
 
@@ -9191,7 +9403,7 @@ mod tests {
                 .map(|sample| sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample,
-                    kind: "dot".to_string(),
+                    kind: "dot".into(),
                 })
                 .collect(),
         }];
@@ -9223,22 +9435,22 @@ mod tests {
                 sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 80,
-                    kind: "stop".to_string(),
+                    kind: "stop".into(),
                 },
                 sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 10,
-                    kind: "start".to_string(),
+                    kind: "start".into(),
                 },
                 sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 10,
-                    kind: "start".to_string(),
+                    kind: "start".into(),
                 },
                 sigpilot_core::DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 50,
-                    kind: "dot".to_string(),
+                    kind: "dot".into(),
                 },
             ],
         }];
@@ -9284,7 +9496,7 @@ mod tests {
             protocol_markers: vec![sigpilot_core::DecodedProtocolMarker {
                 channel: Some(0),
                 sample: 150,
-                kind: "up_arrow".to_string(),
+                kind: "up_arrow".into(),
             }],
         }];
         let track = render_analyzer_track(
@@ -9330,7 +9542,7 @@ mod tests {
             protocol_markers: vec![sigpilot_core::DecodedProtocolMarker {
                 channel: Some(1),
                 sample: 150,
-                kind: "dot".to_string(),
+                kind: "dot".into(),
             }],
         }];
         let track = render_analyzer_track(
@@ -9443,7 +9655,7 @@ mod tests {
             protocol_markers: vec![sigpilot_core::DecodedProtocolMarker {
                 channel: Some(0),
                 sample: 15,
-                kind: "up_arrow".to_string(),
+                kind: "up_arrow".into(),
             }],
         };
 
@@ -9668,12 +9880,12 @@ mod tests {
                     sigpilot_core::DecodedProtocolMarker {
                         channel: Some(1),
                         sample: 32,
-                        kind: "up_arrow".to_string(),
+                        kind: "up_arrow".into(),
                     },
                     sigpilot_core::DecodedProtocolMarker {
                         channel: Some(2),
                         sample: 33,
-                        kind: "dot".to_string(),
+                        kind: "dot".into(),
                     },
                 ],
             },
@@ -10535,7 +10747,7 @@ mod tests {
         frames[0].protocol_markers.push(DecodedProtocolMarker {
             channel: Some(0),
             sample: 105,
-            kind: "preview".to_string(),
+            kind: "preview".into(),
         });
         attach_native_completion_markers(
             &mut frames,
@@ -10543,17 +10755,17 @@ mod tests {
                 DecodedProtocolMarker {
                     channel: Some(1),
                     sample: 350,
-                    kind: "stop".to_string(),
+                    kind: "stop".into(),
                 },
                 DecodedProtocolMarker {
                     channel: Some(0),
                     sample: 50,
-                    kind: "start".to_string(),
+                    kind: "start".into(),
                 },
                 DecodedProtocolMarker {
                     channel: Some(1),
                     sample: 250,
-                    kind: "up_arrow".to_string(),
+                    kind: "up_arrow".into(),
                 },
             ],
         );
@@ -10723,3 +10935,6 @@ mod tests {
         assert!(rendered[1].tracks.is_empty());
     }
 }
+
+#[cfg(test)]
+mod memory_tests;
