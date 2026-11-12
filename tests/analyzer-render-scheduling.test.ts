@@ -1,12 +1,47 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  analyzerRenderProgress,
   analyzerRenderRequestIntervalMs,
   analyzerRenderedTracksMatchRequests,
   analyzerRenderViewportCanServe,
+  nextAnalyzerRenderProgress,
   preserveLiveAnalyzerTracks,
 } from "../src/lib/analyzerRenderScheduling.ts";
 import type { AnalyzerTrackWindow } from "../src/lib/api.ts";
+
+/**
+ * The progress sampler ticks every 100 ms while a native analyzer batch runs.
+ * Reporting "no change" on the flat part of the curve is what keeps a working
+ * analyzer from re-rendering the whole workbench ten times a second.
+ */
+test("a flat progress curve reports no change instead of a new session write", () => {
+  // Mid-curve the value moves, so the caller must write.
+  const first = nextAnalyzerRenderProgress(0, 100);
+  assert.ok(first !== null && first > 0);
+
+  // Ticking again at the same elapsed time cannot move it.
+  assert.equal(nextAnalyzerRenderProgress(first, 100), null);
+
+  // Once the curve saturates, further ticks must all report no change, however
+  // long the analyzer works.
+  const saturated = analyzerRenderProgress(600_000);
+  for (const elapsed of [600_000, 600_100, 601_000, 900_000]) {
+    assert.equal(nextAnalyzerRenderProgress(saturated, elapsed), null);
+  }
+});
+
+test("progress never goes backwards and stays below the completion mark", () => {
+  let progress = 0;
+  for (const elapsed of [0, 100, 500, 2_400, 10_000, 60_000]) {
+    const next = nextAnalyzerRenderProgress(progress, elapsed);
+    if (next === null) continue;
+    assert.ok(next >= progress, `progress fell from ${progress} to ${next}`);
+    progress = next;
+  }
+  assert.ok(progress <= 94, "the sampler must not claim completion");
+  assert.equal(analyzerRenderProgress(0), 8);
+});
 
 test("interactive analyzer renders keep following the viewport", () => {
   assert.equal(analyzerRenderRequestIntervalMs(true, false), 50);

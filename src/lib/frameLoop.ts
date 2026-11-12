@@ -56,6 +56,17 @@ export interface FrameLoopState {
   ready: boolean;
 }
 
+export interface FrameRequestOptions {
+  /**
+   * The caller should render the waveform but skip analyzer decoding.
+   *
+   * Set on intermediate glide frames. The analyzer lanes are expected to keep
+   * showing their previous contents, which is what the backend already does when
+   * a request arrives without analyzers.
+   */
+  suppressAnalyzers: boolean;
+}
+
 export interface FrameLoopDependencies {
   /**
    * Issues one frame request. Rejects on transport failure. The loop's current
@@ -66,6 +77,7 @@ export interface FrameLoopDependencies {
     intent: ViewIntent,
     frameId: number,
     state: FrameLoopState,
+    options: FrameRequestOptions,
   ) => Promise<GraphFrameResponse>;
   /** Device pixel width to render for. Read per frame so a resize is picked up. */
   widthPx: () => number;
@@ -124,6 +136,14 @@ export class SessionFrameLoop {
   private retryNotBeforeMs = 0;
   private consecutiveFailures = 0;
   private healthy = true;
+  /**
+   * True once a glide frame has skipped its decode, meaning the analyzer lanes
+   * are stale and one more frame is owed to them. Without this the lanes would
+   * keep showing the pre-glide viewport until an unrelated invalidation arrived.
+   */
+  private analyzersDeferred = false;
+  /** Whether any analyzer lanes exist to decode for. Read per frame. */
+  private analyzersEnabled = true;
 
   constructor(deps: FrameLoopDependencies) {
     this.deps = deps;
@@ -184,6 +204,9 @@ export class SessionFrameLoop {
   private demand(): FrameDemand {
     if (this.pendingIntent && this.pendingIntent.kind !== "keep_current") return "gesture";
     if (this.deps.now() < this.animatingUntilMs) return "animating";
+    // A glide that skipped its decode owes one more frame, so the loop keeps
+    // running until the analyzer lanes have caught up with the final viewport.
+    if (this.analyzersDeferred) return "gesture";
     if (this.revisionDirty) return "gesture";
     if (this.live) return "live";
     return "idle";
@@ -219,10 +242,32 @@ export class SessionFrameLoop {
     const frameId = ++this.frameId;
     this.inFlight = true;
     const widthPx = Math.max(1, Math.round(this.deps.widthPx()));
+    // Skip analyzer decoding on intermediate animation frames.
+    //
+    // A glide sends a new viewport on every frame, and the backend answers each
+    // one by splitting the visible range into up to sixteen decode windows that
+    // never hit its window cache. The 2026-10-19 run turned 103 render requests
+    // into 1042 decode windows and 850 sidecar round trips inside four seconds,
+    // which is what made the frame table flicker and the CPU climb. The waveform
+    // is cheap and keeps gliding; the decode is deferred to the frame that ends
+    // the glide.
+    const suppressAnalyzers = this.shouldDeferAnalyzers();
+    // Only clear the debt when this frame actually carries the decode.
+    this.analyzersDeferred = suppressAnalyzers;
     this.deps
-      .request(intent, frameId, this.state)
+      .request(intent, frameId, this.state, { suppressAnalyzers })
       .then((response) => this.accept(response, widthPx))
       .catch((error) => this.fail(error));
+  }
+
+  /**
+   * True while a glide is still running, so the decode can wait for it to end.
+   *
+   * The last frame of a glide must decode, otherwise the analyzer lanes would
+   * stay on the pre-glide viewport until something else invalidated them.
+   */
+  private shouldDeferAnalyzers(): boolean {
+    return this.analyzersEnabled && this.deps.now() < this.animatingUntilMs;
   }
 
   /**

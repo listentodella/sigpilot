@@ -118,6 +118,7 @@ import {
   analyzerRenderRequestIntervalMs,
   analyzerRenderedTracksMatchRequests,
   analyzerRenderViewportCanServe,
+  nextAnalyzerRenderProgress,
   preserveLiveAnalyzerTracks,
 } from "./lib/analyzerRenderScheduling";
 import { traceAnalyzerPerformance } from "./lib/analyzerPerformance";
@@ -2589,7 +2590,7 @@ export default function App() {
       onError: (error) => {
         updateSession(sessionId, (current) => ({ ...current, message: String(error) }));
       },
-      request: (intent, frameId, state) => {
+      request: (intent, frameId, state, options) => {
         const live = currentSession();
         const channels = live ? visibleDigitalChannelIndexes(live) : [];
         // `pixels` is a CSS-pixel budget, matching what the tile pipeline used to
@@ -2611,8 +2612,13 @@ export default function App() {
         // That is what keeps the bubble aggregation in step with a zoom: the
         // backend aggregates for the viewport it is rendering, so the frontend
         // never draws bubbles merged for a scale the user has left behind.
-        const analyzers = live
-          ? live.analyzers.flatMap((analyzer) => {
+        // A glide frame asks only for the waveform. Decoding on every animation
+        // frame multiplied into hundreds of sidecar calls (see `frameLoop.ts`),
+        // while the analyzer lanes simply keep their previous contents until the
+        // final frame arrives with the decode.
+        const analyzers =
+          live && !options.suppressAnalyzers
+            ? live.analyzers.flatMap((analyzer) => {
               const settings = analyzerDecodeSettings(analyzer, live.analyzers);
               if (!settings || !analyzerCanRunDecoder(analyzer)) return [];
               const tracks = analyzerTrackRequestsForAnalyzer(analyzer);
@@ -3058,15 +3064,30 @@ export default function App() {
               // The native analyzer is a batch API. Keep the UI moving while
               // it is working, then only show the checkmark after the result
               // has been committed.
-              const progress = Math.min(94, 8 + 86 * (1 - Math.exp(-elapsed / 2_400)));
-              updateSession(sessionSnapshot.id, (session) => ({
-                ...session,
-                analyzers: session.analyzers.map((analyzer) =>
-                  pendingRenderAnalyzerIds.has(analyzer.id) && analyzer.renderBusy
-                    ? { ...analyzer, renderProgress: Math.max(analyzer.renderProgress, progress) }
-                    : analyzer,
-                ),
-              }));
+              updateSession(sessionSnapshot.id, (session) => {
+                // Bail out when nothing actually moves.
+                //
+                // This used to replace the analyzers array unconditionally every
+                // 100 ms. The progress curve flattens quickly, so most ticks
+                // changed no value, yet each one still produced a new session
+                // object and re-ran every derived computation in the workbench
+                // (frame table, bubble layout, viewport memos). That is what kept
+                // the CPU pinned while the decoder panel was open.
+                let changed = false;
+                const analyzers = session.analyzers.map((analyzer) => {
+                  if (!pendingRenderAnalyzerIds.has(analyzer.id) || !analyzer.renderBusy) {
+                    return analyzer;
+                  }
+                  const nextProgress = nextAnalyzerRenderProgress(
+                    analyzer.renderProgress,
+                    elapsed,
+                  );
+                  if (nextProgress === null) return analyzer;
+                  changed = true;
+                  return { ...analyzer, renderProgress: nextProgress };
+                });
+                return changed ? { ...session, analyzers } : session;
+              });
             }, 100)
           : null;
       void (async () => {

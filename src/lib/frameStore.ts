@@ -10,7 +10,7 @@
 // after that is driven by the loop.
 
 import type { AnalyzerRenderRequest, GraphFrameResponse, ViewIntent } from "./api.ts";
-import { SessionFrameLoop, type FrameLoopState } from "./frameLoop.ts";
+import { SessionFrameLoop, type FrameLoopState, type FrameRequestOptions } from "./frameLoop.ts";
 
 export interface SessionFrameLoopConfig {
   analyzers: () => AnalyzerRenderRequest[];
@@ -20,6 +20,7 @@ export interface SessionFrameLoopConfig {
     intent: ViewIntent,
     frameId: number,
     state: FrameLoopState,
+    options: FrameRequestOptions,
   ) => Promise<GraphFrameResponse>;
   widthPx: () => number;
 }
@@ -100,9 +101,9 @@ export function ensureSessionFrameLoop(sessionId: string, config: SessionFrameLo
       entry.state = state;
       for (const listener of entry.listeners) listener(state);
     },
-    request: (intent, frameId, state) => {
+    request: (intent, frameId, state, options) => {
       if (!entry.config) return Promise.reject(new Error("frame loop has no request handler"));
-      return entry.config.request(intent, frameId, state);
+      return entry.config.request(intent, frameId, state, options);
     },
     scheduleFrame: (callback) => window.requestAnimationFrame(callback),
     widthPx: () => entry.config?.widthPx() ?? 1,

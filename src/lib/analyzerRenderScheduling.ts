@@ -66,3 +66,30 @@ export function analyzerRenderedTracksMatchRequests(
     )
   );
 }
+
+/**
+ * Progress shown while a native analyzer batch is running.
+ *
+ * The curve flattens quickly, which is deliberate: it should look like it is
+ * waiting, not like it is nearly finished.
+ */
+export function analyzerRenderProgress(elapsedMs: number) {
+  return Math.min(94, 8 + 86 * (1 - Math.exp(-elapsedMs / 2_400)));
+}
+
+/**
+ * Next progress value for one analyzer, or `null` when nothing should change.
+ *
+ * The sampler ticks every 100 ms, so returning the current value on a flat part
+ * of the curve is the difference between "one session write per visible change"
+ * and "a full workbench re-render ten times a second". Callers must treat `null`
+ * as "leave the session alone"; writing an equal value still allocates a new
+ * session object and re-runs every derived computation in the workbench.
+ */
+export function nextAnalyzerRenderProgress(
+  currentProgress: number,
+  elapsedMs: number,
+): number | null {
+  const next = Math.max(currentProgress, analyzerRenderProgress(elapsedMs));
+  return next === currentProgress ? null : next;
+}

@@ -54,6 +54,8 @@ const NATIVE_VIEW_EDGE_BUDGET: usize = 32_768;
 const NATIVE_FIT_MAX_CHUNKS: usize = 16;
 const NATIVE_FIT_EDGES_PER_CHUNK: usize = 1_024;
 const NATIVE_CONTEXT_EDGES: usize = 256;
+/// Floor for the window-quantisation grid, so short captures still align.
+const NATIVE_WINDOW_QUANTUM_MIN_SAMPLES: u64 = 8_192;
 const NATIVE_CACHE_REUSE_EDGES: usize = 128;
 const NATIVE_BACKGROUND_BODY_EDGES: usize = 131_072;
 const NATIVE_BACKGROUND_CONTEXT_EDGES: usize = 4_096;
@@ -2615,13 +2617,31 @@ impl GraphSession {
                 append_native_background_frames(Arc::make_mut(&mut state.frames), retained);
                 state.next_driver_edge = result.window.body_edge_end;
                 if state.next_driver_edge >= state.total_driver_edges {
-                    completed.push((result.key, std::mem::take(&mut state.frames)));
+                    // The async sweep decodes the whole capture, while the
+                    // viewport path writes partial window results under the same
+                    // analyzer key. Sharing one key made the two overwrite each
+                    // other, so every frame that read the key saw a different
+                    // frame count (11001 then 143255 in the 2026-10-19 run) and
+                    // the frame table redrew continuously. The completed sweep
+                    // gets its own key so each entry has one fixed meaning.
+                    completed.push((
+                        background_full_cache_key(&result.key),
+                        std::mem::take(&mut state.frames),
+                    ));
                 }
             }
         }
         if !completed.is_empty() {
             let mut cache = self.analyzer_cache.lock();
             for (key, frames) in completed {
+                // The background sweep accumulates one entry per driver edge and
+                // then hands the whole list over. On the 2026-10-19 demo run this
+                // stored 272_053 frames for a single key with no budget applied,
+                // and every later hit returned all of them to the renderer, which
+                // is what made the frame table flicker while the CPU climbed.
+                let frames = cap_decoded_frames(Arc::try_unwrap(frames).unwrap_or_else(|shared| {
+                    shared.as_ref().clone()
+                }));
                 cache.insert(key, analyzer_cache_entry(sample_count, frames));
             }
         }
@@ -3886,16 +3906,28 @@ impl GraphSession {
                 continue;
             }
 
+            // The frame budget is enforced *while* windows are collected, not
+            // after. Collecting first and thinning later meant a wide window
+            // could materialise every decoded frame (the incident produced
+            // 200_669) before the cap applied, so peak memory was set by the
+            // uncapped decode rather than by MAX_DECODED_FRAMES.
             let mut frames = Vec::new();
             let window_entries = Vec::new();
             let mut missing_windows = Vec::new();
+            let mut window_frame_total = 0usize;
             for &(start, end) in &windows {
-                if let Some(window_frames) =
-                    self.cached_native_window_frames(&full_key, sample_count, start, end)
-                {
-                    frames.extend(window_frames.iter().cloned());
-                } else {
-                    missing_windows.push((start, end));
+                match self.cached_native_window_frames(&full_key, sample_count, start, end) {
+                    Some(window_frames) => {
+                        window_frame_total = window_frame_total.saturating_add(window_frames.len());
+                        let remaining = MAX_DECODED_FRAMES.saturating_sub(frames.len());
+                        if window_frames.len() > remaining {
+                            let stride = window_frames.len().div_ceil(remaining.max(1));
+                            frames.extend(window_frames.iter().step_by(stride).cloned());
+                        } else {
+                            frames.extend(window_frames.iter().cloned());
+                        }
+                    }
+                    None => missing_windows.push((start, end)),
                 }
             }
             let window_cache_key = serde_json::to_string(&(
@@ -3911,7 +3943,10 @@ impl GraphSession {
                 for frame in &mut frames {
                     frame.frame_id = frame.start_sample;
                 }
-                let uncapped_frame_count = frames.len();
+                // The true decoded total, not the thinned length: whether the
+                // full-capture cache entry is safe to write depends on what the
+                // decoder actually produced.
+                let uncapped_frame_count = window_frame_total.max(frames.len());
                 if frames.len() > MAX_DECODED_FRAMES {
                     let stride = frames.len().div_ceil(MAX_DECODED_FRAMES);
                     frames = frames.into_iter().step_by(stride).collect();
@@ -4136,6 +4171,20 @@ impl GraphSession {
         let sample_count = self.sample_count();
         let full_key = native_full_analyzer_cache_key(backend, settings)?;
         let native_window_analyzer_key = full_key.clone();
+        // A finished whole-capture sweep is strictly better than a partial
+        // viewport result, so it wins whenever both exist. Without this
+        // preference the two entries alternate as the stored value and the
+        // rendered frame count keeps changing.
+        if let Some(entry) = self.analyzer_cache.lock().get(&background_full_cache_key(&full_key)) {
+            if entry.decoded_sample_count == sample_count {
+                trace_graph_timing(
+                    "native_background_full_cache_hit",
+                    Instant::now(),
+                    &format!("backend={backend:?} frames={}", entry.frames.len()),
+                );
+                return Ok(entry.frames.clone());
+            }
+        }
         if let Some(entry) = self.analyzer_cache.lock().get(&full_key) {
             if entry.decoded_sample_count == sample_count {
                 trace_graph_timing(
@@ -4179,6 +4228,7 @@ impl GraphSession {
         let mut frames = Vec::new();
         let mut missing_windows = Vec::new();
         let mut window_cache_hits = 0usize;
+        let mut window_frame_total = 0usize;
         for &(start, end) in &windows {
             if let Some(window_frames) = self.cached_native_window_frames(
                 &native_window_analyzer_key,
@@ -4186,7 +4236,8 @@ impl GraphSession {
                 start,
                 end,
             ) {
-                frames.extend(window_frames.iter().cloned());
+                window_frame_total = window_frame_total.saturating_add(window_frames.len());
+                collect_frames_within_budget(&mut frames, &window_frames);
                 window_cache_hits += 1;
             } else {
                 missing_windows.push((start, end));
@@ -4216,7 +4267,8 @@ impl GraphSession {
                 {
                     Ok(output) => {
                         let window_frames = native_window_frames_from_output(output, decode_start);
-                        frames.extend(window_frames.iter().cloned());
+                        window_frame_total = window_frame_total.saturating_add(window_frames.len());
+                        collect_frames_within_budget(&mut frames, &window_frames);
                         decoded_window_entries.push(NativeWindowCacheEntry {
                             decoded_sample_count: sample_count,
                             start_sample: decode_start,
@@ -4237,6 +4289,7 @@ impl GraphSession {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let decoder = native_decoder_for_backend(backend)?;
                         let mut chunk_frames = Vec::new();
+                        let mut chunk_frame_total = 0usize;
                         let mut chunk_window_entries = Vec::new();
                         let mut chunk_error = None;
                         for (start, end) in chunk {
@@ -4251,7 +4304,12 @@ impl GraphSession {
                                 Ok(output) => {
                                     let window_frames =
                                         native_window_frames_from_output(output, decode_start);
-                                    chunk_frames.extend(window_frames.iter().cloned());
+                                    chunk_frame_total =
+                                        chunk_frame_total.saturating_add(window_frames.len());
+                                    collect_frames_within_budget(
+                                        &mut chunk_frames,
+                                        &window_frames,
+                                    );
                                     chunk_window_entries.push(NativeWindowCacheEntry {
                                         decoded_sample_count: sample_count,
                                         start_sample: decode_start,
@@ -4264,7 +4322,12 @@ impl GraphSession {
                                 }
                             }
                         }
-                        Ok::<_, GraphError>((chunk_frames, chunk_window_entries, chunk_error))
+                        Ok::<_, GraphError>((
+                            chunk_frames,
+                            chunk_window_entries,
+                            chunk_error,
+                            chunk_frame_total,
+                        ))
                     }))
                     .unwrap_or_else(|_| {
                         Err(GraphError::DecoderBackend(
@@ -4275,7 +4338,8 @@ impl GraphSession {
                 .collect::<Vec<_>>();
             for output in worker_outputs {
                 match output {
-                    Ok((mut chunk_frames, mut chunk_window_entries, chunk_error)) => {
+                    Ok((mut chunk_frames, mut chunk_window_entries, chunk_error, chunk_frame_total)) => {
+                        window_frame_total = window_frame_total.saturating_add(chunk_frame_total);
                         frames.append(&mut chunk_frames);
                         decoded_window_entries.append(&mut chunk_window_entries);
                         if let Some(error) = chunk_error {
@@ -4845,6 +4909,46 @@ fn offset_decoded_frame_samples(frame: &mut DecodedFrame, offset: u64) {
     }
 }
 
+/// Applies the decoded-frame budget to a finished frame list.
+///
+/// Separate from `collect_frames_within_budget` because this operates on a list
+/// that was already assembled: it is the last line of defence for cache writes
+/// that do not build their frames through the bounded collector.
+fn cap_decoded_frames(mut frames: Vec<DecodedFrame>) -> Arc<Vec<DecodedFrame>> {
+    if frames.len() > MAX_DECODED_FRAMES {
+        let stride = frames.len().div_ceil(MAX_DECODED_FRAMES);
+        frames = frames.into_iter().step_by(stride).collect();
+        for frame in &mut frames {
+            frame.frame_id = frame.start_sample;
+        }
+    }
+    Arc::new(frames)
+}
+
+/// Appends decoded frames while keeping the running vector inside the frame
+/// budget.
+///
+/// The budget used to be applied only after every window had been collected, so
+/// a wide decode could materialise its full frame list first. The 2026-10-19
+/// incident produced 200_669 frames this way, more than twice
+/// `MAX_DECODED_FRAMES`, and peak memory was driven by that list rather than by
+/// the cap. Thinning inside the collection loop keeps the peak proportional to
+/// the budget instead of to whatever the decoder emitted.
+fn collect_frames_within_budget(into: &mut Vec<DecodedFrame>, window_frames: &[DecodedFrame]) {
+    let remaining = MAX_DECODED_FRAMES.saturating_sub(into.len());
+    if remaining == 0 {
+        return;
+    }
+    if window_frames.len() <= remaining {
+        into.extend(window_frames.iter().cloned());
+        return;
+    }
+    // Take an evenly spread subset so the retained frames still describe the
+    // whole window rather than only its beginning.
+    let stride = window_frames.len().div_ceil(remaining);
+    into.extend(window_frames.iter().step_by(stride).cloned());
+}
+
 fn native_window_frames_from_output(
     output: sigpilot_core::DecoderOutput,
     offset: u64,
@@ -4860,6 +4964,15 @@ fn native_window_frames_from_output(
         frame.frame_id = frame.start_sample;
     }
     Arc::new(frames)
+}
+
+/// Cache key for a finished whole-capture background sweep.
+///
+/// Deliberately distinct from `native_full_analyzer_cache_key`: that key also
+/// receives partial viewport-window results, and letting both share one entry
+/// made the stored frame count depend on which writer ran last.
+fn background_full_cache_key(analyzer_key: &str) -> String {
+    format!("{analyzer_key}\u{0}background-full")
 }
 
 fn native_full_analyzer_cache_key(
@@ -5139,6 +5252,19 @@ fn sparse_native_analysis_windows(
         .filter(|(start, end)| start < end)
         .collect::<Vec<_>>();
     windows.sort_unstable();
+    // Quantise the boundaries onto a fixed sample grid before merging.
+    //
+    // Window edges are derived from the driver's edge indices, so a zoom
+    // animation produced a different window on every frame and almost nothing
+    // hit the window cache: the 2026-10-19 run turned 103 render requests into
+    // 1042 decode windows with 850 cache misses. Snapping to a grid makes
+    // neighbouring frames ask for the same windows instead of nearly the same
+    // ones, which is what lets the existing cache do its job.
+    let windows = quantize_native_windows(
+        windows,
+        maximum_native_window_quantum(capture),
+        capture.metadata.sample_count,
+    );
     let mut merged: Vec<(u64, u64)> = Vec::with_capacity(windows.len());
     for (start, end) in windows {
         if let Some(previous) = merged.last_mut() {
@@ -5205,6 +5331,48 @@ fn native_decode_window_for_cache(
         expanded_start,
         expanded_end_sample,
     ))
+}
+
+/// Grid size used to quantise native decode windows.
+///
+/// The grid has to be coarse enough that a zoom animation reuses windows, and
+/// fine enough that a small window does not drag in a large neighbourhood. It is
+/// derived from the capture length so the cost stays bounded on long captures.
+fn maximum_native_window_quantum(capture: &SparseCaptureView<'_>) -> u64 {
+    const TARGET_QUANTA: u64 = 4_096;
+    (capture.metadata.sample_count / TARGET_QUANTA).max(NATIVE_WINDOW_QUANTUM_MIN_SAMPLES)
+}
+
+/// Snaps window boundaries outwards onto a fixed grid, then merges the result.
+///
+/// Expanding outwards (floor for the start, ceil for the end) keeps the decoded
+/// range a superset of what the caller asked for, so quantisation can only add
+/// context, never drop a frame the viewport needed. `total_samples` clamps the
+/// expanded end: a window that runs past the capture is rejected outright, which
+/// would turn a cache-friendly alignment into a failed frame.
+fn quantize_native_windows(
+    windows: Vec<(u64, u64)>,
+    quantum: u64,
+    total_samples: u64,
+) -> Vec<(u64, u64)> {
+    if quantum <= 1 {
+        return windows;
+    }
+    let mut quantised = windows
+        .into_iter()
+        .map(|(start, end)| {
+            let aligned_start = (start / quantum * quantum).min(total_samples);
+            let aligned_end = end
+                .div_ceil(quantum)
+                .saturating_mul(quantum)
+                .min(total_samples);
+            let aligned_end = aligned_end.max(aligned_start + 1).min(total_samples.max(1));
+            (aligned_start, aligned_end)
+        })
+        .filter(|(start, end)| start < end)
+        .collect::<Vec<_>>();
+    quantised.sort_unstable();
+    quantised
 }
 
 fn align_spi_window_to_enable(
@@ -10933,6 +11101,312 @@ mod tests {
         assert!(rendered[0].error.is_none(), "{:?}", rendered[0].error);
         assert!(rendered[1].error.is_some());
         assert!(rendered[1].tracks.is_empty());
+    }
+
+    // ---------------------------------------------------------------------
+    // Demo-capture memory incident (2026-10-19). Evidence from
+    // ~/Library/Logs/SigPilot/sigpilot-20261019T022412Z-p000.log:
+    //   - demo source at 25 MS/s, cancelled after samples=119407865
+    //   - 377 "dispatching a decode" lines, 66 inside one second
+    //   - one result carrying frames=200669
+    //   - one framed response of binary_bytes=11692284 (11.7 MB)
+    // These are #[ignore]d because they need the bundled sidecar runtime:
+    //   cargo test -p sigpilot-graph -- --ignored --nocapture --test-threads=1
+    // ---------------------------------------------------------------------
+
+    /// Resident set size, read from the OS rather than inferred.
+    fn resident_bytes() -> u64 {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps should be available");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0)
+            * 1024
+    }
+
+    fn incident_spi_settings() -> AnalyzerDecodeSettings {
+        AnalyzerDecodeSettings::Spi(SpiDecodeSettings {
+            mosi_channel: Some(0),
+            miso_channel: Some(1),
+            clock_channel: 2,
+            enable_channel: Some(3),
+            enable_active_low: true,
+            clock_polarity: false,
+            clock_phase: false,
+            bits_per_transfer: 8,
+            msb_first: true,
+        })
+    }
+
+    /// The incident's widest decode window, on the demo capture it used.
+    fn incident_request(frame_id: u64) -> GraphFrameRequest {
+        GraphFrameRequest {
+            frame_id,
+            waveform: WaveformRequest {
+                start_sample: 70_005_010,
+                sample_count: 736_083,
+                pixels: 1200,
+                channels: vec![0, 1, 2, 3],
+            },
+            include_tile: true,
+            analyzer_view: None,
+            analyzers: vec![AnalyzerRenderRequest {
+                analyzer_id: "analyzer-demo-spi".to_string(),
+                backend: DecoderBackendKind::SaleaeNative,
+                settings: incident_spi_settings(),
+                tracks: vec![AnalyzerTrackRequest { channel: 0, role: "MOSI".to_string() }],
+            }],
+            view: None,
+        }
+    }
+
+    /// Generates the demo capture *with* the SPI analyzer configured.
+    ///
+    /// The analyzer setting is what makes the demo source drive real SPI edges;
+    /// without it every channel stays a plain pulse train and the SPI decoder
+    /// correctly finds nothing, which would make a "no blow-up" result
+    /// meaningless.
+    fn demo_spi_capture(sample_count: u64) -> CaptureData {
+        use sigpilot_core::capture::DemoAnalyzerSettings;
+        use sigpilot_core::fake::FakeBackend;
+
+        let mut settings = CaptureSettings::default();
+        settings.device_id = "fake:sigpilot-demo".to_string();
+        settings.sample_rate_hz = 25_000_000;
+        settings.channel_count = 8;
+        settings.enabled_channels = (0..8).collect();
+        // Buffer mode captures an exact sample count, so the test controls the
+        // capture length instead of depending on how fast the generator runs.
+        settings.mode = sigpilot_core::models::CaptureMode::Buffer;
+        settings.duration_ms = sample_count.saturating_mul(1_000) / settings.sample_rate_hz.max(1) + 1;
+
+        let analyzers = vec![DemoAnalyzerSettings {
+            backend: DecoderBackendKind::SaleaeNative,
+            settings: incident_spi_settings(),
+        }];
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut no_start = |_: &sigpilot_core::models::CaptureMetadata| {};
+        let mut no_samples = |_: &[u8]| {};
+
+        let capture = FakeBackend
+            .capture_streaming_with_analyzers(
+                &settings,
+                &analyzers,
+                &cancel,
+                &mut |_: sigpilot_core::models::CaptureProgress| {},
+                &mut no_start,
+                &mut no_samples,
+            )
+            .unwrap();
+        capture
+    }
+
+    #[test]
+    #[ignore = "requires the bundled saleae sidecar runtime"]
+    fn demo_spi_wide_window_returns_at_most_the_frame_budget() {
+        let capture = demo_spi_capture(119_407_865);
+        let session = graph_session_with(&capture);
+
+        let before = resident_bytes();
+        let started = Instant::now();
+        let response = session.render_frame(&incident_request(1)).unwrap();
+        let elapsed = started.elapsed();
+        let after = resident_bytes();
+
+        let frames = response
+            .analyzers
+            .iter()
+            .map(|analyzer| analyzer.tracks.iter().map(|track| track.frames.len()).sum::<usize>())
+            .sum::<usize>();
+        println!(
+            "wide decode: frames={frames} elapsed={:.1}ms rss_delta={:.1}MB",
+            elapsed.as_secs_f64() * 1000.0,
+            after.saturating_sub(before) as f64 / (1024.0 * 1024.0)
+        );
+
+        assert!(
+            frames <= MAX_DECODED_FRAMES,
+            "one window rendered {frames} frames, above the {MAX_DECODED_FRAMES} budget"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the bundled saleae sidecar runtime"]
+    fn demo_spi_repeated_windows_do_not_grow_memory() {
+        let capture = demo_spi_capture(119_407_865);
+        let session = graph_session_with(&capture);
+        session.render_frame(&incident_request(1)).unwrap();
+
+        let baseline = resident_bytes();
+        let started = Instant::now();
+        // 65 repeats is what the incident produced in roughly one second.
+        for frame_id in 2..=66 {
+            session.render_frame(&incident_request(frame_id)).unwrap();
+        }
+        let elapsed = started.elapsed();
+        let after = resident_bytes();
+
+        println!(
+            "65 repeats: elapsed={:.1}ms rss_delta={:.1}MB",
+            elapsed.as_secs_f64() * 1000.0,
+            after.saturating_sub(baseline) as f64 / (1024.0 * 1024.0)
+        );
+        assert!(
+            after.saturating_sub(baseline) < 64 * 1024 * 1024,
+            "repeating one window grew RSS by {} MB",
+            after.saturating_sub(baseline) / (1024 * 1024)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the bundled saleae sidecar runtime"]
+    fn demo_spi_repeated_windows_are_served_from_cache() {
+        let capture = demo_spi_capture(20_000_000);
+        let session = graph_session_with(&capture);
+
+        let started = Instant::now();
+        session.render_frame(&incident_request(1)).unwrap();
+        let first = started.elapsed();
+
+        let started = Instant::now();
+        for frame_id in 2..=20 {
+            session.render_frame(&incident_request(frame_id)).unwrap();
+        }
+        let repeats = started.elapsed();
+
+        println!(
+            "first={:.1}ms nineteen_repeats={:.1}ms",
+            first.as_secs_f64() * 1000.0,
+            repeats.as_secs_f64() * 1000.0
+        );
+        assert!(
+            repeats < first * 3,
+            "19 repeats took {repeats:?} against a {first:?} first decode, so the window was re-decoded"
+        );
+
+    }
+
+    #[test]
+    #[ignore = "requires the bundled saleae sidecar runtime"]
+    fn demo_spi_capture_length_and_decode_probe() {
+        let capture = demo_spi_capture(2_000_000);
+        println!(
+            "capture: samples={} unitsize={} channels={}",
+            capture.metadata.sample_count,
+            capture.metadata.unitsize,
+            capture.metadata.channel_count
+        );
+        let session = graph_session_with(&capture);
+
+        // Decode the first 500k samples, which is inside the capture.
+        let mut request = incident_request(1);
+        request.waveform.start_sample = 0;
+        request.waveform.sample_count = 500_000;
+        let started = Instant::now();
+        let response = session.render_frame(&request).unwrap();
+        let elapsed = started.elapsed();
+        let frames: usize = response
+            .analyzers
+            .iter()
+            .map(|analyzer| analyzer.tracks.iter().map(|track| track.frames.len()).sum::<usize>())
+            .sum();
+        println!(
+            "decode probe: frames={frames} elapsed={:.1}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+        assert!(frames > 0, "the demo SPI source produced no decodable frames");
+    }
+
+    /// The frame budget must hold *during* collection, not only after it.
+    ///
+    /// Regression test for the 2026-10-19 incident, where a wide decode
+    /// materialised 200_669 frames before the cap applied.
+    #[test]
+    fn collecting_frames_stays_within_the_budget() {
+        let make = |count: usize, start: u64| {
+            (0..count)
+                .map(|index| decoded_frame_for_graph_test(start + index as u64, start + index as u64))
+                .collect::<Vec<_>>()
+        };
+
+        let mut frames = Vec::new();
+        // Ten windows, each larger than the whole budget: the old code appended
+        // every one of them and only thinned afterwards.
+        for window in 0..10 {
+            let window_frames = make(MAX_DECODED_FRAMES / 2, (window * 1_000_000) as u64);
+            collect_frames_within_budget(&mut frames, &window_frames);
+        }
+        assert!(
+            frames.len() <= MAX_DECODED_FRAMES,
+            "collection kept {} frames, above the {MAX_DECODED_FRAMES} budget",
+            frames.len()
+        );
+        assert!(frames.len() >= MAX_DECODED_FRAMES / 2);
+
+        // Frames that fit are copied verbatim, so nothing is lost when the
+        // budget is not under pressure.
+        let mut small = Vec::new();
+        let window_frames = make(10, 0);
+        collect_frames_within_budget(&mut small, &window_frames);
+        assert_eq!(small.len(), 10);
+
+        // Sampling stays spread across the window instead of taking a prefix.
+        let mut sampled = Vec::new();
+        collect_frames_within_budget(
+            &mut sampled,
+            &make(MAX_DECODED_FRAMES * 4, 0),
+        );
+        assert!(sampled.len() <= MAX_DECODED_FRAMES);
+        assert!(
+            sampled.last().expect("frames").start_sample
+                > (MAX_DECODED_FRAMES * 4 / 2) as u64,
+            "the retained frames stopped early, so the window tail is unreachable"
+        );
+    }
+
+    /// Cache writes must respect the budget even when they did not assemble
+    /// their frames through the bounded collector.
+    ///
+    /// Regression test for the 2026-10-19 demo run, where the background sweep
+    /// stored 272_053 frames under one cache key and every later cache hit
+    /// returned all of them to the renderer.
+    #[test]
+    fn capped_cache_frames_stay_within_the_budget() {
+        let oversized = (0..272_053u64)
+            .map(|index| decoded_frame_for_graph_test(index, index))
+            .collect::<Vec<_>>();
+        let capped = cap_decoded_frames(oversized);
+        assert!(
+            capped.len() <= MAX_DECODED_FRAMES,
+            "a cache write kept {} frames, above the {MAX_DECODED_FRAMES} budget",
+            capped.len()
+        );
+        // The list must still describe the whole capture, not just its start.
+        assert!(
+            capped.last().expect("frames").start_sample > 272_053 / 2,
+            "capping kept only the beginning of the frame list"
+        );
+        // Every retained frame keeps a monotonically increasing identity, so the
+        // table and bubble indices stay usable.
+        assert!(capped.windows(2).all(|pair| pair[0].frame_id < pair[1].frame_id));
+
+        // A list inside the budget passes through untouched.
+        let small = (0..10u64)
+            .map(|index| decoded_frame_for_graph_test(index, index))
+            .collect::<Vec<_>>();
+        assert_eq!(cap_decoded_frames(small).len(), 10);
+    }
+
+    /// Mirrors the workbench: begin, stream the capture in, then finalize.
+    fn graph_session_with(capture: &CaptureData) -> GraphSession {
+        let session = GraphSession::default();
+        session.begin_capture(capture.metadata.clone()).unwrap();
+        session.append_samples(&capture.samples).unwrap();
+        session.finish_capture(capture.clone()).unwrap();
+        session
     }
 }
 

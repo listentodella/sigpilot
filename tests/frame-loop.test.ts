@@ -49,9 +49,9 @@ function harness() {
     onError: (error) => errors.push(error),
     onHealthChange: (healthy) => health.push(healthy),
     onState: (state) => states.push(state),
-    request: (intent, frameId) =>
+    request: (intent, frameId, _state, options) =>
       new Promise<GraphFrameResponse>((resolve, reject) => {
-        requests.push({ frameId, intent, reject, resolve });
+        requests.push({ frameId, intent, options, reject, resolve });
       }),
     scheduleFrame: (callback) => {
       scheduled.push(callback);
@@ -175,10 +175,15 @@ test("a backend-owned animation keeps asking until it is due to finish", async (
   await Promise.resolve();
   await Promise.resolve();
 
-  // Past the requested duration the loop settles again.
+  // Past the requested duration the loop settles again, after one frame that
+  // carries the decode the glide deferred.
   h.advance(400);
   h.runFrame();
-  assert.equal(h.requests.length, 2);
+  assert.equal(h.requests.length, 3);
+  h.requests[2].resolve(frame(3, { samples: 200, start_sample: 0 }, { samples: 200, start_sample: 0 }));
+  await Promise.resolve();
+  await Promise.resolve();
+  h.advance(400);
   assert.equal(h.queuedFrames(), 0);
 });
 
@@ -207,7 +212,16 @@ test("a gliding zoom keeps the loop pumping frames too", async () => {
 
   h.advance(400);
   h.runFrame();
-  assert.equal(h.requests.length, 2);
+  // One extra frame after the glide: the intermediate frames skipped their
+  // decode, so the loop owes the analyzer lanes a final frame that carries it.
+  assert.equal(h.requests.length, 3, "the glide must be followed by one decoding frame");
+  assert.equal(h.requests[0].options?.suppressAnalyzers, true);
+  assert.equal(h.requests[1].options?.suppressAnalyzers, true);
+  assert.equal(h.requests[2].options?.suppressAnalyzers, false);
+  h.requests[2].resolve(frame(3, { samples: 200, start_sample: 0 }, { samples: 200, start_sample: 0 }));
+  await Promise.resolve();
+  await Promise.resolve();
+  h.advance(400);
   assert.equal(h.queuedFrames(), 0);
 });
 
