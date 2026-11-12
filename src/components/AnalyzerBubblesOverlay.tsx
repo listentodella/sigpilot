@@ -21,6 +21,7 @@ import {
   visibleAnalyzerMarkerSamples,
   visibleAnalyzerProtocolMarkers,
 } from "../lib/analyzerMarkers";
+import { drawProtocolMarker, type ProtocolMarkerPalette } from "../lib/analyzerMarkerDrawing";
 import {
   analyzerBubbleKey,
   paddedAnalyzerBubbleRange,
@@ -375,6 +376,13 @@ export function AnalyzerBubblesOverlay({
 
       const viewStart = viewportStart;
       const viewSamples = Math.max(1, viewportSamples);
+      const theme = activeUiTheme();
+      const markerPalette: ProtocolMarkerPalette = {
+        start: theme.cssVars["--positive"],
+        stop: theme.cssVars["--yellow"],
+        error: theme.cssVars["--red"],
+        background: activeWaveformThemeColors().background,
+      };
       // Bubbles are always drawn as DOM. Logic has a single rendering path for
       // them, and the canvas preview this replaced was the reason the text sat
       // left-aligned while the viewport moved and snapped to centred once it
@@ -419,6 +427,7 @@ export function AnalyzerBubblesOverlay({
             centerY,
             marker.kind,
             saleaeLegacyChannelColor(track.channel),
+            markerPalette,
           );
         }
       });
@@ -692,63 +701,6 @@ function drawAnalyzerMarker(
   context.stroke();
 }
 
-function drawProtocolMarker(
-  context: CanvasRenderingContext2D,
-  centerX: number,
-  centerY: number,
-  kind: import("../lib/api").AnalyzerProtocolMarker["kind"],
-  channelColor: string,
-) {
-  context.save();
-  context.shadowColor = "rgba(0, 0, 0, 0.5)";
-  context.shadowBlur = 1;
-  context.fillStyle =
-    kind === "start"
-      ? activeUiTheme().cssVars["--positive"]
-      : kind === "stop"
-        ? activeUiTheme().cssVars["--yellow"]
-        : kind.startsWith("error_")
-          ? activeUiTheme().cssVars["--red"]
-          : channelColor;
-  context.strokeStyle = context.fillStyle;
-  context.lineWidth = 1.25;
-  context.beginPath();
-  if (kind === "start") {
-    context.arc(centerX, centerY, 3.5, 0, Math.PI * 2);
-    context.fill();
-  } else if (kind === "dot" || kind === "error_dot") {
-    context.arc(centerX, centerY, 2, 0, Math.PI * 2);
-    context.fill();
-  } else if (kind === "stop" || kind === "square" || kind === "error_square") {
-    const side = kind === "stop" ? 7 : 5;
-    context.rect(centerX - side / 2, centerY - side / 2, side, side);
-    context.fill();
-  } else if (kind === "up_arrow" || kind === "down_arrow") {
-    const rising = kind === "up_arrow";
-    context.moveTo(centerX - 4.5, centerY + (rising ? 3 : -3));
-    context.lineTo(centerX, centerY + (rising ? -3 : 3));
-    context.lineTo(centerX + 4.5, centerY + (rising ? 3 : -3));
-    context.closePath();
-    context.fill();
-  } else if (kind === "one" || kind === "zero") {
-    drawRoundedRect(context, centerX - 6.5, centerY - 6.5, 13, 13, 2);
-    context.fillStyle = activeWaveformThemeColors().background;
-    context.fill();
-    context.stroke();
-    context.fillStyle = channelColor;
-    context.font = "600 9px Roboto, system-ui, sans-serif";
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    context.fillText(kind === "one" ? "1" : "0", centerX, centerY);
-  } else {
-    context.moveTo(centerX - 3, centerY - 3);
-    context.lineTo(centerX + 3, centerY + 3);
-    context.moveTo(centerX + 3, centerY - 3);
-    context.lineTo(centerX - 3, centerY + 3);
-    context.stroke();
-  }
-  context.restore();
-}
 
 function snapProtocolMarkerToEdge(
   kind: import("../lib/api").AnalyzerProtocolMarker["kind"],
@@ -807,28 +759,6 @@ function crispAnalyzerMarkerX(value: number) {
   return Math.round(value) + 0.5;
 }
 
-function drawRoundedRect(
-  context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-) {
-  const right = x + width;
-  const bottom = y + height;
-  context.beginPath();
-  context.moveTo(x + radius, y);
-  context.lineTo(right - radius, y);
-  context.quadraticCurveTo(right, y, right, y + radius);
-  context.lineTo(right, bottom - radius);
-  context.quadraticCurveTo(right, bottom, right - radius, bottom);
-  context.lineTo(x + radius, bottom);
-  context.quadraticCurveTo(x, bottom, x, bottom - radius);
-  context.lineTo(x, y + radius);
-  context.quadraticCurveTo(x, y, x + radius, y);
-  context.closePath();
-}
 
 function analyzerMarkerEdgeType(analyzer: UiAnalyzerInstance): "rising" | "falling" {
   if (analyzer.type === "SPI") {

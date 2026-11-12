@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>SigPilot · 协议标识图鉴</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <header class="page-header">
+        <div>
+          <div class="eyebrow">SIGPILOT <span>/</span> DECODER TOOLKIT</div>
+          <h1>协议标识图鉴<span class="count">12</span></h1>
+          <p>从采样箭头到错误叉号，查看当前支持的全部标识。直接复用应用的 Canvas 绘制函数。</p>
+        </div>
+        <div class="status-badge"><span></span>合成波形 · 无需硬件</div>
+      </header>
+
+      <section class="panel waveform-panel" aria-labelledby="waveform-heading">
+        <div class="panel-heading">
+          <div>
+            <h2 id="waveform-heading">在波形上查看</h2>
+            <p>1 MS/s · 1,200 个采样点 · 4 个展示通道</p>
+          </div>
+          <div class="controls">
+            <label>主题
+              <select id="theme-select" aria-label="主题">
+                <option value="saleae-dark">Saleae Dark</option>
+                <option value="lab-light">Lab Light</option>
+              </select>
+            </label>
+            <label>标识大小
+              <select id="marker-scale" aria-label="波形标识大小">
+                <option value="1">1× 实际大小</option>
+                <option value="2">2× 演示放大</option>
+                <option value="4">4× 演示放大</option>
+              </select>
+            </label>
+            <label class="checkbox-label"><input id="show-labels" type="checkbox" checked />类型标签</label>
+            <button id="export-png" class="secondary-button" type="button">导出 PNG</button>
+          </div>
+        </div>
+        <div id="waveform-host" class="waveform-host">
+          <canvas id="waveform" role="img" aria-label="包含全部 12 种协议标识的合成数字波形">请使用支持 Canvas 的浏览器；下方图鉴也提供每种标识的文字说明。</canvas>
+          <div id="waveform-targets" class="waveform-targets"></div>
+        </div>
+        <div class="viewport-controls">
+          <label>时间缩放 <input id="zoom" type="range" min="1" max="4" step="0.25" value="1" /><output id="zoom-value">1×</output></label>
+          <label>平移 <input id="pan" type="range" min="0" max="100" step="0.1" value="0" disabled /></label>
+          <button id="reset-view" class="text-button" type="button">复位视图</button>
+          <output id="render-status" aria-live="polite">正在绘制…</output>
+        </div>
+        <p class="panel-footnote">这是标识展示数据，不是有效的 SPI、SWD 或 I3C 事务。波形默认以 1× 绘制；类型文字、选中光圈和 2× / 4× 放大仅用于本 Demo。</p>
+      </section>
+
+      <section aria-labelledby="gallery-heading">
+        <div class="section-heading">
+          <div><h2 id="gallery-heading">全部标识</h2><p>每张卡片同时展示实际大小与 4× 放大图。点击查看含义和调用示例。</p></div>
+          <label class="color-control">图鉴通道颜色<input id="preview-color" type="color" value="#53a9fd" aria-label="图鉴通道颜色" /></label>
+        </div>
+        <div id="marker-gallery" class="marker-gallery"></div>
+      </section>
+
+      <section class="panel detail-panel" aria-labelledby="detail-title">
+        <div class="detail-summary">
+          <canvas id="detail-preview" width="112" height="96" aria-hidden="true"></canvas>
+          <div>
+            <div id="detail-kind" class="eyebrow"></div>
+            <h2 id="detail-title"></h2>
+            <p id="detail-description"></p>
+            <p id="detail-note" class="detail-note"></p>
+          </div>
+        </div>
+        <div class="code-grid">
+          <div><h3>SigPilot · 通道的标识数据</h3><pre><code id="sigpilot-example"></code></pre></div>
+          <div><h3>Saleae SDK · 解码器调用</h3><pre><code id="saleae-example"></code></pre></div>
+        </div>
+      </section>
+
+      <aside class="info-note">
+        <strong>图形不是协议语义。</strong>
+        普通 <code>X</code> 不一定代表错误，<code>One / Zero</code> 也可能被解码器借用来表示状态。
+        本页只展示现有 12 种类型，不包含尚未实现的 I3C 专用图标或区间标注。
+      </aside>
+      <footer>Canvas 2D · 共享模块 <code>src/lib/analyzerMarkerDrawing.ts</code> · 不连接设备，不执行协议解码</footer>
+    </main>
+    <script type="module" src="./entry.ts"></script>
+  </body>
+</html>
