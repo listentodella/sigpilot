@@ -64,11 +64,38 @@ struct SaleaeTransitionSession {
     analyzers: Vec<Value>,
 }
 
+/// Marker shape drawn for a user annotation in the waveform view.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaveformAnnotationShape {
+    Flag,
+    Diamond,
+    Warning,
+    Cross,
+    Dot,
+    Square,
+}
+
+/// User-created waveform annotation stored with a project session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaveformAnnotation {
+    pub id: String,
+    pub sample: u64,
+    pub channel: u8,
+    pub shape: WaveformAnnotationShape,
+    pub color: String,
+    pub title: String,
+    #[serde(default)]
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SaleaeSessionMetadata {
     pub name: String,
     pub notes: String,
     pub analyzers: Vec<SaleaeAnalyzerMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_annotations: Vec<WaveformAnnotation>,
 }
 
 impl Default for SaleaeSessionMetadata {
@@ -77,6 +104,7 @@ impl Default for SaleaeSessionMetadata {
             name: "SigPilot Capture".to_string(),
             notes: String::new(),
             analyzers: Vec::new(),
+            user_annotations: Vec::new(),
         }
     }
 }
@@ -449,6 +477,7 @@ pub fn open_saleae_transition_session(path: impl AsRef<Path>) -> Result<SaleaeIm
             name: manifest.session.name,
             notes: manifest.session.notes,
             analyzers,
+            user_annotations: Vec::new(),
         },
     })
 }
@@ -1285,6 +1314,22 @@ mod tests {
     }
 
     #[test]
+    fn sessions_without_user_annotations_still_open() {
+        // Files written before the field existed (and Saleae exports) must keep
+        // loading, and an empty list must not bloat every manifest.
+        let legacy = serde_json::json!({
+            "name": "Legacy",
+            "notes": "no annotations here",
+            "analyzers": []
+        });
+        let session: SaleaeSessionMetadata = serde_json::from_value(legacy).unwrap();
+        assert!(session.user_annotations.is_empty());
+
+        let omitted = serde_json::to_value(SaleaeSessionMetadata::default()).unwrap();
+        assert!(omitted.get("user_annotations").is_none());
+    }
+
+    #[test]
     fn pxl_round_trips_sparse_capture_and_sigrok_metadata() {
         let mut metadata = sparse_capture().metadata;
         metadata.sample_count = 4;
@@ -1910,6 +1955,26 @@ mod tests {
         SaleaeSessionMetadata {
             name: "PXLogic Bench".to_string(),
             notes: "round-trip notes".to_string(),
+            user_annotations: vec![
+                WaveformAnnotation {
+                    id: "annotation-bench-1".to_string(),
+                    sample: 1_234,
+                    channel: 3,
+                    shape: WaveformAnnotationShape::Warning,
+                    color: "#ffb45b".to_string(),
+                    title: "Enter HDR-DDR".to_string(),
+                    note: "Follow up: confirm the mode change".to_string(),
+                },
+                WaveformAnnotation {
+                    id: "annotation-bench-2".to_string(),
+                    sample: 7,
+                    channel: 0,
+                    shape: WaveformAnnotationShape::Flag,
+                    color: "#53a9fd".to_string(),
+                    title: "Key event".to_string(),
+                    note: String::new(),
+                },
+            ],
             analyzers: vec![
                 SaleaeAnalyzerMetadata {
                     analyzer_type: "I2C".to_string(),

@@ -1,0 +1,169 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<!-- The real stylesheet: unstyled overlays are exactly what this harness is for. -->
+<link rel="stylesheet" href="../../src/styles.css" />
+</head>
+<body>
+<!-- 1000x360 mirrors a wide, short graph viewport: annotations must stay inside it. -->
+<div id="host" style="position: relative; width: 1000px; height: 360px"></div>
+<pre id="out">pending</pre>
+<script type="module">
+// Static import plus synchronous work: a deferred module runs before
+// DOMContentLoaded, so --dump-dom (which waits for load) captures the result.
+import { applyDefaultTheme, mountAnnotationEditor, mountAnnotationProbe, whenI18nReady } from "./dist/entry.js";
+
+const lines = [];
+let passed = 0;
+let failed = 0;
+const log = (text) => lines.push(text);
+// Waits are timer-based, not rAF-based: under --virtual-time-budget Chrome
+// fast-forwards timers but does not guarantee a rendering opportunity, and a
+// pending rAF would leave the dumped DOM showing "pending".
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+function check(name, condition, detail = "") {
+  if (condition) { passed += 1; log(`  PASS  ${name}${detail ? ` (${detail})` : ""}`); }
+  else { failed += 1; log(`  FAIL  ${name}${detail ? ` (${detail})` : ""}`); }
+}
+
+const GREEN = "#58c667";
+const fixtures = [
+  { id: "key-1", sample: 100, channel: 0, shape: "flag", color: GREEN, title: "Enter HDR-DDR", note: "Check the mode change" },
+  { id: "key-2", sample: 700, channel: 0, shape: "warning", color: "#ffb45b", title: "Parity suspect", note: "SDR parity" },
+  { id: "crowd-1", sample: 200, channel: 1, shape: "diamond", color: "#53a9fd", title: "First", note: "" },
+  { id: "crowd-2", sample: 210, channel: 1, shape: "dot", color: "#af92fb", title: "Second", note: "" },
+];
+
+try {
+  await whenI18nReady();
+  applyDefaultTheme();
+  const host = document.getElementById("host");
+  const probe = mountAnnotationProbe(host);
+  // The overlay measures its own width in a passive effect. Asserting before it
+  // lands measures a 1px-wide layer where every symbol collapses onto x=0.
+  await settle();
+  await settle();
+  probe.render(fixtures, null);
+
+  log("rendered structure");
+  check("every annotation gets an element", probe.ids().length === 4, probe.ids().join(","));
+  check("crowded title collapses but keeps its symbol", probe.titledIds().length === 3, probe.titledIds().join(","));
+  const rects = probe.annotationRects();
+  check("symbols stay inside the viewport", rects.every((rect) => rect.left >= 0 && rect.right <= 1000), JSON.stringify(rects));
+  check("channel rows place symbols on different rows", rects[0].top !== rects[2].top, `${rects[0].top} vs ${rects[2].top}`);
+
+  log("");
+  log("icon canvases actually painted");
+  const pixels = probe.iconPixels();
+  check("every icon has drawn pixels", pixels.every((entry) => entry.painted > 0), JSON.stringify(pixels.map((entry) => entry.painted)));
+  check("icon uses the annotation colour", pixels.find((entry) => entry.id === "key-1").colored > 0, JSON.stringify(pixels.find((entry) => entry.id === "key-1")));
+  check("a different colour does not repaint another icon", pixels.find((entry) => entry.id === "crowd-2").colored === 0);
+
+  log("");
+  log("computed styles come from the stylesheet");
+  const overlayStyle = getComputedStyle(host.querySelector(".waveformAnnotationsOverlay"));
+  check("overlay is an absolute, click-through layer", overlayStyle.position === "absolute" && overlayStyle.pointerEvents === "none", `${overlayStyle.position}/${overlayStyle.pointerEvents}`);
+  check("overlay sits above the waveform canvas", Number(overlayStyle.zIndex) >= 12, overlayStyle.zIndex);
+  const buttonStyle = getComputedStyle(host.querySelector(".waveformAnnotationButton"));
+  check("the symbol itself accepts clicks", buttonStyle.pointerEvents === "auto", buttonStyle.pointerEvents);
+  const titleRect = probe.titleRects().find((entry) => entry.id === "key-1");
+  const iconRect = rects.find((entry) => entry.id === "key-1");
+  check("an unselected title sits to the right of its symbol", titleRect.left > iconRect.left, `${titleRect.left} > ${iconRect.left}`);
+  check("title text is the user's own words", titleRect.text === "Enter HDR-DDR", titleRect.text);
+
+  log("");
+  log("hover shows the note without opening a panel");
+  probe.hover("key-1");
+  // React treats mouseover as a continuous event, so its update is not flushed
+  // synchronously the way click or keydown are.
+  await settle();
+  const tooltip = probe.tooltipText() ?? "";
+  log(`    evidence: tooltip nodes=${host.querySelectorAll('[role="tooltip"]').length}, text length=${tooltip.length}`);
+  check("tooltip carries title, position and note", tooltip.includes("Enter HDR-DDR") && tooltip.includes("Check the mode change") && tooltip.includes("D0"), tooltip.slice(0, 80));
+  probe.unhover("key-1");
+  await settle();
+  check("tooltip disappears on leave", probe.tooltipText() === null);
+
+  log("");
+  log("selection, edit and delete");
+  probe.reset();
+  probe.click("key-1");
+  check("clicking selects the annotation", probe.recorder.select.at(-1) === "key-1", JSON.stringify(probe.recorder.select));
+  check("a selected annotation offers edit/delete", probe.actionsVisible());
+  probe.doubleClick("key-1");
+  check("double-click opens the editor", probe.recorder.edit.at(-1) === "key-1", JSON.stringify(probe.recorder.edit));
+  probe.press("Enter");
+  check("Enter opens the editor for the selection", probe.recorder.edit.at(-1) === "key-1");
+  probe.press("Delete");
+  check("Delete removes the selection", probe.recorder.delete.at(-1) === "key-1", JSON.stringify(probe.recorder.delete));
+  probe.press("Escape");
+  check("Escape clears the selection", probe.recorder.select.at(-1) === null, JSON.stringify(probe.recorder.select));
+
+  log("");
+  log("dragging re-anchors the symbol in time");
+  probe.reset();
+  probe.render(fixtures, null);
+  probe.drag("key-1", 100);
+  const moved = probe.recorder.move.at(-1);
+  check("100 px over a 1000 px / 1000 sample viewport moves 100 samples", moved && moved[0] === "key-1" && moved[1] === 200, JSON.stringify(moved));
+  check("the drag is committed once", probe.recorder.move.length === 1, JSON.stringify(probe.recorder.move));
+
+  log("");
+  log("a recording session is read-only");
+  probe.reset();
+  probe.setBusy(true);
+  probe.render(fixtures, "key-1");
+  check("edit/delete buttons are hidden while recording", !probe.actionsVisible());
+  probe.press("Delete");
+  check("Delete is ignored while recording", probe.recorder.delete.length === 0);
+  probe.drag("key-1", 100);
+  check("dragging is ignored while recording", probe.recorder.move.length === 0);
+  probe.setBusy(false);
+
+  log("");
+  log("a selected annotation near the right edge flips its title inward");
+  probe.render([{ id: "edge", sample: 980, channel: 0, shape: "cross", color: "#ff6d7f", title: "At the edge", note: "" }], "edge");
+  const edgeTitle = probe.titleRects()[0];
+  const edgeIcon = probe.annotationRects()[0];
+  check("title moves to the left of the symbol", edgeTitle.right < edgeIcon.right, `${edgeTitle.right} < ${edgeIcon.right}`);
+
+  log("");
+  log("editor dialog");
+  const editor = mountAnnotationEditor(fixtures[0], false);
+  await settle();
+  check("the dialog is an accessible modal", editor.dialog()?.getAttribute("role") === "dialog" && editor.dialog()?.getAttribute("aria-modal") === "true");
+  check("the title is prefilled and focused", editor.titleValue() === "Enter HDR-DDR" && document.activeElement === editor.titleInput(), document.activeElement?.tagName ?? "");
+  editor.setTitle("  Renamed  ");
+  editor.submit();
+  await settle();
+  check("saving trims the title", editor.saveCalls.at(-1)?.title === "Renamed", JSON.stringify(editor.saveCalls.at(-1)?.title));
+  editor.setTitle("   ");
+  editor.submit();
+  await settle();
+  check("an empty title is rejected with a message", editor.errors().length > 0 && editor.saveCalls.length === 1, editor.errors().join("|"));
+  editor.setTitle("Ok");
+  editor.setSample("1005");
+  editor.submit();
+  await settle();
+  check("an out-of-range sample is rejected", editor.errors().length > 0 && editor.saveCalls.length === 1, editor.errors().join("|"));
+  editor.setSample("500");
+  editor.submit();
+  await settle();
+  check("a valid sample is accepted", editor.saveCalls.at(-1)?.sample === 500, JSON.stringify(editor.saveCalls.at(-1)?.sample));
+  editor.remove();
+  check("delete asks the caller to remove the annotation", editor.deleteCalls === 1);
+  editor.pressEscape();
+  check("Escape closes the dialog", editor.closeCalls === 1);
+  editor.unmount();
+} catch (error) {
+  failed += 1;
+  log(`THREW ${error && error.stack ? error.stack : error}`);
+}
+
+log("");
+log(`RESULT: ${passed} passed, ${failed} failed`);
+document.getElementById("out").textContent = lines.join("\n");
+</script>
+</body>
+</html>

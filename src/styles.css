@@ -8315,3 +8315,300 @@ body.timing-marker-col-resize * {
 .analogMeasurementArrowLeft { border-right-color: var(--wave-measurement, var(--on-background-20)); }
 .analogMeasurementArrowRight { border-left-color: var(--wave-measurement, var(--on-background-20)); }
 .analogHoverVoltage, .analogMeasurementLabel { color: var(--wave-text, var(--on-background-0)); background: var(--wave-background, var(--background-30)); }
+
+/* User waveform annotations. Outlined symbols deliberately differ from the
+   filled decoder markers so a human observation is never read as decoded data. */
+.waveformAnnotationsOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 17;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.waveformAnnotation {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform: translateX(-50%);
+  color: var(--annotation-color, var(--selected-highlight));
+  pointer-events: none;
+}
+
+.waveformAnnotationStem {
+  width: 1px;
+  background: var(--annotation-color, var(--selected-highlight));
+  opacity: 0.55;
+}
+
+.waveformAnnotationButton {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: inherit;
+  background: none;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.waveformAnnotationButton:focus-visible {
+  outline: 2px solid var(--annotation-color, var(--selected-highlight));
+  outline-offset: 2px;
+}
+
+.waveformAnnotation.dragging .waveformAnnotationButton { cursor: grabbing; }
+.waveformAnnotation.dragging { opacity: 0.85; }
+
+.waveformAnnotationIcon { display: block; width: 18px; height: 18px; pointer-events: none; }
+
+.waveformAnnotation.selected .waveformAnnotationButton::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1px solid var(--annotation-color, var(--selected-highlight));
+  border-radius: 4px;
+  opacity: 0.9;
+}
+
+.waveformAnnotationTitle {
+  position: absolute;
+  top: 50%;
+  padding: 1px 5px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--on-background-10);
+  background: var(--background-10);
+  border: 1px solid var(--annotation-color, var(--selected-highlight));
+  border-radius: 3px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.waveformAnnotation.right .waveformAnnotationTitle { left: 22px; }
+.waveformAnnotation.left .waveformAnnotationTitle { right: 22px; }
+
+.waveformAnnotationActions {
+  position: absolute;
+  top: -22px;
+  left: 50%;
+  display: flex;
+  gap: 2px;
+  padding: 1px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  background: var(--background-20);
+  box-shadow: var(--box-shadow);
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.waveformAnnotationActions button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: var(--on-background-20);
+  background: none;
+  cursor: pointer;
+}
+
+.waveformAnnotationActions button:hover {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.waveformAnnotationTooltip {
+  position: absolute;
+  top: 24px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--on-background-10);
+  background: var(--background-10);
+  border: 1px solid var(--border-20);
+  border-radius: 6px;
+  box-shadow: var(--box-shadow);
+  pointer-events: none;
+}
+
+.waveformAnnotationTooltip strong { font-size: 12px; font-weight: 600; color: var(--on-background-0); }
+.waveformAnnotationTooltip p { max-height: 84px; margin: 0; overflow: hidden; color: var(--on-background-20); }
+.waveformAnnotationSource { font-size: 10px; letter-spacing: 0.02em; color: var(--selected-highlight); white-space: nowrap; }
+
+.waveformAnnotationBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.waveformAnnotationEditor {
+  width: min(430px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--on-background-10);
+  background: var(--background-20);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  box-shadow: var(--box-shadow);
+}
+
+.waveformAnnotationEditor > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border-10);
+}
+
+.waveformAnnotationEditor > header h2 { margin: 3px 0 0; font-size: 15px; font-weight: 600; }
+
+.waveformAnnotationEditor > header button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  color: var(--on-background-20);
+  background: none;
+  cursor: pointer;
+}
+
+.waveformAnnotationEditor > header button:hover { color: var(--on-background-0); background: var(--hover-background); }
+
+.waveformAnnotationEditor form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  overflow: auto;
+}
+
+.waveformAnnotationAnchor { font-size: 11px; color: var(--on-background-30); }
+
+.waveformAnnotationEditor label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--on-background-20);
+}
+
+.waveformAnnotationEditor input:not([type="color"]),
+.waveformAnnotationEditor textarea {
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--on-background-0);
+  background: var(--background-10);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+}
+
+.waveformAnnotationEditor input[aria-invalid="true"] { border-color: hsl(7, 69%, 54%); }
+.waveformAnnotationEditor fieldset { margin: 0; padding: 0; border: 0; }
+.waveformAnnotationEditor legend { padding: 0 0 6px; font-size: 11px; color: var(--on-background-20); }
+
+.waveformAnnotationShapes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.waveformAnnotationShapes button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--on-background-20);
+  background: var(--background-10);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.waveformAnnotationShapes button[aria-pressed="true"] {
+  color: var(--on-background-0);
+  background: var(--hover-background);
+  border-color: var(--selected-highlight);
+}
+
+.waveformAnnotationColorRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--on-background-20);
+}
+
+.waveformAnnotationSwatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border-20);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.waveformAnnotationSwatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--selected-highlight); }
+
+.waveformAnnotationColorRow input[type="color"] {
+  width: 30px;
+  height: 22px;
+  padding: 1px;
+  background: var(--background-10);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+}
+
+.waveformAnnotationError { margin: -6px 0 0; font-size: 11px; color: hsl(7, 69%, 54%); }
+.waveformAnnotationHelp { margin: 0; font-size: 10px; line-height: 1.6; color: var(--on-background-30); }
+
+.waveformAnnotationEditor footer { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.waveformAnnotationEditor footer span { flex: 1; }
+
+.waveformAnnotationEditor footer button {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--on-background-10);
+  background: var(--background-10);
+  border: 1px solid var(--border-20);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.waveformAnnotationEditor footer button.primary {
+  color: var(--on-primary);
+  background: var(--selected-highlight);
+  border-color: var(--selected-highlight);
+}
+
+.waveformAnnotationEditor footer button.waveformAnnotationDelete {
+  color: hsl(7, 69%, 64%);
+  border-color: hsl(7, 69%, 54%);
+}

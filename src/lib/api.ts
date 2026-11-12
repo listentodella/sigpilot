@@ -18,6 +18,7 @@ import type {
 // Type-only: `logger.ts` imports `frontendLog` from here, so a value import
 // would be a cycle. The type is erased at compile time.
 import type { LogLevel } from "./logger.ts";
+import type { WaveformAnnotationShape } from "./waveformAnnotations";
 
 export type DeviceKind = "Fake" | "Usb";
 
@@ -414,10 +415,21 @@ export interface SaleaeAnalyzerMetadata {
   saleae_metadata?: unknown;
 }
 
+export interface WaveformAnnotation {
+  id: string;
+  sample: number;
+  channel: number;
+  shape: WaveformAnnotationShape;
+  color: string;
+  title: string;
+  note: string;
+}
+
 export interface SaleaeSessionMetadata {
   name: string;
   notes: string;
   analyzers: SaleaeAnalyzerMetadata[];
+  user_annotations?: WaveformAnnotation[];
 }
 
 type PreviewDemoSignal =

@@ -1,5 +1,3 @@
-import { AnalyzerTableRequestQueue, visitAnalyzerTablePages } from "./lib/analyzerTableRequests";
-import type { AnalyzerFrameTableWindow } from "./lib/api";
 import { maxDigitalChannelsForCapabilities as maxChannelsForCapabilities } from "./lib/deviceCapabilities";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -103,9 +101,21 @@ import {
   TimingMarkersPanel,
 } from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
+import { WaveformAnnotationEditor } from "./components/WaveformAnnotationEditor";
+import { WaveformAnnotationsOverlay } from "./components/WaveformAnnotationsOverlay";
+import {
+  WAVEFORM_ANNOTATION_COLORS,
+  WAVEFORM_ANNOTATION_NOTE_LIMIT,
+  WAVEFORM_ANNOTATION_TITLE_LIMIT,
+  clampWaveformAnnotationSample,
+  normalizeWaveformAnnotations,
+  trimWaveformAnnotations,
+} from "./lib/waveformAnnotations";
 import { resolveWaveformPointerSample } from "./lib/waveformEdgeSnap";
 import { graphTileCanServeViewport } from "./lib/waveformTileCoverage";
 import { virtualListWindow } from "./lib/virtualList";
+import { AnalyzerTableRequestQueue, visitAnalyzerTablePages } from "./lib/analyzerTableRequests";
+import type { AnalyzerFrameTableWindow } from "./lib/api";
 import { defaultCaptureViewportSamples, previewCaptureViewportSamples } from "./lib/liveViewport";
 import {
   maximumCaptureViewportSamples,
@@ -215,6 +225,7 @@ import {
   trimCapture,
   ViewIntent,
   writeTextFile,
+  WaveformAnnotation,
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
@@ -359,6 +370,19 @@ const LOG_TEXT_BYTES = 64 * 1024;
 // real captures.
 const USE_BACKEND_FRAME_LOOP = true;
 
+interface WaveformAnnotationEditorState {
+  annotation: WaveformAnnotation;
+  isNew: boolean;
+}
+
+let waveformAnnotationSequence = 0;
+
+/** Ids only need to be unique inside the session that owns the annotation. */
+function nextWaveformAnnotationId() {
+  waveformAnnotationSequence += 1;
+  return `annotation-${Date.now().toString(36)}-${waveformAnnotationSequence}`;
+}
+
 interface UiSession {
   id: string;
   name: string;
@@ -394,6 +418,9 @@ interface UiSession {
   timingMarkerPlacement: UiTimingMarkerPlacement | null;
   timingMarkers: UiTimingMarker[];
   notes: string;
+  selectedAnnotationId: string | null;
+  waveformAnnotations: WaveformAnnotation[];
+  annotationEditor: WaveformAnnotationEditorState | null;
 }
 
 interface PendingCaptureUiUpdate {
@@ -1200,6 +1227,9 @@ function applyTrimmedCapture(
         };
       })
       .filter((marker) => marker.type === "single" || (marker.endSample ?? marker.sample + 1) > marker.sample),
+    annotationEditor: null,
+    selectedAnnotationId: null,
+    waveformAnnotations: trimWaveformAnnotations(session.waveformAnnotations, trimStart, totalSamples),
     viewportSamples,
     viewportStart: 0,
   };
@@ -1432,6 +1462,9 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     timingMarkerPlacement: null,
     timingMarkers: [],
     notes: "",
+    selectedAnnotationId: null,
+    waveformAnnotations: [],
+    annotationEditor: null,
   };
 }
 
@@ -1532,6 +1565,7 @@ export default function App() {
   const { t } = useTranslation();
   const { t: panelsT } = useTranslation("panels");
   const { t: statusT } = useTranslation("status");
+  const { t: annotationsT } = useTranslation("annotations");
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [deviceCapabilitiesById, setDeviceCapabilitiesById] = useState<Record<string, HardwareCaptureCapabilities>>({});
   const [deviceCapabilityErrorsById, setDeviceCapabilityErrorsById] = useState<Record<string, string>>({});
@@ -3964,6 +3998,111 @@ export default function App() {
     }
   }
 
+  function waveformAnnotationTotalSamples() {
+    return Math.max(1, activeSession?.summary?.metadata.sample_count ?? 0);
+  }
+
+  /** Graph-opened menus carry a sample; label-opened menus fall back to the view centre. */
+  function waveformAnnotationAnchor(sample: number | undefined) {
+    const session = activeSession;
+    const fallback = Math.round(
+      (session?.viewportStart ?? 0) + (session?.viewportSamples ?? 0) / 2,
+    );
+    return clampWaveformAnnotationSample(sample ?? fallback, waveformAnnotationTotalSamples());
+  }
+
+  function openWaveformAnnotationEditor(annotation: WaveformAnnotation, isNew: boolean) {
+    const session = activeSession;
+    if (!session) return;
+    updateSession(session.id, (current) => ({
+      ...current,
+      annotationEditor: { annotation, isNew },
+      selectedAnnotationId: annotation.id,
+    }));
+  }
+
+  function closeWaveformAnnotationEditor() {
+    const session = activeSession;
+    if (!session) return;
+    updateSession(session.id, (current) => ({ ...current, annotationEditor: null }));
+  }
+
+  function addWaveformAnnotation(channelIndex: number, sample: number | undefined) {
+    const session = activeSession;
+    if (!session?.summary) return;
+    if (session.busy) {
+      updateSession(session.id, (current) => ({ ...current, message: annotationsT("busy") }));
+      return;
+    }
+    const channelCount = Math.max(1, session.channelLabels.length);
+    const channel = Math.max(0, Math.min(channelCount - 1, Math.round(channelIndex)));
+    openWaveformAnnotationEditor(
+      {
+        channel,
+        color: WAVEFORM_ANNOTATION_COLORS[channel % WAVEFORM_ANNOTATION_COLORS.length],
+        id: nextWaveformAnnotationId(),
+        note: "",
+        sample: waveformAnnotationAnchor(sample),
+        shape: "flag",
+        title: annotationsT("defaultTitle"),
+      },
+      true,
+    );
+  }
+
+  function saveWaveformAnnotation(annotation: WaveformAnnotation) {
+    const session = activeSession;
+    if (!session) return;
+    if (!annotation.title.trim()) return;
+    const saved: WaveformAnnotation = {
+      ...annotation,
+      note: annotation.note.slice(0, WAVEFORM_ANNOTATION_NOTE_LIMIT),
+      sample: clampWaveformAnnotationSample(annotation.sample, waveformAnnotationTotalSamples()),
+      title: annotation.title.trim().slice(0, WAVEFORM_ANNOTATION_TITLE_LIMIT),
+    };
+    updateSession(session.id, (current) => ({
+      ...current,
+      annotationEditor: null,
+      message: annotationsT("saved"),
+      selectedAnnotationId: saved.id,
+      waveformAnnotations: current.waveformAnnotations.some((item) => item.id === saved.id)
+        ? current.waveformAnnotations.map((item) => (item.id === saved.id ? saved : item))
+        : [...current.waveformAnnotations, saved],
+    }));
+  }
+
+  function deleteWaveformAnnotation(id: string) {
+    const session = activeSession;
+    if (!session) return;
+    updateSession(session.id, (current) => ({
+      ...current,
+      annotationEditor: current.annotationEditor?.annotation.id === id ? null : current.annotationEditor,
+      message: annotationsT("deleted"),
+      selectedAnnotationId: current.selectedAnnotationId === id ? null : current.selectedAnnotationId,
+      waveformAnnotations: current.waveformAnnotations.filter((item) => item.id !== id),
+    }));
+  }
+
+  function selectWaveformAnnotation(id: string | null) {
+    const session = activeSession;
+    if (!session) return;
+    updateSession(session.id, (current) =>
+      current.selectedAnnotationId === id ? current : { ...current, selectedAnnotationId: id },
+    );
+  }
+
+  function moveWaveformAnnotation(id: string, sample: number) {
+    const session = activeSession;
+    if (!session || session.busy) return;
+    const clamped = clampWaveformAnnotationSample(sample, waveformAnnotationTotalSamples());
+    updateSession(session.id, (current) => ({
+      ...current,
+      waveformAnnotations: current.waveformAnnotations.map((item) =>
+        item.id === id ? { ...item, sample: clamped } : item,
+      ),
+    }));
+  }
+
   async function loadCaptureIntoSession(opened: OpenCaptureResult, targetSession?: UiSession, sourcePath?: string) {
     const { summary, saleae_session: saleaeSession } = opened;
     const target =
@@ -4003,6 +4142,13 @@ export default function App() {
       cursorState: defaultCursorState(summary.metadata.sample_count, summary.metadata.channel_count),
       rangePlacement: null,
       timingMarkerPlacement: null,
+      selectedAnnotationId: null,
+      waveformAnnotations: normalizeWaveformAnnotations(
+        saleaeSession?.user_annotations,
+        summary.metadata.sample_count,
+        summary.metadata.channel_count,
+      ),
+      annotationEditor: null,
       summary: summaryWithLabels(summary, labels),
       tile: null,
       ...initialViewport,
@@ -4093,6 +4239,7 @@ export default function App() {
           name: activeSession.name,
           notes: activeSession.notes,
           analyzers: activeSession.analyzers.map((analyzer) => saleaeAnalyzerMetadata(analyzer, activeSession.analyzers)),
+          user_annotations: activeSession.waveformAnnotations,
         });
       }
       const savedName =
@@ -5579,6 +5726,10 @@ export default function App() {
                         hasCapture={Boolean(activeSession.summary)}
                         hasHiddenChannels={contextMenuChannelRows.some((row) => row.isSelectable && row.isHidden)}
                         interactiveMeasurementVisible={activeSession.showInteractiveMeasurement}
+                        onAddAnnotation={() =>
+                          addWaveformAnnotation(channelContextMenu.channelIndex, channelContextMenu.sample)
+                        }
+                        annotationAnchorAvailable={Boolean(activeSession.summary) && !activeSession.busy}
                         onClose={() => setChannelContextMenu(null)}
                         onDeleteDataAfter={() => previewChannelTrim("after")}
                         onDeleteDataBefore={() => previewChannelTrim("before")}
@@ -5683,6 +5834,23 @@ export default function App() {
                         onAnalyzerError={(message) =>
                           updateSession(activeSession.id, (current) => ({ ...current, message }))
                         }
+                        viewportSamples={activeSession.viewportSamples}
+                        viewportStart={activeSession.viewportStart}
+                        visibleChannelIndexes={visibleChannelIndexes}
+                      />
+                      <WaveformAnnotationsOverlay
+                        annotations={activeSession.waveformAnnotations ?? []}
+                        busy={activeSession.busy}
+                        onDelete={deleteWaveformAnnotation}
+                        onEdit={(annotation) => openWaveformAnnotationEditor(annotation, false)}
+                        onMove={moveWaveformAnnotation}
+                        onSelect={selectWaveformAnnotation}
+                        rowHeights={visibleOuterRowHeights}
+                        rowTopInsets={visibleAnalyzerInsets}
+                        sampleRateHz={activeSession.summary?.metadata.sample_rate_hz ?? activeSession.settings.sample_rate_hz}
+                        selectedId={activeSession.selectedAnnotationId}
+                        sessionId={activeSession.id}
+                        totalSamples={totalSamples}
                         viewportSamples={activeSession.viewportSamples}
                         viewportStart={activeSession.viewportStart}
                         visibleChannelIndexes={visibleChannelIndexes}
@@ -5795,6 +5963,24 @@ export default function App() {
                     viewportSamples={activeSession.viewportSamples}
                     viewportStart={activeSession.viewportStart}
                     viewportInteracting={graphViewportInteracting}
+                  />
+                )}
+                {activeSession.annotationEditor && (
+                  <WaveformAnnotationEditor
+                    annotation={activeSession.annotationEditor.annotation}
+                    channelLabel={
+                      channelLabels[activeSession.annotationEditor.annotation.channel] ??
+                      `D${activeSession.annotationEditor.annotation.channel}`
+                    }
+                    isNew={activeSession.annotationEditor.isNew}
+                    onClose={closeWaveformAnnotationEditor}
+                    onDelete={() => {
+                      const pending = activeSession.annotationEditor;
+                      if (pending) deleteWaveformAnnotation(pending.annotation.id);
+                    }}
+                    onSave={saveWaveformAnnotation}
+                    sampleRateHz={activeSession.summary?.metadata.sample_rate_hz ?? activeSession.settings.sample_rate_hz}
+                    totalSamples={totalSamples}
                   />
                 )}
               </>
@@ -6449,6 +6635,8 @@ function ChannelContextMenu({
   hasHiddenChannels,
   interactiveMeasurementVisible,
   onClose,
+  annotationAnchorAvailable,
+  onAddAnnotation,
   onDeleteDataAfter,
   onDeleteDataBefore,
   onDeleteDataOffscreen,
@@ -6477,6 +6665,8 @@ function ChannelContextMenu({
   hasHiddenChannels: boolean;
   interactiveMeasurementVisible: boolean;
   onClose: () => void;
+  annotationAnchorAvailable: boolean;
+  onAddAnnotation: () => void;
   onDeleteDataAfter: () => void;
   onDeleteDataBefore: () => void;
   onDeleteDataOffscreen: () => void;
@@ -6498,6 +6688,7 @@ function ChannelContextMenu({
   y: number;
 }) {
   const { t } = useTranslation("channelMenu");
+  const { t: annotationT } = useTranslation("annotations");
   const menuWidth = 286;
   const submenuWidth = 286;
   const opensLeft = typeof window !== "undefined" && x + menuWidth + submenuWidth + 12 > window.innerWidth;
@@ -6545,6 +6736,13 @@ function ChannelContextMenu({
         tooltip={t("showInteractiveMeasurementHint")}
       />
       <ChannelMenuSeparator />
+      {annotationAnchorAvailable && (
+        <ChannelMenuSelectionItem
+          label={annotationT("add")}
+          onClick={() => run(onAddAnnotation)}
+          tooltip={annotationT("addHint")}
+        />
+      )}
       {isChannelDeleteDataVisible(hasCapture) && (
         <>
           <ChannelMenuSubmenu label={t("deleteData")}>
