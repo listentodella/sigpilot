@@ -1,0 +1,32 @@
+.floatingTerminalRoot { position: fixed; inset: 0; pointer-events: none; z-index: 6000; }
+.floatingTerminalLauncher, .floatingTerminalWindow { pointer-events: auto; }
+.floatingTerminalLauncher { position: absolute; right: 64px; bottom: 54px; display: flex; align-items: center; gap: 9px; height: 39px; padding: 0 13px; border: 1px solid var(--grey50); border-radius: 10px; color: var(--on-background-10); background: var(--background-30); box-shadow: 0 5px 18px #0005; font-size: 12px; cursor: pointer; }
+.floatingTerminalLauncher:hover { background: var(--hover-background); border-color: var(--lightBlue); }
+.floatingTerminalWindow { position: absolute; display: flex; flex-direction: column; border: 1px solid #5d5d68; border-radius: 10px; box-shadow: 0 18px 60px #0009, 0 2px 10px #0006; overflow: hidden; background: #141417; color: #d5d5df; }
+.floatingTerminalWindow[hidden] { display: none; }
+.floatingTerminalHeader { display: flex; align-items: center; gap: 10px; flex-shrink: 0; height: 38px; padding: 0 8px 0 14px; background: var(--background-40); color: var(--on-background-10); cursor: move; user-select: none; touch-action: none; border-bottom: 1px solid #3b3b43; }
+.floatingTerminalHeader strong { font-size: 12px; font-weight: 600; }
+.terminalShellLabel { color: var(--on-background-30); font-size: 11px; }
+.terminalHeaderSpacer { flex: 1; }
+.terminalPin { color: #87cbe7; margin-right: 5px; }
+.floatingTerminalHeader button { width: 26px; height: 26px; display: grid; place-items: center; background: transparent; color: inherit; border-radius: 4px; cursor: pointer; }
+.floatingTerminalHeader button:hover { background: #44444e; }
+.floatingTerminalHeader button:disabled { opacity: .4; cursor: default; }
+.floatingTerminalSessionBar { display: flex; align-items: center; gap: 8px; padding: 0 14px; height: 28px; flex-shrink: 0; background: #202025; border-bottom: 1px solid #2f2f37; color: #a1a1ae; font-size: 10px; }
+.terminalStateDot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #73737f; flex-shrink: 0; }
+.terminalStateDot.running { background: #7bc8a3; }
+.terminalCwd { margin-left: auto; max-width: 65%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: "Roboto Mono", monospace; color: #9393a0; }
+.floatingTerminalViewport { flex: 1; min-height: 0; min-width: 0; padding: 10px 12px 5px; overflow: hidden; }
+.floatingTerminalViewport .xterm { height: 100%; }
+.floatingTerminalViewport .xterm-viewport { overscroll-behavior: contain; }
+.floatingTerminalFooter { display: flex; align-items: center; justify-content: space-between; height: 25px; flex-shrink: 0; padding: 0 24px 0 14px; font-size: 10px; color: #8d8d9c; background: #1e1e24; border-top: 1px solid #2c2c35; }
+.terminalResizeHandle { position: absolute; bottom: 0; right: 0; height: 22px; width: 22px; cursor: nwse-resize; touch-action: none; }
+.terminalResizeHandle::after { content: ""; position: absolute; bottom: 4px; right: 4px; width: 10px; height: 10px; clip-path: polygon(100% 0, 100% 100%, 0 100%); background: repeating-linear-gradient(135deg, transparent 0 2px, #888895 2px 3px); }
+.terminalError, .terminalExitBar { padding: 7px 12px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; }
+.terminalError { color: #edb2a4; background: #362625; max-height: 70px; overflow: auto; }
+.terminalError span { overflow-wrap: anywhere; }
+.terminalError button { background: transparent; color: inherit; cursor: pointer; }
+.terminalExitBar { color: #b5b5c2; background: #25252d; }
+.terminalExitBar button { display: flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid #454550; border-radius: 4px; background: #30303a; color: #dddde6; cursor: pointer; }
+.terminalUnavailable { margin: 15px; color: #b3b3c0; font-size: 12px; }
+.floatingTerminalRoot button:focus-visible, .terminalResizeHandle:focus-visible { outline: 2px solid var(--lightBlue); outline-offset: -2px; }

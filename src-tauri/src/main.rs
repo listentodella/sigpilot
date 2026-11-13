@@ -2530,6 +2530,7 @@ fn warm_sigrok_native_catalog_async(delay: Duration) {
 mod logging;
 #[cfg(not(target_os = "macos"))]
 mod file_clipboard;
+mod terminal;
 
 fn main() {
     // Install the log sink before anything else, so a failure during start-up
@@ -2559,7 +2560,18 @@ fn main() {
             Ok(())
         })
         .manage(AppState::default())
+        .manage(terminal::TerminalState::default())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<terminal::TerminalState>().0.close_all();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            terminal::terminal_open,
+            terminal::terminal_poll,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
             frontend_log,
             set_log_level,
             set_log_levels,

@@ -5,6 +5,7 @@ members = [
     "crates/sigpilot-file",
     "crates/sigpilot-graph",
     "crates/sigpilot-waveform",
+    "crates/sigpilot-terminal",
     "src-tauri",
 ]
 resolver = "2"

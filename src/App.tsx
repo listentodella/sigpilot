@@ -76,6 +76,7 @@ import triggerPulseLowIcon from "./assets/saleae/trigger/pulse-low.svg";
 import triggerRisingIcon from "./assets/saleae/trigger/rising.svg";
 import emptyMeasurementArt from "./assets/saleae/empty_measurement.svg";
 import { AdvancedOptionsPanel } from "./components/AdvancedOptionsPanel";
+import { FloatingTerminal } from "./components/FloatingTerminal";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
@@ -5310,6 +5311,7 @@ export default function App() {
 
     function isEditableTarget(target: EventTarget | null) {
       if (!(target instanceof HTMLElement)) return false;
+      if (target.closest("[data-terminal-root]")) return true;
       const tagName = target.tagName.toLowerCase();
       return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
     }
@@ -5561,6 +5563,10 @@ export default function App() {
             <span>{activeMessage}</span>
           </div>
           <div className="window-actions">
+            <button className="tool-button text-tool" title={i18n.t("terminal:open")} onClick={() => window.dispatchEvent(new Event("sigpilot:toggle-terminal"))}>
+              <Terminal size={14} />
+              {i18n.t("terminal:title")}
+            </button>
             <button className="tool-button text-tool" title={t("openCapture")} onClick={handleOpen}>
               <FolderOpen size={14} />
               {t("open")}
@@ -6135,6 +6141,7 @@ export default function App() {
           zoomLabel={zoomLabel}
         />
       </section>
+      <FloatingTerminal />
     </main>
   );
 }

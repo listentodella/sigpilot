@@ -16,6 +16,7 @@ sigpilot-core = { path = "../crates/sigpilot-core" }
 sigpilot-file = { path = "../crates/sigpilot-file" }
 sigpilot-graph = { path = "../crates/sigpilot-graph" }
 sigpilot-waveform = { path = "../crates/sigpilot-waveform" }
+sigpilot-terminal = { path = "../crates/sigpilot-terminal" }
 parking_lot.workspace = true
 rayon.workspace = true
 serde.workspace = true
