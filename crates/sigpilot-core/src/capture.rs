@@ -106,6 +106,9 @@ pub fn capture_profile_from_settings(
         }
         profile.trigger_one |= settings.trigger_high_mask;
         profile.trigger_zero |= settings.trigger_low_mask;
+        if profile.trigger_one & profile.trigger_zero != 0 {
+            return Err(CoreError::Decode("trigger level conditions require the same channel high and low".to_string()));
+        }
     }
 
     Ok(profile)
@@ -1661,6 +1664,15 @@ mod tests {
         assert_eq!(profile.trigger_rise, 1);
         assert_eq!(profile.trigger_one, 1 << 2);
         assert_eq!(profile.trigger_zero, 1 << 3);
+    }
+
+    #[test]
+    fn rejects_contradictory_trigger_level_masks() {
+        let settings=CaptureSettings {channel_count:8,enabled_channels:vec![0,1],trigger_enabled:true,trigger_channel:0,
+            trigger_kind:CaptureTriggerKind::High,trigger_low_mask:1,..CaptureSettings::default()};
+        assert!(capture_profile_from_settings(&settings,8).is_err());
+        let settings=CaptureSettings {trigger_kind:CaptureTriggerKind::Rising,trigger_high_mask:2,trigger_low_mask:2,..settings};
+        assert!(capture_profile_from_settings(&settings,8).is_err());
     }
 
     #[test]

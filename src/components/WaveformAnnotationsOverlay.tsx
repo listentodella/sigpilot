@@ -24,6 +24,7 @@ export function WaveformAnnotationIcon({ shape, color }: { shape: WaveformAnnota
 }
 
 interface AnnotationDrag {
+  editToken?: string;
   id: string;
   pointerId: number;
   initialSample: number;
@@ -35,6 +36,7 @@ interface AnnotationDrag {
 }
 
 interface WaveformAnnotationsOverlayProps {
+  editToken?: string;
   annotations: WaveformAnnotation[];
   selectedId: string | null;
   sessionId: string;
@@ -48,12 +50,12 @@ interface WaveformAnnotationsOverlayProps {
   busy: boolean;
   onSelect: (id: string | null) => void;
   onEdit: (annotation: WaveformAnnotation) => void;
-  onMove: (id: string, sample: number) => void;
+  onMove: (id: string, sample: number, token?: string) => void;
   onDelete: (id: string) => void;
 }
 
 /** User-owned data only. Decoder frames are never read or mutated here. */
-export function WaveformAnnotationsOverlay({ annotations, selectedId, sessionId, rowHeights, rowTopInsets, visibleChannelIndexes, viewportStart, viewportSamples, totalSamples, sampleRateHz, busy, onSelect, onEdit, onMove, onDelete }: WaveformAnnotationsOverlayProps) {
+export function WaveformAnnotationsOverlay({ annotations, selectedId, sessionId, rowHeights, rowTopInsets, visibleChannelIndexes, viewportStart, viewportSamples, totalSamples, sampleRateHz, busy, editToken, onSelect, onEdit, onMove, onDelete }: WaveformAnnotationsOverlayProps) {
   const { t } = useTranslation("annotations");
   const rootRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<AnnotationDrag | null>(null);
@@ -114,7 +116,7 @@ export function WaveformAnnotationsOverlay({ annotations, selectedId, sessionId,
     onSelect(annotation.id);
     event.currentTarget.focus({ preventScroll: true });
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragRef.current = { id: annotation.id, pointerId: event.pointerId, initialSample: annotation.sample, initialX: event.clientX, width, samples, moved: false, sample: annotation.sample };
+    dragRef.current = { id: annotation.id, editToken, pointerId: event.pointerId, initialSample: annotation.sample, initialX: event.clientX, width, samples, moved: false, sample: annotation.sample };
   }
   function moveDrag(event: ReactPointerEvent<HTMLButtonElement>) {
     const drag = dragRef.current;
@@ -133,7 +135,7 @@ export function WaveformAnnotationsOverlay({ annotations, selectedId, sessionId,
     dragRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     setPreview(null);
-    if (commit && drag.moved && drag.sample !== drag.initialSample && !busy) onMove(drag.id, drag.sample);
+    if (commit && drag.moved && drag.sample !== drag.initialSample && !busy) onMove(drag.id, drag.sample, drag.editToken);
   }
   function passWheel(event: ReactWheelEvent<HTMLDivElement>) {
     const host = rootRef.current?.parentElement?.querySelector<HTMLElement>(".waveformCanvasHost");
@@ -175,7 +177,7 @@ export function WaveformAnnotationsOverlay({ annotations, selectedId, sessionId,
           <button type="button" aria-label={t("delete")} title={t("delete")} onClick={(event) => { event.stopPropagation(); onDelete(item.id); }}><Trash2 aria-hidden size={12} /></button>
         </div>}
         {hoveredId === item.id && !preview && <div id={`annotation-note-${item.id}`} role="tooltip" className="waveformAnnotationTooltip" style={{ left: tooltipLeft, width: tooltipWidth }}>
-          <span className="waveformAnnotationSource">{t("userOwned")}</span>
+          <span className="waveformAnnotationSource">{t(item.source === "assistant" ? "assistantOwned" : item.source === "analysis_provider" ? "analysisOwned" : "userOwned")}</span>
           <strong>{item.title}</strong>
           <span>{t("tooltipPosition", { channel: item.channel, sample: item.sample, time: formatTimingMarkerSeconds(item.sample / Math.max(1, sampleRateHz)) })}</span>
           {item.note && <p>{item.note}</p>}

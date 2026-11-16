@@ -54,7 +54,7 @@ export function WaveformAnnotationEditor({ annotation, isNew, channelLabel, tota
     onPointerDown={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onClose(); }}
     onKeyDown={(event) => event.stopPropagation()}>
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="waveform-annotation-editor-title" className="waveformAnnotationEditor" data-testid="annotation-editor">
-      <header><div><span className="waveformAnnotationSource">{t("userOwned")}</span><h2 id="waveform-annotation-editor-title">{t(isNew ? "addTitle" : "editTitle")}</h2></div>
+      <header><div><span className="waveformAnnotationSource">{t(annotation.source === "assistant" ? "assistantOwned" : annotation.source === "analysis_provider" ? "analysisOwned" : "userOwned")}</span><h2 id="waveform-annotation-editor-title">{t(isNew ? "addTitle" : "editTitle")}</h2></div>
         <button type="button" aria-label={t("close")} onClick={onClose}><X aria-hidden size={16} /></button></header>
       <form noValidate onSubmit={(event) => {
         event.preventDefault(); setSubmitted(true);

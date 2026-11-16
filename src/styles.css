@@ -8612,3 +8612,60 @@ body.timing-marker-col-resize * {
   color: hsl(7, 69%, 64%);
   border-color: hsl(7, 69%, 54%);
 }
+
+.mcpPanel { display: flex; flex: 1; flex-direction: column; gap: 10px; padding: 14px; font-size: 12px; line-height: 1.5; min-width: 0; min-height: 0; overflow-y: auto; }
+.mcpPanel > * { flex-shrink: 0; }
+.mcpPanel a { color: var(--lightBlue); }
+.mcpPanel::-webkit-scrollbar { width: 8px; }
+.mcpPanel::-webkit-scrollbar-thumb { background: var(--grey100); border-radius: 4px; }
+.mcpPanel::-webkit-scrollbar-track { background: var(--background-0); }
+.mcpPanel p { margin: 0; overflow-wrap: anywhere; }
+.mcpPanel button, .mcpPanel select { min-height: 32px; padding: 6px 10px; border: 1px solid var(--border-20); border-radius: 4px; background: var(--background-20); color: var(--on-background-0); }
+.mcpPanel button { cursor: pointer; }
+.mcpPanel button:disabled { cursor: default; opacity: .5; }
+.mcpPermission { display: flex; align-items: flex-start; gap: 8px; }
+.mcpPermission input { flex: none; margin-top: 3px; }
+.mcpServiceStatus { font-weight: 600; }
+.mcpSteps { margin: 0; padding-left: 22px; }
+.mcpSteps li + li { margin-top: 6px; }
+.mcpHint { color: var(--on-background-20); }
+.mcpPath code { display: block; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcpConfig { box-sizing: border-box; width: 100%; resize: vertical; min-height: 100px; padding: 8px; border: 1px solid var(--border-20); border-radius: 4px; background: var(--background-20); color: var(--on-background-0); font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcpCheckSuccess { color: var(--success, #57a86b); }
+.mcpError { color: var(--danger, #d95b5b); }
+.mcpPanel details summary { cursor: pointer; }
+.mcpPanel details p { margin-top: 8px; }
+.mcpIntro { display: flex; align-items: flex-start; gap: 11px; padding: 2px 0 8px; }
+.mcpIntro > svg { color: var(--lightBlue); margin-top: 3px; flex-shrink: 0; }
+.mcpIntro h3 { margin: 0 0 5px; font-size: 14px; font-weight: 600; }
+.mcpIntro p { color: var(--on-background-20); font-size: 11px; }
+.mcpSetupCard { display: flex; flex-direction: column; gap: 10px; padding: 13px; border: 1px solid var(--border-20); border-radius: 8px; background: var(--background-10); min-width: 0; }
+.mcpStepHeading { display: flex; align-items: center; gap: 8px; margin: 0 0 2px; font-size: 12px; font-weight: 600; }
+.mcpStepHeading > span { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--background-30); color: var(--lightBlue); font-size: 10px; }
+.mcpServiceRow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mcpServiceStatus { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 400; }
+.mcpServiceStatus i { width: 6px; height: 6px; border-radius: 50%; background: var(--on-background-20); }
+.mcpServiceStatus.enabled i { background: #73bf94; }
+.mcpPermission small { display: block; margin-top: 3px; color: var(--on-background-20); font-size: 10px; }
+.mcpFieldLabel { font-size: 11px; color: var(--on-background-20); }
+.mcpPanel button { display: flex; justify-content: center; align-items: center; gap: 6px; }
+.mcpPanel button.mcpPrimary { color: var(--on-primary); background: var(--selected-highlight); border-color: var(--selected-highlight); }
+.mcpPanel button:hover:not(:disabled) { filter: brightness(1.12); }
+.mcpCommandHeader { display: flex; align-items: center; gap: 6px; color: var(--on-background-20); font-size: 10px; margin-bottom: -5px; }
+.mcpCommand { box-sizing: border-box; width: 100%; min-height: 82px; padding: 9px; resize: vertical; border: 1px solid var(--border-20); border-radius: 5px; background: var(--background-0); color: var(--on-background-0); font: 11px/1.5 ui-monospace, monospace; }
+.mcpNextStep { font-size: 11px; padding-left: 9px; border-left: 2px solid var(--lightBlue); }
+.mcpManualBody { display: flex; flex-direction: column; gap: 9px; margin-top: 8px; }
+.mcpManual, .mcpPromptDetails, .mcpConnectionDetails { color: var(--on-background-20); font-size: 11px; }
+.mcpPromptDetails textarea { margin-top: 8px; }
+.mcpDocsLink { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; align-self: flex-start; }
+.mcpNotice { padding: 10px; border: 1px solid var(--border-20); border-radius: 6px; background: var(--background-20); }
+.mcpEndpoint { display:flex; flex-direction:column; gap:8px; padding:9px; background:var(--background-0); border-radius:5px; }
+.mcpEndpoint code { font-size:11px; overflow-wrap:anywhere; }
+.mcpAuthorization { border-color:var(--lightBlue); }
+.mcpAuthorization h4 { margin:0; }
+.mcpAuthorizationActions { display:flex; gap:8px; }
+.mcpAuthorizationActions button { flex:1; }
+.mcpCallback { font-size:10px; overflow-wrap:anywhere; color:var(--on-background-20); }
+.mcpPort { display:flex; align-items:center; justify-content:space-between; margin:12px 0 8px; gap:8px; }
+.mcpPort input { width:90px; padding:6px; border:1px solid var(--border-20); border-radius:4px; background:var(--background-10); color:var(--on-background-0); }
+.mcpAuthorizedClient { display:flex; align-items:center; justify-content:space-between; margin:8px 0; gap:8px; }

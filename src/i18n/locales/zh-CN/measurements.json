@@ -1,4 +1,6 @@
 {
+  "undoAnnotations": "撤销标记",
+  "saveMarkerComment": "保存备注",
   "addDisabled": "录制过程中以及首次采集之前不可用",
   "addMeasurement": "添加测量",
   "addMeasurementHint": "按住拖选一段区域，或单击分别指定起点与终点",

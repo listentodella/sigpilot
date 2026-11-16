@@ -5,6 +5,9 @@ members = [
     "crates/sigpilot-file",
     "crates/sigpilot-graph",
     "crates/sigpilot-waveform",
+    "crates/sigpilot-analysis",
+    "crates/sigpilot-workbench",
+    "crates/sigpilot-mcp",
     "crates/sigpilot-terminal",
     "src-tauri",
 ]

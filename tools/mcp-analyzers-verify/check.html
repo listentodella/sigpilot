@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="../../src/styles.css"></head>
+<body><div id="host"></div><pre id="out">pending</pre>
+<script type="module">
+import { runChecks } from "./dist/entry.js";
+try {document.getElementById("out").textContent=JSON.stringify(await runChecks());}
+catch(error) {document.getElementById("out").textContent=JSON.stringify({passed:false,error:String(error)});}
+</script></body></html>

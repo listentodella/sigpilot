@@ -1,4 +1,8 @@
 {
+  "syncPending": "Annotations are synchronizing. Please retry shortly.",
+  "versionConflict": "Annotations changed during this edit. The latest state has been loaded; please edit again.",
+  "assistantOwned": "AI assistant annotation · not a decoder result",
+  "analysisOwned": "Analysis tool annotation · not a decoder result",
   "add": "Add waveform annotation…",
   "addHint": "Add a user annotation at this channel and sample",
   "addTitle": "Add waveform annotation",

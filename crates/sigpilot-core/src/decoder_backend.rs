@@ -2414,6 +2414,20 @@ impl SaleaeNativeDecoder {
         }
     }
 
+    /// Construct a structured-field request without starting a persistent or
+    /// globally registered HLA worker. The caller supervises its own process.
+    /// Capture edge vectors must already obey the caller's allocation budget.
+    pub fn isolated_job_request(&self, capture: &SparseCaptureData, settings: &AnalyzerDecodeSettings) -> Result<Vec<u8>> {
+        let mut request = build_sparse_native_sidecar_request(capture, settings, false)?;
+        request.response_format = "standard";
+        request.include_fields = true;
+        serde_json::to_vec(&request).map_err(|e| CoreError::Decode(e.to_string()))
+    }
+
+    pub fn isolated_job_paths(&self) -> (&Path, &Path) {
+        (&self.sidecar_path, &self.runtime_root)
+    }
+
     pub fn from_env() -> Result<Self> {
         let sidecar_path = crate::product_env("SIGPILOT_SALEAE_SIDECAR")
             .map(PathBuf::from)

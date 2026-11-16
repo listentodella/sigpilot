@@ -22,6 +22,9 @@ use thiserror::Error;
 
 pub mod performance_self_test;
 pub mod view_state;
+pub mod read_api;
+
+pub use read_api::{DigitalWindowSnapshot, GraphCaptureSnapshot, MAX_DIGITAL_WINDOW_EDGES};
 
 pub use view_state::{
     default_capture_view_samples, ease_out_cubic, maximum_view_samples, minimum_view_samples,
@@ -1216,6 +1219,10 @@ fn empty_waveform_tile(request: &WaveformRequest) -> WaveformTile {
 #[derive(Debug)]
 pub struct GraphSession {
     instance_id: u64,
+    /// Publish graph, capture backing, and revision together for exact analysis
+    /// reads. Render-only readers continue using the existing graph read lock.
+    capture_mutation: Mutex<()>,
+    capture_generation: AtomicU64,
     graph: RwLock<Option<DigitalGraph>>,
     capture: RwLock<Option<Arc<CaptureData>>>,
     sparse_capture: RwLock<Option<Arc<SparseCaptureData>>>,
@@ -1246,6 +1253,8 @@ impl Default for GraphSession {
         );
         Self {
             instance_id,
+            capture_mutation: Mutex::new(()),
+            capture_generation: AtomicU64::new(0),
             graph: RwLock::new(None),
             capture: RwLock::new(None),
             sparse_capture: RwLock::new(None),
@@ -1566,6 +1575,7 @@ impl GraphSession {
     }
 
     pub fn begin_capture(&self, metadata: CaptureMetadata) -> Result<()> {
+        let _mutation = self.capture_mutation.lock();
         tracing::info!(
             target: "sigpilot::capture",
             session_id = self.instance_id,
@@ -1578,12 +1588,14 @@ impl GraphSession {
         *self.graph.write() = Some(DigitalGraph::new(metadata)?);
         *self.capture.write() = None;
         *self.sparse_capture.write() = None;
+        self.capture_generation.fetch_add(1, Ordering::AcqRel);
         self.clear_analyzer_caches();
         self.bump_revision();
         Ok(())
     }
 
     pub fn append_samples(&self, samples: &[u8]) -> Result<u64> {
+        let _mutation = self.capture_mutation.lock();
         let count = self
             .graph
             .write()
@@ -1611,6 +1623,7 @@ impl GraphSession {
         samples: &[u8],
         reverse_bits_in_word: bool,
     ) -> Result<u64> {
+        let _mutation = self.capture_mutation.lock();
         let count = self
             .graph
             .write()
@@ -1622,6 +1635,7 @@ impl GraphSession {
     }
 
     pub fn set_trigger(&self, trigger: CaptureTriggerMetadata) -> Result<()> {
+        let _mutation = self.capture_mutation.lock();
         self.graph
             .write()
             .as_mut()
@@ -1632,16 +1646,19 @@ impl GraphSession {
     }
 
     pub fn replace_capture(&self, capture: CaptureData) -> Result<()> {
+        let _mutation = self.capture_mutation.lock();
         let graph = DigitalGraph::from_capture(&capture)?;
         *self.graph.write() = Some(graph);
         *self.capture.write() = Some(Arc::new(capture));
         *self.sparse_capture.write() = None;
+        self.capture_generation.fetch_add(1, Ordering::AcqRel);
         self.clear_analyzer_caches();
         self.bump_revision();
         Ok(())
     }
 
     pub fn finish_capture(&self, capture: CaptureData) -> Result<()> {
+        let mutation = self.capture_mutation.lock();
         let indexed_samples = self
             .graph
             .read()
@@ -1661,6 +1678,7 @@ impl GraphSession {
                 metadata_samples = capture.metadata.sample_count,
                 "streamed sample count disagrees with the final metadata; rebuilding the graph"
             );
+            drop(mutation);
             return self.replace_capture(capture);
         }
         let finalized = self
@@ -1677,6 +1695,7 @@ impl GraphSession {
                 error = finalized.as_ref().err().map(|error| error.to_string()),
                 "finalizing the streamed metadata failed; rebuilding the graph"
             );
+            drop(mutation);
             return self.replace_capture(capture);
         }
         *self.capture.write() = Some(Arc::new(capture));
@@ -1695,16 +1714,19 @@ impl GraphSession {
     }
 
     pub fn replace_sparse_capture(&self, capture: SparseCaptureData) -> Result<()> {
+        let _mutation = self.capture_mutation.lock();
         let graph = DigitalGraph::from_sparse_capture(&capture)?;
         *self.graph.write() = Some(graph);
         *self.capture.write() = None;
         *self.sparse_capture.write() = Some(Arc::new(capture));
+        self.capture_generation.fetch_add(1, Ordering::AcqRel);
         self.clear_analyzer_caches();
         self.bump_revision();
         Ok(())
     }
 
     pub fn trim_capture(&self, start: u64, end: u64) -> Result<(CaptureMetadata, usize)> {
+        let _mutation = self.capture_mutation.lock();
         tracing::info!(
             target: "sigpilot::capture",
             session_id = self.instance_id,
@@ -1753,6 +1775,7 @@ impl GraphSession {
         };
 
         graph.trim(start, end)?;
+        self.capture_generation.fetch_add(1, Ordering::AcqRel);
         self.clear_analyzer_caches();
         self.bump_revision();
         tracing::info!(

@@ -423,6 +423,7 @@ export interface WaveformAnnotation {
   color: string;
   title: string;
   note: string;
+  source?: "user" | "assistant" | "analysis_provider";
 }
 
 export interface SaleaeSessionMetadata {

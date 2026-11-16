@@ -242,6 +242,24 @@ pub struct SparseDigitalChannel {
     pub transitions: Vec<u64>,
 }
 
+/// An owned, bounded window of exact edges. `high_before_start` is the level
+/// immediately before any edge at `start_sample`, so pages can be joined
+/// without rounding, rescanning raw samples, or inventing boundary transitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigitalChannelWindow {
+    pub channel: u8,
+    pub sample_rate_hz: u64,
+    pub capture_sample_count: u64,
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub requested_end_sample: u64,
+    pub high_before_start: bool,
+    pub previous_transition: Option<u64>,
+    pub next_transition: Option<u64>,
+    pub transitions: Vec<u64>,
+    pub complete: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SparseCaptureData {
     pub metadata: CaptureMetadata,

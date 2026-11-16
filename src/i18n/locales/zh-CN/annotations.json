@@ -1,4 +1,8 @@
 {
+  "syncPending": "标注状态正在同步，请稍后重试。",
+  "versionConflict": "标注已被其他操作修改，已同步最新状态，请重新编辑。",
+  "assistantOwned": "AI 助手标注 · 不属于协议解码结果",
+  "analysisOwned": "分析工具标注 · 不属于协议解码结果",
   "add": "添加波形标注…",
   "addHint": "在当前通道和采样位置添加人工标注",
   "addTitle": "添加波形标注",

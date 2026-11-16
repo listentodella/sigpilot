@@ -30,12 +30,14 @@ import {
 import { useTranslation } from "react-i18next";
 import { SaleaeIcon } from "../SaleaeIcon";
 
-type MarkerUpdater = (updater: (markers: UiTimingMarker[]) => UiTimingMarker[]) => void;
+type MarkerUpdater = (updater: (markers: UiTimingMarker[]) => UiTimingMarker[], expectedToken?: string) => void;
 type PlacementUpdater = (
   updater: (placement: UiTimingMarkerPlacement | null) => UiTimingMarkerPlacement | null,
 ) => void;
 
 interface TimingMarkersOverlayProps {
+  editToken?: string;
+  busy?: boolean;
   markers: UiTimingMarker[];
   onChangeMarkers: MarkerUpdater;
   onChangePlacement: PlacementUpdater;
@@ -56,6 +58,8 @@ interface TimingMarkersOverlayProps {
 }
 
 interface DragState {
+  marker: UiTimingMarker;
+  editToken?: string;
   editOnClick: boolean;
   id: string;
   initialClientX: number;
@@ -78,6 +82,8 @@ interface GraphContextMenuState {
 
 // Ported from Logic 2.4.43 timingMarkers/GraphMarkers and useHandleTempMarker.
 export function TimingMarkersOverlay({
+  editToken,
+  busy = false,
   markers,
   onChangeMarkers,
   onChangePlacement,
@@ -118,6 +124,7 @@ export function TimingMarkersOverlay({
   const previewSampleFrameRef = useRef<number | null>(null);
   const snapRequestRef = useRef(0);
   const [dragging, setDragging] = useState<HoverState | null>(null);
+  const [dragPreview, setDragPreview] = useState<UiTimingMarker | null>(null);
   const [hovered, setHovered] = useState<HoverState | null>(null);
   const [contextMenu, setContextMenu] = useState<GraphContextMenuState | null>(null);
   const [graphBounds, setGraphBounds] = useState<{ left: number; width: number } | null>(null);
@@ -232,8 +239,9 @@ export function TimingMarkersOverlay({
 
   function updateMarkerPoint(id: string, itemType: TimingMarkerItemType, clientX: number, clientY: number) {
     const sample = clientXToSample(clientX, clientY);
-    onChangeMarkers((current) =>
-      current.map((marker) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const next = [drag.marker].map((marker) => {
         if (marker.id !== id) return marker;
         if (marker.type === "single") {
           return { ...marker, graphPopupOpen: null, sample, selected: true };
@@ -249,8 +257,9 @@ export function TimingMarkersOverlay({
           sample: ordered.leftSample,
           selected: true,
         };
-      }),
-    );
+      })[0];
+    drag.marker = next;
+    setDragPreview(next);
   }
 
   function beginMarkerDrag(
@@ -258,11 +267,14 @@ export function TimingMarkersOverlay({
     itemType: TimingMarkerItemType,
     event: ReactPointerEvent<HTMLDivElement>,
   ) {
-    if (event.button !== 0 || placement) return;
+    const marker = markers.find((m) => m.id === id);
+    if (event.button !== 0 || placement || busy || !marker || marker.isCaptureTrigger) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
+      marker,
+      editToken,
       editOnClick: Boolean((event.target as Element | null)?.closest?.(".timingMarkerHead")),
       id,
       initialClientX: event.clientX,
@@ -294,7 +306,11 @@ export function TimingMarkersOverlay({
     }
     dragRef.current = null;
     setDragging(null);
-    if (drag.moved) return;
+    setDragPreview(null);
+    if (drag.moved) {
+      if (event.type !== "pointercancel" && !busy) onChangeMarkers((current) => current.map((m) => m.id === drag.id ? { ...m, sample: drag.marker.sample, endSample: drag.marker.endSample } : m), drag.editToken);
+      return;
+    }
     selectMarker(drag.id, event);
     if (drag.editOnClick) openEditPopup(drag.id, drag.itemType);
   }
@@ -553,7 +569,7 @@ export function TimingMarkersOverlay({
 
   function createPairFromSelectedGraphMarkers() {
     onChangeMarkers((current) => {
-      const selected = current.filter((marker) => marker.type === "single" && marker.selected);
+      const selected = current.filter((marker) => marker.type === "single" && marker.selected && !marker.isCaptureTrigger);
       if (selected.length !== 2) return current;
       const [left, right] = [...selected].sort((a, b) => a.sample - b.sample);
       const label = getNextTimingMarkerNumber(current);
@@ -599,7 +615,7 @@ export function TimingMarkersOverlay({
           onPointerDown={addSingleMarkerFromRuler}
         />
       )}
-      {markers.flatMap((marker) => {
+      {markers.map((m) => dragPreview?.id === m.id ? { ...m, sample: dragPreview.sample, endSample: dragPreview.endSample } : m).flatMap((marker) => {
         if (marker.type === "single") {
           return [
             <GraphMarker
@@ -710,6 +726,8 @@ export function TimingMarkersOverlay({
 
       {popupMarker && popupItemType && popupSample !== undefined && (
         <TimingMarkerEditPopup
+          key={popupMarker.id}
+          editToken={editToken}
           className={sampleToPercent(popupSample) > 72 ? "opensLeft" : "opensRight"}
           marker={popupMarker}
           onClose={() =>
@@ -720,9 +738,10 @@ export function TimingMarkersOverlay({
           onDelete={() =>
             onChangeMarkers((current) => current.filter((marker) => marker.id !== popupMarker.id))
           }
-          onUpdate={(patch) =>
+          onUpdate={(patch, token) =>
             onChangeMarkers((current) =>
               current.map((marker) => marker.id === popupMarker.id ? { ...marker, ...patch } : marker),
+              token,
             )
           }
           style={{ left: `${sampleToPercent(popupSample)}%`, top: 33 }}
@@ -969,6 +988,9 @@ function TimingMarkerSummary({
 }
 
 interface TimingMarkersPanelProps {
+  editToken?: string;
+  canUndo?: boolean;
+  onUndo?: () => void;
   busy: boolean;
   hasCapture: boolean;
   markers: UiTimingMarker[];
@@ -985,6 +1007,9 @@ interface TimingMarkersPanelProps {
 
 // Ported from timingMarkers/sidebar/{BaseItem,MarkerItem,PairItem,Note}.
 export function TimingMarkersPanel({
+  editToken,
+  canUndo = false,
+  onUndo,
   busy,
   hasCapture,
   markers,
@@ -1020,9 +1045,10 @@ export function TimingMarkersPanel({
     else onAddSingleMarker();
   }
 
-  function updateMarker(id: string, patch: Partial<UiTimingMarker>) {
+  function updateMarker(id: string, patch: Partial<UiTimingMarker>, token?: string) {
     onChangeMarkers((current) =>
       current.map((marker) => marker.id === id ? { ...marker, ...patch } : marker),
+      token,
     );
   }
 
@@ -1074,7 +1100,7 @@ export function TimingMarkersPanel({
 
   function createPairFromSelected() {
     onChangeMarkers((current) => {
-      const selected = current.filter((marker) => marker.type === "single" && marker.selected);
+      const selected = current.filter((marker) => marker.type === "single" && marker.selected && !marker.isCaptureTrigger);
       if (selected.length !== 2) return current;
       const [left, right] = [...selected].sort((a, b) => a.sample - b.sample);
       const label = getNextTimingMarkerNumber(current);
@@ -1110,6 +1136,7 @@ export function TimingMarkersPanel({
       <div className="timingMarkersTitleRow">
         <span>{measureT("timingMarkers")}</span>
         <div className="markerAddMenu">
+          {onUndo && <button type="button" disabled={busy || !canUndo} onClick={onUndo} title={measureT("undoAnnotations")}>{measureT("undoAnnotations")}</button>}
           <button
             aria-label={measureT("addTimingMarker")}
             className={`sidebarCircleButton ${addOpen ? "active" : ""}`}
@@ -1219,11 +1246,13 @@ export function TimingMarkersPanel({
 
       {editMarker && (
         <TimingMarkerEditPopup
+          key={editMarker.id}
+          editToken={editToken}
           className="sidebarTimingMarkerEditPopup"
           marker={editMarker}
           onClose={() => setEditMarkerId(null)}
           onDelete={() => editMarker.isCaptureTrigger ? undefined : deleteMarker(editMarker.id)}
-          onUpdate={(patch) => updateMarker(editMarker.id, patch)}
+          onUpdate={(patch, token) => updateMarker(editMarker.id, patch, token)}
           style={{ right: 5, top: 42 }}
         />
       )}
@@ -1410,15 +1439,17 @@ function TimingMarkerItemMenu({
 }
 
 interface TimingMarkerEditPopupProps {
+  editToken?: string;
   className?: string;
   marker: UiTimingMarker;
   onClose: () => void;
   onDelete: () => void;
-  onUpdate: (patch: Partial<UiTimingMarker>) => void;
+  onUpdate: (patch: Partial<UiTimingMarker>, token?: string) => void;
   style?: CSSProperties;
 }
 
 function TimingMarkerEditPopup({
+  editToken,
   className = "",
   marker,
   onClose,
@@ -1429,6 +1460,9 @@ function TimingMarkerEditPopup({
   const { t: measureT } = useTranslation("measurements");
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; x: number; y: number } | null>(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [note, setNote] = useState(marker.note);
+  const noteToken = useRef(editToken);
+  function saveNote() { if (note !== marker.note) onUpdate({ note }, noteToken.current); onClose(); }
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -1479,25 +1513,26 @@ function TimingMarkerEditPopup({
       <textarea
         autoFocus
         className="timingMarkerPopupControl"
-        onChange={(event) => onUpdate({ note: event.target.value })}
+        onChange={(event) => setNote(event.target.value)}
         onKeyDown={(event) => {
           if (!event.shiftKey && event.key === "Enter") {
             event.preventDefault();
-            onClose();
+            saveNote();
           }
         }}
         placeholder={measureT("commentPlaceholder")}
         rows={3}
-        value={marker.note}
+        value={note}
       />
       <div className="timingMarkerEditFooter timingMarkerPopupControl">
+        <button type="button" onClick={saveNote}>{measureT("saveMarkerComment")}</button>
         <div className="timingMarkerColorChoices">
           {TIMING_MARKER_COLORS.map((color) => (
             <button
               aria-label={measureT("useMarkerColor", { color })}
               className={marker.color === color ? "selected" : ""}
               key={color}
-              onClick={() => onUpdate({ color })}
+              onClick={() => { onUpdate({ color, note }, noteToken.current); onClose(); }}
               style={{ color: timingMarkerColorValue(color) }}
               type="button"
             >

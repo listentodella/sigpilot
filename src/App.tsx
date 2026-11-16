@@ -66,6 +66,9 @@ import analyzersIcon from "./assets/saleae/sidebar/analyzers.svg";
 import cursorsIcon from "./assets/saleae/sidebar/cursors.svg";
 import devicesIcon from "./assets/saleae/sidebar/devices.svg";
 import extensionsIcon from "./assets/saleae/sidebar/extensions.svg";
+import mcpIcon from "./assets/saleae/sidebar/mcp.svg";
+import { McpSettingsPanel } from "./components/McpSettingsPanel";
+import { FloatingTerminal } from "./components/FloatingTerminal";
 import measurementsIcon from "./assets/saleae/sidebar/measurements.svg";
 import notesIcon from "./assets/saleae/sidebar/notes.svg";
 import recordingSettingsIcon from "./assets/saleae/sidebar/recordingSettings.svg";
@@ -76,7 +79,9 @@ import triggerPulseLowIcon from "./assets/saleae/trigger/pulse-low.svg";
 import triggerRisingIcon from "./assets/saleae/trigger/rising.svg";
 import emptyMeasurementArt from "./assets/saleae/empty_measurement.svg";
 import { AdvancedOptionsPanel } from "./components/AdvancedOptionsPanel";
-import { FloatingTerminal } from "./components/FloatingTerminal";
+import { applyWorkbenchAnnotations, applyWorkbenchResult, readWorkbenchSnapshot, sameCapture, waveformAnnotationFromWorkbench, waveformAnnotationInput, timingMarkersFromWorkbench, timingMarkerOperations, undoWorkbenchAnnotations, workbenchEditToken, type AnnotationResult, type WorkbenchEvent, type WorkbenchSnapshot, type AnnotationOperation } from "./lib/workbench";
+import { replaceWorkbenchAnalyzers } from "./lib/workbench";
+import { analyzerMetadataList, analyzersFromWorkbench, commitWorkbenchAnalyzers, mergeAnalyzerSnapshot, sameAnalyzerSettings } from "./lib/workbenchAnalyzers";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
 import { AnalyzerSettingsDialog } from "./components/AnalyzerSettingsDialog";
@@ -103,6 +108,7 @@ import {
 } from "./components/timingMarkers/TimingMarkers";
 import { WaveformCanvas } from "./components/WaveformCanvas";
 import { WaveformAnnotationEditor } from "./components/WaveformAnnotationEditor";
+import { RangeAnnotationsOverlay } from "./components/RangeAnnotationsOverlay";
 import { WaveformAnnotationsOverlay } from "./components/WaveformAnnotationsOverlay";
 import {
   WAVEFORM_ANNOTATION_COLORS,
@@ -374,6 +380,7 @@ const USE_BACKEND_FRAME_LOOP = true;
 interface WaveformAnnotationEditorState {
   annotation: WaveformAnnotation;
   isNew: boolean;
+  snapshot: WorkbenchSnapshot | null;
 }
 
 let waveformAnnotationSequence = 0;
@@ -421,6 +428,7 @@ interface UiSession {
   notes: string;
   selectedAnnotationId: string | null;
   waveformAnnotations: WaveformAnnotation[];
+  workbenchSnapshot: WorkbenchSnapshot | null;
   annotationEditor: WaveformAnnotationEditorState | null;
 }
 
@@ -457,6 +465,7 @@ interface AnalyzerEditState {
   analyzer: UiAnalyzerInstance;
   isNew: boolean;
   sessionId: string;
+  workbenchSnapshot?: WorkbenchSnapshot | null;
 }
 
 type UiRecordingMode = "FreeRun" | "Timer" | "Trigger";
@@ -644,6 +653,7 @@ const panelMeta: Record<
   measurements: { labelKey: "measurements", iconUrl: measurementsIcon },
   timingMarkers: { labelKey: "timingMarkers", iconUrl: timingMarkersIcon },
   extensions: { labelKey: "extensions", iconUrl: extensionsIcon },
+  mcp: { labelKey: "mcp", iconUrl: mcpIcon },
   notes: { labelKey: "notes", iconUrl: notesIcon },
   advanced: { labelKey: "advanced", iconUrl: advancedIcon },
 };
@@ -1465,6 +1475,7 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
     notes: "",
     selectedAnnotationId: null,
     waveformAnnotations: [],
+    workbenchSnapshot: null,
     annotationEditor: null,
   };
 }
@@ -1540,7 +1551,7 @@ function getSidebarPanelAllowed(
     };
   }
 
-  if (panel === "extensions") {
+  if (panel === "extensions" || panel === "mcp") {
     return { isSelectable: true, isVisible: true };
   }
 
@@ -1933,6 +1944,130 @@ export default function App() {
   const updateActiveSession = useCallback((updater: (session: UiSession) => UiSession) => {
     if (activeSessionId) updateSession(activeSessionId, updater);
   }, [activeSessionId, updateSession]);
+
+  const workbenchRefreshSequence = useRef(new Map<string, number>());
+  const refreshWorkbench = useCallback(async (sessionId: string) => {
+    if (!isTauriRuntime()) return;
+    const sequence = (workbenchRefreshSequence.current.get(sessionId) ?? 0) + 1;
+    workbenchRefreshSequence.current.set(sessionId, sequence);
+    try {
+      let snapshot = await readWorkbenchSnapshot(sessionId);
+      if (workbenchRefreshSequence.current.get(sessionId) !== sequence) return;
+      const live = sessionsRef.current.find((session) => session.id === sessionId);
+      if (!snapshot.context.analyzers_initialized && live?.analyzers.length) {
+        await replaceWorkbenchAnalyzers(snapshot, analyzerMetadataList(live.analyzers));
+        snapshot = await readWorkbenchSnapshot(sessionId);
+        if (workbenchRefreshSequence.current.get(sessionId) !== sequence) return;
+      }
+      const annotations = snapshot.annotations.filter((a) => a.kind === "channel_annotation").map(waveformAnnotationFromWorkbench);
+      updateSession(sessionId, (session) => {
+        const previous = session.workbenchSnapshot;
+        if (previous && sameCapture(previous.context, snapshot.context) && BigInt(previous.context.annotation_revision) > BigInt(snapshot.context.annotation_revision)) return session;
+        if (previous && sameCapture(previous.context, snapshot.context) && BigInt(previous.context.config_revision ?? "0") > BigInt(snapshot.context.config_revision ?? "0")) return session;
+        return { ...session, workbenchSnapshot: snapshot, analyzers: analyzersFromWorkbench(snapshot, session.analyzers), waveformAnnotations: annotations, timingMarkers: timingMarkersFromWorkbench(snapshot.annotations, session.timingMarkers) };
+      });
+    } catch (error) {
+      updateSession(sessionId, (session) => ({ ...session, message: String(error) }));
+    }
+  }, [updateSession]);
+
+  const pendingAnalyzerEdits = useRef(new Set<string>());
+  async function changeSharedAnalyzerSettings(sessionId: string, updater: (session: UiSession) => UiSession, expected?: WorkbenchSnapshot | null) {
+    const live = sessionsRef.current.find((session) => session.id === sessionId);
+    if (!live) return false;
+    const proposed = updater(live);
+    const reconciled = { ...proposed, analyzers: reconcileHlaAnalyzers(live.analyzers, proposed.analyzers) };
+    if (!isTauriRuntime() || !live.summary || live.busy) {
+      updateSession(sessionId, () => reconciled);
+      return true;
+    }
+    const snapshot = expected === undefined ? live.workbenchSnapshot : expected;
+    if (!snapshot || snapshot.context.config_revision == null || !live.workbenchSnapshot || !sameCapture(snapshot.context, live.workbenchSnapshot.context)) {
+      await refreshWorkbench(sessionId);
+      updateSession(sessionId, (session) => ({...session, message: "Analyzer configuration changed; reopen the editor and retry."}));
+      return false;
+    }
+    if (pendingAnalyzerEdits.current.has(sessionId)) {
+      updateSession(sessionId, (session) => ({...session, message: "Another analyzer edit is being saved."}));
+      return false;
+    }
+    pendingAnalyzerEdits.current.add(sessionId);
+    try {
+      const saved = await commitWorkbenchAnalyzers(snapshot, reconciled.analyzers);
+      // Apply only other changed UI properties; concurrent marker/event updates
+      // remain intact. Analyzer settings arrive from the authoritative snapshot.
+      const patch = Object.fromEntries(Object.entries(reconciled).filter(([key, value]) => key !== "analyzers" && key !== "workbenchSnapshot"
+        && value !== live[key as keyof UiSession])) as Partial<UiSession>;
+      updateSession(sessionId, (session) => {
+        if (session.workbenchSnapshot && !sameCapture(snapshot.context, session.workbenchSnapshot.context)) return session;
+        const current = mergeAnalyzerSnapshot(session.workbenchSnapshot, saved);
+        return {...session, ...patch, workbenchSnapshot: current, analyzers: analyzersFromWorkbench(current, session.analyzers)};
+      });
+      await refreshWorkbench(sessionId);
+      return true;
+    } catch (error) {
+      await refreshWorkbench(sessionId);
+      updateSession(sessionId, (session) => ({...session, message: String(error)}));
+      return false;
+    } finally {
+      pendingAnalyzerEdits.current.delete(sessionId);
+    }
+  }
+
+  function updateActiveSessionFromUi(updater: (session: UiSession) => UiSession) {
+    const live = sessionsRef.current.find((session) => session.id === activeSessionId);
+    if (!live) return;
+    const next = updater(live);
+    if (!sameAnalyzerSettings(live.analyzers, next.analyzers)) void changeSharedAnalyzerSettings(live.id, () => next);
+    else updateSession(live.id, updater);
+  }
+
+  const receiveWorkbenchResult = useCallback((result: AnnotationResult) => {
+    // Repair event gaps outside React's state updater (which may run twice).
+    const previous = sessionsRef.current.find((s) => s.id === result.capture.session_id)?.workbenchSnapshot;
+    if (!previous || (sameCapture(previous.context, result.capture) && BigInt(result.annotation_revision) > BigInt(previous.context.annotation_revision) + 1n)) {
+      void refreshWorkbench(result.capture.session_id);
+      return;
+    }
+    updateSession(result.capture.session_id, (session) => {
+      if (!session.workbenchSnapshot) return session;
+      const snapshot = applyWorkbenchResult(session.workbenchSnapshot, result);
+      if (!snapshot || snapshot === session.workbenchSnapshot) return session;
+      return { ...session, workbenchSnapshot: snapshot, waveformAnnotations: snapshot.annotations.filter((a) => a.kind === "channel_annotation").map(waveformAnnotationFromWorkbench),
+        timingMarkers: timingMarkersFromWorkbench(snapshot.annotations, session.timingMarkers) };
+    });
+  }, [refreshWorkbench, updateSession]);
+
+  const workbenchCaptureSignature = sessions.map((s) => `${s.id}:${s.summary?.metadata.captured_at ?? ""}:${s.summary?.metadata.sample_count ?? 0}:${s.busy}`).join("|");
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    for (const session of sessionsRef.current) {
+      if (session.summary && !session.busy) void refreshWorkbench(session.id);
+    }
+  }, [workbenchCaptureSignature, refreshWorkbench]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const subscriptions = [
+      listen<WorkbenchEvent>("workbench_event", ({ payload: event }) => {
+        if (event.kind === "annotations_changed") receiveWorkbenchResult(event.result);
+        if (event.kind === "reports_changed") void refreshWorkbench(event.capture.session_id);
+        if (event.kind === "results_changed") void refreshWorkbench(event.capture.session_id);
+        if (event.kind === "analyzers_changed") void refreshWorkbench(event.capture.session_id);
+        if (event.kind === "focus_requested") {
+          const session = sessionsRef.current.find((s) => s.id === event.capture.session_id);
+          if (!session?.workbenchSnapshot || !sameCapture(session.workbenchSnapshot.context, event.capture)) return;
+          setActiveSessionId(session.id);
+          updateSession(session.id, (current) => ({ ...current, viewportStart: event.view.start_sample, viewportSamples: event.view.samples,
+            hiddenDigitalChannels: current.hiddenDigitalChannels.map((hidden, channel) => event.channels.includes(channel) ? false : hidden) }));
+        }
+      }),
+      listen("workbench_resync_required", () => {
+        for (const session of sessionsRef.current) if (session.summary && !session.busy) void refreshWorkbench(session.id);
+      }),
+    ];
+    return () => { void Promise.all(subscriptions).then((unlisten) => unlisten.forEach((dispose) => dispose())); };
+  }, [receiveWorkbenchResult, refreshWorkbench, updateSession]);
 
   const queueCaptureUiUpdate = useCallback((sessionId: string, update: PendingCaptureUiUpdate) => {
     const pending = pendingCaptureUiRef.current;
@@ -3426,6 +3561,8 @@ export default function App() {
       rangeMeasurements: [],
       timingMarkerPlacement: null,
       timingMarkers: [],
+      waveformAnnotations: [],
+      workbenchSnapshot: null,
       analyzers: current.analyzers.map((analyzer) => ({
         ...analyzer,
         protocolBubbles: [],
@@ -4017,7 +4154,7 @@ export default function App() {
     if (!session) return;
     updateSession(session.id, (current) => ({
       ...current,
-      annotationEditor: { annotation, isNew },
+      annotationEditor: { annotation, isNew, snapshot: session.workbenchSnapshot },
       selectedAnnotationId: annotation.id,
     }));
   }
@@ -4051,7 +4188,54 @@ export default function App() {
     );
   }
 
-  function saveWaveformAnnotation(annotation: WaveformAnnotation) {
+  async function commitWaveformAnnotationOperations(session: UiSession, operations: AnnotationOperation[], snapshot = session.workbenchSnapshot): Promise<boolean> {
+    if (!snapshot || session.busy) {
+      updateSession(session.id, (current) => ({ ...current, message: annotationsT("syncPending") }));
+      return false;
+    }
+    try {
+      const result = await applyWorkbenchAnnotations(snapshot, operations);
+      receiveWorkbenchResult(result);
+      return true;
+    } catch (error) {
+      await refreshWorkbench(session.id);
+      updateSession(session.id, (current) => ({ ...current, message: String(error) }));
+      return false;
+    }
+  }
+
+  async function changeTimingMarkers(sessionId: string, updater: (markers: UiTimingMarker[]) => UiTimingMarker[], expectedToken?: string) {
+    const session = sessionsRef.current.find((s) => s.id === sessionId);
+    if (!session) return;
+    const next = updater(session.timingMarkers);
+    if (!isTauriRuntime()) { updateSession(sessionId, (s) => ({ ...s, timingMarkers: next })); return; }
+    const snapshot = session.workbenchSnapshot;
+    if (!snapshot || session.busy) { updateSession(sessionId, (s) => ({ ...s, message: annotationsT("syncPending") })); return; }
+    if (expectedToken && expectedToken !== workbenchEditToken(snapshot)) {
+      await refreshWorkbench(sessionId);
+      updateSession(sessionId, (s) => ({ ...s, message: annotationsT("versionConflict") }));
+      return;
+    }
+    try {
+      const operations = timingMarkerOperations(snapshot, next);
+      if (operations.length && !await commitWaveformAnnotationOperations(session, operations, snapshot)) return;
+      // Selection, expansion and popups are independent of the committed semantics.
+      const ui = new Map(next.map((m) => [m.id, m]));
+      updateSession(sessionId, (s) => ({ ...s, timingMarkers: s.timingMarkers.map((m) => {
+        const draft = ui.get(m.id);
+        return draft ? { ...m, selected: draft.selected, graphPopupOpen: draft.graphPopupOpen, isExpanded: draft.isExpanded } : m;
+      }) }));
+    } catch (error) { updateSession(sessionId, (s) => ({ ...s, message: String(error) })); }
+  }
+
+  async function undoAnnotations(sessionId: string) {
+    const session = sessionsRef.current.find((s) => s.id === sessionId);
+    if (!session?.workbenchSnapshot?.undo_batch_id || session.busy) return;
+    try { receiveWorkbenchResult(await undoWorkbenchAnnotations(session.workbenchSnapshot)); await refreshWorkbench(sessionId); }
+    catch (error) { await refreshWorkbench(sessionId); updateSession(sessionId, (s) => ({ ...s, message: String(error) })); }
+  }
+
+  async function saveWaveformAnnotation(annotation: WaveformAnnotation) {
     const session = activeSession;
     if (!session) return;
     if (!annotation.title.trim()) return;
@@ -4061,6 +4245,14 @@ export default function App() {
       sample: clampWaveformAnnotationSample(annotation.sample, waveformAnnotationTotalSamples()),
       title: annotation.title.trim().slice(0, WAVEFORM_ANNOTATION_TITLE_LIMIT),
     };
+    if (isTauriRuntime()) {
+      const snapshot = session.annotationEditor?.snapshot ?? session.workbenchSnapshot;
+      const previous = snapshot?.annotations.find((a) => a.id === saved.id);
+      const operation: AnnotationOperation = { op: previous ? "update" : "create", id: saved.id, annotation: waveformAnnotationInput(saved, previous) };
+      if (!(await commitWaveformAnnotationOperations(session, [operation], snapshot))) return;
+      updateSession(session.id, (current) => ({ ...current, annotationEditor: null, selectedAnnotationId: saved.id, message: annotationsT("saved") }));
+      return;
+    }
     updateSession(session.id, (current) => ({
       ...current,
       annotationEditor: null,
@@ -4072,9 +4264,16 @@ export default function App() {
     }));
   }
 
-  function deleteWaveformAnnotation(id: string) {
+  async function deleteWaveformAnnotation(id: string) {
     const session = activeSession;
     if (!session) return;
+    if (isTauriRuntime()) {
+      const snapshot = session.annotationEditor?.annotation.id === id ? session.annotationEditor.snapshot : session.workbenchSnapshot;
+      if (!(await commitWaveformAnnotationOperations(session, [{ op: "delete", id }], snapshot))) return;
+      updateSession(session.id, (current) => ({ ...current, annotationEditor: current.annotationEditor?.annotation.id === id ? null : current.annotationEditor,
+        selectedAnnotationId: current.selectedAnnotationId === id ? null : current.selectedAnnotationId, message: annotationsT("deleted") }));
+      return;
+    }
     updateSession(session.id, (current) => ({
       ...current,
       annotationEditor: current.annotationEditor?.annotation.id === id ? null : current.annotationEditor,
@@ -4092,10 +4291,22 @@ export default function App() {
     );
   }
 
-  function moveWaveformAnnotation(id: string, sample: number) {
+  async function moveWaveformAnnotation(id: string, sample: number, token?: string) {
     const session = activeSession;
     if (!session || session.busy) return;
     const clamped = clampWaveformAnnotationSample(sample, waveformAnnotationTotalSamples());
+    if (isTauriRuntime()) {
+      if (token && token !== workbenchEditToken(session.workbenchSnapshot)) {
+        await refreshWorkbench(session.id);
+        updateSession(session.id, (s) => ({ ...s, message: annotationsT("versionConflict") }));
+        return;
+      }
+      const annotation = session.waveformAnnotations.find((a) => a.id === id);
+      if (!annotation) return;
+      await commitWaveformAnnotationOperations(session, [{ op: "update", id,
+        annotation: waveformAnnotationInput({ ...annotation, sample: clamped }, session.workbenchSnapshot?.annotations.find((a) => a.id === id)) }]);
+      return;
+    }
     updateSession(session.id, (current) => ({
       ...current,
       waveformAnnotations: current.waveformAnnotations.map((item) =>
@@ -4149,6 +4360,7 @@ export default function App() {
         summary.metadata.sample_count,
         summary.metadata.channel_count,
       ),
+      workbenchSnapshot: null,
       annotationEditor: null,
       summary: summaryWithLabels(summary, labels),
       tile: null,
@@ -4876,6 +5088,7 @@ export default function App() {
       analyzer: createAnalyzerInstance("Async Serial", activeSession.analyzers, channelIndex, "sigrok_native"),
       isNew: true,
       sessionId: activeSession.id,
+      workbenchSnapshot: activeSession.workbenchSnapshot,
     });
   }
 
@@ -4896,6 +5109,7 @@ export default function App() {
         : createAnalyzerInstance(name, activeSession.analyzers, startChannel, decoderBackend),
       isNew: true,
       sessionId: activeSession.id,
+      workbenchSnapshot: activeSession.workbenchSnapshot,
     });
   }
 
@@ -4903,13 +5117,13 @@ export default function App() {
     if (!activeSession) return;
     const analyzer = activeSession.analyzers.find((item) => item.id === analyzerId);
     if (!analyzer) return;
-    setAnalyzerInEdit({ analyzer: { ...analyzer }, isNew: false, sessionId: activeSession.id });
+    setAnalyzerInEdit({ analyzer: { ...analyzer }, isNew: false, sessionId: activeSession.id, workbenchSnapshot: activeSession.workbenchSnapshot });
   }
 
-  function saveAnalyzerSettings(analyzer: UiAnalyzerInstance) {
+  async function saveAnalyzerSettings(analyzer: UiAnalyzerInstance) {
     const editor = analyzerInEdit;
     if (!editor) return;
-    updateSession(editor.sessionId, (session) => {
+    const saved = await changeSharedAnalyzerSettings(editor.sessionId, (session) => {
       const digitalChannels = [...session.deviceSettings.digitalChannels];
       const hiddenDigitalChannels = makeHiddenDigitalChannels(session.hiddenDigitalChannels);
       const analyzerChannels = analyzerChannelIndexes(analyzer);
@@ -4939,7 +5153,8 @@ export default function App() {
         },
         message: `${analyzer.name} settings saved`,
       };
-    });
+    }, editor.workbenchSnapshot);
+    if (!saved) return;
     setAnalyzerInEdit(null);
     window.setTimeout(() => void handleDecodeAnalyzer(editor.sessionId, analyzer.id), 0);
   }
@@ -5130,7 +5345,7 @@ export default function App() {
       setAnalyzerInEdit({ analyzer: {
         ...createAnalyzerInstance(choiceOrName.name, activeSession.analyzers, 0, "saleae_native"),
         hla: { ...choiceOrName.hla, upstreamId: "", settings: {} },
-      }, isNew: true, sessionId: activeSession.id });
+      }, isNew: true, sessionId: activeSession.id, workbenchSnapshot: activeSession.workbenchSnapshot });
       return;
     }
     beginAddAnalyzer(choiceOrName.name, undefined, choiceOrName.backend, choiceOrName.catalogItem);
@@ -5244,14 +5459,8 @@ export default function App() {
 
   function addSingleMarkerAtSample(sample: number) {
     if (!activeSession?.summary || activeSession.busy || activeSession.timingMarkerPlacement) return;
-    updateSession(activeSession.id, (session) => ({
-      ...session,
-      timingMarkers: [
-        ...session.timingMarkers.map((marker) => ({ ...marker, graphPopupOpen: null, selected: false })),
-        createTimingMarker(session, "single", sample),
-      ],
-      message: statusT("singleMarkerAdded"),
-    }));
+    const marker = createTimingMarker(activeSession, "single", sample);
+    void changeTimingMarkers(activeSession.id, (markers) => [...markers.map((m) => ({ ...m, graphPopupOpen: null, selected: false })), marker]);
   }
 
   function closeSession(sessionId: string) {
@@ -5323,6 +5532,12 @@ export default function App() {
       const hasCommandModifier = event.metaKey || event.ctrlKey;
       const hasSelectedTimingMarker = Boolean(activeSession?.timingMarkers.some((marker) => marker.selected));
 
+      if (hasCommandModifier && !event.altKey && !event.shiftKey && key === "z" && activeSession?.workbenchSnapshot?.undo_batch_id && !activeSession.busy) {
+        event.preventDefault();
+        void undoAnnotations(activeSession.id);
+        return;
+      }
+
       if (key === "escape" && activeSession?.timingMarkerPlacement) {
         event.preventDefault();
         updateSession(activeSession.id, (session) => ({
@@ -5348,14 +5563,7 @@ export default function App() {
 
       if (!hasCommandModifier && !event.altKey && (key === "backspace" || key === "delete") && hasSelectedTimingMarker && activeSession) {
         event.preventDefault();
-        updateSession(activeSession.id, (session) => {
-          const deleted = session.timingMarkers.filter((marker) => marker.selected && !marker.isCaptureTrigger).length;
-          return {
-            ...session,
-            timingMarkers: session.timingMarkers.filter((marker) => !marker.selected || marker.isCaptureTrigger),
-            message: `${deleted} timing marker${deleted === 1 ? "" : "s"} deleted`,
-          };
-        });
+        void changeTimingMarkers(activeSession.id, (markers) => markers.filter((m) => !m.selected || m.isCaptureTrigger));
         return;
       }
 
@@ -5403,14 +5611,7 @@ export default function App() {
         clearShortcutSequence();
         if (prefix === "m" && key === "d" && hasSelectedTimingMarker && activeSession) {
           event.preventDefault();
-          updateSession(activeSession.id, (session) => {
-            const deleted = session.timingMarkers.filter((marker) => marker.selected).length;
-            return {
-              ...session,
-              timingMarkers: session.timingMarkers.filter((marker) => !marker.selected),
-              message: `${deleted} timing marker${deleted === 1 ? "" : "s"} deleted`,
-            };
-          });
+          void changeTimingMarkers(activeSession.id, (markers) => markers.filter((m) => !m.selected || m.isCaptureTrigger));
           return;
         }
         const command = prefix === "n" ? SIDEBAR_SHORTCUT_TO_COMMAND[key] : undefined;
@@ -5845,6 +6046,7 @@ export default function App() {
                         visibleChannelIndexes={visibleChannelIndexes}
                       />
                       <WaveformAnnotationsOverlay
+                        editToken={workbenchEditToken(activeSession.workbenchSnapshot)}
                         annotations={activeSession.waveformAnnotations ?? []}
                         busy={activeSession.busy}
                         onDelete={deleteWaveformAnnotation}
@@ -5861,6 +6063,10 @@ export default function App() {
                         viewportStart={activeSession.viewportStart}
                         visibleChannelIndexes={visibleChannelIndexes}
                       />
+                      <RangeAnnotationsOverlay annotations={activeSession.workbenchSnapshot?.annotations ?? []} sessionId={activeSession.id}
+                        rowHeights={visibleOuterRowHeights} rowTopInsets={visibleAnalyzerInsets} visibleChannelIndexes={visibleChannelIndexes}
+                        viewportStart={activeSession.viewportStart} viewportSamples={activeSession.viewportSamples} busy={activeSession.busy}
+                        onDelete={(id) => void commitWaveformAnnotationOperations(activeSession, [{ op: "delete", id }])} />
                       <CursorOverlay
                         onUpdateSession={(updater) => updateSession(activeSession.id, updater)}
                         session={activeSession}
@@ -5928,13 +6134,10 @@ export default function App() {
                 )}
                 {activeSession.summary && (
                   <TimingMarkersOverlay
+                    editToken={workbenchEditToken(activeSession.workbenchSnapshot)}
+                    busy={activeSession.busy}
                     markers={activeSession.timingMarkers}
-                    onChangeMarkers={(updater) =>
-                      updateSession(activeSession.id, (session) => ({
-                        ...session,
-                        timingMarkers: updater(session.timingMarkers),
-                      }))
-                    }
+                    onChangeMarkers={(updater, token) => void changeTimingMarkers(activeSession.id, updater, token)}
                     onChangePlacement={(updater) =>
                       updateSession(activeSession.id, (session) => ({
                         ...session,
@@ -6016,6 +6219,8 @@ export default function App() {
             onAddRangeMeasurement={handleAddRangeMeasurement}
             onAddMarkerPair={handleAddMarkerPair}
             onAddSingleMarker={handleAddSingleMarker}
+            onChangeTimingMarkers={(updater, token) => activeSession && void changeTimingMarkers(activeSession.id, updater, token)}
+            onUndoAnnotations={() => activeSession && void undoAnnotations(activeSession.id)}
             onDecodeAnalyzer={(analyzerId) => activeSession && handleDecodeAnalyzer(activeSession.id, analyzerId)}
             onClearLogs={handleClearLogs}
             onCopyLogFiles={handleCopyLogFiles}
@@ -6036,7 +6241,7 @@ export default function App() {
             onSelectDevice={setSelectedDeviceForActive}
             onSelectPanel={toggleSidebarPanel}
             onSidebarPanelWidthChange={(width) => setSidebarPanelWidth(clampSidebarPanelWidth(width))}
-            onUpdateSession={updateActiveSession}
+            onUpdateSession={updateActiveSessionFromUi}
             onUpdateSettings={updateActiveSettings}
             onViewportChange={(start, samples) => {
               if (activeSession) {
@@ -8467,6 +8672,8 @@ function RightSidebar({
   onAddRangeMeasurement,
   onAddMarkerPair,
   onAddSingleMarker,
+  onChangeTimingMarkers,
+  onUndoAnnotations,
   onCreateSession,
   onDecodeAnalyzer,
   onClearLogs,
@@ -8505,6 +8712,8 @@ function RightSidebar({
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
   onAddSingleMarker: () => void;
+  onChangeTimingMarkers: (updater: (markers: UiTimingMarker[]) => UiTimingMarker[], token?: string) => void;
+  onUndoAnnotations: () => void;
   onCreateSession: (deviceId?: string) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
@@ -8607,6 +8816,8 @@ function RightSidebar({
             onAddRangeMeasurement={onAddRangeMeasurement}
             onAddMarkerPair={onAddMarkerPair}
             onAddSingleMarker={onAddSingleMarker}
+            onChangeTimingMarkers={onChangeTimingMarkers}
+            onUndoAnnotations={onUndoAnnotations}
             onCreateSession={onCreateSession}
             onDecodeAnalyzer={onDecodeAnalyzer}
             onEditAnalyzer={onEditAnalyzer}
@@ -8688,6 +8899,8 @@ function SidebarPanelContent({
   onAddRangeMeasurement,
   onAddMarkerPair,
   onAddSingleMarker,
+  onChangeTimingMarkers,
+  onUndoAnnotations,
   onCreateSession,
   onDecodeAnalyzer,
   onClearLogs,
@@ -8723,6 +8936,8 @@ function SidebarPanelContent({
   onAddRangeMeasurement: () => void;
   onAddMarkerPair: () => void;
   onAddSingleMarker: () => void;
+  onChangeTimingMarkers: (updater: (markers: UiTimingMarker[]) => UiTimingMarker[], token?: string) => void;
+  onUndoAnnotations: () => void;
   onCreateSession: (deviceId?: string) => void;
   onDecodeAnalyzer: (analyzerId: string) => void;
   onEditAnalyzer: (analyzerId: string) => void;
@@ -8807,14 +9022,15 @@ function SidebarPanelContent({
       )}
       {panel === "timingMarkers" && session && (
         <TimingMarkersPanel
+          editToken={workbenchEditToken(session.workbenchSnapshot)}
+          canUndo={Boolean(session.workbenchSnapshot?.undo_batch_id)}
+          onUndo={onUndoAnnotations}
           busy={session.busy}
           hasCapture={Boolean(session.summary)}
           markers={session.timingMarkers}
           onAddMarkerPair={onAddMarkerPair}
           onAddSingleMarker={onAddSingleMarker}
-          onChangeMarkers={(updater) =>
-            onUpdateSession((current) => ({ ...current, timingMarkers: updater(current.timingMarkers) }))
-          }
+          onChangeMarkers={onChangeTimingMarkers}
           onMessage={(message) => onUpdateSession((current) => ({ ...current, message }))}
           onViewportChange={onViewportChange}
           placementActive={Boolean(session.timingMarkerPlacement)}
@@ -8837,6 +9053,7 @@ function SidebarPanelContent({
           onChange={(notes) => onUpdateSession((current) => ({ ...current, notes }))}
         />
       )}
+      {panel === "mcp" && <McpSettingsPanel />}
       {panel === "advanced" && (
         <AdvancedOptionsPanel
           diagnostics={{

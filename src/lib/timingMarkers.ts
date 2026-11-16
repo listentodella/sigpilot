@@ -1,11 +1,12 @@
 // Ported from Logic 2.4.43 timingMarkers Store/BaseManager/PairManager/defaults.
 export const TIMING_MARKER_COLORS = ["paleRed", "green2", "purple2", "orange2", "fuchsia", "lightBlue"] as const;
 
-export type TimingMarkerColor = (typeof TIMING_MARKER_COLORS)[number];
+export type TimingMarkerColor = (typeof TIMING_MARKER_COLORS)[number] | `#${string}`;
 export type TimingMarkerKind = "pair" | "single";
 export type TimingMarkerItemType = "left" | "right" | "root";
 
 export interface UiTimingMarker {
+  source?: "user" | "assistant" | "analysis_provider";
   color: TimingMarkerColor;
   endSample?: number;
   graphPopupOpen: TimingMarkerItemType | null;
@@ -29,7 +30,7 @@ export interface UiTimingMarkerPlacement {
   type: TimingMarkerKind;
 }
 
-export const TIMING_MARKER_COLOR_VALUES: Record<TimingMarkerColor, string> = {
+export const TIMING_MARKER_COLOR_VALUES: Record<(typeof TIMING_MARKER_COLORS)[number], string> = {
   paleRed: "hsl(0, 78%, 63%)",
   green2: "hsl(162, 85%, 34%)",
   purple2: "#805dcd",
@@ -56,7 +57,14 @@ export function getDefaultTimingMarkerColor(id: number) {
 }
 
 export function timingMarkerColorValue(color: TimingMarkerColor | undefined) {
-  return TIMING_MARKER_COLOR_VALUES[color ?? DEFAULT_TIMING_MARKER_COLOR];
+  if (color?.startsWith("#")) return color;
+  return TIMING_MARKER_COLOR_VALUES[(color ?? DEFAULT_TIMING_MARKER_COLOR) as (typeof TIMING_MARKER_COLORS)[number]];
+}
+
+/** Exact serializable colors; popup and selection state stay in the UI. */
+export function timingMarkerExactColor(color: TimingMarkerColor): string {
+  if (color.startsWith("#")) return color.toLowerCase();
+  return { paleRed: "#ea5757", green2: "#139c73", purple2: "#805dcd", orange2: "#e9a457", fuchsia: "#e8498e", lightBlue: "#3baee3" }[color as (typeof TIMING_MARKER_COLORS)[number]];
 }
 
 export function normalizeTimingMarker(marker: UiTimingMarker, index: number): UiTimingMarker {

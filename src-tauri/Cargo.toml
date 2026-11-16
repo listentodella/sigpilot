@@ -16,6 +16,8 @@ sigpilot-core = { path = "../crates/sigpilot-core" }
 sigpilot-file = { path = "../crates/sigpilot-file" }
 sigpilot-graph = { path = "../crates/sigpilot-graph" }
 sigpilot-waveform = { path = "../crates/sigpilot-waveform" }
+sigpilot-workbench = { path = "../crates/sigpilot-workbench" }
+sigpilot-mcp = { path = "../crates/sigpilot-mcp" }
 sigpilot-terminal = { path = "../crates/sigpilot-terminal" }
 parking_lot.workspace = true
 rayon.workspace = true
@@ -25,12 +27,13 @@ tauri.workspace = true
 tauri-plugin-clipboard-manager.workspace = true
 tauri-plugin-dialog.workspace = true
 time.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zip.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_DataExchange", "Win32_System_Memory", "Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_System_DataExchange", "Win32_System_Memory", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

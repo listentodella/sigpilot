@@ -1,4 +1,6 @@
 {
+  "undoAnnotations": "Undo markers",
+  "saveMarkerComment": "Save comment",
   "addDisabled": "Disabled while recording and before the first capture",
   "addMeasurement": "Add Measurement",
   "addMeasurementHint": "Click and drag to select a range or click to start and end a range",

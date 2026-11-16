@@ -6,14 +6,14 @@ use std::{
 };
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sigpilot_core::{
     capture::read_sample_word, resolve_enabled_channels, AnalyzerDecodeSettings, CaptureData,
     CaptureMetadata, DecoderBackendKind, I2cDecodeSettings, NativeDecodeSettings,
     NativeOptionValue, SparseCaptureData, SparseDigitalChannel, SpiDecodeSettings,
     UartDecodeSettings, UartParity, UartStopBits,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use thiserror::Error;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -31,6 +31,8 @@ pub enum FileError {
     InvalidCapture,
     #[error("invalid Saleae capture: {0}")]
     InvalidSaleae(String),
+    #[error("capture exceeds the configured import budget")]
+    ImportBudgetExceeded,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,8 +96,26 @@ pub struct SaleaeSessionMetadata {
     pub name: String,
     pub notes: String,
     pub analyzers: Vec<SaleaeAnalyzerMetadata>,
+    /// Shared analyzer IDs and provenance. Legacy readers use `analyzers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workbench_analyzers: Vec<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_annotations: Vec<WaveformAnnotation>,
+    /// Versioned semantic annotations. Validated by Workbench before use;
+    /// exact sample coordinates remain decimal strings in this extension.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workbench_annotations: Vec<Value>,
+    /// Independent immutable finding bundles. Unknown versions remain opaque
+    /// and are preserved by Workbench when saving the project again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workbench_reports: Vec<Value>,
+    /// Explicitly retained complete analysis/decode snapshots, independently
+    /// versioned and validated by Workbench; not automatically cached jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workbench_results: Vec<Value>,
+    /// Bounded original-capture provenance for an explicitly derived waveform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workbench_derivation: Option<Value>,
 }
 
 impl Default for SaleaeSessionMetadata {
@@ -104,7 +124,12 @@ impl Default for SaleaeSessionMetadata {
             name: "SigPilot Capture".to_string(),
             notes: String::new(),
             analyzers: Vec::new(),
+            workbench_analyzers: Vec::new(),
             user_annotations: Vec::new(),
+            workbench_annotations: Vec::new(),
+            workbench_reports: Vec::new(),
+            workbench_results: Vec::new(),
+            workbench_derivation: None,
         }
     }
 }
@@ -477,7 +502,12 @@ pub fn open_saleae_transition_session(path: impl AsRef<Path>) -> Result<SaleaeIm
             name: manifest.session.name,
             notes: manifest.session.notes,
             analyzers,
+            workbench_analyzers: Vec::new(),
             user_annotations: Vec::new(),
+            workbench_annotations: Vec::new(),
+            workbench_reports: Vec::new(),
+            workbench_results: Vec::new(),
+            workbench_derivation: None,
         },
     })
 }
@@ -915,17 +945,28 @@ pub fn save_pxcap(path: impl AsRef<Path>, capture: &CaptureData) -> Result<()> {
 pub fn open_pxcap(path: impl AsRef<Path>) -> Result<CaptureData> {
     let file = File::open(path)?;
     let mut zip = ZipArchive::new(file)?;
+    read_pxcap_archive(&mut zip)
+}
 
-    let mut metadata_json = String::new();
-    zip.by_name("metadata.json")?
-        .read_to_string(&mut metadata_json)?;
-    let mut metadata: CaptureMetadata = serde_json::from_str(&metadata_json)?;
+/// Untrusted MCP files must be budget-checked on the same opened file that is
+/// read, before decompression or large allocation. The limit applies to the
+/// declared uncompressed sizes; read_archive_entry also enforces those sizes.
+pub fn open_pxcap_bounded(path: impl AsRef<Path>, max_bytes: u64) -> Result<CaptureData> {
+    let file = File::open(path)?;
+    validate_compressed_budget(&file, max_bytes)?;
+    let mut zip = ZipArchive::new(file)?;
+    validate_archive_budget(&mut zip, max_bytes)?;
+    read_pxcap_archive(&mut zip)
+}
+
+fn read_pxcap_archive(zip: &mut ZipArchive<File>) -> Result<CaptureData> {
+    let metadata_json = read_archive_entry(zip, "metadata.json", 256 * 1024)?;
+    let mut metadata: CaptureMetadata = serde_json::from_slice(&metadata_json)?;
     metadata.enabled_channels =
         resolve_enabled_channels(metadata.channel_count, &metadata.enabled_channels)
             .map_err(|_| FileError::InvalidCapture)?;
 
-    let mut samples = Vec::new();
-    zip.by_name("samples.bin")?.read_to_end(&mut samples)?;
+    let samples = read_archive_entry(zip, "samples.bin", u64::MAX - 1)?;
 
     Ok(CaptureData { metadata, samples })
 }
@@ -1001,10 +1042,20 @@ pub fn save_pxl_sparse(
 pub fn open_pxl(path: impl AsRef<Path>) -> Result<PxlogicProject> {
     let file = File::open(path)?;
     let mut zip = ZipArchive::new(file)?;
-    let mut manifest_json = String::new();
-    zip.by_name("project.json")?
-        .read_to_string(&mut manifest_json)?;
-    let manifest: PxlogicProjectManifest = serde_json::from_str(&manifest_json)?;
+    read_pxl_archive(&mut zip)
+}
+
+pub fn open_pxl_bounded(path: impl AsRef<Path>, max_bytes: u64) -> Result<PxlogicProject> {
+    let file = File::open(path)?;
+    validate_compressed_budget(&file, max_bytes)?;
+    let mut zip = ZipArchive::new(file)?;
+    validate_archive_budget(&mut zip, max_bytes)?;
+    read_pxl_archive(&mut zip)
+}
+
+fn read_pxl_archive(zip: &mut ZipArchive<File>) -> Result<PxlogicProject> {
+    let manifest_json = read_archive_entry(zip, "project.json", 4 * 1024 * 1024)?;
+    let manifest: PxlogicProjectManifest = serde_json::from_slice(&manifest_json)?;
     if manifest.format != "pxlogic.project.v1" {
         return Err(FileError::InvalidCapture);
     }
@@ -1018,8 +1069,7 @@ pub fn open_pxl(path: impl AsRef<Path>) -> Result<PxlogicProject> {
             metadata.enabled_channels =
                 resolve_enabled_channels(metadata.channel_count, &metadata.enabled_channels)
                     .map_err(|_| FileError::InvalidCapture)?;
-            let mut samples = Vec::new();
-            zip.by_name(&samples_file)?.read_to_end(&mut samples)?;
+            let samples = read_archive_entry(zip, &samples_file, u64::MAX - 1)?;
             PxlogicProjectCapture::Packed(CaptureData { metadata, samples })
         }
         PxlogicProjectCaptureManifest::Sparse {
@@ -1029,12 +1079,29 @@ pub fn open_pxl(path: impl AsRef<Path>) -> Result<PxlogicProject> {
             metadata.enabled_channels =
                 resolve_enabled_channels(metadata.channel_count, &metadata.enabled_channels)
                     .map_err(|_| FileError::InvalidCapture)?;
+            // Validate before reading: many references to one compressed entry
+            // must not multiply decompression and allocation beyond the budget.
+            if channels.is_empty()
+                || channels.len() > 32
+                || channels.len() != metadata.enabled_channels.len()
+            {
+                return Err(FileError::InvalidCapture);
+            }
+            let mut seen_channels = std::collections::BTreeSet::new();
+            let mut seen_files = std::collections::BTreeSet::new();
+            for channel in &channels {
+                if !metadata.enabled_channels.contains(&channel.channel)
+                    || !seen_channels.insert(channel.channel)
+                    || !seen_files.insert(&channel.transitions_file)
+                {
+                    return Err(FileError::InvalidCapture);
+                }
+            }
             let mut restored_channels = channels
                 .into_iter()
                 .map(|channel| {
                     validate_project_file_name(&channel.transitions_file)?;
-                    let transitions =
-                        read_project_transition_file(&mut zip, &channel.transitions_file)?;
+                    let transitions = read_project_transition_file(zip, &channel.transitions_file)?;
                     Ok(SparseDigitalChannel {
                         channel: channel.channel,
                         initial_high: channel.initial_high,
@@ -1071,8 +1138,7 @@ fn validate_project_file_name(path: &str) -> Result<()> {
 }
 
 fn read_project_transition_file(zip: &mut ZipArchive<File>, path: &str) -> Result<Vec<u64>> {
-    let mut bytes = Vec::new();
-    zip.by_name(path)?.read_to_end(&mut bytes)?;
+    let bytes = read_archive_entry(zip, path, u64::MAX - 1)?;
     if bytes.len() % 8 != 0 {
         return Err(FileError::InvalidCapture);
     }
@@ -1080,6 +1146,50 @@ fn read_project_transition_file(zip: &mut ZipArchive<File>, path: &str) -> Resul
         .chunks_exact(8)
         .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("transition width")))
         .collect())
+}
+
+fn validate_archive_budget(zip: &mut ZipArchive<File>, max_bytes: u64) -> Result<()> {
+    if zip.len() > 256 {
+        return Err(FileError::ImportBudgetExceeded);
+    }
+    let mut total = 0u64;
+    for index in 0..zip.len() {
+        let entry = zip.by_index(index)?;
+        total = total
+            .checked_add(entry.size())
+            .ok_or(FileError::ImportBudgetExceeded)?;
+        if total > max_bytes {
+            return Err(FileError::ImportBudgetExceeded);
+        }
+    }
+    Ok(())
+}
+
+fn validate_compressed_budget(file: &File, max_bytes: u64) -> Result<()> {
+    if file.metadata()?.len() > max_bytes.saturating_add(1024 * 1024) {
+        return Err(FileError::ImportBudgetExceeded);
+    }
+    Ok(())
+}
+
+fn read_archive_entry(zip: &mut ZipArchive<File>, name: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    let entry = zip.by_name(name)?;
+    let declared = entry.size();
+    if declared > max_bytes {
+        return Err(FileError::ImportBudgetExceeded);
+    }
+    let mut bytes = Vec::new();
+    entry
+        .take(
+            declared
+                .checked_add(1)
+                .ok_or(FileError::ImportBudgetExceeded)?,
+        )
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != declared {
+        return Err(FileError::InvalidCapture);
+    }
+    Ok(bytes)
 }
 
 fn validate_sparse_project_capture(capture: &SparseCaptureData) -> Result<()> {
@@ -1254,6 +1364,62 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn bounded_import_rejects_highly_compressed_and_many_entry_archives() {
+        let path = temp_file("budget.pxcap");
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        zip.start_file("samples.bin", options).unwrap();
+        zip.write_all(&vec![0; 128 * 1024]).unwrap();
+        zip.finish().unwrap();
+        assert!(matches!(
+            open_pxcap_bounded(&path, 1024),
+            Err(FileError::ImportBudgetExceeded)
+        ));
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        for index in 0..257 {
+            zip.start_file(format!("entry-{index}"), options).unwrap();
+        }
+        zip.finish().unwrap();
+        assert!(matches!(
+            open_pxl_bounded(&path, 1024 * 1024),
+            Err(FileError::ImportBudgetExceeded)
+        ));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_import_accepts_valid_projects_and_rejects_repeated_sparse_references() {
+        let capture = generate_sample_words(&CaptureSettings {
+            sample_rate_hz: 10000,
+            duration_ms: 10,
+            channel_count: 2,
+            ..CaptureSettings::default()
+        })
+        .unwrap();
+        let path = temp_file("bounded-valid.pxl");
+        save_pxl_packed(&path, &capture, &SaleaeSessionMetadata::default()).unwrap();
+        assert_eq!(
+            open_pxl_bounded(&path, 1024 * 1024).unwrap().capture,
+            PxlogicProjectCapture::Packed(capture.clone())
+        );
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        let options = SimpleFileOptions::default();
+        zip.start_file("project.json", options).unwrap();
+        zip.write_all(&serde_json::to_vec(&serde_json::json!({
+            "format":"pxlogic.project.v1", "session":SaleaeSessionMetadata::default(),
+            "capture":{"kind":"sparse", "metadata":capture.metadata,
+                "channels":[{"channel":0,"initial_high":false,"transitions_file":"missing"},{"channel":0,"initial_high":false,"transitions_file":"missing"}]}
+        })).unwrap()).unwrap();
+        zip.finish().unwrap();
+        // Fails before trying to load any duplicated transition entry.
+        assert!(matches!(
+            open_pxl_bounded(&path, 1024 * 1024),
+            Err(FileError::InvalidCapture)
+        ));
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn pxcap_round_trips_capture() {
@@ -1955,6 +2121,11 @@ mod tests {
         SaleaeSessionMetadata {
             name: "PXLogic Bench".to_string(),
             notes: "round-trip notes".to_string(),
+            workbench_annotations: Vec::new(),
+            workbench_reports: Vec::new(),
+            workbench_analyzers: Vec::new(),
+            workbench_results: Vec::new(),
+            workbench_derivation: None,
             user_annotations: vec![
                 WaveformAnnotation {
                     id: "annotation-bench-1".to_string(),

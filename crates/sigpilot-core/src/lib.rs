@@ -57,6 +57,7 @@ pub use models::{
     CaptureTriggerKind, CaptureTriggerMetadata, DeviceInfo, DeviceKind, DiagnosticEvent,
     DiagnosticLevel, ExportFormat, ExternalTriggerMode, HardwareCaptureCapabilities,
     HardwareChannelModeInfo, PwmConfiguration, PwmSettings, SparseCaptureData, SparseCaptureView,
+    DigitalChannelWindow,
     SparseDigitalChannel, SparseDigitalChannelView, WaveformSource,
 };
 pub use performance::{record_performance_event, PerformanceCapture, PerformanceEvent};

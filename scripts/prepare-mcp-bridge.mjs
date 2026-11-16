@@ -1,0 +1,21 @@
+// Prepare the signed/bundled stdio sidecar for the same target as Tauri.
+import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync, chmodSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+const root=resolve(dirname(fileURLToPath(import.meta.url)),"..");
+const args=process.argv.slice(2);
+if(args.length!==2 || args[0]!=="--profile" || !["dev","release"].includes(args[1])) throw new Error("usage: prepare-mcp-bridge.mjs --profile dev|release");
+const release=args[1]==="release";
+const cargo=process.env.CARGO || "cargo";
+const target=process.env.TAURI_ENV_TARGET_TRIPLE || process.env.CARGO_BUILD_TARGET || execFileSync("rustc",["-vV"],{encoding:"utf8"}).split("\n").find((line)=>line.startsWith("host: "))?.slice(6);
+if(!target || !/^[a-zA-Z0-9_-]+$/.test(target)) throw new Error("Cannot determine the Tauri target triple");
+const explicitTarget=process.env.TAURI_ENV_TARGET_TRIPLE || process.env.CARGO_BUILD_TARGET;
+execFileSync(cargo,["build","--locked","-p","sigpilot-mcp","--bin","sigpilot-mcp-bridge",...(release?["--release"]:[]),...(explicitTarget?["--target",target]:[])],{cwd:root,stdio:"inherit"});
+const suffix=target.includes("windows")?".exe":"";
+const targetDir=resolve(root,process.env.CARGO_TARGET_DIR || "target");
+const source=join(targetDir,...(explicitTarget?[target]:[]),release?"release":"debug",`sigpilot-mcp-bridge${suffix}`);
+const directory=join(root,"src-tauri","binaries");mkdirSync(directory,{recursive:true});
+const destination=join(directory,`sigpilot-mcp-bridge-${target}${suffix}`);
+copyFileSync(source,destination);if(!suffix)chmodSync(destination,0o755);
+console.log(`MCP bridge prepared: ${destination}`);

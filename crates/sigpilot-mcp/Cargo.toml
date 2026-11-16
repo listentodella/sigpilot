@@ -1,0 +1,30 @@
+[package]
+name = "sigpilot-mcp"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+base64.workspace = true
+sigpilot-workbench = { path = "../sigpilot-workbench" }
+sigpilot-analysis = { path = "../sigpilot-analysis" }
+sigpilot-graph = { path = "../sigpilot-graph" }
+sigpilot-file = { path = "../sigpilot-file" }
+rmcp = { version = "=3.9.0", default-features = false, features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+reqwest = { version = "0.13", default-features = false }
+uuid = { version = "1", features = ["v4"] }
+libc.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { workspace = true, features = ["net", "macros", "io-std", "io-util", "signal", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11"
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory"] }
+
+[dev-dependencies]
+sigpilot-core = { path = "../sigpilot-core", default-features = false }
+rmcp = { version = "=3.9.0", default-features = false, features = ["transport-child-process"] }
+tokio = { workspace = true, features = ["process"] }

@@ -1,6 +1,8 @@
 # Build outputs and dependency caches
 /target/
 /src-tauri/target/
+/src-tauri/binaries/*
+!/src-tauri/binaries/.gitkeep
 /node_modules/
 /dist/
 

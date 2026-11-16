@@ -13,8 +13,9 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use parking_lot::{Mutex, RwLock};
-use std::sync::mpsc;
+use parking_lot::Mutex;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use sigpilot_core::{
     build_pxview_pwm0_register_script, AnalyzerDecodeSettings, CaptureMetadata, CaptureProgress,
     CaptureSettings, CaptureTriggerMetadata, DecodedFrame, DecoderBackendKind,
@@ -30,8 +31,7 @@ use sigpilot_graph::{
 use sigpilot_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
-use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
+use std::sync::mpsc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(feature = "rusb-transport")]
@@ -147,7 +147,8 @@ fn encode_graph_frame_bytes(mut frame: GraphFrameResponse) -> CommandResult<Vec<
 
 #[derive(Clone)]
 struct AppState {
-    sessions: Arc<RwLock<HashMap<String, Arc<GraphSession>>>>,
+    workbench: Arc<sigpilot_workbench::WorkbenchService>,
+    mcp: Arc<tokio::sync::Mutex<Option<sigpilot_mcp::desktop::DesktopMcpServer>>>,
     cancel: Arc<AtomicBool>,
     active_capture: Arc<Mutex<Option<ActiveCapture>>>,
     /// Hardware-agnostic device drivers. Every device-id lookup goes through this,
@@ -158,7 +159,8 @@ struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            sessions: Arc::default(),
+            workbench: Arc::default(),
+            mcp: Arc::default(),
             cancel: Arc::default(),
             active_capture: Arc::default(),
             devices: Arc::new(DeviceRegistry::with_builtin_drivers()),
@@ -167,23 +169,19 @@ impl Default for AppState {
 }
 
 impl AppState {
-    fn session(&self, session_id: &str) -> Arc<GraphSession> {
-        if let Some(session) = self.sessions.read().get(session_id).cloned() {
-            return session;
-        }
-        let mut sessions = self.sessions.write();
-        sessions
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(GraphSession::default()))
-            .clone()
+    fn session(&self, session_id: &str) -> CommandResult<Arc<GraphSession>> {
+        let session = self.workbench.session(session_id).map_err(to_string)?;
+        self.workbench
+            .set_gui_attached(session_id, true)
+            .map_err(to_string)?;
+        Ok(session.graph.clone())
     }
 
     fn existing_session(&self, session_id: &str) -> CommandResult<Arc<GraphSession>> {
-        self.sessions
-            .read()
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| format!("session {session_id} has no capture data"))
+        self.workbench
+            .existing_session(session_id)
+            .map(|s| s.graph.clone())
+            .map_err(to_string)
     }
 
     /// Drop any cached device state, e.g. after a USB error invalidated the FPGA
@@ -434,8 +432,7 @@ async fn configure_pwm(
             let mut diagnostics = |event: DiagnosticEvent| {
                 let _ = diagnostics_app.emit("usb_diagnostic", &event);
             };
-            prepare_device_cached(&app_state, &device_id, &mut diagnostics)
-                .map_err(to_string)?;
+            prepare_device_cached(&app_state, &device_id, &mut diagnostics).map_err(to_string)?;
             real.configure_pwm0_with_trace(&device_id, &settings, &mut diagnostics)
                 .map_err(to_string)
         })
@@ -570,7 +567,10 @@ fn clear_logs() {
 /// in a file manager and attaching it.
 #[tauri::command]
 fn read_diagnostics(frontend_log: String, max_bytes: Option<u64>) -> String {
-    logging::diagnostics(&frontend_log, max_bytes.unwrap_or(logging::DIAGNOSTICS_BYTES))
+    logging::diagnostics(
+        &frontend_log,
+        max_bytes.unwrap_or(logging::DIAGNOSTICS_BYTES),
+    )
 }
 
 /// Write the diagnostics bundle the user chose a path for.
@@ -594,7 +594,11 @@ fn export_logs(path: String, frontend_log: String) -> CommandResult<()> {
     {
         fs::create_dir_all(parent).map_err(to_string)?;
     }
-    fs::write(path, logging::diagnostics(&frontend_log, logging::DIAGNOSTICS_BYTES)).map_err(to_string)
+    fs::write(
+        path,
+        logging::diagnostics(&frontend_log, logging::DIAGNOSTICS_BYTES),
+    )
+    .map_err(to_string)
 }
 
 /// What `copy_log_files` put on the clipboard, so the UI can say what to expect.
@@ -699,7 +703,10 @@ fn copy_log_files(frontend_log: String) -> CommandResult<CopiedLogFiles> {
     }
     file_clipboard::copy_files(&path)?;
     Ok(CopiedLogFiles {
-        name: path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         bytes: fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
         path: path.to_string_lossy().into_owned(),
         files,
@@ -796,7 +803,7 @@ async fn start_capture(
 
     state.cancel.store(false, Ordering::Release);
     let cancel = state.cancel.clone();
-    let graph = state.session(&session_id);
+    let graph = state.session(&session_id)?;
     let active_capture = state.active_capture.clone();
     let app_state = state.inner().clone();
 
@@ -1127,7 +1134,7 @@ fn open_capture(
                     bytes: capture.samples.len(),
                 };
                 state
-                    .session(&session_id)
+                    .session(&session_id)?
                     .replace_capture(capture)
                     .map_err(to_string)?;
                 summary
@@ -1135,12 +1142,16 @@ fn open_capture(
             sigpilot_file::PxlogicProjectCapture::Sparse(capture) => {
                 let summary = sparse_capture_summary(&capture);
                 state
-                    .session(&session_id)
+                    .session(&session_id)?
                     .replace_sparse_capture(capture)
                     .map_err(to_string)?;
                 summary
             }
         };
+        state
+            .workbench
+            .restore_annotations(&session_id, &project.session)
+            .map_err(to_string)?;
         return Ok(OpenCaptureResult {
             summary,
             saleae_session: Some(project.session),
@@ -1153,7 +1164,7 @@ fn open_capture(
         bytes: capture.samples.len(),
     };
     state
-        .session(&session_id)
+        .session(&session_id)?
         .replace_capture(capture)
         .map_err(to_string)?;
     Ok(OpenCaptureResult {
@@ -1176,14 +1187,11 @@ fn save_capture(
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pxl"))
     {
-        let metadata = saleae_session.unwrap_or_default();
-        if let Some(capture) = session.capture() {
-            return sigpilot_file::save_pxl_packed(path, &capture, &metadata).map_err(to_string);
-        }
-        if let Some(capture) = session.sparse_capture() {
-            return sigpilot_file::save_pxl_sparse(path, &capture, &metadata).map_err(to_string);
-        }
-        return Err("no capture is loaded".to_string());
+        return state.workbench.save_project(
+            &session_id,
+            &path,
+            saleae_session.unwrap_or_default(),
+        );
     }
 
     let capture = session
@@ -1231,8 +1239,11 @@ async fn trim_capture(
     if end <= start {
         return Err("delete data interval would remove the entire capture".to_string());
     }
+    let workbench = state.workbench.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let (metadata, bytes) = session.trim_capture(start, end).map_err(to_string)?;
+        let (metadata, bytes) = workbench
+            .trim_capture(&session_id, start, end)
+            .map_err(to_string)?;
         Ok(CaptureSummary { metadata, bytes })
     })
     .await
@@ -1690,7 +1701,10 @@ async fn measure_digital_range(
 }
 
 #[tauri::command]
-async fn inspect_hla_extension(manifest_path: String, entry_point: String) -> CommandResult<serde_json::Value> {
+async fn inspect_hla_extension(
+    manifest_path: String,
+    entry_point: String,
+) -> CommandResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let settings = serde_json::from_value(serde_json::json!({
             "manifest_path": manifest_path, "entry_point": entry_point,
@@ -1699,10 +1713,15 @@ async fn inspect_hla_extension(manifest_path: String, entry_point: String) -> Co
                 "channel": 0, "baud_rate": 115200, "inverted": false,
                 "data_bits": 8, "stop_bits": 1, "parity": "none", "msb_first": false
             } }
-        })).map_err(to_string)?;
-        sigpilot_core::hla_backend::HlaDecoder::discover().map_err(to_string)?
-            .inspect(&settings).map_err(to_string)
-    }).await.map_err(to_string)?
+        }))
+        .map_err(to_string)?;
+        sigpilot_core::hla_backend::HlaDecoder::discover()
+            .map_err(to_string)?
+            .inspect(&settings)
+            .map_err(to_string)
+    })
+    .await
+    .map_err(to_string)?
 }
 
 #[tauri::command]
@@ -2240,7 +2259,7 @@ async fn render_graph_frame(
 
 #[tauri::command]
 fn release_graph_session(session_id: String, state: State<'_, AppState>) -> CommandResult<()> {
-    state.sessions.write().remove(&session_id);
+    state.workbench.release_session(&session_id);
     Ok(())
 }
 
@@ -2427,9 +2446,21 @@ fn configure_bundled_resources(app: &tauri::App) -> tauri::Result<()> {
     };
     #[cfg(not(debug_assertions))]
     let native_dir = bundled_native_dir;
-    let python_executable = if cfg!(windows) { "bin/python.exe" } else { "bin/python3" };
-    set_bundled_path("SIGPILOT_HLA_PYTHON", native_dir.join("python-runtime").join(python_executable), false);
-    set_bundled_path("SIGPILOT_HLA_HOST", native_dir.join("hla-analyzer-sidecar/main.py"), false);
+    let python_executable = if cfg!(windows) {
+        "bin/python.exe"
+    } else {
+        "bin/python3"
+    };
+    set_bundled_path(
+        "SIGPILOT_HLA_PYTHON",
+        native_dir.join("python-runtime").join(python_executable),
+        false,
+    );
+    set_bundled_path(
+        "SIGPILOT_HLA_HOST",
+        native_dir.join("hla-analyzer-sidecar/main.py"),
+        false,
+    );
     let sigrok_dir = native_dir.join("sigrok-analyzer-sidecar");
     #[cfg(target_os = "windows")]
     let sigrok_executable = "sigpilot-sigrok-sidecar.exe";
@@ -2527,9 +2558,10 @@ fn warm_sigrok_native_catalog_async(delay: Duration) {
         });
 }
 
-mod logging;
 #[cfg(not(target_os = "macos"))]
 mod file_clipboard;
+mod logging;
+mod mcp;
 mod terminal;
 
 fn main() {
@@ -2537,7 +2569,9 @@ fn main() {
     // is recorded too. Losing logs is much better than losing the app, so a
     // failure here is not fatal.
     match logging::init() {
-        Some(path) => tracing::info!(target: "sigpilot::main", path = %path.display(), "SigPilot starting"),
+        Some(path) => {
+            tracing::info!(target: "sigpilot::main", path = %path.display(), "SigPilot starting")
+        }
         None => tracing::warn!(
             target: "sigpilot::main",
             "SigPilot starting without a log file; set SIGPILOT_LOG to control the level"
@@ -2555,6 +2589,11 @@ fn main() {
                 window.set_icon(icon.clone())?;
             }
             configure_bundled_resources(app)?;
+            mcp::bridge_workbench_events(
+                app.handle().clone(),
+                app.state::<AppState>().workbench.clone(),
+            )?;
+            mcp::restore_mcp(app.handle().clone());
             warm_saleae_native_sidecar_async(None, Duration::from_millis(350));
             warm_sigrok_native_catalog_async(Duration::from_millis(350));
             Ok(())
@@ -2611,6 +2650,18 @@ fn main() {
             saleae_decoder_catalog,
             sigrok_decoder_catalog,
             release_graph_session,
+            mcp::workbench_snapshot,
+            mcp::workbench_replace_analyzers,
+            mcp::workbench_apply_annotations,
+            mcp::workbench_undo_annotations,
+            mcp::mcp_status,
+            mcp::mcp_setup_info,
+            mcp::check_mcp_connection,
+            mcp::open_mcp_client,
+            mcp::mcp_authorization_status,
+            mcp::mcp_decide_authorization,
+            mcp::mcp_revoke_authorization,
+            mcp::configure_mcp,
             apply_graph_view_intent,
             set_graph_view_limits,
             read_extension_package,
