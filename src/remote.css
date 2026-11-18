@@ -1,0 +1,561 @@
+.remoteWorkbench,
+.remoteLogin {
+  --remote-accent: #7bbab0;
+  --remote-bg: #151a1e;
+  --remote-panel: #20272c;
+  --remote-border: #343e45;
+  --remote-muted: #9aa7af;
+  color: #e6e9eb;
+  background: var(--remote-bg);
+  font:
+    13px Roboto,
+    system-ui,
+    sans-serif;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  color-scheme: dark;
+}
+.remoteWorkbench {
+  display: flex;
+  flex-direction: column;
+}
+.remoteWorkbench *,
+.remoteLogin * {
+  box-sizing: border-box;
+}
+.remoteWorkbench button,
+.remoteLogin button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 31px;
+  border: 1px solid var(--remote-border);
+  border-radius: 5px;
+  background: #293238;
+  color: #e6e9eb;
+  padding: 5px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+.remoteWorkbench button:hover,
+.remoteLogin button:hover {
+  background: #36434b;
+}
+.remoteWorkbench button:disabled,
+.remoteLogin button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.remoteWorkbench input,
+.remoteWorkbench select,
+.remoteWorkbench textarea,
+.remoteLogin input {
+  display: block;
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--remote-border);
+  border-radius: 4px;
+  padding: 7px 8px;
+  background: #141b20;
+  color: #e6e9eb;
+  font: inherit;
+}
+.remoteWorkbench label,
+.remoteLogin label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--remote-muted);
+  font-size: 12px;
+}
+.remoteWorkbench h2 {
+  font-size: 15px;
+  margin: 3px 0 14px;
+  color: #e6e9eb;
+}
+.remoteWorkbench p,
+.remoteLogin p {
+  color: var(--remote-muted);
+  line-height: 1.6;
+}
+.remoteWorkbench code {
+  font:
+    11px "Roboto Mono",
+    monospace;
+}
+.remotePrimary.remotePrimary {
+  background: #6da89e;
+  color: #101e1c;
+  border-color: #6da89e;
+  font-weight: 600;
+}
+.remotePrimary.remotePrimary:hover {
+  background: #89c1b7;
+}
+.remoteHeader {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--remote-border);
+  min-height: 58px;
+}
+.remoteBrand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.4px;
+  white-space: nowrap;
+}
+.remoteBrand svg {
+  color: var(--remote-accent);
+}
+.remoteBrand span {
+  color: var(--remote-muted);
+  font-size: 9px;
+  letter-spacing: 2px;
+  border: 1px solid var(--remote-border);
+  padding: 4px 6px;
+  border-radius: 3px;
+  margin-left: 3px;
+}
+.remoteConnection {
+  margin-left: auto;
+  color: var(--remote-muted);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.remoteConnection i {
+  height: 6px;
+  width: 6px;
+  border-radius: 100%;
+  background: #77c49d;
+}
+.remoteConnection.offline i {
+  background: #e6b35a;
+}
+.remotePermission {
+  font-size: 11px;
+  color: var(--remote-accent);
+}
+.remoteCaptureBar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--remote-border);
+}
+.remoteCaptureBar label {
+  flex-direction: row;
+  align-items: center;
+  white-space: nowrap;
+}
+.remoteCaptureBar select {
+  width: 300px;
+}
+.remoteCaptureInfo {
+  color: var(--remote-muted);
+  font:
+    11px "Roboto Mono",
+    monospace;
+  margin-right: auto;
+}
+.remoteBody {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.remoteWaveArea {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.remoteViewToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 14px 20px;
+}
+.remoteViewToolbar input {
+  max-width: 140px;
+  font-family: "Roboto Mono", monospace;
+}
+.remoteWaveScroll {
+  flex: 1;
+  overflow: auto;
+  border-top: 1px solid var(--remote-border);
+}
+.remoteWaveRows {
+  display: flex;
+  min-height: 0;
+}
+.remoteChannelLabels {
+  padding-top: 22px;
+  width: 90px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--remote-border);
+}
+.remoteChannelLabels > div {
+  height: 62px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0 12px;
+  font-family: "Roboto Mono", monospace;
+  color: #b8c4cb;
+}
+.remoteChannelLabels small {
+  font:
+    10px Roboto,
+    sans-serif;
+  color: var(--remote-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.remoteWaveCanvas {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+.remoteMarkerOverlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.remoteMarkerLine {
+  position: absolute;
+  bottom: 0;
+  border-left: 1px solid;
+  opacity: 0.85;
+}
+.remoteMarkerLine span {
+  position: absolute;
+  top: 2px;
+  left: 3px;
+  font-size: 10px;
+  white-space: nowrap;
+  color: #172027;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.remoteMarkerRange {
+  position: absolute;
+  inset-block: 0;
+  opacity: 0.12;
+}
+.remoteWaveFooter {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--remote-muted);
+  padding: 12px 20px;
+  font-size: 11px;
+  border-top: 1px solid var(--remote-border);
+}
+.remoteSidebar {
+  width: 340px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--remote-border);
+  background: var(--remote-panel);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.remoteSidebar nav {
+  display: flex;
+  padding: 8px 12px;
+  gap: 5px;
+  border-bottom: 1px solid var(--remote-border);
+}
+.remoteSidebar nav button {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  color: var(--remote-muted);
+}
+.remoteSidebar nav button.active {
+  background: #34433f;
+  color: #a8d6cc;
+}
+.remoteSidebarContent {
+  overflow: auto;
+  padding: 18px;
+  flex: 1;
+}
+.remoteForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.remoteFormRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.remoteFormRow > label {
+  flex: 1;
+  min-width: 0;
+}
+.remoteForm input[type="color"] {
+  height: 31px;
+  padding: 3px;
+  max-width: 60px;
+}
+.remoteForm .remoteCheck {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.remoteCheck input {
+  width: 14px;
+  height: 14px;
+}
+.remoteSectionHeading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.remoteSectionHeading button {
+  font-size: 10px;
+  padding: 4px 7px;
+}
+.remoteMarkerList {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.remoteMarkerList article {
+  border: 1px solid var(--remote-border);
+  border-radius: 6px;
+  padding: 10px;
+  background: #192126;
+}
+.remoteMarkerList article > div {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.remoteMarkerList article > code {
+  display: block;
+  color: var(--remote-muted);
+  margin-top: 8px;
+}
+.remoteMarkerJump.remoteMarkerJump {
+  border: 0;
+  background: none;
+  justify-content: flex-start;
+  padding: 0;
+  min-height: 20px;
+  max-width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.remoteMarkerJump i {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 2px;
+}
+.remoteMarkerList p {
+  margin: 7px 0;
+}
+.remoteSidebar hr {
+  border: 0;
+  border-top: 1px solid var(--remote-border);
+  margin: 24px 0;
+}
+.remoteMeasurement {
+  background: #192126;
+  border-radius: 5px;
+  padding: 10px;
+}
+.remoteDecodeRows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 400px;
+  overflow: auto;
+  margin-bottom: 14px;
+}
+.remoteDecodeRows button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  text-align: left;
+}
+.remoteDecodeRows code,
+.remoteDecodeRows small {
+  color: var(--remote-muted);
+}
+.remoteJob {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 20px;
+  border-top: 1px solid var(--remote-border);
+  font-size: 11px;
+  color: var(--remote-muted);
+  overflow-wrap: anywhere;
+}
+.remoteJob span {
+  flex: 1;
+}
+.remoteError.remoteError {
+  background: #442c2c;
+  color: #ffccc2;
+  margin: 0;
+  padding: 10px 20px;
+  overflow-wrap: anywhere;
+}
+.remoteNotice {
+  color: #e6b35a !important;
+}
+.remoteEmpty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 30px;
+  text-align: center;
+  color: #677780;
+}
+.remoteLogin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at 50% 30%, #253a3c 0%, #151a1e 60%);
+  padding: 24px;
+  overflow: auto;
+}
+.remoteLogin > .remoteBrand {
+  margin-bottom: 32px;
+}
+.remoteLogin form {
+  width: min(420px, 100%);
+  padding: 32px;
+  background: #20272ce8;
+  border: 1px solid #3a494d;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  box-shadow: 0 24px 80px #0005;
+}
+.remoteLogin form > svg {
+  color: var(--remote-accent);
+}
+.remoteLogin h1 {
+  font-size: 24px;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: -0.6px;
+}
+.remoteLogin p {
+  margin: 0;
+}
+.remoteLogin .remoteLanguage {
+  border: 0;
+  background: none;
+  color: var(--remote-muted);
+  font-size: 11px;
+}
+@media (max-width: 900px) {
+  .remoteHeader {
+    flex-wrap: wrap;
+    padding: 10px;
+  }
+  .remotePermission {
+    display: none;
+  }
+  .remoteCaptureBar {
+    flex-wrap: wrap;
+    padding: 10px;
+  }
+  .remoteCaptureBar select {
+    width: 200px;
+  }
+  .remoteCaptureInfo {
+    width: 100%;
+  }
+  .remoteSidebar {
+    width: 300px;
+  }
+  .remoteViewToolbar {
+    padding: 10px;
+  }
+  .remoteViewToolbar input {
+    max-width: 100px;
+  }
+  .remoteWaveFooter {
+    padding: 10px;
+  }
+  .remoteChannelLabels {
+    width: 60px;
+  }
+}
+@media (max-width: 640px) {
+  .remoteBody {
+    flex-direction: column;
+    overflow: auto;
+  }
+  .remoteWaveArea {
+    min-height: 350px;
+  }
+  .remoteWaveScroll {
+    min-height: 220px;
+  }
+  .remoteSidebar {
+    width: 100%;
+    border-left: 0;
+    border-top: 1px solid var(--remote-border);
+    min-height: 400px;
+  }
+  .remoteSidebarContent {
+    overflow: visible;
+  }
+  .remoteWorkbench {
+    overflow: auto;
+  }
+  .remoteBody {
+    flex: 1;
+  }
+  .remoteCaptureBar select {
+    width: 160px;
+  }
+  .remoteConnection {
+    font-size: 10px;
+  }
+  .remoteHeader .remoteBrand {
+    font-size: 17px;
+  }
+}
+
+.remoteWorkbench [hidden] {
+  display: none;
+}
+.remoteWorkbench select,
+.remoteWorkbench input[type="number"] {
+  height: 32px;
+  padding-block: 4px;
+}
+.remoteDecodeRows button {
+  flex: none;
+}
+.remoteCaptureBar button {
+  white-space: nowrap;
+}

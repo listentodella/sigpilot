@@ -1,0 +1,18 @@
+[package]
+name = "sigpilot-remote"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+sigpilot-core = { path = "../sigpilot-core", default-features = false }
+sigpilot-workbench = { path = "../sigpilot-workbench" }
+sigpilot-graph = { path = "../sigpilot-graph" }
+sigpilot-file = { path = "../sigpilot-file" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "macros", "sync", "time"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+reqwest = { version = "0.13", default-features = false }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.11"

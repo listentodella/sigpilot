@@ -6,6 +6,7 @@ export default defineConfig({
   clearScreen: false,
   build: {
     assetsInlineLimit: 0,
+    rollupOptions: { input: { main: "index.html", web: "web.html" } },
   },
   server: {
     host: "127.0.0.1",

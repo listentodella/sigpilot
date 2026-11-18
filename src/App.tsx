@@ -68,6 +68,8 @@ import devicesIcon from "./assets/saleae/sidebar/devices.svg";
 import extensionsIcon from "./assets/saleae/sidebar/extensions.svg";
 import mcpIcon from "./assets/saleae/sidebar/mcp.svg";
 import { McpSettingsPanel } from "./components/McpSettingsPanel";
+import { RemoteSettingsPanel } from "./components/RemoteSettingsPanel";
+import remoteIcon from "./assets/saleae/sidebar/remote.svg";
 import { FloatingTerminal } from "./components/FloatingTerminal";
 import measurementsIcon from "./assets/saleae/sidebar/measurements.svg";
 import notesIcon from "./assets/saleae/sidebar/notes.svg";
@@ -654,6 +656,7 @@ const panelMeta: Record<
   timingMarkers: { labelKey: "timingMarkers", iconUrl: timingMarkersIcon },
   extensions: { labelKey: "extensions", iconUrl: extensionsIcon },
   mcp: { labelKey: "mcp", iconUrl: mcpIcon },
+  remote: { labelKey: "remote", iconUrl: remoteIcon },
   notes: { labelKey: "notes", iconUrl: notesIcon },
   advanced: { labelKey: "advanced", iconUrl: advancedIcon },
 };
@@ -1551,7 +1554,7 @@ function getSidebarPanelAllowed(
     };
   }
 
-  if (panel === "extensions" || panel === "mcp") {
+  if (panel === "extensions" || panel === "mcp" || panel === "remote") {
     return { isSelectable: true, isVisible: true };
   }
 
@@ -9054,6 +9057,7 @@ function SidebarPanelContent({
         />
       )}
       {panel === "mcp" && <McpSettingsPanel />}
+      {panel === "remote" && <RemoteSettingsPanel />}
       {panel === "advanced" && (
         <AdvancedOptionsPanel
           diagnostics={{

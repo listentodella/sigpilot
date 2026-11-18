@@ -2004,6 +2004,16 @@ button:disabled {
   inset: 0;
 }
 
+.remoteSettings .remoteSettingInput {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
+  color: inherit;
+  background: var(--surface-20);
+}
+
 .waveformCanvasHost {
   width: 100%;
   height: 100%;

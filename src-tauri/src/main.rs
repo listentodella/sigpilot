@@ -39,114 +39,17 @@ use sigpilot_core::RusbBackend;
 
 type CommandResult<T> = Result<T, String>;
 
-#[derive(Serialize)]
-struct PackedBinRange {
-    offset: usize,
-    length: usize,
-}
-
-#[derive(Serialize)]
-struct BinaryChannelTile<'a> {
-    channel: u8,
-    label: &'a str,
-    bins: &'a [sigpilot_waveform::WaveformBin],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    packed_bins: Option<PackedBinRange>,
-    segments: &'a [sigpilot_waveform::DigitalSegment],
-    rising_edges: &'a [u64],
-    falling_edges: &'a [u64],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    previous_transition: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_transition: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct BinaryWaveformTile<'a> {
-    start_sample: u64,
-    sample_count: u64,
-    pixels: u32,
-    samples_per_pixel: f64,
-    channels: Vec<BinaryChannelTile<'a>>,
-}
-
-#[derive(Serialize)]
-struct BinaryGraphFrameResponse<'a> {
-    frame_id: u64,
-    revision: u64,
-    sample_count: u64,
-    /// The frontend's frame loop discards a frame that has no viewport, because
-    /// drawing against `undefined` would take the canvas tree down with it. The
-    /// binary transport has to carry both viewports exactly as the JSON
-    /// response does; leaving them out makes every frame unusable.
-    view: &'a sigpilot_graph::SessionView,
-    data_view: &'a sigpilot_graph::SessionView,
-    tile: BinaryWaveformTile<'a>,
-    analyzers: &'a [sigpilot_graph::AnalyzerRenderResult],
-}
-
 fn encode_graph_frame_response(frame: GraphFrameResponse) -> CommandResult<tauri::ipc::Response> {
     encode_graph_frame_bytes(frame).map(tauri::ipc::Response::new)
 }
 
-fn encode_graph_frame_bytes(mut frame: GraphFrameResponse) -> CommandResult<Vec<u8>> {
-    let mut binary = Vec::new();
-    let packed_ranges = frame
-        .tile
-        .channels
-        .iter_mut()
-        .map(|channel| {
-            channel.packed_bins.take().map(|packed| {
-                let offset = binary.len();
-                let length = packed.len();
-                binary.extend_from_slice(&packed);
-                PackedBinRange { offset, length }
-            })
-        })
-        .collect::<Vec<_>>();
-    let channels = frame
-        .tile
-        .channels
-        .iter()
-        .zip(packed_ranges)
-        .map(|(channel, packed_bins)| BinaryChannelTile {
-            channel: channel.channel,
-            label: &channel.label,
-            bins: &channel.bins,
-            packed_bins,
-            segments: &channel.segments,
-            rising_edges: &channel.rising_edges,
-            falling_edges: &channel.falling_edges,
-            previous_transition: channel.previous_transition,
-            next_transition: channel.next_transition,
-        })
-        .collect();
-    let response = BinaryGraphFrameResponse {
-        frame_id: frame.frame_id,
-        revision: frame.revision,
-        sample_count: frame.sample_count,
-        view: &frame.view,
-        data_view: &frame.data_view,
-        tile: BinaryWaveformTile {
-            start_sample: frame.tile.start_sample,
-            sample_count: frame.tile.sample_count,
-            pixels: frame.tile.pixels,
-            samples_per_pixel: frame.tile.samples_per_pixel,
-            channels,
-        },
-        analyzers: &frame.analyzers,
-    };
-    let header = serde_json::to_vec(&response).map_err(to_string)?;
-    let mut output = Vec::with_capacity(13 + header.len() + binary.len());
-    output.extend_from_slice(b"PXGF1");
-    output.extend_from_slice(&(header.len() as u64).to_le_bytes());
-    output.extend_from_slice(&header);
-    output.extend_from_slice(&binary);
-    Ok(output)
+fn encode_graph_frame_bytes(frame: GraphFrameResponse) -> CommandResult<Vec<u8>> {
+    sigpilot_graph::transport::encode_graph_frame(frame).map_err(to_string)
 }
 
 #[derive(Clone)]
 struct AppState {
+    remote_events: Arc<sigpilot_remote::events::Events>,
     workbench: Arc<sigpilot_workbench::WorkbenchService>,
     mcp: Arc<tokio::sync::Mutex<Option<sigpilot_mcp::desktop::DesktopMcpServer>>>,
     cancel: Arc<AtomicBool>,
@@ -160,6 +63,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             workbench: Arc::default(),
+            remote_events: Arc::default(),
             mcp: Arc::default(),
             cancel: Arc::default(),
             active_capture: Arc::default(),
@@ -734,12 +638,15 @@ enum UiMessage {
 
 impl UiMessage {
     fn emit(self, app: &AppHandle) {
+        let events = app.state::<AppState>().remote_events.clone();
         match self {
             UiMessage::Progress(progress, memory) => {
+                events.publish(serde_json::json!({"kind":"capture_progress","progress":progress}));
                 let _ = app.emit("capture_progress", &progress);
                 let _ = app.emit("capture_memory_updated", &memory);
             }
             UiMessage::Updated(event) => {
+                events.publish(serde_json::json!({"kind":"capture_updated","update":event}));
                 let _ = app.emit("capture_updated", &event);
             }
             UiMessage::Diagnostic(event) => {
@@ -801,17 +708,21 @@ async fn start_capture(
         "start_capture requested"
     );
 
-    state.cancel.store(false, Ordering::Release);
-    let cancel = state.cancel.clone();
     let graph = state.session(&session_id)?;
+    {
+        let mut active = state.active_capture.lock();
+        if active.is_some() { return Err("Another capture is already running".into()); }
+        *active = Some(ActiveCapture { device_id: settings.device_id.clone(), session_id: session_id.clone() });
+        state.cancel.store(false, Ordering::Release);
+    }
+    let cancel = state.cancel.clone();
     let active_capture = state.active_capture.clone();
     let app_state = state.inner().clone();
 
     let result = tauri::async_runtime::spawn_blocking(move || {
-        *active_capture.lock() = Some(ActiveCapture {
-            device_id: settings.device_id.clone(),
-            session_id: session_id.clone(),
-        });
+        struct CaptureGuard(Arc<Mutex<Option<ActiveCapture>>>);
+        impl Drop for CaptureGuard { fn drop(&mut self) { *self.0.lock() = None; } }
+        let _capture_guard = CaptureGuard(active_capture.clone());
         let buffer_bytes = settings.buffer_size_mb.saturating_mul(1024 * 1024);
         let publisher = UiPublisher::new(app.clone());
         let progress_app = publisher.clone();
@@ -1030,7 +941,6 @@ async fn start_capture(
 
         match capture {
             Ok(capture) => {
-                *active_capture.lock() = None;
                 tracing::info!(
                     target: "sigpilot::capture",
                     source_device = %capture.metadata.source_device,
@@ -1060,7 +970,6 @@ async fn start_capture(
                 Ok(summary)
             }
             Err(error) => {
-                *active_capture.lock() = None;
                 #[cfg(feature = "rusb-transport")]
                 if settings.device_id != FakeBackend::DEVICE_ID
                     && matches!(error, sigpilot_core::CoreError::Usb(_))
@@ -2562,6 +2471,7 @@ fn warm_sigrok_native_catalog_async(delay: Duration) {
 mod file_clipboard;
 mod logging;
 mod mcp;
+mod remote;
 mod terminal;
 
 fn main() {
@@ -2600,12 +2510,16 @@ fn main() {
         })
         .manage(AppState::default())
         .manage(terminal::TerminalState::default())
+        .manage(remote::RemoteState::default())
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 window.state::<terminal::TerminalState>().0.close_all();
             }
         })
         .invoke_handler(tauri::generate_handler![
+            remote::remote_setup,
+            remote::configure_remote,
+            remote::revoke_remote_client,
             terminal::terminal_open,
             terminal::terminal_poll,
             terminal::terminal_write,

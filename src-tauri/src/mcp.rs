@@ -400,6 +400,7 @@ pub fn bridge_workbench_events(
             loop {
                 match receiver.recv_timeout(Duration::from_secs(1)) {
                     Ok(event) => {
+                        app.state::<AppState>().remote_events.publish(serde_json::json!({"kind":"workbench_event","event":event.as_ref()}));
                         let _ = app.emit("workbench_event", event.as_ref());
                     }
                     Err(RecvTimeoutError::Timeout) => {}
@@ -409,6 +410,7 @@ pub fn bridge_workbench_events(
                             Err(_) => break,
                         }
                         let _ = app.emit("workbench_resync_required", ());
+                        app.state::<AppState>().remote_events.publish(serde_json::json!({"kind":"resync_required"}));
                     }
                 }
             }

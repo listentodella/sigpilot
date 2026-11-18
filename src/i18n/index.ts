@@ -29,6 +29,8 @@ import enPanels from "./locales/en/panels.json";
 import enSettings from "./locales/en/settings.json";
 import enStart from "./locales/en/start.json";
 import enToolbar from "./locales/en/toolbar.json";
+import enRemote from "./locales/en/remote.json";
+import zhRemote from "./locales/zh-CN/remote.json";
 import enTerminal from "./locales/en/terminal.json";
 import zhAdvanced from "./locales/zh-CN/advanced.json";
 import zhAnalyzers from "./locales/zh-CN/analyzers.json";
@@ -59,7 +61,7 @@ void i18n.use(initReactI18next).init({
     escapeValue: false,
   },
   lng: loadUiPreferences().locale,
-  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions", "analyzers", "annotations", "graph", "channelMenu", "device", "measurements", "overlays", "status", "terminal"],
+  ns: ["common", "footer", "advanced", "settings", "toolbar", "panels", "notes", "start", "extensions", "analyzers", "annotations", "graph", "channelMenu", "device", "measurements", "overlays", "status", "terminal", "remote"],
   resources: {
     en: {
       advanced: enAdvanced,
@@ -80,6 +82,7 @@ void i18n.use(initReactI18next).init({
       start: enStart,
       toolbar: enToolbar,
       terminal: enTerminal,
+      remote: enRemote,
     },
     "zh-CN": {
       advanced: zhAdvanced,
@@ -100,6 +103,7 @@ void i18n.use(initReactI18next).init({
       start: zhStart,
       toolbar: zhToolbar,
       terminal: zhTerminal,
+      remote: zhRemote,
     },
   },
   supportedLngs: ["en", "zh-CN"],

@@ -3416,6 +3416,7 @@ dependencies = [
  "sigpilot-file",
  "sigpilot-graph",
  "sigpilot-mcp",
+ "sigpilot-remote",
  "sigpilot-terminal",
  "sigpilot-waveform",
  "sigpilot-workbench",
@@ -3480,6 +3481,23 @@ dependencies = [
  "tower",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sigpilot-remote"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sigpilot-core",
+ "sigpilot-file",
+ "sigpilot-graph",
+ "sigpilot-workbench",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
