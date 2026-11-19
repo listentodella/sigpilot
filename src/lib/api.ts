@@ -1,6 +1,7 @@
 import { ANALOG_CHANNEL_COUNT, ANALOG_SAMPLE_RATE_OPTIONS } from "./analogChannels.ts";
 import { invoke } from "@tauri-apps/api/core";
 import { ANALYZER_TABLE_PAGE_SIZE } from "./analyzerTableRequests.ts";
+import { strToU8, zipSync } from "fflate";
 import {
   normalizeCaptureViewport,
   normalizeLiveCaptureViewport,
@@ -19,6 +20,24 @@ import type {
 // would be a cycle. The type is erased at compile time.
 import type { LogLevel } from "./logger.ts";
 import type { WaveformAnnotationShape } from "./waveformAnnotations";
+import {
+  cancelWebUsbCapture,
+  isWebUsbDemoDevice,
+  listWebUsbDevices,
+  requestWebUsbDevice,
+  releaseWebUsbCapture,
+  saveWebUsbCapture,
+  startWebUsbCapture,
+  webUsbAvailable,
+  webUsbCapabilities,
+  webUsbCaptureForSession,
+  webUsbDeviceIdForSession,
+  webUsbMeasurePoint,
+  webUsbMeasureRange,
+  webUsbNearestTransition,
+  prepareWebUsbDevice,
+  webUsbTile,
+} from "../webusb/bridge";
 
 export type DeviceKind = "Fake" | "Usb";
 
@@ -666,6 +685,9 @@ export interface CaptureCallbacks {
 export const isTauriRuntime = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+export const isWebUsbRuntime = () => webUsbAvailable();
+export { requestWebUsbDevice };
+
 let previewCapture: CaptureSummary = {
   metadata: {
     version: 1,
@@ -681,6 +703,7 @@ let previewCapture: CaptureSummary = {
   bytes: 250_000,
 };
 interface PreviewCaptureRun {
+  sessionId: string;
   cancelled: boolean;
   cancel: () => void;
 }
@@ -690,6 +713,7 @@ const previewCaptures = new Map<string, CaptureSummary>();
 const previewCaptureRevisions = new Map<string, number>();
 const previewAnalyzerFrameCache = new Map<string, DecodedFrame[]>();
 const previewDemoSignalsBySession = new Map<string, PreviewDemoSignal[]>();
+const webUsbDemoSessions = new Set<string>();
 let previewDemoSignals: PreviewDemoSignal[] = [];
 
 // Ported from Logic 2.4.43 BaseAnalyzerManager. Bubble responses may grow
@@ -1021,6 +1045,7 @@ export async function readLogStatus(): Promise<LogStatus | null> {
 }
 
 export async function setLogPaused(paused: boolean): Promise<void> {
+  if (!isTauriRuntime()) return;
   await callBackend("set_log_paused", { paused });
 }
 
@@ -1159,6 +1184,7 @@ export async function applyGraphViewIntent(
   sessionId: string,
   intent: ViewIntent,
 ): Promise<SessionView | null> {
+  if (isWebUsbRuntime() && !webUsbDemoSessions.has(sessionId)) return applyWebUsbViewIntent(sessionId, intent);
   if (!isTauriRuntime()) return previewApplyViewIntent(sessionId, intent);
   return invoke<SessionView>("apply_graph_view_intent", { sessionId, intent });
 }
@@ -1171,6 +1197,16 @@ export async function setGraphViewLimits(
   sessionId: string,
   limits: ViewLimits,
 ): Promise<SessionView | null> {
+  if (isWebUsbRuntime() && !webUsbDemoSessions.has(sessionId)) {
+    const summary = webUsbCaptureSummary(sessionId);
+    if (!summary) return null;
+    const current = webUsbViews.get(sessionId) ?? { start_sample: 0, samples: summary.metadata.sample_count };
+    const samples = Math.max(1, Math.min(summary.metadata.sample_count, limits.maximum_samples ?? summary.metadata.sample_count, current.samples));
+    const start = Math.max(0, Math.min(summary.metadata.sample_count - samples, current.start_sample));
+    const next = { start_sample: start, samples };
+    webUsbViews.set(sessionId, next);
+    return next;
+  }
   if (!isTauriRuntime()) return previewSetViewLimits(sessionId, limits);
   return invoke<SessionView>("set_graph_view_limits", { sessionId, limits });
 }
@@ -1194,6 +1230,7 @@ function withPreviewCapture<T>(sessionId: string, callback: () => T): T {
 }
 
 export function listDevices(): Promise<DeviceInfo[]> {
+  if (isWebUsbRuntime()) return listWebUsbDevices();
   if (!isTauriRuntime()) {
     return Promise.resolve([
       {
@@ -1219,6 +1256,11 @@ export function listDevices(): Promise<DeviceInfo[]> {
 }
 
 export function deviceCapabilities(deviceId: string): Promise<HardwareCaptureCapabilities> {
+  if (isWebUsbRuntime() && isWebUsbDemoDevice(deviceId)) {
+    const preview = previewDeviceCapabilities(deviceId);
+    return Promise.resolve({ ...preview, max_analog_channels: 0, analog_sample_rates: [] });
+  }
+  if (isWebUsbRuntime()) return webUsbCapabilities(deviceId);
   if (!isTauriRuntime()) {
     return Promise.resolve(previewDeviceCapabilities(deviceId));
   }
@@ -1226,11 +1268,13 @@ export function deviceCapabilities(deviceId: string): Promise<HardwareCaptureCap
 }
 
 export function sigrokDecoderCatalog(): Promise<SigrokDecoderCatalog> {
+  if (isWebUsbRuntime()) return Promise.resolve({ decoders: [], c_decoder_count: 0, python_decoder_count: 0 });
   if (!isTauriRuntime()) return Promise.resolve(PREVIEW_SIGROK_DECODER_CATALOG);
   return callBackend("sigrok_decoder_catalog");
 }
 
 export function saleaeDecoderCatalog(): Promise<SigrokDecoderCatalog> {
+  if (isWebUsbRuntime()) return Promise.resolve({ decoders: [], c_decoder_count: 0, python_decoder_count: 0 });
   if (!isTauriRuntime()) return Promise.resolve({ decoders: [], c_decoder_count: 0, python_decoder_count: 0 });
   return callBackend("saleae_decoder_catalog");
 }
@@ -1278,6 +1322,8 @@ function previewDeviceCapabilities(deviceId: string): HardwareCaptureCapabilitie
 }
 
 export function prepareDevice(deviceId: string): Promise<void> {
+  if (isWebUsbRuntime() && isWebUsbDemoDevice(deviceId)) return Promise.resolve();
+  if (isWebUsbRuntime()) return prepareWebUsbDevice(deviceId);
   if (!isTauriRuntime()) return Promise.resolve();
   return callBackend("prepare_device", { deviceId });
 }
@@ -1311,10 +1357,16 @@ export function startCapture(
   callbacks: CaptureCallbacks = {},
   demoAnalyzers: DemoAnalyzerSettings[] = [],
 ): Promise<CaptureSummary> {
+  if (isWebUsbRuntime() && !isWebUsbDemoDevice(settings.device_id)) {
+    webUsbDemoSessions.delete(sessionId);
+    return startWebUsbCapture(sessionId, settings, callbacks);
+  }
+  if (isWebUsbRuntime()) webUsbDemoSessions.add(sessionId);
   if (!isTauriRuntime()) {
     previewCaptureRun?.cancel();
     let finishRun = () => {};
     const run: PreviewCaptureRun = {
+      sessionId,
       cancelled: false,
       cancel: () => {
         if (run.cancelled) return;
@@ -1414,6 +1466,14 @@ export function startCapture(
 }
 
 export function cancelCapture(): Promise<void> {
+  if (isWebUsbRuntime() && webUsbDemoSessions.has(previewCaptureRun?.sessionId ?? "")) {
+    previewCaptureRun?.cancel();
+    return Promise.resolve();
+  }
+  if (isWebUsbRuntime()) {
+    cancelWebUsbCapture();
+    return Promise.resolve();
+  }
   if (!isTauriRuntime()) {
     previewCaptureRun?.cancel();
     return Promise.resolve();
@@ -1435,8 +1495,41 @@ export function saveCapture(
   path: string,
   saleaeSession?: SaleaeSessionMetadata,
 ): Promise<void> {
+  if (isWebUsbRuntime() && webUsbDemoSessions.has(sessionId)) {
+    saveWebUsbDemoCapture(sessionId);
+    return Promise.resolve();
+  }
+  if (isWebUsbRuntime()) {
+    saveWebUsbCapture(sessionId);
+    return Promise.resolve();
+  }
   if (!isTauriRuntime()) return Promise.resolve();
   return callBackend("save_capture", { sessionId, path, saleaeSession });
+}
+
+function saveWebUsbDemoCapture(sessionId: string) {
+  const summary = previewCaptureForSession(sessionId);
+  const metadata = summary.metadata;
+  const samples = new Uint8Array(metadata.sample_count * metadata.unitsize);
+  withPreviewCapture(sessionId, () => {
+    for (let sample = 0; sample < metadata.sample_count; sample += 1) {
+      for (let channel = 0; channel < metadata.channel_count; channel += 1) {
+        if (previewDigitalLevelAt(sample, channel, metadata.sample_rate_hz)) {
+          samples[sample * metadata.unitsize + (channel >>> 3)] |= 1 << (channel & 7);
+        }
+      }
+    }
+  });
+  const archive = zipSync({
+    "metadata.json": strToU8(JSON.stringify(metadata)),
+    "samples.bin": samples,
+  }, { level: 0 });
+  const url = URL.createObjectURL(new Blob([new Uint8Array(archive)], { type: "application/zip" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `SigPilot-Demo-${metadata.captured_at.replace(/:/g, "-")}.pxcap`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function exportCapture(
@@ -1489,6 +1582,7 @@ export function trimCapture(sessionId: string, request: TrimCaptureRequest): Pro
 }
 
 export function getWaveformTile(sessionId: string, request: WaveformRequest): Promise<WaveformTile> {
+  if (isWebUsbRuntime() && !webUsbDemoSessions.has(sessionId)) return Promise.resolve(webUsbTile(sessionId, request));
   if (!isTauriRuntime()) {
     return Promise.resolve(withPreviewCapture(sessionId, () => buildPreviewTile(request)));
   }
@@ -1505,6 +1599,7 @@ export function nearestDigitalTransition(
   sessionId: string,
   request: NearestDigitalTransitionRequest,
 ): Promise<NearestDigitalTransition | null> {
+  if (isWebUsbRuntime() && !webUsbDemoSessions.has(sessionId)) return Promise.resolve(webUsbNearestTransition(sessionId, request.channel, request.sample));
   if (isTauriRuntime()) {
     return callBackend("nearest_digital_transition", { sessionId, request });
   }
@@ -1537,6 +1632,7 @@ export function measureDigitalPoint(
   sessionId: string,
   request: DigitalPointMeasurementRequest,
 ): Promise<DigitalPointMeasurement | null> {
+  if (isWebUsbRuntime() && !webUsbDemoSessions.has(sessionId)) return Promise.resolve(webUsbMeasurePoint(sessionId, request.channel, request.sample));
   if (!isTauriRuntime()) {
     return Promise.resolve(withPreviewCapture(sessionId, () => measurePreviewDigitalPoint(request)));
   }
@@ -1547,6 +1643,7 @@ export function measureDigitalRange(
   sessionId: string,
   request: DigitalRangeMeasurementRequest,
 ): Promise<DigitalRangeMeasurementStats> {
+  if (isWebUsbRuntime() && !webUsbDemoSessions.has(sessionId)) return Promise.resolve(webUsbMeasureRange(sessionId, request.channel, request.start_sample, request.end_sample));
   if (!isTauriRuntime()) {
     return Promise.resolve(withPreviewCapture(sessionId, () => measurePreviewDigitalRange(request)));
   }
@@ -1849,6 +1946,29 @@ export function renderGraphFrame(
   sessionId: string,
   request: GraphFrameRequest,
 ): Promise<GraphFrameResponse> {
+  if (isWebUsbRuntime() && !webUsbDemoSessions.has(sessionId)) {
+    const summary = webUsbCaptureSummary(sessionId);
+    if (!summary) return Promise.reject(new Error("此会话没有 WebUSB 采集数据。"));
+    const view = request.view
+      ? applyWebUsbViewIntent(sessionId, request.view)
+      : webUsbViews.get(sessionId) ?? { start_sample: request.waveform.start_sample, samples: request.waveform.sample_count };
+    const startSample = Math.max(0, Math.floor(view.start_sample));
+    const endSample = Math.min(summary.metadata.sample_count, Math.ceil(view.start_sample + view.samples));
+    const waveform = {
+      ...request.waveform,
+      start_sample: startSample,
+      sample_count: Math.max(1, endSample - startSample),
+    };
+    return Promise.resolve({
+      frame_id: request.frame_id,
+      revision: 1,
+      sample_count: summary.metadata.sample_count,
+      view,
+      data_view: view,
+      tile: request.include_tile === false ? emptyPreviewTile(waveform) : webUsbTile(sessionId, waveform),
+      analyzers: [],
+    });
+  }
   if (isTauriRuntime()) {
     return callGraphFrameBackend(sessionId, request);
   }
@@ -1899,6 +2019,54 @@ export function renderGraphFrame(
       };
     }),
   );
+}
+
+const webUsbViews = new Map<string, SessionView>();
+
+function webUsbCaptureSummary(sessionId: string): CaptureSummary | null {
+  const capture = webUsbCaptureForSession(sessionId);
+  if (!capture) return null;
+  return {
+    metadata: {
+      version: 1,
+      source_device: webUsbDeviceIdForSession(sessionId),
+      sample_rate_hz: capture.rate,
+      channel_count: capture.channels,
+      enabled_channels: Array.from({ length: capture.channels }, (_, index) => index),
+      unitsize: Math.ceil(capture.channels / 8),
+      sample_count: capture.count,
+      captured_at: capture.date,
+      labels: Array.from({ length: capture.channels }, (_, index) => `D${index}`),
+    },
+    bytes: capture.samples.byteLength,
+  };
+}
+
+function applyWebUsbViewIntent(sessionId: string, intent: ViewIntent): SessionView {
+  const summary = webUsbCaptureSummary(sessionId);
+  if (!summary) return { start_sample: 0, samples: 0 };
+  const total = Math.max(1, summary.metadata.sample_count);
+  const current = webUsbViews.get(sessionId) ?? { start_sample: 0, samples: total };
+  let start = current.start_sample;
+  let samples = current.samples;
+  switch (intent.kind) {
+    case "keep_current": break;
+    case "set":
+    case "animate_to": start = intent.start_sample; samples = intent.samples; break;
+    case "pan_samples": start += intent.delta_samples; break;
+    case "zoom": {
+      const anchor = Math.max(0, Math.min(1, intent.anchor_ratio));
+      const anchorSample = start + samples * anchor;
+      samples = Math.max(1, samples * Math.max(0.001, Math.min(1_000, intent.factor)));
+      start = anchorSample - samples * anchor;
+      break;
+    }
+  }
+  samples = Math.max(1, Math.min(total, samples));
+  start = Math.max(0, Math.min(total - samples, start));
+  const next = { start_sample: start, samples };
+  webUsbViews.set(sessionId, next);
+  return next;
 }
 
 function buildPreviewAnalyzerTrackWindow(
@@ -2154,9 +2322,16 @@ function framesForAnalyzerTrack(frames: DecodedFrame[], track: AnalyzerTrackRequ
 }
 
 export function releaseGraphSession(sessionId: string): Promise<void> {
+  webUsbDemoSessions.delete(sessionId);
+  if (isWebUsbRuntime() && !previewCaptures.has(sessionId)) {
+    releaseWebUsbCapture(sessionId);
+    webUsbViews.delete(sessionId);
+    return Promise.resolve();
+  }
   previewCaptures.delete(sessionId);
   previewCaptureRevisions.delete(sessionId);
   previewDemoSignalsBySession.delete(sessionId);
+  webUsbViews.delete(sessionId);
   if (!isTauriRuntime()) return Promise.resolve();
   return callBackend("release_graph_session", { sessionId });
 }

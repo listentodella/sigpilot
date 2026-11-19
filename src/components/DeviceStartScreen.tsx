@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import { Download, RefreshCw } from "lucide-react";
+import { Download, RefreshCw, Usb } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import devicePattern from "../assets/start-screen/device-pattern.png";
 import { DeviceInfo } from "../lib/api";
@@ -13,6 +13,8 @@ interface DeviceStartScreenProps {
   onRefreshDevices: () => void;
   onCreateSessionWithDevice: (deviceId: string) => void;
   onSelectDevice: (deviceId: string) => void;
+  onRequestDevice?: () => void | Promise<void>;
+  showCaptureImport?: boolean;
 }
 
 export function DeviceStartScreen({
@@ -23,6 +25,8 @@ export function DeviceStartScreen({
   onRefreshDevices,
   onCreateSessionWithDevice,
   onSelectDevice,
+  onRequestDevice,
+  showCaptureImport = true,
 }: DeviceStartScreenProps) {
   const { t } = useTranslation("start");
   const physicalDevices = devices.filter((device) => device.kind === "Usb");
@@ -40,6 +44,7 @@ export function DeviceStartScreen({
             onRefreshDevices={onRefreshDevices}
             onCreateSessionWithDevice={onCreateSessionWithDevice}
             onSelectDevice={onSelectDevice}
+            onRequestDevice={onRequestDevice}
             selectedDevice={selectedDevice}
           />
           {selectedDemo && (
@@ -58,7 +63,7 @@ export function DeviceStartScreen({
         </DevicePromptCard>
       </div>
 
-      <div className="loadCaptureFile">
+      {showCaptureImport && <div className="loadCaptureFile">
         <div className="loadCaptureTitle">{t("loadCaptureFile")}</div>
         <div className="fileChooser">
           <div className="dragDrop">
@@ -69,7 +74,7 @@ export function DeviceStartScreen({
             {t("chooseFile")}
           </button>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -96,6 +101,7 @@ interface DeviceListProps {
   onRefreshDevices: () => void;
   onCreateSessionWithDevice: (deviceId: string) => void;
   onSelectDevice: (deviceId: string) => void;
+  onRequestDevice?: () => void | Promise<void>;
 }
 
 /**
@@ -122,6 +128,7 @@ function DeviceList({
   onRefreshDevices,
   onCreateSessionWithDevice,
   onSelectDevice,
+  onRequestDevice,
 }: DeviceListProps) {
   const { t } = useTranslation("start");
 
@@ -133,6 +140,12 @@ function DeviceList({
           <RefreshCw size={14} />
           {t("refresh")}
         </button>
+        {onRequestDevice && (
+          <button className="saleaePrimaryButton" disabled={busy} onClick={() => void onRequestDevice()} type="button">
+            <Usb size={14} />
+            {t("connectWebUsb")}
+          </button>
+        )}
       </div>
     );
   }
@@ -160,6 +173,12 @@ function DeviceList({
           </button>
         );
       })}
+      {onRequestDevice && (
+        <button className="saleaePrimaryButton" disabled={busy} onClick={() => void onRequestDevice()} type="button">
+          <Usb size={14} />
+          {t("connectWebUsb")}
+        </button>
+      )}
     </div>
   );
 }

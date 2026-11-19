@@ -1,5 +1,6 @@
 {
   "chooseFile": "Choose a file from your computer",
+  "connectWebUsb": "Connect USB device in browser",
   "deviceFound": "Found",
   "deviceReady": "Ready",
   "dragDropHere": "Drag and drop a file here or",

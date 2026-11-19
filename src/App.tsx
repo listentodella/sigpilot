@@ -216,12 +216,14 @@ import {
   HardwareCaptureCapabilities,
   HardwareChannelModeInfo,
   isTauriRuntime,
+  isWebUsbRuntime,
   listDevices,
   measureDigitalRange,
   nearestDigitalTransition,
   openCapture,
   OpenCaptureResult,
   prepareDevice,
+  requestWebUsbDevice,
   releaseGraphSession,
   renderGraphFrame,
   saveCapture,
@@ -377,7 +379,7 @@ const LOG_TEXT_BYTES = 64 * 1024;
 // caches and the fallback chain). Flipping this to `true` is the whole switch:
 // the old path stays intact underneath until the new one has been validated on
 // real captures.
-const USE_BACKEND_FRAME_LOOP = true;
+const useBackendFrameLoop = () => !isWebUsbRuntime();
 
 interface WaveformAnnotationEditorState {
   annotation: WaveformAnnotation;
@@ -706,7 +708,10 @@ function captureTriggerKind(edge: UiTriggerEdge): CaptureTriggerKind {
 
 function settingsFromDeviceSettings(session: UiSession, deviceId: string): CaptureSettings {
   const deviceSettings = session.deviceSettings;
-  const captureMode = backendCaptureMode(deviceSettings.captureMode);
+  // The browser physical adapter only supports a finite DDR window today. Use
+  // a finite preview capture for the browser demo as well, rather than making
+  // the demo allocate against its multi-gigabyte streaming buffer setting.
+  const captureMode = isWebUsbRuntime() ? "Buffer" : backendCaptureMode(deviceSettings.captureMode);
   const sampleRateHz =
     deviceSettings.captureMode === "Trigger" && deviceSettings.triggerSamplingEnabled
       ? deviceSettings.triggerSamplingRateHz
@@ -1535,6 +1540,9 @@ function getSidebarPanelAllowed(
   session: UiSession | null | undefined,
   options: { showAdvanced?: boolean } = {},
 ): SidebarPanelAllowed {
+  if (isWebUsbRuntime() && ["extensions", "mcp", "remote", "advanced"].includes(panel)) {
+    return { isSelectable: false, isVisible: false };
+  }
   const hasActiveSession = Boolean(session);
   const isMso = isMsoSession(session);
 
@@ -1883,6 +1891,7 @@ export default function App() {
     [deviceCapabilitiesById],
   );
   const availableAnalyzers = useMemo<AnalyzerLibraryChoice[]>(() => {
+    if (isWebUsbRuntime()) return [];
     const choices: AnalyzerLibraryChoice[] = [
       ...ANALYZER_CATALOG_GROUPS.flatMap((group) =>
         group.analyzers.map((name) => ({
@@ -2289,6 +2298,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     const subscriptions = [
       listen<CaptureProgress>("capture_progress", (event) => {
         const targetId = captureSessionRef.current;
@@ -2731,7 +2741,7 @@ export default function App() {
   // loaded and driven by requestAnimationFrame from then on — deliberately
   // outside React, because a pan or zoom frame must not re-render the workbench.
   useEffect(() => {
-    if (!USE_BACKEND_FRAME_LOOP) return;
+    if (!useBackendFrameLoop()) return;
     const session = activeSession;
     if (!session?.summary) return;
     const sessionId = session.id;
@@ -2851,7 +2861,7 @@ export default function App() {
   // window at the tail instead of fitting the whole capture on every frame.
   const previousSessionBusyRef = useRef(false);
   useEffect(() => {
-    if (!USE_BACKEND_FRAME_LOOP) return;
+    if (!useBackendFrameLoop()) return;
     const session = activeSession;
     if (!session?.id || !session.summary) return;
     setSessionFrameLive(session.id, session.busy);
@@ -2898,7 +2908,7 @@ export default function App() {
   // pipeline takes over again on the next render.
   const [frameLoopHealthy, setFrameLoopHealthy] = useState(false);
   useEffect(() => {
-    if (!USE_BACKEND_FRAME_LOOP) return;
+    if (!useBackendFrameLoop()) return;
     const sessionId = activeSession?.id;
     if (!sessionId || !activeSession?.summary) return;
     setFrameLoopHealthy(readFrameHealth(sessionId));
@@ -2906,7 +2916,7 @@ export default function App() {
   }, [activeSession?.id, activeSession?.summary]);
 
   useEffect(() => {
-    if (!USE_BACKEND_FRAME_LOOP) return;
+    if (!useBackendFrameLoop()) return;
     const sessionId = activeSession?.id;
     if (!sessionId || frameLoopHealthy) return;
     releaseSessionFrameLoop(sessionId);
@@ -2915,13 +2925,13 @@ export default function App() {
   // Channel selection and layout changes do not move the viewport, but they do
   // change what a frame contains, so the loop needs a nudge.
   useEffect(() => {
-    if (!USE_BACKEND_FRAME_LOOP) return;
+    if (!useBackendFrameLoop()) return;
     if (!activeSession?.id) return;
     invalidateSessionFrame(activeSession.id);
   }, [activeSession?.id, visibleChannelSignature]);
 
   useEffect(() => {
-    if (USE_BACKEND_FRAME_LOOP && frameLoopHealthy) {
+    if (useBackendFrameLoop() && frameLoopHealthy) {
       // The backend frame loop owns the waveform end to end; running this
       // pipeline alongside it would only issue a second set of requests.
       tileRequestSeq.current += 1;
@@ -3050,7 +3060,7 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (USE_BACKEND_FRAME_LOOP && frameLoopHealthy) {
+    if (useBackendFrameLoop() && frameLoopHealthy) {
       // Analyzer tracks now ride along on each frame, already aggregated for the
       // viewport that frame rendered. Running this pipeline alongside it would
       // render every analyzer twice per cycle.
@@ -4434,6 +4444,11 @@ export default function App() {
   async function handleSave() {
     if (!activeSession?.summary || activeSession.busy) return;
     try {
+      if (isWebUsbRuntime()) {
+        await saveCapture(activeSession.id, "");
+        updateSession(activeSession.id, (session) => ({ ...session, message: statusT("captureSaved") }));
+        return;
+      }
       const path = await saveDialog({
         defaultPath: `${activeSession.name || "capture"}.pxl`,
         filters: [
@@ -4474,6 +4489,20 @@ export default function App() {
       }));
     } catch (error) {
       updateSession(activeSession.id, (session) => ({ ...session, message: String(error) }));
+    }
+  }
+
+  async function handleRequestWebUsbDevice() {
+    try {
+      const device = await requestWebUsbDevice();
+      await refreshDevices();
+      setDraftSelectedDevice(device.id);
+      createSession(device.id);
+      setSelectedPanel("devices");
+      setStartupMessage(`${device.label} · WebUSB ready`);
+    } catch (error) {
+      await refreshDevices();
+      setStartupMessage(String(error));
     }
   }
 
@@ -5490,6 +5519,7 @@ export default function App() {
   function createSessionFromStartScreen(deviceId: string) {
     setDraftSelectedDevice(deviceId);
     createSession(deviceId);
+    if (isWebUsbRuntime()) setSelectedPanel("devices");
   }
 
   function duplicateSessionSetup(sessionId: string) {
@@ -5767,14 +5797,14 @@ export default function App() {
             <span>{activeMessage}</span>
           </div>
           <div className="window-actions">
-            <button className="tool-button text-tool" title={i18n.t("terminal:open")} onClick={() => window.dispatchEvent(new Event("sigpilot:toggle-terminal"))}>
+            {!isWebUsbRuntime() && <button className="tool-button text-tool" title={i18n.t("terminal:open")} onClick={() => window.dispatchEvent(new Event("sigpilot:toggle-terminal"))}>
               <Terminal size={14} />
               {i18n.t("terminal:title")}
-            </button>
-            <button className="tool-button text-tool" title={t("openCapture")} onClick={handleOpen}>
+            </button>}
+            {!isWebUsbRuntime() && <button className="tool-button text-tool" title={t("openCapture")} onClick={handleOpen}>
               <FolderOpen size={14} />
               {t("open")}
-            </button>
+            </button>}
             <button
               className="tool-button text-tool"
               title={t("saveCapture")}
@@ -6203,6 +6233,8 @@ export default function App() {
                 onCreateSessionWithDevice={createSessionFromStartScreen}
                 onOpenCapture={handleOpen}
                 onRefreshDevices={refreshDevices}
+                onRequestDevice={isWebUsbRuntime() ? handleRequestWebUsbDevice : undefined}
+                showCaptureImport={!isWebUsbRuntime()}
                 onSelectDevice={setSelectedDeviceForActive}
                 selectedDevice={selectedDevice}
               />
@@ -6349,7 +6381,7 @@ export default function App() {
           zoomLabel={zoomLabel}
         />
       </section>
-      <FloatingTerminal />
+      {!isWebUsbRuntime() && <FloatingTerminal />}
     </main>
   );
 }
@@ -9113,15 +9145,24 @@ function DeviceSettingsPanel({
     session.settings.channel_count,
     session.settings.sample_rate_hz,
   );
-  const thresholdOptions = thresholdOptionsForCapabilities(
-    selectedCapabilities,
-    session.settings.threshold_volts,
-  );
+  const thresholdOptions = isWebUsbRuntime()
+    ? [1.8, 2, 2.5, 3.3, 5]
+    : thresholdOptionsForCapabilities(selectedCapabilities, session.settings.threshold_volts);
   const channelCountOptions = channelCountOptionsForCapabilities(
     selectedCapabilities,
     activeBackendMode,
     session.settings.channel_count,
   );
+  const webUsbDepths = [1_024, 16_384, 65_536, 262_144];
+  const webUsbDepth = webUsbDepths.reduce((best, value) =>
+    Math.abs(value - session.settings.sample_rate_hz * session.settings.duration_ms / 1000) <
+      Math.abs(best - session.settings.sample_rate_hz * session.settings.duration_ms / 1000)
+      ? value
+      : best,
+  webUsbDepths[0]);
+  const deviceChannelCountOptions = isWebUsbRuntime()
+    ? [4, 8, 16, 32].filter((count) => count <= (selectedCapabilities?.max_channels ?? 0))
+    : channelCountOptions;
   const selectedChannelMode = selectedHardwareChannelMode(
     selectedCapabilities,
     activeBackendMode,
@@ -9355,7 +9396,13 @@ function DeviceSettingsPanel({
             <span>{deviceT("sampleRate")}</span>
             <select
               value={session.settings.sample_rate_hz}
-              onChange={(event) => onUpdateSettings({ sample_rate_hz: Number(event.target.value) })}
+              onChange={(event) => {
+                const sample_rate_hz = Number(event.target.value);
+                onUpdateSettings({
+                  sample_rate_hz,
+                  ...(isWebUsbRuntime() ? { duration_ms: (webUsbDepth / sample_rate_hz) * 1000 } : {}),
+                });
+              }}
             >
               {sampleRateOptions.map((rate) => (
                 <option key={rate} value={rate}>
@@ -9374,13 +9421,32 @@ function DeviceSettingsPanel({
         <label className="stack-field">
           <span>{deviceT("activeChannels")}</span>
           <select value={session.settings.channel_count} onChange={(event) => setChannelCount(Number(event.target.value))}>
-            {channelCountOptions.map((count) => (
+            {deviceChannelCountOptions.map((count) => (
               <option key={count} value={count}>
                 {deviceT("digitalChannelCount", { count })}
               </option>
             ))}
           </select>
         </label>
+        {isWebUsbRuntime() && (
+          <label className="stack-field">
+            <span>{deviceT("captureDepth")}</span>
+            <select
+              value={webUsbDepth}
+              onChange={(event) => {
+                const sampleCount = Number(event.target.value);
+                onUpdateSettings({ duration_ms: (sampleCount / session.settings.sample_rate_hz) * 1000 });
+              }}
+            >
+              {webUsbDepths.map((count) => (
+                <option key={count} value={count}>{count.toLocaleString()} {deviceT("samples")}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {isWebUsbRuntime() && selected?.kind === "Usb" && (
+          <p className="deviceSettingsModeHint">{deviceT("webUsbCaptureHint")}</p>
+        )}
         {selectedChannelMode && (
           <div className="deviceSettingsModeHint">{selectedChannelMode.description}</div>
         )}
@@ -9430,7 +9496,7 @@ function DeviceSettingsPanel({
       </section>
       )}
 
-      <section className="deviceSettingsBlock">
+      {!isWebUsbRuntime() && <section className="deviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
           <span>{deviceT("captureMode")}</span>
           <small>{session.deviceSettings.captureMode}</small>
@@ -9476,9 +9542,9 @@ function DeviceSettingsPanel({
             />
           </div>
         )}
-      </section>
+      </section>}
 
-      <section className="deviceSettingsBlock compact">
+      {!isWebUsbRuntime() && <section className="deviceSettingsBlock compact">
         <label className="toggle-field panel-toggle">
           <input
             checked={session.deviceSettings.trimAfterCapture}
@@ -9505,9 +9571,9 @@ function DeviceSettingsPanel({
             onUpdateSettings({ buffer_size_mb: bufferSizeMb });
           }}
         />
-      </section>
+      </section>}
 
-      <section className="deviceSettingsBlock compact">
+      {!isWebUsbRuntime() && <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
           <span>{deviceT("hardwareIo")}</span>
           <small>SigPilot</small>
@@ -9552,9 +9618,9 @@ function DeviceSettingsPanel({
           />
           {deviceT("enTriggerOut")}
         </label>
-      </section>
+      </section>}
 
-      <section className="deviceSettingsBlock compact">
+      {!isWebUsbRuntime() && <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
           <span>{deviceT("pwm0Output")}</span>
           <small>{deviceT("pwm0Clock")}</small>
@@ -9609,7 +9675,7 @@ function DeviceSettingsPanel({
           <SlidersHorizontal size={13} />
           {pwmBusy ? deviceT("pwmApplying") : deviceT("applyPwm0")}
         </button>
-      </section>
+      </section>}
 
       <section className="deviceSettingsBlock compact">
         <div className="deviceSettingsBlockTitle">
@@ -10001,7 +10067,15 @@ function RecordingSettingsPanel({
 
   return (
     <div className="recordingSettingsPanel">
-      <section className="deviceSettingsBlock">
+      {isWebUsbRuntime() ? (
+        <section className="deviceSettingsBlock">
+          <div className="deviceSettingsBlockTitle">
+            <span>{deviceT("webUsbCaptureTitle")}</span>
+            <small>{deviceT("captureDepth")}</small>
+          </div>
+          <p className="deviceSettingsModeHint">{deviceT("webUsbCaptureHint")}</p>
+        </section>
+      ) : <section className="deviceSettingsBlock">
         <div className="deviceSettingsBlockTitle">
           <span>{deviceT("recordingType")}</span>
           <small>{selectedChannelMode?.description ?? session.deviceSettings.captureMode}</small>
@@ -10019,9 +10093,9 @@ function RecordingSettingsPanel({
             </button>
           ))}
         </div>
-      </section>
+      </section>}
 
-      {session.deviceSettings.captureMode === "FreeRun" && (
+      {!isWebUsbRuntime() && session.deviceSettings.captureMode === "FreeRun" && (
         <section className="deviceSettingsBlock">
           <div className="deviceSettingsBlockTitle">
             <span>{deviceT("freeRunSettings")}</span>
@@ -10051,7 +10125,7 @@ function RecordingSettingsPanel({
         </section>
       )}
 
-      {session.deviceSettings.captureMode === "Timer" && (
+      {!isWebUsbRuntime() && session.deviceSettings.captureMode === "Timer" && (
         <section className="deviceSettingsBlock">
           <div className="deviceSettingsBlockTitle">
             <span>{deviceT("timerSettings")}</span>
@@ -10082,7 +10156,7 @@ function RecordingSettingsPanel({
         </section>
       )}
 
-      {session.deviceSettings.captureMode === "Trigger" && (
+      {!isWebUsbRuntime() && session.deviceSettings.captureMode === "Trigger" && (
         <>
           <section className="deviceSettingsBlock">
             <div className="deviceSettingsBlockTitle">

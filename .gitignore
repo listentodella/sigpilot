@@ -5,6 +5,7 @@
 !/src-tauri/binaries/.gitkeep
 /node_modules/
 /dist/
+/dist-webusb/
 
 # Local reference checkouts / extracted application data.
 # Keep these on disk for porting, but do not mix them into this repo's history.

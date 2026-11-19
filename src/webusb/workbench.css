@@ -1,0 +1,130 @@
+.usbHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 55px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--remote-border);
+}
+.usbHeader svg,
+.usbEmpty svg {
+  color: var(--remote-accent);
+}
+.usbHeader strong {
+  font-size: 20px;
+}
+.usbHeader span {
+  color: var(--remote-muted);
+  border-left: 1px solid var(--remote-border);
+  padding-left: 14px;
+}
+.usbLayout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(210px, 265px) minmax(0, 1fr);
+}
+.usbLayout aside {
+  padding: 20px 16px;
+  background: var(--remote-panel);
+  border-right: 1px solid var(--remote-border);
+  overflow: auto;
+}
+.usbLayout aside section,
+.usbHelp {
+  border-top: 1px solid var(--remote-border);
+  margin-top: 20px;
+  padding-top: 20px;
+}
+.usbLayout aside label {
+  margin-bottom: 12px;
+}
+.usbLayout aside h2,
+.usbWaveTools,
+.usbInspect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usbLayout article {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.usbLayout .remoteWaveRows {
+  min-width: 310px;
+}
+.usbEmpty {
+  text-align: center;
+  margin: auto;
+  padding: 25px;
+}
+.usbEmpty h2 {
+  margin: 14px 0 5px;
+  font-size: 18px;
+}
+.usbWaveTools,
+.usbInspect {
+  padding: 10px 14px;
+  flex-wrap: wrap;
+}
+.usbWaveTools span {
+  margin-right: auto;
+  color: var(--remote-muted);
+}
+.usbInspect {
+  border-top: 1px solid var(--remote-border);
+}
+.usbInspect label {
+  min-width: 78px;
+}
+.usbInspect input {
+  width: 110px;
+}
+.usbInspect output {
+  font: 12px monospace;
+  color: var(--remote-accent);
+}
+.usbCursor {
+  position: absolute;
+  inset-block: 0;
+  border-left: 1px dashed #ffce79;
+  pointer-events: none;
+}
+.usbHelp summary {
+  cursor: pointer;
+}
+.usbHelp dd {
+  margin: 4px 0 10px;
+  color: var(--remote-muted);
+  line-height: 1.5;
+}
+.usbHelp a {
+  color: var(--remote-accent);
+}
+@media (max-width: 700px) {
+  .usbWorkbench {
+    overflow: auto;
+  }
+  .usbLayout {
+    display: flex;
+    flex-direction: column;
+  }
+  .usbLayout aside {
+    overflow: visible;
+  }
+  .usbLayout aside section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .usbLayout aside section h2 {
+    grid-column: 1/-1;
+  }
+  .usbLayout article {
+    flex: none;
+    min-height: 320px;
+    height: 75vh;
+  }
+}

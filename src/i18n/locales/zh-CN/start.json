@@ -1,5 +1,6 @@
 {
   "chooseFile": "从电脑中选择文件",
+  "connectWebUsb": "通过浏览器连接 USB 设备",
   "deviceFound": "已发现",
   "deviceReady": "就绪",
   "dragDropHere": "将文件拖放到此处，或",
