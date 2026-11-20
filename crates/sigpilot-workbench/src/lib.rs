@@ -8,6 +8,7 @@ pub mod derived;
 pub mod evidence;
 pub mod hardware_trigger;
 pub mod jobs;
+pub mod layout;
 pub mod models;
 mod process;
 pub mod protocol;
@@ -163,6 +164,7 @@ struct Document {
     result_replay: VecDeque<results::Replay>,
     derivation: Option<serde_json::Value>,
     derived_replay: Option<(String, String, String)>,
+    channel_layout: layout::LayoutState,
 }
 
 pub struct WorkbenchSession {
@@ -1092,6 +1094,7 @@ fn synchronize(document: &mut Document, generation: u64) {
         document.result_replay.clear();
         document.derivation = None;
         document.derived_replay = None;
+        document.channel_layout = Default::default();
     }
 }
 

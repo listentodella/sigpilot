@@ -164,6 +164,10 @@ pub enum WorkbenchEvent {
         channels: Vec<u8>,
         view: sigpilot_graph::SessionView,
     },
+    ChannelLayoutRequested {
+        capture: CaptureRef,
+        command: crate::layout::ChannelLayoutCommand,
+    },
     SessionReleased {
         session_id: String,
     },

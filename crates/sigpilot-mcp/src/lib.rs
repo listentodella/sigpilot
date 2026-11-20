@@ -156,6 +156,7 @@ impl McpAdapter {
             tool("sigpilot_get_reports", "Read independent immutable bundles of selected evidence. List mode requires report_revision and optionally after_id. Finding-page mode requires report_id, optionally start_index, and forbids report_revision/after_id. Pages contain provider parameters, exact observations and verification provenance, at most 112KiB. Reports persist when the GUI saves .pxl; reopened evidence is saved, not recomputed. Cropped reports are archived in original coordinates and cannot supply current-capture evidence. This bundle covers selected findings only; it is not a full scan or decode cache.",json!({"capture":capture,"report_revision":exact,"after_id":{"type":"string","maxLength":128},"report_id":{"type":"string","maxLength":128},"start_index":exact,"limit":{"type":"integer","minimum":1,"maximum":64,"default":20}}),&["capture"],true,true),
             tool("sigpilot_export_report", "Render one immutable selected-evidence report as JSON or Markdown UTF-8 chunks. Requires the current report revision. Concatenate content in order, resuming with next_offset and the same capture/report/revision/format. max_bytes limits each chunk; offsets must be UTF-8 boundaries. Exact sample strings, provider parameters and saved/archived verification are retained. Markdown quotes commentary and fences observations. No server file path is accepted or written; the client may save the returned content in its authorized workspace. Rendered report <=2MiB.",json!({"capture":capture,"report_revision":exact,"report_id":{"type":"string","maxLength":128},"format":{"type":"string","enum":["json","markdown"]},"offset":exact,"max_bytes":{"type":"integer","minimum":128,"maximum":32768,"default":16384}}),&["capture","report_revision","report_id","format"],true,true),
             tool("sigpilot_focus_view", "Focus the attached desktop session on an exact range. Returns the actual normalized viewport. Rejects coordinates that the GUI cannot represent exactly.", json!({"capture":capture,"range":range,"channels":{"type":"array","maxItems":32,"items":{"type":"integer","minimum":0,"maximum":31}}}), &["capture","range"], false, true),
+            tool("sigpilot_get_channel_layout", "Read the latest attached-desktop report of digital row heights, decoder strip insets, visibility, viewport/content height and vertical scroll. Includes pending command and last_applied_command_id. This is the last GUI report, not a synchronous screenshot or new measurement; layout can be null before the first report. Poll after set_channel_layout until its command_id is last_applied_command_id. No signal data changes.", json!({"capture":capture}), &["capture"], true, true),
             tool("sigpilot_run_analysis", "Run a registered provider over bounded original-edge pages. Obtain parameter schema from list_capabilities.providers. Built-ins include pulse_width, range_measure and multichannel_timing (setup/hold or edge delay); channel selects the primary anchor channel, and typed parameters declare related captured channels. All inputs use the same capture revision. Resume using next_start_sample and the same original_range. Timing complete describes anchor coverage, while assessments_complete preserves undecided boundary cases. Legacy flat pulse fields require parameters to be omitted. No automatic markings or source filtering are applied.", json!({"capture":capture,"provider_id":{"type":"string","maxLength":128},"channel":{"type":"integer","minimum":0,"maximum":31},"original_range":range,"start_sample":exact,"parameters":{"type":"object","description":"Must match the registered provider parameter_schema."},"high":{"type":["boolean","null"]},"min_width_samples":exact,"max_width_exclusive":{"anyOf":[exact,{"type":"null"}]},"limit":limit}), &["capture","provider_id","channel","original_range","start_sample"], true, true),
         ];
         if !self.file_roots.is_empty() {
@@ -163,6 +164,10 @@ impl McpAdapter {
         }
         tools.push(tool("sigpilot_get_results", "Read explicitly retained complete job snapshots. List requires current result_revision; summary uses result_set_id; chunk mode also uses offset/max_bytes and returns typed output as UTF-8 JSON chunks. Reopened projects rebind result IDs and mark saved-not-recomputed verification without restarting jobs. Retained decode IDs support existing frame/sequence/transaction queries; cropped archived results cannot query the new capture. Runtime jobs remain private until explicitly retained.",json!({"capture":capture,"result_revision":exact,"after_id":{"type":"string","maxLength":128},"result_set_id":{"type":"string","maxLength":128},"offset":exact,"max_bytes":{"type":"integer","minimum":128,"maximum":32768},"limit":{"type":"integer","minimum":1,"maximum":16,"default":16}}),&["capture"],true,true));
         if self.can_edit_annotations {
+            tools.push(tool("sigpilot_set_channel_layout", "Request digital channel row layout in the attached desktop. Requires edit permission. action fit activates automatic fit for all visible rows and scrolls to top; manual sets selected captured channels to integer CSS heights 28..1000, preserving other rows and excluding decoder-strip insets. Returns state pending until GUI acknowledges the actual geometry; acceptance is not proof of application. Poll get_channel_layout for matching last_applied_command_id. A newer command supersedes an older pending command. Same caller/request_id/action replays without applying again while retained in 16-entry history. No capture or annotation revision changes.", json!({"capture":capture,"request_id":{"type":"string","minLength":1,"maxLength":128},"action":{"oneOf":[
+                {"type":"object","additionalProperties":false,"required":["mode"],"properties":{"mode":{"const":"fit"}}},
+                {"type":"object","additionalProperties":false,"required":["mode","rows"],"properties":{"mode":{"const":"manual"},"rows":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["channel","height_px"],"properties":{"channel":channel,"height_px":{"type":"integer","minimum":28,"maximum":1000}}}}}}
+            ]}}), &["capture","request_id","action"], false, true));
             tools.push(tool("sigpilot_create_derived_capture", "Create a separate immutable digital hypothesis by replacing disjoint complete original pulses narrower than max_width_exclusive. Select 1..8 captured channels and optional high polarity. One pass, no cascading, <=65536 original edges across all captured channels. Preserves sample count, initial levels, open-boundary runs and sample axis; source is unchanged. Returns new context with bounded provenance and identity mapping. preview has no write; same caller/request/inputs replay while target is unchanged. Existing targets reject conflicts. Reopened provenance grants no replay. Run the existing decoder separately on original and derived captures with identical temporary config, then query each result; do not reuse original evidence on derived data. Filtering is not an electrical repair or hardware diagnosis. No file is written.",json!({"capture":capture,"target_session_id":{"type":"string","maxLength":128},"channels":{"type":"array","minItems":1,"maxItems":8,"uniqueItems":true,"items":channel},"max_width_exclusive":exact,"high":{"type":["boolean","null"]},"request_id":{"type":"string","maxLength":128},"preview":{"type":"boolean","default":false}}),&["capture","target_session_id","channels","max_width_exclusive","request_id"],false,true));
             tools.push(tool("sigpilot_apply_results", "Retain a complete owned job output in the shared project or delete a retained snapshot. Independent expected_result_revision, preview and bounded caller/request replay. At most 16 snapshots, 4MiB each and 8MiB per project. GUI .pxl save persists full typed output; reopening shares saved observations without resuming jobs. Retaining deliberately shares the result with other authorized project clients. No source change or server file write.",json!({"capture":capture,"expected_result_revision":exact,"request_id":{"type":"string","maxLength":128},"preview":{"type":"boolean","default":false},"operation":{"oneOf":[
                 {"type":"object","additionalProperties":false,"required":["op","job_id"],"properties":{"op":{"const":"retain"},"job_id":{"type":"string","maxLength":128}}},
@@ -217,7 +222,7 @@ impl McpAdapter {
             "sigpilot_list_capabilities" => {
                 let _: EmptyRequest = parse(arguments)?;
                 Ok(
-                    json!({"schema_version":"1","providers":self.workbench.analysis_capabilities(),"decoder":self.workbench.decode_capabilities(),"analyzers":self.workbench.analyzer_capabilities(),"protocol_queries":self.workbench.protocol_query_capabilities(),"hardware_triggers":self.workbench.hardware_trigger_capabilities(),"reports":self.workbench.report_capabilities(),"results":self.workbench.result_capabilities(),"derived_captures":self.workbench.derived_capabilities(),"real_capture_control":self.can_capture && self.capture_service.is_some(),"capture_control":self.capture_service.as_ref().map(|s|s.capabilities()),"gui_focus_requires_attachment":true}),
+                    json!({"schema_version":"1","providers":self.workbench.analysis_capabilities(),"decoder":self.workbench.decode_capabilities(),"analyzers":self.workbench.analyzer_capabilities(),"protocol_queries":self.workbench.protocol_query_capabilities(),"hardware_triggers":self.workbench.hardware_trigger_capabilities(),"reports":self.workbench.report_capabilities(),"results":self.workbench.result_capabilities(),"derived_captures":self.workbench.derived_capabilities(),"real_capture_control":self.can_capture && self.capture_service.is_some(),"capture_control":self.capture_service.as_ref().map(|s|s.capabilities()),"gui_focus_requires_attachment":true,"channel_layout":{"requires_gui":true,"can_edit":self.can_edit_annotations,"min_height_px":28,"max_height_px":1000,"requires_gui_ack":true,"request_history":16}}),
                 )
             }
             "sigpilot_run_decode" => {
@@ -749,6 +754,23 @@ impl McpAdapter {
                     &request,
                 )?)?)
             }
+            "sigpilot_get_channel_layout" => {
+                let request: ChannelLayoutRequest = parse(arguments)?;
+                Ok(serde_json::to_value(
+                    self.workbench.get_channel_layout(&request.capture)?,
+                )?)
+            }
+            "sigpilot_set_channel_layout" if self.can_edit_annotations => {
+                let request: sigpilot_workbench::layout::SetChannelLayoutRequest =
+                    parse(arguments)?;
+                Ok(serde_json::to_value(self.workbench.set_channel_layout(
+                    Caller {
+                        id: &self.caller_id,
+                        source: AnnotationSource::Assistant,
+                    },
+                    &request,
+                )?)?)
+            }
             "sigpilot_focus_view" => {
                 let request: FocusRequest = parse(arguments)?;
                 let view =
@@ -1133,6 +1155,11 @@ struct FocusRequest {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ChannelLayoutRequest {
+    capture: CaptureRef,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MeasureRequest {
     capture: CaptureRef,
     channel: u8,
@@ -1284,4 +1311,82 @@ struct EvidenceRequest {
     capture: CaptureRef,
     refs: Vec<String>,
     context_samples: Option<ExactU64>,
+}
+
+#[cfg(test)]
+mod channel_layout_tests {
+    use super::*;
+
+    #[test]
+    fn layout_tools_enforce_permission_and_return_pending_until_gui_report() {
+        let workbench = Arc::new(WorkbenchService::default());
+        let metadata = serde_json::from_value(json!({
+            "version":1,"source_device":"fixture","sample_rate_hz":1000000,
+            "channel_count":2,"enabled_channels":[0,1],"unitsize":1,
+            "sample_count":16,"captured_at":"2026-11-20T00:00:00Z","labels":["D0","D1"]
+        }))
+        .unwrap();
+        workbench
+            .session("layout-test")
+            .unwrap()
+            .graph
+            .replace_capture(sigpilot_core::CaptureData {
+                metadata,
+                samples: vec![0; 16],
+            })
+            .unwrap();
+        workbench.set_gui_attached("layout-test", true).unwrap();
+        let capture = workbench.context("layout-test").unwrap().capture;
+        let mut adapter = McpAdapter::new(workbench.clone(), vec![], false, "layout-caller".into());
+        assert!(adapter
+            .tool_catalog()
+            .iter()
+            .any(|tool| tool.name == "sigpilot_get_channel_layout"));
+        assert!(!adapter
+            .tool_catalog()
+            .iter()
+            .any(|tool| tool.name == "sigpilot_set_channel_layout"));
+        let input = json!({"capture":capture,"request_id":"fit","action":{"mode":"fit"}});
+        assert_eq!(
+            adapter
+                .execute("sigpilot_set_channel_layout", input.clone())
+                .unwrap_err()
+                .code,
+            "TOOL_NOT_FOUND"
+        );
+        assert!(workbench
+            .get_channel_layout(&capture)
+            .unwrap()
+            .pending
+            .is_none());
+        adapter.can_edit_annotations = true;
+        assert!(adapter
+            .tool_catalog()
+            .iter()
+            .any(|tool| tool.name == "sigpilot_set_channel_layout"));
+        let result = adapter
+            .execute("sigpilot_set_channel_layout", input.clone())
+            .unwrap();
+        assert_eq!(result["state"], "pending");
+        assert!(result["layout"].is_null());
+        let status = adapter
+            .execute("sigpilot_get_channel_layout", json!({"capture":capture}))
+            .unwrap();
+        assert_eq!(status["pending"]["command_id"], result["command_id"]);
+        assert!(status["last_applied_command_id"].is_null());
+        // No acknowledgement tool is exposed to an MCP caller.
+        assert_eq!(
+            adapter
+                .execute("sigpilot_report_channel_layout", json!({}))
+                .unwrap_err()
+                .code,
+            "TOOL_NOT_FOUND"
+        );
+        assert_eq!(
+            adapter
+                .execute("sigpilot_set_channel_layout", input)
+                .unwrap()["command_id"],
+            result["command_id"]
+        );
+    }
 }

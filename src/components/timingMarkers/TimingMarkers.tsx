@@ -29,6 +29,7 @@ import {
 } from "../../lib/timingMarkers";
 import { useTranslation } from "react-i18next";
 import { SaleaeIcon } from "../SaleaeIcon";
+import { Undo2 } from "lucide-react";
 
 type MarkerUpdater = (updater: (markers: UiTimingMarker[]) => UiTimingMarker[], expectedToken?: string) => void;
 type PlacementUpdater = (
@@ -1135,8 +1136,19 @@ export function TimingMarkersPanel({
     <div className="timingMarkersSidebarPanel" data-timing-marker-interactive="true">
       <div className="timingMarkersTitleRow">
         <span>{measureT("timingMarkers")}</span>
-        <div className="markerAddMenu">
-          {onUndo && <button type="button" disabled={busy || !canUndo} onClick={onUndo} title={measureT("undoAnnotations")}>{measureT("undoAnnotations")}</button>}
+        <div className="markerAddMenu timingMarkerHeaderActions">
+          {onUndo && (
+            <button
+              aria-label={measureT("undoAnnotations")}
+              className="sidebarCircleButton"
+              disabled={busy || !canUndo}
+              onClick={onUndo}
+              title={measureT("undoAnnotations")}
+              type="button"
+            >
+              <Undo2 aria-hidden="true" size={14} />
+            </button>
+          )}
           <button
             aria-label={measureT("addTimingMarker")}
             className={`sidebarCircleButton ${addOpen ? "active" : ""}`}
@@ -1512,6 +1524,7 @@ function TimingMarkerEditPopup({
     >
       <textarea
         autoFocus
+        aria-label={measureT("commentPlaceholder")}
         className="timingMarkerPopupControl"
         onChange={(event) => setNote(event.target.value)}
         onKeyDown={(event) => {
@@ -1525,11 +1538,11 @@ function TimingMarkerEditPopup({
         value={note}
       />
       <div className="timingMarkerEditFooter timingMarkerPopupControl">
-        <button type="button" onClick={saveNote}>{measureT("saveMarkerComment")}</button>
         <div className="timingMarkerColorChoices">
           {TIMING_MARKER_COLORS.map((color) => (
             <button
               aria-label={measureT("useMarkerColor", { color })}
+              aria-pressed={marker.color === color}
               className={marker.color === color ? "selected" : ""}
               key={color}
               onClick={() => { onUpdate({ color, note }, noteToken.current); onClose(); }}
@@ -1540,9 +1553,26 @@ function TimingMarkerEditPopup({
             </button>
           ))}
         </div>
-        <button className="timingMarkerEditDelete" onClick={onDelete} title={measureT("delete")} type="button">
-          <SaleaeIcon name="trash" size={14} />
-        </button>
+        <div className="timingMarkerEditActions">
+          <button
+            aria-label={measureT("delete")}
+            className="timingMarkerEditDelete"
+            onClick={onDelete}
+            title={measureT("delete")}
+            type="button"
+          >
+            <SaleaeIcon name="trash" size={14} />
+          </button>
+          <button
+            aria-label={measureT("saveMarkerComment")}
+            className="timingMarkerEditSave"
+            onClick={saveNote}
+            title={`${measureT("saveMarkerComment")} (Enter)`}
+            type="button"
+          >
+            <SaleaeIcon name="checkmark" size={12} />
+          </button>
+        </div>
       </div>
     </div>
   );

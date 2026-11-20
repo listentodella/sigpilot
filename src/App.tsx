@@ -82,7 +82,7 @@ import triggerRisingIcon from "./assets/saleae/trigger/rising.svg";
 import emptyMeasurementArt from "./assets/saleae/empty_measurement.svg";
 import { AdvancedOptionsPanel } from "./components/AdvancedOptionsPanel";
 import { applyWorkbenchAnnotations, applyWorkbenchResult, readWorkbenchSnapshot, sameCapture, waveformAnnotationFromWorkbench, waveformAnnotationInput, timingMarkersFromWorkbench, timingMarkerOperations, undoWorkbenchAnnotations, workbenchEditToken, type AnnotationResult, type WorkbenchEvent, type WorkbenchSnapshot, type AnnotationOperation } from "./lib/workbench";
-import { replaceWorkbenchAnalyzers } from "./lib/workbench";
+import { replaceWorkbenchAnalyzers, readChannelLayout, reportChannelLayout, type CaptureRef, type ChannelLayoutCommand, type ChannelLayout } from "./lib/workbench";
 import { analyzerMetadataList, analyzersFromWorkbench, commitWorkbenchAnalyzers, mergeAnalyzerSnapshot, sameAnalyzerSettings } from "./lib/workbenchAnalyzers";
 import { CaptureNotesPanel } from "./components/CaptureNotesPanel";
 import { AnalyzerBubblesOverlay } from "./components/AnalyzerBubblesOverlay";
@@ -286,6 +286,9 @@ import {
 } from "./lib/analyzers";
 import {
   SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
+  SALEAE_DIGITAL_ROW_AUTOSIZE_MAX_PX,
+  SALEAE_DIGITAL_ROW_AUTOSIZE_MAX_PERCENT,
+  fitChannelRowsToViewport,
   fitSaleaeDigitalRowsToViewport,
   makeSaleaeDigitalRowHeights,
   saleaeChannelContentHeight,
@@ -413,6 +416,7 @@ interface UiSession {
   channelHeights: number[];
   hiddenDigitalChannels: boolean[];
   manualChannelLayout: boolean;
+  channelLayoutCommand?: { capture: CaptureRef; command: ChannelLayoutCommand; applied: boolean };
   showInteractiveMeasurement: boolean;
   graphScrollTop: number;
   summary: CaptureSummary | null;
@@ -1806,8 +1810,15 @@ export default function App() {
 
     const onWheel = (event: WheelEvent) => {
       const target = event.target as HTMLElement | null;
-      // Over the label column: leave it alone so the rows scroll.
-      if (target?.closest(".channelLabels")) return;
+      // Resize handles and the gaps between labels are siblings of the label
+      // list. Use the column boundary too so every pixel on the left scrolls.
+      const graph = scroller.querySelector<HTMLElement>(".graphViewport");
+      const inLabelColumn = graph && event.clientX < graph.getBoundingClientRect().left
+        && event.clientX >= scroller.getBoundingClientRect().left;
+      if (inLabelColumn || target?.closest(".channelLabels, .channelResizeHandle, .labelsBackground")) {
+        event.stopPropagation();
+        return;
+      }
       // Anywhere else in the graph: the rows must not move.
       event.preventDefault();
       // The host already saw this one and zoomed. An overlay that swallowed it
@@ -1815,6 +1826,7 @@ export default function App() {
       if (target?.closest(".waveformCanvasHost")) return;
       const host = scroller.querySelector<HTMLElement>(".waveformCanvasHost");
       if (!host) return;
+      event.stopPropagation();
       const source = event;
       host.dispatchEvent(new WheelEvent("wheel", {
         altKey: source.altKey,
@@ -1832,8 +1844,8 @@ export default function App() {
       }));
     };
 
-    scroller.addEventListener("wheel", onWheel, { passive: false });
-    return () => scroller.removeEventListener("wheel", onWheel);
+    scroller.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    return () => scroller.removeEventListener("wheel", onWheel, true);
   }, [activeSession?.id]);
 
   useEffect(() => {
@@ -1962,6 +1974,28 @@ export default function App() {
     if (activeSessionId) updateSession(activeSessionId, updater);
   }, [activeSessionId, updateSession]);
 
+  const layoutSyncSequence = useRef(new Map<string, number>());
+  const receiveChannelLayout = useCallback((capture: CaptureRef, command: ChannelLayoutCommand, retry = false) => {
+    const session = sessionsRef.current.find((item) => item.id === capture.session_id);
+    if (!session?.workbenchSnapshot || session.busy || !sameCapture(session.workbenchSnapshot.context, capture)) return;
+    if (!retry && session.channelLayoutCommand?.command.command_id === command.command_id) return;
+    setActiveSessionId(session.id);
+    updateSession(session.id, (current) => ({ ...current, channelLayoutCommand: { capture, command, applied: false } }));
+  }, [updateSession]);
+
+  const syncChannelLayout = useCallback(async (capture: CaptureRef, retry = false) => {
+    const sequence = (layoutSyncSequence.current.get(capture.session_id) ?? 0) + 1;
+    layoutSyncSequence.current.set(capture.session_id, sequence);
+    try {
+      const status = await readChannelLayout(capture);
+      if (layoutSyncSequence.current.get(capture.session_id) !== sequence) return;
+      if (status.pending) receiveChannelLayout(status.capture, status.pending, retry);
+      else updateSession(capture.session_id, (current) => current.channelLayoutCommand
+        && sameCapture(current.channelLayoutCommand.capture, capture)
+        ? { ...current, channelLayoutCommand: undefined } : current);
+    } catch { /* A capture may have been replaced/released while the read ran. */ }
+  }, [receiveChannelLayout, updateSession]);
+
   const workbenchRefreshSequence = useRef(new Map<string, number>());
   const refreshWorkbench = useCallback(async (sessionId: string) => {
     if (!isTauriRuntime()) return;
@@ -2071,6 +2105,7 @@ export default function App() {
         if (event.kind === "reports_changed") void refreshWorkbench(event.capture.session_id);
         if (event.kind === "results_changed") void refreshWorkbench(event.capture.session_id);
         if (event.kind === "analyzers_changed") void refreshWorkbench(event.capture.session_id);
+        if (event.kind === "channel_layout_requested") void syncChannelLayout(event.capture);
         if (event.kind === "focus_requested") {
           const session = sessionsRef.current.find((s) => s.id === event.capture.session_id);
           if (!session?.workbenchSnapshot || !sameCapture(session.workbenchSnapshot.context, event.capture)) return;
@@ -2080,11 +2115,23 @@ export default function App() {
         }
       }),
       listen("workbench_resync_required", () => {
-        for (const session of sessionsRef.current) if (session.summary && !session.busy) void refreshWorkbench(session.id);
+        for (const session of sessionsRef.current) if (session.summary && !session.busy) {
+          void refreshWorkbench(session.id);
+          if (session.workbenchSnapshot) void syncChannelLayout(session.workbenchSnapshot.context);
+        }
       }),
     ];
     return () => { void Promise.all(subscriptions).then((unlisten) => unlisten.forEach((dispose) => dispose())); };
-  }, [receiveWorkbenchResult, refreshWorkbench, updateSession]);
+  }, [receiveWorkbenchResult, refreshWorkbench, updateSession, receiveChannelLayout, syncChannelLayout]);
+
+  const layoutCaptureSignature = sessions.map((session) => session.workbenchSnapshot
+    ? `${session.id}:${session.workbenchSnapshot.context.capture_id}:${session.workbenchSnapshot.context.data_revision}` : "").join("|");
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    for (const session of sessionsRef.current) if (session.workbenchSnapshot && !session.busy) {
+      void syncChannelLayout(session.workbenchSnapshot.context);
+    }
+  }, [layoutCaptureSignature, syncChannelLayout]);
 
   const queueCaptureUiUpdate = useCallback((sessionId: string, update: PendingCaptureUiUpdate) => {
     const pending = pendingCaptureUiRef.current;
@@ -2522,35 +2569,11 @@ export default function App() {
     },
     [activeSession],
   );
-  const visibleChannelHeights = useMemo(
-    () =>
-      activeSession
-        ? fitSaleaeDigitalRowsToViewport({
-            availableHeight: graphViewportHeight,
-            channelIndexes: visibleChannelIndexes,
-            storedHeights: activeSession.channelHeights,
-            manualLayout: activeSession.manualChannelLayout,
-          })
-        : [],
-    [
-      activeSession?.channelHeights,
-      activeSession?.manualChannelLayout,
-      graphViewportHeight,
-      visibleChannelSignature,
-    ],
-  );
   const visibleAnalyzerInsets = useMemo(
-    () =>
-      activeSession
-        ? visibleChannelIndexes.map((channelIndex) =>
-            analyzerStripInsetForChannel(activeSession.analyzers, channelIndex),
-          )
-        : [],
+    () => activeSession
+      ? visibleChannelIndexes.map((channelIndex) => analyzerStripInsetForChannel(activeSession.analyzers, channelIndex))
+      : [],
     [activeSession?.analyzers, graphAnalyzerDecodeSignature, visibleChannelSignature],
-  );
-  const visibleOuterRowHeights = useMemo(
-    () => visibleChannelHeights.map((height, index) => height + (visibleAnalyzerInsets[index] ?? 0)),
-    [visibleAnalyzerInsets, visibleChannelHeights],
   );
   const visibleAnalogChannelEntries = useMemo(
     () => (activeSession && !activeSession.readOnly
@@ -2560,9 +2583,30 @@ export default function App() {
       : []),
     [activeSession?.deviceSettings.analogChannels, activeSession?.readOnly, selectedCapabilities],
   );
+  const fittedRowHeights = useMemo(() => fitChannelRowsToViewport(graphViewportHeight, [
+    ...visibleChannelIndexes.map((_, index) => ({
+      minHeight: SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
+      maxHeight: Math.max(SALEAE_DIGITAL_ROW_AUTOSIZE_MAX_PX, graphViewportHeight * SALEAE_DIGITAL_ROW_AUTOSIZE_MAX_PERCENT),
+      topInset: visibleAnalyzerInsets[index] ?? 0,
+    })),
+    ...visibleAnalogChannelEntries.map(() => ({ minHeight: ANALOG_ROW_MIN_HEIGHT_PX })),
+  ]), [graphViewportHeight, visibleChannelSignature, visibleAnalyzerInsets, visibleAnalogChannelEntries]);
+  const visibleChannelHeights = useMemo(() => activeSession
+    ? activeSession.manualChannelLayout
+      ? fitSaleaeDigitalRowsToViewport({ availableHeight: graphViewportHeight, channelIndexes: visibleChannelIndexes,
+          storedHeights: activeSession.channelHeights, manualLayout: true })
+      : fittedRowHeights.slice(0, visibleChannelIndexes.length)
+    : [], [activeSession?.channelHeights, activeSession?.manualChannelLayout, graphViewportHeight,
+      visibleChannelSignature, fittedRowHeights]);
+  const visibleOuterRowHeights = useMemo(
+    () => visibleChannelHeights.map((height, index) => height + (visibleAnalyzerInsets[index] ?? 0)),
+    [visibleAnalyzerInsets, visibleChannelHeights],
+  );
   const visibleAnalogRowHeights = useMemo(
-    () => visibleAnalogChannelEntries.map(({ settings }) => settings.height),
-    [visibleAnalogChannelEntries],
+    () => activeSession?.manualChannelLayout
+      ? visibleAnalogChannelEntries.map(({ settings }) => settings.height)
+      : fittedRowHeights.slice(visibleChannelIndexes.length),
+    [activeSession?.manualChannelLayout, visibleAnalogChannelEntries, fittedRowHeights, visibleChannelSignature],
   );
   const allVisibleRowHeights = useMemo(
     () => [...visibleOuterRowHeights, ...visibleAnalogRowHeights],
@@ -2584,6 +2628,92 @@ export default function App() {
     [activeSession?.tile, channelLabels, visibleChannelIndexes],
   );
   const graphContentHeight = Math.max(graphViewportHeight, saleaeChannelContentHeight(allVisibleRowHeights));
+
+  useEffect(() => {
+    const pending = activeSession?.channelLayoutCommand;
+    if (!activeSession || !pending || pending.applied || activeSession.busy || graphViewportHeight <= 0) return;
+    if (!activeSession.workbenchSnapshot) return;
+    if (!sameCapture(activeSession.workbenchSnapshot.context, pending.capture)) {
+      updateSession(activeSession.id, (current) => ({ ...current, channelLayoutCommand: undefined }));
+      return;
+    }
+    const action = pending.command.action;
+    if (action.mode === "fit" && graphScrollerRef.current) graphScrollerRef.current.scrollTop = 0;
+    const frozen = freezeVisibleRowHeights(activeSession);
+    if (action.mode === "manual") {
+      for (const row of action.rows) frozen.channelHeights[row.channel] = row.height_px;
+    }
+    updateSession(activeSession.id, (current) => current.busy || !current.workbenchSnapshot
+      || !sameCapture(current.workbenchSnapshot.context, pending.capture)
+      || current.channelLayoutCommand?.command.command_id !== pending.command.command_id ? current : ({ ...current,
+      ...(action.mode === "manual" ? frozen : {}),
+      manualChannelLayout: action.mode === "manual",
+      graphScrollTop: action.mode === "fit" ? 0 : current.graphScrollTop,
+      channelLayoutCommand: { ...pending, applied: true },
+    }));
+  }, [activeSession?.id, activeSession?.busy, activeSession?.channelLayoutCommand, graphViewportHeight,
+    visibleChannelHeights, visibleAnalogRowHeights, updateSession]);
+
+  // Measure after React has committed the new row sizes. A pending request is
+  // acknowledged only with actual DOM geometry, never on receiving the event.
+  useEffect(() => {
+    if (!isTauriRuntime() || !activeSession?.workbenchSnapshot || activeSession.busy || graphViewportHeight <= 0) return;
+    const session = activeSession;
+    const capture = session.workbenchSnapshot!.context;
+    const pending = session.channelLayoutCommand && sameCapture(session.channelLayoutCommand.capture, capture)
+      ? session.channelLayoutCommand : undefined;
+    if (pending && !pending.applied) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const measure = async () => {
+      const scroller = graphScrollerRef.current;
+      if (disposed || !scroller || activeSessionIdRef.current !== session.id) return;
+      const elements = [...scroller.querySelectorAll<HTMLElement>(".channelDragItem[data-channel-index]")];
+      if (visibleChannelIndexes.some((channel) => !elements.some((element) => Number(element.dataset.channelIndex) === channel))) {
+        // Background WKWebView may postpone the droppable's first paint.
+        timer = setTimeout(() => void measure(), 500);
+        return;
+      }
+      const channels = capture.enabled_channels.length ? capture.enabled_channels
+        : Array.from({ length: capture.channel_count }, (_, index) => index);
+      const layout: ChannelLayout = {
+        automatic: !session.manualChannelLayout,
+        viewport_height_px: scroller.clientHeight,
+        content_height_px: scroller.scrollHeight,
+        scroll_top_px: Math.max(0, Math.min(scroller.scrollTop, scroller.scrollHeight - scroller.clientHeight)),
+        rows: channels.map((channel) => {
+          const index = visibleChannelIndexes.indexOf(channel);
+          const inset = analyzerStripInsetForChannel(session.analyzers, channel);
+          const element = elements.find((row) => Number(row.dataset.channelIndex) === channel);
+          return { channel, visible: index >= 0,
+            height_px: index >= 0 && element ? element.getBoundingClientRect().height - inset
+              : session.channelHeights[channel] ?? SALEAE_DEFAULT_DIGITAL_ROW_HEIGHT_PX,
+            top_inset_px: inset };
+        }),
+      };
+      const syncSequence = layoutSyncSequence.current.get(session.id) ?? 0;
+      try {
+        const status = await reportChannelLayout(capture, layout,
+          pending && sameCapture(pending.capture, capture) ? pending.command.command_id : undefined);
+        if (disposed || (layoutSyncSequence.current.get(session.id) ?? 0) !== syncSequence) return;
+        layoutSyncSequence.current.set(session.id, (layoutSyncSequence.current.get(session.id) ?? 0) + 1);
+        if (status.pending && status.pending.command_id !== pending?.command.command_id) receiveChannelLayout(capture, status.pending);
+        else if (pending && status.last_applied_command_id === pending.command.command_id) {
+          updateSession(session.id, (current) => current.channelLayoutCommand?.command.command_id === pending.command.command_id
+            ? { ...current, channelLayoutCommand: undefined } : current);
+        }
+      } catch {
+        // A superseding request or replaced capture invalidates an old ack.
+        if (!disposed) void syncChannelLayout(capture, true);
+      }
+    };
+    timer = setTimeout(() => void measure(), 100);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [activeSession?.id, activeSession?.busy, activeSession?.workbenchSnapshot?.context.capture_id,
+    activeSession?.workbenchSnapshot?.context.data_revision, activeSession?.channelLayoutCommand,
+    activeSession?.channelHeights, activeSession?.manualChannelLayout, activeSession?.graphScrollTop,
+    graphViewportHeight, graphContentHeight, visibleChannelSignature, visibleAnalyzerInsets,
+    receiveChannelLayout, syncChannelLayout, updateSession]);
 
   const totalSamples = activeSession?.summary?.metadata.sample_count ?? 0;
   const progressPercent =
@@ -4845,19 +4975,29 @@ export default function App() {
     });
   }
 
+  function freezeVisibleRowHeights(session: UiSession) {
+    const channelHeights = makeSaleaeDigitalRowHeights(32, session.channelHeights);
+    const analogChannels = cloneAnalogChannels(session.deviceSettings.analogChannels);
+    if (!session.manualChannelLayout) {
+      visibleChannelIndexes.forEach((channel, index) => {
+        channelHeights[channel] = visibleChannelHeights[index] ?? channelHeights[channel];
+      });
+      visibleAnalogChannelEntries.forEach(({ index }, row) => {
+        analogChannels[index].height = visibleAnalogRowHeights[row] ?? analogChannels[index].height;
+      });
+    }
+    return { channelHeights, deviceSettings: { ...session.deviceSettings, analogChannels } };
+  }
+
   function setChannelHeight(channelIndex: number, height: number) {
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => {
-      const channelHeights = makeSaleaeDigitalRowHeights(32, session.channelHeights);
-      if (!session.manualChannelLayout) {
-        visibleChannelIndexes.forEach((visibleChannelIndex, rowIndex) => {
-          channelHeights[visibleChannelIndex] =
-            visibleChannelHeights[rowIndex] ?? channelHeights[visibleChannelIndex];
-        });
-      }
+      const frozen = freezeVisibleRowHeights(session);
+      const channelHeights = frozen.channelHeights;
       channelHeights[channelIndex] = Math.max(SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX, height);
       return {
         ...session,
+        ...frozen,
         channelHeights,
         manualChannelLayout: true,
       };
@@ -4867,7 +5007,8 @@ export default function App() {
   function updateAnalogChannel(channelIndex: number, patch: Partial<UiAnalogChannelSettings>) {
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => {
-      const analogChannels = cloneAnalogChannels(session.deviceSettings.analogChannels);
+      const frozen = freezeVisibleRowHeights(session);
+      const analogChannels = frozen.deviceSettings.analogChannels;
       const current = analogChannels[channelIndex];
       if (!current) return session;
       analogChannels[channelIndex] = {
@@ -4882,6 +5023,7 @@ export default function App() {
       };
       return {
         ...session,
+        ...(patch.height !== undefined ? { ...frozen, manualChannelLayout: true } : {}),
         deviceSettings: { ...session.deviceSettings, analogChannels },
       };
     });
@@ -4932,13 +5074,8 @@ export default function App() {
   function matchAllDigitalChannelHeights(channelIndex: number) {
     if (!activeSession) return;
     updateSession(activeSession.id, (session) => {
-      const channelHeights = makeSaleaeDigitalRowHeights(32, session.channelHeights);
-      if (!session.manualChannelLayout) {
-        visibleChannelIndexes.forEach((visibleChannelIndex, rowIndex) => {
-          channelHeights[visibleChannelIndex] =
-            visibleChannelHeights[rowIndex] ?? channelHeights[visibleChannelIndex];
-        });
-      }
+      const frozen = freezeVisibleRowHeights(session);
+      const channelHeights = frozen.channelHeights;
       const sourceHeight =
         channelHeights[channelIndex] ??
         visibleChannelHeights[visibleChannelIndexes.indexOf(channelIndex)] ??
@@ -4948,6 +5085,7 @@ export default function App() {
       });
       return {
         ...session,
+        ...frozen,
         channelHeights,
         manualChannelLayout: true,
         message: statusT("channelHeightsMatched"),
@@ -4957,9 +5095,15 @@ export default function App() {
 
   function fitAllRowsToWindowHeight() {
     if (!activeSession) return;
+    const scroller = graphScrollerRef.current;
+    if (scroller) {
+      setGraphViewportHeight(Math.max(0, Math.floor(scroller.clientHeight)));
+      scroller.scrollTop = 0;
+    }
     updateSession(activeSession.id, (session) => ({
       ...session,
       manualChannelLayout: false,
+      graphScrollTop: 0,
       message: statusT("rowsFitToWindow"),
     }));
   }
@@ -4970,6 +5114,7 @@ export default function App() {
       const autoLayout = session.manualChannelLayout;
       return {
         ...session,
+        ...(!autoLayout ? freezeVisibleRowHeights(session) : {}),
         manualChannelLayout: !autoLayout,
         message: autoLayout ? "Auto Layout enabled" : "Auto Layout disabled",
       };
@@ -6226,21 +6371,22 @@ export default function App() {
                         height={visibleChannelHeights[rowIndex]}
                         key={channelIndex}
                         onResize={(height) => setChannelHeight(channelIndex, height)}
-                        top={saleaeChannelResizeHandleTop(visibleOuterRowHeights, rowIndex)}
+                        top={Math.min(graphContentHeight - SALEAE_ROW_V2_SPACING_PX,
+                          saleaeChannelResizeHandleTop(visibleOuterRowHeights, rowIndex))}
                       />
                     ))}
                     {visibleAnalogChannelEntries.map(({ index, settings }, rowIndex) => (
                       <ChannelResizeHandle
                         channelIndex={index}
-                        height={settings.height}
+                        height={visibleAnalogRowHeights[rowIndex]}
                         key={`analog-resize-${index}`}
                         label={`A${index}`}
                         minHeight={ANALOG_ROW_MIN_HEIGHT_PX}
                         onResize={(height) => updateAnalogChannel(index, { height })}
-                        top={saleaeChannelResizeHandleTop(
+                        top={Math.min(graphContentHeight - SALEAE_ROW_V2_SPACING_PX, saleaeChannelResizeHandleTop(
                           allVisibleRowHeights,
                           visibleOuterRowHeights.length + rowIndex,
-                        )}
+                        ))}
                       />
                     ))}
                   </div>

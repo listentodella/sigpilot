@@ -14,6 +14,40 @@ export function makeSaleaeDigitalRowHeights(channelCount = 32, existing: number[
   );
 }
 
+/** Allocate the visible height after reserving decoder strips and row gaps.
+ * Minimums may require scrolling; oversized stored/manual heights do not.
+ */
+export function fitChannelRowsToViewport(
+  availableHeight: number,
+  rows: { minHeight: number; maxHeight?: number; topInset?: number }[],
+) {
+  if (!rows.length) return [];
+  let remaining = Math.max(0, availableHeight - SALEAE_ROW_V2_CONTAINER_PADDING_PX
+    - SALEAE_ROW_V2_SPACING_PX * (rows.length - 1)
+    - rows.reduce((sum, row) => sum + (row.topInset ?? 0), 0));
+  const heights = rows.map(() => 0);
+  let pending = rows.map((_, index) => index);
+  // Satisfy larger minimums first, then distribute the rest evenly. Caps may
+  // leave spare room when only a few digital channels are visible.
+  while (pending.length) {
+    const share = remaining / pending.length;
+    const belowMinimum = pending.filter((index) => rows[index].minHeight > share);
+    const fixed = belowMinimum.length ? belowMinimum
+      : pending.filter((index) => (rows[index].maxHeight ?? Infinity) < share);
+    if (!fixed.length) {
+      for (const index of pending) heights[index] = Math.floor(share);
+      break;
+    }
+    for (const index of fixed) {
+      heights[index] = belowMinimum.length ? rows[index].minHeight : rows[index].maxHeight!;
+      remaining -= heights[index];
+    }
+    const fixedSet = new Set(fixed);
+    pending = pending.filter((index) => !fixedSet.has(index));
+  }
+  return heights;
+}
+
 export function fitSaleaeDigitalRowsToViewport({
   availableHeight,
   channelIndexes,
@@ -36,22 +70,13 @@ export function fitSaleaeDigitalRowsToViewport({
     );
   }
 
-  const rowsAreaHeight = Math.max(
-    0,
-    availableHeight -
-      SALEAE_ROW_V2_CONTAINER_PADDING_PX -
-      SALEAE_ROW_V2_SPACING_PX * Math.max(channelIndexes.length - 1, 0),
-  );
-  const desiredHeight = Math.max(
-    SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX,
-    Math.floor(rowsAreaHeight / channelIndexes.length),
-  );
   const maximumHeight = Math.max(
     SALEAE_DIGITAL_ROW_AUTOSIZE_MAX_PX,
     availableHeight * SALEAE_DIGITAL_ROW_AUTOSIZE_MAX_PERCENT,
   );
-  const fittedHeight = Math.min(desiredHeight, maximumHeight);
-  return channelIndexes.map(() => fittedHeight);
+  return fitChannelRowsToViewport(availableHeight, channelIndexes.map(() => ({
+    minHeight: SALEAE_DIGITAL_ROW_V2_MIN_HEIGHT_PX, maxHeight: maximumHeight,
+  })));
 }
 
 export function saleaeChannelContentHeight(rowHeights: number[]) {

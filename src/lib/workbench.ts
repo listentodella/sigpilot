@@ -77,7 +77,38 @@ export interface AnnotationResult {
   deleted_ids: string[];
 }
 
+export type ChannelLayoutAction = { mode: "fit" } | { mode: "manual"; rows: { channel: number; height_px: number }[] };
+export interface ChannelLayoutCommand {
+  command_id: string;
+  request_id: string;
+  action: ChannelLayoutAction;
+}
+export interface ChannelLayout {
+  automatic: boolean;
+  viewport_height_px: number;
+  content_height_px: number;
+  scroll_top_px: number;
+  rows: { channel: number; height_px: number; top_inset_px: number; visible: boolean }[];
+}
+export interface ChannelLayoutStatus {
+  capture: CaptureRef;
+  layout: ChannelLayout | null;
+  pending: ChannelLayoutCommand | null;
+  last_applied_command_id: string | null;
+}
+export function readChannelLayout(capture: CaptureRef): Promise<ChannelLayoutStatus> {
+  const { session_id, capture_id, data_revision } = capture;
+  return invoke("workbench_channel_layout", { capture: { session_id, capture_id, data_revision } });
+}
+export function reportChannelLayout(capture: CaptureRef, layout: ChannelLayout, appliedCommandId?: string): Promise<ChannelLayoutStatus> {
+  const { session_id, capture_id, data_revision } = capture;
+  return invoke("workbench_report_channel_layout", { request: {
+    capture: { session_id, capture_id, data_revision }, layout, applied_command_id: appliedCommandId,
+  } });
+}
+
 export type WorkbenchEvent =
+  | { kind: "channel_layout_requested"; capture: CaptureRef; command: ChannelLayoutCommand }
   | { kind: "results_changed"; capture: CaptureRef; result_revision: string }
   | { kind: "analyzers_changed"; capture: CaptureRef; config_revision: string }
   | { kind: "annotations_changed"; result: AnnotationResult }

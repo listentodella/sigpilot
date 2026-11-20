@@ -2715,6 +2715,8 @@ fn main() {
             sigrok_decoder_catalog,
             release_graph_session,
             mcp::workbench_snapshot,
+            mcp::workbench_channel_layout,
+            mcp::workbench_report_channel_layout,
             mcp::workbench_replace_analyzers,
             mcp::workbench_apply_annotations,
             mcp::workbench_undo_annotations,

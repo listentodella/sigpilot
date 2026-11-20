@@ -101,6 +101,28 @@ pub fn workbench_snapshot(
 }
 
 #[tauri::command]
+pub fn workbench_channel_layout(
+    capture: sigpilot_workbench::CaptureRef,
+    state: State<'_, AppState>,
+) -> CommandResult<sigpilot_workbench::layout::ChannelLayoutStatus> {
+    state
+        .workbench
+        .get_channel_layout(&capture)
+        .map_err(to_string)
+}
+
+#[tauri::command]
+pub fn workbench_report_channel_layout(
+    request: sigpilot_workbench::layout::ReportChannelLayoutRequest,
+    state: State<'_, AppState>,
+) -> CommandResult<sigpilot_workbench::layout::ChannelLayoutStatus> {
+    state
+        .workbench
+        .report_channel_layout(&request)
+        .map_err(to_string)
+}
+
+#[tauri::command]
 pub fn workbench_apply_annotations(
     request: ApplyAnnotationsRequest,
     state: State<'_, AppState>,

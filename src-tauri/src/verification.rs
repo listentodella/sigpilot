@@ -26,6 +26,19 @@ pub fn on_page_load(webview: &tauri::Webview, payload: &tauri::webview::PageLoad
             );
         }
         let script = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if std::env::var_os("SIGPILOT_VERIFY_VISIBLE").is_some() {
+            // Explicit QA windows may otherwise stay on another macOS Space
+            // and never paint. This affects only the isolated debug launch.
+            webview
+                .window()
+                .set_visible_on_all_workspaces(true)
+                .map_err(|e| e.to_string())?;
+            webview
+                .window()
+                .set_always_on_top(true)
+                .map_err(|e| e.to_string())?;
+            webview.window().show().map_err(|e| e.to_string())?;
+        }
         // A background WKWebView can defer paints/animation frames. The explicit
         // local verification launch needs a visible, focused window for UI QA.
         webview.window().set_focus().map_err(|e| e.to_string())?;

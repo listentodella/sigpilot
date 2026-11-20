@@ -5819,15 +5819,17 @@ body.timing-marker-col-resize * {
 
 .timingMarkerEditPopup {
   width: 250px;
+  max-width: calc(100vw - 16px);
   position: absolute;
   z-index: 40;
   display: flex;
   flex-direction: column;
-  border-radius: 3px;
+  border: 1px solid var(--border-20);
+  border-radius: 4px;
   color: var(--on-background-10);
   background: var(--background-20);
   box-shadow: 0 0 5px rgba(0, 0, 0, 0.2);
-  padding: 16px 20px;
+  padding: 12px;
   cursor: move;
   pointer-events: auto;
   touch-action: none;
@@ -5850,6 +5852,7 @@ body.timing-marker-col-resize * {
   padding: 0;
   font: inherit;
   font-size: 13px;
+  line-height: 18px;
   outline: 0;
   cursor: auto;
 }
@@ -5860,57 +5863,93 @@ body.timing-marker-col-resize * {
 
 .timingMarkerEditFooter {
   min-width: 0;
-  height: 20px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   margin-top: 8px;
   cursor: auto;
 }
 
 .timingMarkerColorChoices {
-  height: 20px;
+  height: 24px;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 4px;
 }
 
 .timingMarkerColorChoices button {
-  width: 16px;
-  height: 16px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 24px;
   display: inline-flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
+  border-radius: 3px;
   color: inherit;
   background: transparent;
   padding: 0;
   cursor: pointer;
 }
 
+.timingMarkerColorChoices button:hover,
 .timingMarkerColorChoices button.selected {
-  width: 20px;
-  height: 20px;
+  background: var(--hover-background);
 }
 
 .timingMarkerColorChoices svg {
-  width: 100%;
-  height: 100%;
+  width: 16px;
+  height: 18px;
 }
 
-.timingMarkerEditDelete {
-  width: 18px;
-  height: 20px;
+.timingMarkerEditActions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.timingMarkerEditDelete,
+.timingMarkerEditSave {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--on-background-20);
   background: transparent;
+  border-radius: 3px;
   padding: 0;
   cursor: pointer;
 }
 
-.timingMarkerEditDelete:hover {
+.timingMarkerEditSave {
+  color: var(--lightBlue);
+  background: rgba(var(--lightBlue-base), 0.1);
+}
+
+.timingMarkerEditDelete:hover,
+.timingMarkerEditSave:hover {
   color: var(--on-background-0);
+  background: var(--hover-background);
+}
+
+.timingMarkerEditFooter button:focus-visible,
+.timingMarkerHeaderActions button:focus-visible {
+  outline: 1px solid var(--lightBlue);
+  outline-offset: 2px;
+}
+
+.timingMarkerHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.timingMarkerHeaderActions .sidebarCircleButton {
+  flex: 0 0 24px;
+  padding: 0;
 }
 
 .timingMarkersSidebarPanel {
@@ -6222,6 +6261,7 @@ body.timing-marker-col-resize * {
 }
 
 .sidebarTimingMarkerEditPopup {
+  max-width: calc(100% - 10px);
   margin: 0;
 }
 
