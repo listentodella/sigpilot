@@ -1281,36 +1281,63 @@ fn demo_uart_level(
     sample_rate_hz: u64,
     settings: &UartDecodeSettings,
 ) -> Option<bool> {
+    use crate::decode::{UartParity, UartStopBits};
     const MESSAGE: &[u8] = b"SigPilot demo\n";
-    const LEAD_IDLE_BITS: u64 = 4;
-    const TRAIL_IDLE_BITS: u64 = 8;
+    const LEAD_IDLE_QUARTERS: u64 = 4 * 4;
+    const TRAIL_IDLE_QUARTERS: u64 = 8 * 4;
 
-    let bit_period = sample_rate_hz / u64::from(settings.baud_rate.max(1));
-    if bit_period < 8 {
+    if settings.baud_rate == 0
+        || sample_rate_hz / u64::from(settings.baud_rate) < 8
+        || !(5..=9).contains(&settings.data_bits)
+    {
         return None;
     }
-
-    let bit_index = sample_index / bit_period;
-    let cycle_bits = LEAD_IDLE_BITS + MESSAGE.len() as u64 * 10 + TRAIL_IDLE_BITS;
-    let cycle_bit = bit_index % cycle_bits;
-    if cycle_bit < LEAD_IDLE_BITS {
-        return Some(true);
-    }
-    let message_bit = cycle_bit - LEAD_IDLE_BITS;
-    if message_bit >= MESSAGE.len() as u64 * 10 {
-        return Some(true);
-    }
-
-    let frame_index = message_bit / 10;
-    let frame_bit = message_bit % 10;
-    let byte = MESSAGE.get(frame_index as usize)?;
-    let level = match frame_bit {
-        0 => Some(false),
-        1..=8 => Some((byte >> (frame_bit - 1)) & 1 != 0),
-        9 => Some(true),
-        _ => Some(true),
-    }?;
-    Some(level != settings.inverted)
+    let parity_quarters = u64::from(settings.parity != UartParity::None) * 4;
+    let stop_quarters = match settings.stop_bits {
+        UartStopBits::One => 4,
+        UartStopBits::OnePointFive => 6,
+        UartStopBits::Two => 8,
+    };
+    let frame_quarters = 4 + u64::from(settings.data_bits) * 4 + parity_quarters + stop_quarters;
+    let cycle_quarters =
+        LEAD_IDLE_QUARTERS + MESSAGE.len() as u64 * frame_quarters + TRAIL_IDLE_QUARTERS;
+    // Rational phase avoids the cumulative baud error of rate / baud rounded
+    // to an integer sample period (e.g. 1 MHz / 115200 baud is not 8 samples).
+    let phase = ((u128::from(sample_index) * u128::from(settings.baud_rate) * 4
+        / u128::from(sample_rate_hz))
+        % u128::from(cycle_quarters)) as u64;
+    let logical = if phase < LEAD_IDLE_QUARTERS
+        || phase >= LEAD_IDLE_QUARTERS + MESSAGE.len() as u64 * frame_quarters
+    {
+        true
+    } else {
+        let message_phase = phase - LEAD_IDLE_QUARTERS;
+        let byte = u16::from(MESSAGE[(message_phase / frame_quarters) as usize])
+            & ((1u16 << settings.data_bits) - 1);
+        let frame_phase = message_phase % frame_quarters;
+        if frame_phase < 4 {
+            false
+        } else if frame_phase < 4 + u64::from(settings.data_bits) * 4 {
+            let wire_bit = ((frame_phase - 4) / 4) as u8;
+            let bit = if settings.msb_first {
+                settings.data_bits - 1 - wire_bit
+            } else {
+                wire_bit
+            };
+            byte & (1 << bit) != 0
+        } else if frame_phase < 4 + u64::from(settings.data_bits) * 4 + parity_quarters {
+            let odd = byte.count_ones() % 2 != 0;
+            if settings.parity == UartParity::Even {
+                odd
+            } else {
+                !odd
+            }
+        } else {
+            true
+        }
+    };
+    // Idle, start, data, parity and stop must all use the same inversion.
+    Some(logical != settings.inverted)
 }
 
 fn demo_i2c_level(
@@ -1355,9 +1382,13 @@ fn demo_spi_level(
     role: DemoSpiRole,
 ) -> bool {
     let half_period = (sample_rate_hz / 2_000_000).max(2);
-    let transfer_half_periods = u64::from(settings.bits_per_transfer.max(1)) * 2 + 4;
+    let bits = settings.bits_per_transfer.clamp(1, 64);
+    let transfer_half_periods = u64::from(bits) * 2 + 4;
     let phase = (sample_index / half_period) % transfer_half_periods;
-    let active = (2..transfer_half_periods - 2).contains(&phase);
+    // CPHA=1 samples the trailing edge, so CS must remain asserted for the
+    // final return-to-idle edge, one half-period later than CPHA=0.
+    let phase_shift = u64::from(settings.clock_phase);
+    let active = (2..transfer_half_periods - 2 + phase_shift).contains(&phase);
     if matches!(role, DemoSpiRole::Enable) {
         return active != settings.enable_active_low;
     }
@@ -1368,17 +1399,19 @@ fn demo_spi_level(
     if !active {
         return false;
     }
-    let wire_bit = ((phase - 2) / 2).min(u64::from(settings.bits_per_transfer - 1));
+    // CPHA=0 changes data before the leading edge; CPHA=1 changes it on
+    // that edge and keeps it stable until the following trailing edge.
+    let wire_bit = ((phase - 2).saturating_sub(phase_shift) / 2).min(u64::from(bits - 1));
     let bit_index = if settings.msb_first {
-        u64::from(settings.bits_per_transfer - 1) - wire_bit
+        u64::from(bits - 1) - wire_bit
     } else {
         wire_bit
     };
     let word_index = (sample_index / (half_period * transfer_half_periods)) as u64;
-    let mask = if settings.bits_per_transfer >= 64 {
+    let mask = if bits >= 64 {
         u64::MAX
     } else {
-        (1u64 << settings.bits_per_transfer) - 1
+        (1u64 << bits) - 1
     };
     let mosi = (0x4c + word_index) & mask;
     let value = if matches!(role, DemoSpiRole::Mosi) {

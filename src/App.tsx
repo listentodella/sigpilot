@@ -240,6 +240,12 @@ import {
   WaveformTile,
 } from "./lib/api";
 import { formatBytes, formatRate, formatSamples } from "./lib/format";
+import { ProtocolTriggerPanel } from "./components/ProtocolTriggerPanel";
+import { mcpCaptureAnalyzers, type McpCaptureStartedEvent, type McpCaptureFinishedEvent } from "./lib/mcpCapture";
+import {
+  buildProtocolTrigger, defaultProtocolTrigger, ProtocolTriggerValidationError,
+  type ProtocolTriggerConfig, type UiAnalyzerTriggerState,
+} from "./lib/protocolTrigger";
 import { formatLogEntries, logSnapshot, setLogLevel, setLogModuleLevels, setPaused } from "./lib/logger";
 import {
   ChannelDeleteDataMode,
@@ -455,14 +461,6 @@ interface CaptureMemoryUpdatedEvent {
 interface CaptureTriggeredEvent {
   session_id: string;
   trigger: CaptureTriggerMetadata;
-}
-
-interface UiAnalyzerTriggerState {
-  analyzerId: string;
-  enabled: boolean;
-  expanded: boolean;
-  holdoffSeconds: number;
-  query: string;
 }
 
 interface AnalyzerEditState {
@@ -1055,7 +1053,9 @@ function applyLiveCaptureSummary(session: UiSession, summary: CaptureSummary): U
     viewportStart: viewport.start,
     viewportSamples: viewport.samples,
     viewportMaxSamples: session.viewportMaxSamples,
-    message: i18n.t("status:capturing"),
+    message: session.analyzerTrigger.enabled && session.busy
+      ? i18n.t(summary.metadata.trigger?.protocol ? "analyzers:protocolTriggerCollecting" : "analyzers:protocolTriggerWaiting")
+      : i18n.t("status:capturing"),
   };
 }
 
@@ -1155,7 +1155,9 @@ function applyCaptureTrigger(session: UiSession, trigger: CaptureTriggerMetadata
     isCaptureTrigger: true,
     isExpanded: false,
     label: "Trigger",
-    note: `D${trigger.channel} ${trigger.kind.toLowerCase()} edge`,
+    note: trigger.protocol
+      ? i18n.t("analyzers:protocolTriggerMarker", { protocol: trigger.protocol, channel: trigger.channel })
+      : `D${trigger.channel} ${trigger.kind?.toLowerCase() ?? ""} edge`,
     sample: Math.max(0, Math.round(trigger.sample_index)),
     selected: false,
     type: "single" as const,
@@ -1169,7 +1171,9 @@ function applyCaptureTrigger(session: UiSession, trigger: CaptureTriggerMetadata
         }
       : session.summary,
     timingMarkers: [...session.timingMarkers.filter((marker) => !marker.isCaptureTrigger), triggerMarker],
-    message: `Triggered on D${trigger.channel} (${trigger.kind})`,
+    message: trigger.protocol
+      ? i18n.t("analyzers:protocolTriggerMatchedLive", { protocol: trigger.protocol })
+      : `Triggered on D${trigger.channel} (${trigger.kind})`,
   };
 }
 
@@ -1469,13 +1473,11 @@ function makeSession(id: string, name: string, deviceId: string, source?: UiSess
         }))
       : [],
     analyzerDataPane: "table",
-    analyzerTrigger: {
-      analyzerId: "",
-      enabled: false,
-      expanded: false,
-      holdoffSeconds: 0.1,
-      query: "",
-    },
+    analyzerTrigger: source ? {
+      ...source.analyzerTrigger,
+      analyzerId: source.analyzers.some((analyzer) => analyzer.id === source.analyzerTrigger.analyzerId)
+        ? `${id}-analyzer-${source.analyzers.findIndex((analyzer) => analyzer.id === source.analyzerTrigger.analyzerId)}` : "",
+    } : defaultProtocolTrigger(),
     rangePlacement: null,
     rangeMeasurements: [],
     timingMarkerPlacement: null,
@@ -1633,6 +1635,7 @@ export default function App() {
   const sessionsRef = useRef<UiSession[]>([]);
   const activeSessionIdRef = useRef<string | null>(null);
   const captureSessionRef = useRef<string | null>(null);
+  const mcpCaptureSessionsRef = useRef(new Set<string>());
   const pendingCaptureUiRef = useRef(new Map<string, PendingCaptureUiUpdate>());
   const captureUiFrameRef = useRef<number | null>(null);
   const sidebarShortcutRef = useRef<{ prefix: "m" | "n" | null; timeout: number | null }>({
@@ -1658,6 +1661,8 @@ export default function App() {
   const sessionCounter = useRef(1);
   const preparingDeviceIdsRef = useRef(new Set<string>());
   const screenshotInProgressRef = useRef(false);
+  const devicesRef = useRef(devices);
+  devicesRef.current = devices;
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
 
@@ -2092,7 +2097,9 @@ export default function App() {
       setSessions((current) =>
         current.map((session) => {
           const next = updates.get(session.id);
-          if (!next) return session;
+          // The publisher can deliver a last live batch after completion. It
+          // must not replace the final protocol-trigger crop with full history.
+          if (!next || !session.busy) return session;
           let updated = session;
           if (next.progress) {
             const indexBytes = updated.memoryUsage?.index_bytes ?? 0;
@@ -2300,6 +2307,71 @@ export default function App() {
   useEffect(() => {
     if (!isTauriRuntime()) return;
     const subscriptions = [
+      listen<McpCaptureStartedEvent>("mcp_capture_started", (event) => {
+        const { session_id: sessionId, settings, analyzers } = event.payload;
+        if (mcpCaptureSessionsRef.current.has(sessionId)) return;
+        mcpCaptureSessionsRef.current.add(sessionId);
+        captureSessionRef.current = sessionId;
+        const device = devicesRef.current.find((item) => item.id === settings.device_id);
+        const deviceName = device?.product?.trim() || device?.label || settings.device_id;
+        const session = makeSession(sessionId, `${i18n.t("advanced:mcpCaptureTab")} · ${deviceName}`, settings.device_id);
+        session.settings = settings;
+        session.busy = true;
+        session.message = i18n.t("advanced:mcpCaptureStarted");
+        session.analyzers = mcpCaptureAnalyzers(sessionId, analyzers);
+        session.channelLabels = channelLabelsForCount(settings.channel_count);
+        session.deviceSettings = {
+          ...session.deviceSettings,
+          bufferSizeMb: settings.buffer_size_mb,
+          captureMode: settings.trigger_enabled ? "Trigger" : settings.mode === "Stream" ? "FreeRun" : "Timer",
+          digitalChannels: Array.from({ length: 32 }, (_, channel) => channel < settings.channel_count &&
+            (settings.enabled_channels.length === 0 || settings.enabled_channels.includes(channel))),
+          clockNegedge: settings.clock_edge,
+          externalTriggerMode: settings.external_trigger_mode,
+          glitchFilterEnabled: settings.glitch_filter_enabled,
+          triggerChannel: settings.trigger_channel,
+          triggerOutEnabled: settings.trigger_out_enabled,
+          triggerEdge: settings.trigger_kind === "Falling" ? "Falling Edge" : settings.trigger_kind === "High" ? "High Pulse" : settings.trigger_kind === "Low" ? "Low Pulse" : "Rising Edge",
+          singleShotPreTriggerMs: settings.duration_ms * settings.trigger_position_percent / 100,
+          singleShotPostTriggerMs: settings.duration_ms * (100 - settings.trigger_position_percent) / 100,
+        };
+        setSessions((current) => current.some((item) => item.id === sessionId) ? current : [...current, session]);
+        setActiveSessionId(sessionId);
+        setDraftSelectedDevice(settings.device_id);
+      }).catch(() => () => {}),
+      listen<McpCaptureFinishedEvent>("mcp_capture_finished", (event) => {
+        const { session_id: sessionId, summary, error } = event.payload;
+        if (!mcpCaptureSessionsRef.current.has(sessionId)) return;
+        pendingCaptureUiRef.current.delete(sessionId);
+        updateSession(sessionId, (session) => {
+          if (!summary) return { ...session, busy: false, readOnly: true, message: error ?? i18n.t("advanced:mcpCaptureFinished") };
+          let completed = applyLiveCaptureSummary(session, summary);
+          if (summary.metadata.trigger) completed = applyCaptureTrigger(completed, summary.metadata.trigger);
+          return {
+            ...completed,
+            ...completedCaptureViewport(session, summary, preferencesRef.current.panToTrigger),
+            busy: false,
+            readOnly: true,
+            tile: null,
+            cursorState: { ...defaultCursorState(summary.metadata.sample_count, summary.metadata.channel_count), visible: session.cursorState.visible },
+            message: error ?? (summary.protocol_trigger
+              ? i18n.t(`analyzers:protocolTriggerResult.${summary.protocol_trigger.status}`) +
+                (summary.protocol_trigger.trigger_sample !== null && !summary.protocol_trigger.pre_trigger_complete
+                  ? ` ${i18n.t("analyzers:protocolTriggerShortPre")}` : "")
+              : i18n.t("advanced:mcpCaptureFinished")),
+          };
+        });
+        if (captureSessionRef.current === sessionId) captureSessionRef.current = null;
+      }).catch(() => () => {}),
+      listen<{ session_id: string }>("mcp_capture_released", (event) => {
+        const sessionId = event.payload.session_id;
+        if (!mcpCaptureSessionsRef.current.delete(sessionId)) return;
+        pendingCaptureUiRef.current.delete(sessionId);
+        const remaining = sessionsRef.current.filter((session) => session.id !== sessionId);
+        setSessions((current) => current.filter((session) => session.id !== sessionId));
+        setActiveSessionId((current) => current === sessionId ? remaining[remaining.length - 1]?.id ?? null : current);
+        if (captureSessionRef.current === sessionId) captureSessionRef.current = null;
+      }).catch(() => () => {}),
       listen<CaptureProgress>("capture_progress", (event) => {
         const targetId = captureSessionRef.current;
         if (!targetId) return;
@@ -2315,7 +2387,9 @@ export default function App() {
       }).catch(() => () => {}),
       listen<CaptureTriggeredEvent>("capture_triggered", (event) => {
         const { session_id: sessionId, trigger } = event.payload;
-        updateSession(sessionId, (session) => applyCaptureTrigger(session, trigger));
+        // Live notifications use the original acquisition coordinates. Once
+        // finalized, the summary owns the trigger's cropped coordinates.
+        updateSession(sessionId, (session) => session.busy ? applyCaptureTrigger(session, trigger) : session);
       }).catch(() => () => {}),
       listen<CaptureSummary>("capture_completed", (event) => {
         const targetId = captureSessionRef.current;
@@ -3514,6 +3588,13 @@ export default function App() {
   ]);
 
   async function runCaptureForSession(session: UiSession, deviceId: string) {
+    if (captureSessionRef.current || sessionsRef.current.some((current) => current.busy)) {
+      updateSession(session.id, (current) => ({
+        ...current,
+        message: i18n.t("advanced:mcpCaptureBusy"),
+      }));
+      return;
+    }
     if (session.readOnly) {
       updateSession(session.id, (current) => ({
         ...current,
@@ -3540,6 +3621,15 @@ export default function App() {
         ...current,
         message: statusT("enableChannelFirst"),
       }));
+      return;
+    }
+    let protocolTrigger: ProtocolTriggerConfig | undefined;
+    try {
+      protocolTrigger = buildProtocolTrigger(session.analyzerTrigger, session.analyzers, nextSettings, isTauriRuntime());
+    } catch (error) {
+      const message = error instanceof ProtocolTriggerValidationError
+        ? i18n.t(`analyzers:protocolTriggerError.${error.code}`) : String(error);
+      updateSession(session.id, (current) => ({ ...current, message }));
       return;
     }
     captureSessionRef.current = session.id;
@@ -3595,7 +3685,7 @@ export default function App() {
         highlightedFrameIndex: null,
       })),
       diagnostics: [],
-      message:
+      message: protocolTrigger ? i18n.t("analyzers:protocolTriggerWaiting") :
         nextSettings.trigger_enabled && captureDevice?.kind === "Usb"
           ? statusT("preparingTrigger", {
             channel: nextSettings.trigger_channel,
@@ -3623,10 +3713,11 @@ export default function App() {
             queueCaptureUiUpdate(session.id, { summary });
           },
           onTrigger: (trigger) => {
-            updateSession(session.id, (current) => applyCaptureTrigger(current, trigger));
+            updateSession(session.id, (current) => current.busy ? applyCaptureTrigger(current, trigger) : current);
           },
         },
         demoAnalyzers,
+        protocolTrigger,
       );
       pendingCaptureUiRef.current.delete(session.id);
       updateSession(session.id, (current) => {
@@ -3636,7 +3727,9 @@ export default function App() {
           preferencesRef.current.panToTrigger,
         );
         return {
-          ...applyLiveCaptureSummary(current, next),
+          ...(next.metadata.trigger
+            ? applyCaptureTrigger(applyLiveCaptureSummary(current, next), next.metadata.trigger)
+            : applyLiveCaptureSummary(current, next)),
           ...completedViewport,
           cursorState: {
             ...defaultCursorState(next.metadata.sample_count, next.metadata.channel_count),
@@ -3660,7 +3753,11 @@ export default function App() {
             decodeProgress: 0,
             highlightedFrameIndex: null,
           })),
-          message: statusT("captureComplete"),
+          message: next.protocol_trigger
+            ? i18n.t(`analyzers:protocolTriggerResult.${next.protocol_trigger.status}`) +
+              (next.protocol_trigger.trigger_sample !== null && !next.protocol_trigger.pre_trigger_complete
+                ? ` ${i18n.t("analyzers:protocolTriggerShortPre")}` : "")
+            : statusT("captureComplete"),
         };
       });
     } catch (error) {
@@ -5501,6 +5598,7 @@ export default function App() {
     const nextSessions = sessions.filter((session) => session.id !== sessionId);
     const targetIndex = sessions.findIndex((session) => session.id === sessionId);
     void releaseGraphSession(sessionId);
+    mcpCaptureSessionsRef.current.delete(sessionId);
     setSessions(nextSessions);
     if (activeSessionId === sessionId) {
       const nextActive = nextSessions[Math.min(targetIndex, nextSessions.length - 1)] ?? null;
@@ -11761,91 +11859,16 @@ function safeExportFileName(value: string) {
   return value.replace(/[<>:"/\\|?*\x00-\x1f]+/g, "_").trim() || "analyzer";
 }
 
-function AnalyzerTriggerView({
-  onUpdateSession,
-  session,
-}: {
+function AnalyzerTriggerView({ onUpdateSession, session }: {
   onUpdateSession: (updater: (session: UiSession) => UiSession) => void;
   session: UiSession;
 }) {
-  const { t: analyzerT } = useTranslation("analyzers");
-  const trigger = session.analyzerTrigger;
-  const selectedAnalyzer = session.analyzers.find((analyzer) => analyzer.id === trigger.analyzerId);
-
-  function updateTrigger(patch: Partial<UiAnalyzerTriggerState>) {
-    onUpdateSession((current) => ({
-      ...current,
-      analyzerTrigger: { ...current.analyzerTrigger, ...patch },
-    }));
-  }
-
-  return (
-    <section className={`analyzerTriggerView ${trigger.expanded ? "expanded" : ""}`}>
-      <div className="analyzerTriggerHeader">
-        <button
-          aria-expanded={trigger.expanded}
-          className="analyzerTriggerExpandButton"
-          onClick={() => updateTrigger({ expanded: !trigger.expanded })}
-          type="button"
-        >
-          <ChevronRight size={11} />
-          <strong>{analyzerT("triggerView")}</strong>
-          <Activity
-            aria-label={analyzerT("experimental")}
-            data-help-tooltip={analyzerT("experimentalHint")}
-            size={11}
-          />
-        </button>
-        <span
-          className="saleaeSwitch analyzerTriggerSwitch"
-          data-help-tooltip={analyzerT("triggerUnavailableHint")}
-        >
-          <input aria-label={analyzerT("enableAnalyzerTrigger")} checked={false} disabled readOnly type="checkbox" />
-          <span className="saleaeSwitchTrack">
-            <span className="saleaeSwitchHandle" />
-          </span>
-        </span>
-      </div>
-      <div className="analyzerTriggerBody" aria-hidden={!trigger.expanded}>
-        <label className="stack-field">
-          <span>{analyzerT("analyzer")}</span>
-          <select
-            disabled={session.analyzers.length === 0}
-            onChange={(event) => updateTrigger({ analyzerId: event.target.value })}
-            value={selectedAnalyzer?.id ?? ""}
-          >
-            <option value="">{analyzerT("selectAnalyzer")}</option>
-            {session.analyzers.map((analyzer) => (
-              <option key={analyzer.id} value={analyzer.id}>{analyzer.name}</option>
-            ))}
-          </select>
-        </label>
-        <div className="analyzerTriggerQueryGrid">
-          <label className="stack-field">
-            <span>{analyzerT("query")}</span>
-            <input
-              disabled
-              onChange={(event) => updateTrigger({ query: event.target.value })}
-              placeholder={analyzerT("queryPlaceholder")}
-              type="text"
-              value={trigger.query}
-            />
-          </label>
-          <label className="stack-field">
-            <span>{analyzerT("holdoff")}</span>
-            <input
-              disabled
-              min={0.1}
-              onChange={(event) => updateTrigger({ holdoffSeconds: Number(event.target.value) })}
-              step={0.1}
-              type="number"
-              value={trigger.holdoffSeconds}
-            />
-          </label>
-        </div>
-      </div>
-    </section>
-  );
+  return <ProtocolTriggerPanel state={session.analyzerTrigger} analyzers={session.analyzers}
+    settings={settingsFromDeviceSettings(session, session.selectedDevice)} desktop={isTauriRuntime()}
+    disabled={session.busy || session.readOnly}
+    onChange={(patch) => onUpdateSession((current) => ({
+      ...current, analyzerTrigger: { ...current.analyzerTrigger, ...patch },
+    }))} />;
 }
 
 function HighlightedAnalyzerText({ query, text }: { query: string; text: string }) {

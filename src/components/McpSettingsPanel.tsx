@@ -11,6 +11,7 @@ export function McpSettingsPanel() {
   const { t } = useTranslation("advanced");
   const [setup, setSetup] = useState<McpSetupInfo | null>(null);
   const [canEdit, setCanEdit] = useState(false);
+  const [canCapture, setCanCapture] = useState(false);
   const [client, setClient] = useState("codex");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -23,6 +24,7 @@ export function McpSettingsPanel() {
   const config = setup?.configurations.find((c) => c.id === client);
   const ready = Boolean(desktop && setup?.supported && setup.status.enabled);
   const manualOnly = Boolean(config && !config.registration_command && !config.install_uri);
+  const testPrompt = t(canCapture ? "mcpCaptureTestPrompt" : "mcpTestPrompt");
 
   useEffect(() => {
     if (!desktop) return;
@@ -31,7 +33,7 @@ export function McpSettingsPanel() {
       try {
         const [next,auth] = await Promise.all([readMcpSetupInfo(),readMcpAuthorization()]);
         if (!active) return;
-        setSetup(next); setCanEdit(next.status.can_edit_annotations);
+        setSetup(next); setCanEdit(next.status.can_edit_annotations); setCanCapture(next.status.can_capture ?? false);
         setAuthorization(auth);
         setPort(previous=>previous||String(next.port));
         setCheck((previous) => previous?.instance_id === next.status.instance_id ? previous : null);
@@ -42,11 +44,11 @@ export function McpSettingsPanel() {
     return () => { active = false; clearInterval(timer); };
   }, [desktop]);
 
-  async function changeService(enabled: boolean, edit: boolean, nextPort?:number) {
+  async function changeService(enabled: boolean, edit: boolean, nextPort?:number, capture = canCapture) {
     setBusy(true); setError(""); setCheck(null);
     try {
-      await configureMcp(enabled, edit,nextPort);
-      setSetup(await readMcpSetupInfo()); setCanEdit(edit);
+      await configureMcp(enabled, edit,nextPort,capture);
+      setSetup(await readMcpSetupInfo()); setCanEdit(edit); setCanCapture(capture);
       setAuthorization(await readMcpAuthorization());
     } catch (e) {
       setError(String(e));
@@ -103,6 +105,8 @@ export function McpSettingsPanel() {
       </div>
       <label className="mcpPermission"><input id="mcp-annotations" type="checkbox" checked={canEdit} disabled={busy || !setup?.supported}
         onChange={(e) => void changeService(Boolean(setup?.status.enabled), e.target.checked)} /><span>{t("mcpAllowAnnotations")}<small>{t("mcpPermissionHint")}</small></span></label>
+      <label className="mcpPermission"><input id="mcp-capture" type="checkbox" checked={canCapture} disabled={busy || !setup?.supported}
+        onChange={(e) => void changeService(Boolean(setup?.status.enabled), canEdit, undefined, e.target.checked)} /><span>{t("mcpAllowCapture")}<small>{t("mcpCapturePermissionHint")}</small></span></label>
       <p className="mcpHint">{t("mcpPersistenceHint")}</p>
     </section>
     {setup?.auto_start_requested && !setup.status.enabled && <p className="mcpNotice" role="status">{t("mcpAutoStartFailed")}</p>}
@@ -136,9 +140,9 @@ export function McpSettingsPanel() {
     </section>
     <section className="mcpSetupCard">
       <h4 className="mcpStepHeading"><span>3</span>{t("mcpStepVerify")}</h4>
-      <p className="mcpHint">{t("mcpVerifyHint")}</p>
-      <button type="button" className="mcpPrimary" disabled={!ready || busy} onClick={() => void copy(t("mcpTestPrompt"), "prompt")}>{copyLabel("prompt", "mcpCopyPrompt")}</button>
-      <details className="mcpPromptDetails"><summary>{t("mcpTestPromptLabel")}</summary><textarea id="mcp-test-prompt" className="mcpConfig" readOnly value={t("mcpTestPrompt")} rows={5} /></details>
+      <p className="mcpHint">{t(canCapture ? "mcpCaptureVerifyHint" : "mcpVerifyHint")}</p>
+      <button type="button" className="mcpPrimary" disabled={!ready || busy} onClick={() => void copy(testPrompt, "prompt")}>{copyLabel("prompt", "mcpCopyPrompt")}</button>
+      <details className="mcpPromptDetails"><summary>{t("mcpTestPromptLabel")}</summary><textarea id="mcp-test-prompt" className="mcpConfig" readOnly value={testPrompt} rows={5} /></details>
       <button type="button" disabled={!ready || busy} onClick={() => void selfCheck()}><ShieldCheck size={13} />{t(busy ? "mcpWorking" : "mcpCheck")}</button>
       {check && <p role="status" className="mcpCheckSuccess">{t("mcpCheckPassed", { count: check.tool_count })}</p>}
     </section>

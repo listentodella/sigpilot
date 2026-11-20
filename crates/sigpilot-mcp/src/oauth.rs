@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     io,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tower::ServiceExt;
@@ -93,6 +93,7 @@ pub struct Authorization {
     directory: PathBuf,
     root: String,
     inner: Arc<Mutex<Runtime>>,
+    capture_service: Weak<crate::capture::CaptureService>,
 }
 
 #[derive(Serialize)]
@@ -132,12 +133,20 @@ impl Authorization {
         Ok(Self {
             directory,
             root,
+            capture_service: Weak::new(),
             inner: Arc::new(Mutex::new(Runtime {
                 saved,
                 pending: HashMap::new(),
                 codes: HashMap::new(),
             })),
         })
+    }
+    pub(crate) fn with_capture_service(
+        mut self,
+        service: &Arc<crate::capture::CaptureService>,
+    ) -> Self {
+        self.capture_service = Arc::downgrade(service);
+        self
     }
     fn save(&self, saved: &Saved) -> io::Result<()> {
         if serde_json::to_vec(saved)?.len() > 240 * 1024 {
@@ -220,6 +229,11 @@ impl Authorization {
         next.grants.retain(|g| g.refresh_expires > now());
         self.save(&next)?;
         data.saved = next;
+        drop(data);
+        // Release OAuth storage lock before entering acquisition state.
+        if let Some(service) = self.capture_service.upgrade() {
+            service.cancel_owner(&format!("http-client-{id}"));
+        }
         Ok(())
     }
     pub fn access_identity(&self, token: &str) -> Option<String> {
@@ -713,4 +727,115 @@ pub fn router(adapter: crate::McpAdapter, auth: Authorization, internal_token: S
 }
 async fn dispatch_handler(State(state): State<Dispatch>, request: Request<Body>) -> Response {
     dispatch(State(state), request).await
+}
+
+#[cfg(test)]
+mod capture_revoke_tests {
+    use super::*;
+    use crate::capture::{
+        CaptureController, CaptureFuture, CaptureService, CaptureState, StartCaptureRequest,
+    };
+    use sigpilot_core::{
+        protocol_trigger::ProtocolTriggerConfig, AnalyzerDecodeSettings, CaptureSettings,
+        DeviceInfo, HardwareCaptureCapabilities,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Controller(Arc<AtomicBool>);
+    impl CaptureController for Controller {
+        fn devices(&self) -> Result<Vec<DeviceInfo>, String> {
+            Ok(vec![])
+        }
+        fn capabilities(&self, id: &str) -> Result<HardwareCaptureCapabilities, String> {
+            Ok(sigpilot_core::generic_logic_capture_capabilities(
+                id, "test",
+            ))
+        }
+        fn start(
+            &self,
+            _id: String,
+            _settings: CaptureSettings,
+            _analyzers: Vec<AnalyzerDecodeSettings>,
+            _trigger: Option<ProtocolTriggerConfig>,
+        ) -> CaptureFuture {
+            let cancel = self.0.clone();
+            Box::pin(async move {
+                while !cancel.load(Ordering::Acquire) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Ok(json!({"cancelled":true}))
+            })
+        }
+        fn cancel(&self, _id: &str) -> Result<(), String> {
+            self.0.store(true, Ordering::Release);
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn oauth_revoke_http_route_cancels_owned_capture_without_ui() {
+        let directory =
+            std::env::temp_dir().join(format!("sigpilot-capture-revoke-{}", uuid::Uuid::new_v4()));
+        let workbench = Arc::new(sigpilot_workbench::WorkbenchService::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let service = CaptureService::new(
+            workbench.clone(),
+            Arc::new(Controller(cancel.clone())),
+            tokio::runtime::Handle::current(),
+        );
+        let auth = Authorization::open(directory.clone(), "http://127.0.0.1:10531".into())
+            .unwrap()
+            .with_capture_service(&service);
+        auth.inner.lock().unwrap().saved.grants.push(Grant {
+            id: "grant".into(),
+            client_id: "client".into(),
+            access_hash: hash("access-secret"),
+            refresh_hash: hash("refresh-secret"),
+            access_expires: now() + 600,
+            refresh_expires: now() + 600,
+        });
+        let mut adapter = crate::McpAdapter::new(workbench, vec![], false, "internal".into());
+        adapter.capture_service = Some(service.clone());
+        adapter.can_capture = true;
+        let router = router(adapter, auth.clone(), "x".repeat(64));
+        let request:StartCaptureRequest=serde_json::from_value(json!({"request_id":"revoke-test","device_id":sigpilot_core::FakeBackend::DEVICE_ID,"sample_rate_hz":"1000000","enabled_channels":[0],"mode":"stream","duration_ms":10,"buffer_size_mb":1,"timeout_ms":1000})).unwrap();
+        let job = service.start("http-client-grant", request).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/oauth/revoke")
+                    .header(header::HOST, "127.0.0.1:10531")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("client_id=client&token=refresh-secret"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(auth.access_identity("access-secret").is_none());
+        assert!(
+            service
+                .status("http-client-grant", &job.job_id)
+                .unwrap()
+                .cancel_requested
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if service
+                    .status("http-client-grant", &job.job_id)
+                    .unwrap()
+                    .state
+                    == CaptureState::Cancelled
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(cancel.load(Ordering::Acquire));
+        service.release("http-client-grant", &job.job_id).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }

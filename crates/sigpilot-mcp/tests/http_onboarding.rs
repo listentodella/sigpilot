@@ -144,6 +144,7 @@ async fn fixed_http_oauth_marker_restart_refresh_and_revoke() {
     let root = format!("http://127.0.0.1:{port}");
     let endpoint = format!("{root}/mcp");
     let prefs = Preferences {
+        can_capture: false,
         enabled: true,
         can_edit: true,
         port,

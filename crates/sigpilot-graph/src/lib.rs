@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod performance_self_test;
+pub mod protocol_trigger_capture;
 pub mod view_state;
 pub mod read_api;
 
@@ -7986,7 +7987,8 @@ mod tests {
         let trigger = CaptureTriggerMetadata {
             sample_index: 2_048,
             channel: 1,
-            kind: sigpilot_core::CaptureTriggerKind::Rising,
+            kind: Some(sigpilot_core::CaptureTriggerKind::Rising),
+            protocol: None,
         };
         session.set_trigger(trigger.clone()).unwrap();
         assert_eq!(session.metadata().unwrap().trigger, Some(trigger.clone()));

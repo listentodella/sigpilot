@@ -39,6 +39,7 @@ impl CaptureController for DesktopController {
                 id,
                 settings,
                 Some(demo),
+                None,
             )
             .await?;
             serde_json::to_value(summary).map_err(|e| e.to_string())

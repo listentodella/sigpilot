@@ -4654,15 +4654,14 @@ button:disabled {
 }
 
 .analyzerTriggerSwitch {
-  opacity: 0.42;
-  cursor: not-allowed;
+  cursor: pointer;
   transform: scale(0.78);
   transform-origin: right center;
 }
 
-.analyzerTriggerSwitch input {
-  cursor: not-allowed;
-}
+.analyzerTriggerSwitch input { cursor: pointer; }
+.analyzerTriggerSwitch:has(input:disabled) { opacity: 0.42; cursor: not-allowed; }
+.analyzerTriggerSwitch input:disabled { cursor: not-allowed; }
 
 .analyzerTriggerBody {
   max-height: 0;
@@ -4675,7 +4674,7 @@ button:disabled {
 }
 
 .analyzerTriggerView.expanded .analyzerTriggerBody {
-  max-height: 190px;
+  max-height: none;
   padding: 8px;
   opacity: 1;
 }
@@ -8679,3 +8678,13 @@ body.timing-marker-col-resize * {
 .mcpPort { display:flex; align-items:center; justify-content:space-between; margin:12px 0 8px; gap:8px; }
 .mcpPort input { width:90px; padding:6px; border:1px solid var(--border-20); border-radius:4px; background:var(--background-10); color:var(--on-background-0); }
 .mcpAuthorizedClient { display:flex; align-items:center; justify-content:space-between; margin:8px 0; gap:8px; }
+
+.protocolTriggerHint, .protocolTriggerError {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.protocolTriggerHint { color: var(--on-background-30); }
+.protocolTriggerError { color: #dc7b5f; }
+.analyzerTriggerQueryGrid > * { min-width: 0; }

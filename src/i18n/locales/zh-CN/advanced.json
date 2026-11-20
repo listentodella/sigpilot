@@ -108,7 +108,7 @@
   "mcpVerifyHint": "将测试任务粘贴到 Agent 聊天中，确认它能读取采集、调用工具。",
   "mcpOAuthHint": "首次连接时，请在 SigPilot 的 AI / MCP 面板确认授权。无需 API key；授权重启后保留，可在高级详情中撤销。",
   "mcpAuthorizationRequest": "Agent 请求连接",
-  "mcpAuthorizationHint": "允许这个客户端使用 MCP 工具；编辑能力由上方权限开关决定。客户端名称由对方提供，请核对是你刚发起的连接。",
+  "mcpAuthorizationHint": "允许此客户端使用 MCP 工具。编辑与设备采集分别遵循上方权限设置。客户端名称由对方提供，请确认这是你刚刚发起的连接。",
   "mcpApprove": "允许连接",
   "mcpDeny": "拒绝",
   "mcpRevoke": "撤销授权",
@@ -117,5 +117,13 @@
   "mcpCopyUrl": "复制 URL",
   "mcpPort": "HTTP 端口",
   "mcpApplyPort": "应用端口",
-  "mcpPortHint": "默认 10531，各平台一致。端口占用会报错；更改后请更新 Agent 的 URL 并重新授权。"
+  "mcpPortHint": "默认 10531，各平台一致。端口占用会报错；更改后请更新 Agent 的 URL 并重新授权。",
+  "mcpAllowCapture": "允许助手控制设备采集",
+  "mcpCapturePermissionHint": "在新标签页中发起和停止有时限的采集。不会中断已占用设备的采集；你也可以在桌面点击停止。",
+  "mcpCaptureStarted": "助手已请求采集，正在准备设备…",
+  "mcpCaptureTab": "MCP 采集",
+  "mcpCaptureBusy": "当前已有采集在进行。请先停止或等待其完成，再开始新的采集。",
+  "mcpCaptureFinished": "助手采集已完成。",
+  "mcpCaptureVerifyHint": "让助手使用 Demo 设备发起采集，然后检查新增标签页和返回的结果。",
+  "mcpCaptureTestPrompt": "请使用 SigPilot MCP 列出设备并读取 Demo 设备能力。在 D0–D3 上以 1 MHz 采集 10 ms 数字波形，缓冲区 8 MiB，任务时限 10 秒。轮询至完成后，返回采集引用、实际采样率和样点数，并读取 D0 的前几个边沿。"
 }

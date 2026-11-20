@@ -184,7 +184,12 @@ const fn default_trigger_position_percent() -> u8 {
 pub struct CaptureTriggerMetadata {
     pub sample_index: u64,
     pub channel: u8,
-    pub kind: CaptureTriggerKind,
+    /// Hardware edge/level, absent for a software protocol trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<CaptureTriggerKind>,
+    /// Decoded protocol name for a software trigger. Old files omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

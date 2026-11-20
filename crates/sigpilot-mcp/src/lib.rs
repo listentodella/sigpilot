@@ -2,6 +2,7 @@
 
 pub mod bridge;
 mod cancellation;
+pub mod capture;
 pub mod desktop;
 pub mod oauth;
 pub mod onboarding;
@@ -40,6 +41,8 @@ pub struct McpAdapter {
     pub workbench: Arc<WorkbenchService>,
     pub file_roots: Arc<Vec<PathBuf>>,
     pub can_edit_annotations: bool,
+    pub can_capture: bool,
+    pub capture_service: Option<Arc<capture::CaptureService>>,
     pub caller_id: Arc<str>,
     pub(crate) budget: Arc<tokio::sync::Semaphore>,
 }
@@ -55,6 +58,8 @@ impl McpAdapter {
             workbench,
             file_roots: Arc::new(file_roots),
             can_edit_annotations,
+            can_capture: false,
+            capture_service: None,
             caller_id: caller_id.into(),
             budget: Arc::new(tokio::sync::Semaphore::new(1)),
         }
@@ -175,6 +180,9 @@ impl McpAdapter {
             tools.push(tool("sigpilot_undo_annotations", "Undo one owned atomic annotation batch with explicit capture and current annotation revision. Only the batch's unchanged resulting revision can be undone; subsequent edits require re-reading state. Restores original provenance and evidence snapshots. preview validates without writing; request_id is replay-safe. History is in-memory for up to 15 minutes, 128 batches and 2MiB.",json!({"capture":capture,"expected_annotation_revision":exact,"batch_id":{"type":"string","maxLength":128},"request_id":{"type":"string","maxLength":128},"preview":{"type":"boolean","default":false}}),&["capture","expected_annotation_revision","batch_id","request_id"],false,true));
             tools.push(tool("sigpilot_apply_annotations", "Atomically create, update, or delete at most 200 annotations. Explicit capture and annotation revisions prevent overwrites. A request ID is replay-safe within the bounded in-memory retention window. preview validates without writing.", json!({"capture":capture,"expected_annotation_revision":exact,"request_id":{"type":"string","maxLength":128},"preview":{"type":"boolean","default":false},"operations":operations}), &["capture","expected_annotation_revision","request_id","operations"], false, true));
         }
+        if self.capture_service.is_some() {
+            tools.extend(capture::tool_catalog(self.can_capture));
+        }
         tools
     }
 
@@ -193,11 +201,23 @@ impl McpAdapter {
         if cancel.load(Ordering::Acquire) {
             return Err(WorkbenchError::Cancelled.into());
         }
+        if let Some(service) = &self.capture_service {
+            if name.starts_with("sigpilot_") && capture::is_capture_tool(name) {
+                return capture::execute(
+                    service,
+                    &self.caller_id,
+                    self.can_capture,
+                    name,
+                    arguments,
+                )
+                .map_err(|e| ToolFailure::new(e.code, e.message));
+            }
+        }
         match name {
             "sigpilot_list_capabilities" => {
                 let _: EmptyRequest = parse(arguments)?;
                 Ok(
-                    json!({"schema_version":"1","providers":self.workbench.analysis_capabilities(),"decoder":self.workbench.decode_capabilities(),"analyzers":self.workbench.analyzer_capabilities(),"protocol_queries":self.workbench.protocol_query_capabilities(),"hardware_triggers":self.workbench.hardware_trigger_capabilities(),"reports":self.workbench.report_capabilities(),"results":self.workbench.result_capabilities(),"derived_captures":self.workbench.derived_capabilities(),"real_capture_control":false,"gui_focus_requires_attachment":true}),
+                    json!({"schema_version":"1","providers":self.workbench.analysis_capabilities(),"decoder":self.workbench.decode_capabilities(),"analyzers":self.workbench.analyzer_capabilities(),"protocol_queries":self.workbench.protocol_query_capabilities(),"hardware_triggers":self.workbench.hardware_trigger_capabilities(),"reports":self.workbench.report_capabilities(),"results":self.workbench.result_capabilities(),"derived_captures":self.workbench.derived_capabilities(),"real_capture_control":self.can_capture && self.capture_service.is_some(),"capture_control":self.capture_service.as_ref().map(|s|s.capabilities()),"gui_focus_requires_attachment":true}),
                 )
             }
             "sigpilot_run_decode" => {
@@ -748,7 +768,7 @@ impl ServerHandler for McpAdapter {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_resources().enable_prompts().build())
             .with_server_info(Implementation::new("sigpilot-mcp", env!("CARGO_PKG_VERSION")))
-            .with_instructions("Use explicit business session and capture references. Exact integers are decimal strings. Query ranges are half-open. Tool results report coverage; a page is not a full scan. No hardware capture is started by this server.")
+            .with_instructions("Use explicit business session and capture references. Exact integers are decimal strings. Query ranges are half-open. Tool results report coverage; a page is not a full scan. Device acquisition is available only when listed in tools and explicitly allowed by the desktop. Use list_devices and get_device_capabilities before start_capture; start returns a job, poll get_capture_status, and stop/release only your own jobs. Never retry a submitted capture with a new request_id merely because a response was lost.")
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -955,7 +975,8 @@ fn tool(
                 .idempotent(idempotent)
                 .destructive(matches!(
                     name,
-                    "sigpilot_apply_annotations"
+                    "sigpilot_release_capture"
+                        | "sigpilot_apply_annotations"
                         | "sigpilot_apply_reports"
                         | "sigpilot_configure_analyzer"
                         | "sigpilot_apply_results"

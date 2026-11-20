@@ -19,6 +19,7 @@ fn default_port() -> u16 {
 pub struct Preferences {
     pub enabled: bool,
     pub can_edit: bool,
+    pub can_capture: bool,
     #[serde(default = "default_port")]
     pub port: u16,
 }
@@ -27,6 +28,7 @@ impl Default for Preferences {
         Self {
             enabled: false,
             can_edit: false,
+            can_capture: false,
             port: DEFAULT_HTTP_PORT,
         }
     }

@@ -11,6 +11,83 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
+struct DesktopCaptureController(AppHandle);
+
+impl sigpilot_mcp::capture::CaptureController for DesktopCaptureController {
+    fn devices(&self) -> Result<Vec<sigpilot_core::DeviceInfo>, String> {
+        Ok(self.0.state::<AppState>().devices.list_devices())
+    }
+
+    fn capabilities(&self, id: &str) -> Result<sigpilot_core::HardwareCaptureCapabilities, String> {
+        self.0
+            .state::<AppState>()
+            .devices
+            .capabilities(id)
+            .map_err(to_string)
+    }
+
+    fn start(
+        &self,
+        session_id: String,
+        settings: sigpilot_core::CaptureSettings,
+        analyzers: Vec<sigpilot_core::AnalyzerDecodeSettings>,
+        protocol_trigger: Option<sigpilot_core::protocol_trigger::ProtocolTriggerConfig>,
+    ) -> sigpilot_mcp::capture::CaptureFuture {
+        let app = self.0.clone();
+        Box::pin(async move {
+            let demo = analyzers
+                .into_iter()
+                .map(|settings| sigpilot_core::DemoAnalyzerSettings {
+                    // Deterministic built-in signals; MCP acquisition never loads
+                    // arbitrary plugins just to generate a Demo input.
+                    backend: sigpilot_core::DecoderBackendKind::LegacyRust,
+                    settings,
+                })
+                .collect();
+            let result = crate::start_capture(
+                app.clone(),
+                app.state::<AppState>(),
+                session_id.clone(),
+                settings,
+                Some(demo),
+                protocol_trigger,
+            )
+            .await;
+            let _ = app.emit(
+                "mcp_capture_finished",
+                &serde_json::json!({
+                    "session_id": session_id,
+                    "summary": result.as_ref().ok(),
+                    "error": result.as_ref().err(),
+                }),
+            );
+            result.and_then(|summary| serde_json::to_value(summary).map_err(to_string))
+        })
+    }
+
+    fn cancel(&self, session_id: &str) -> Result<(), String> {
+        let state = self.0.state::<AppState>();
+        let active = state.active_capture.lock();
+        if !active
+            .as_ref()
+            .is_some_and(|capture| capture.session_id == session_id)
+        {
+            return Err("This MCP capture is not active".into());
+        }
+        state
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn released(&self, session_id: &str) {
+        let _ = self.0.emit(
+            "mcp_capture_released",
+            &serde_json::json!({"session_id":session_id}),
+        );
+    }
+}
+
 #[tauri::command]
 pub fn workbench_snapshot(
     session_id: String,
@@ -90,6 +167,7 @@ pub async fn configure_mcp(
     enabled: bool,
     can_edit_annotations: bool,
     port: Option<u16>,
+    can_capture: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CommandResult<DesktopMcpStatus> {
@@ -97,6 +175,7 @@ pub async fn configure_mcp(
     let directory = instance_directory(&app)?;
     let mut preferences = onboarding::read_preferences(&directory).map_err(to_string)?;
     preferences.port = port.unwrap_or(preferences.port);
+    let can_capture = can_capture.unwrap_or(preferences.can_capture);
     onboarding::validate_port(preferences.port).map_err(to_string)?;
     if !enabled {
         onboarding::save_preferences(
@@ -104,6 +183,7 @@ pub async fn configure_mcp(
             &Preferences {
                 enabled: false,
                 can_edit: can_edit_annotations,
+                can_capture,
                 port: preferences.port,
             },
         )
@@ -117,6 +197,7 @@ pub async fn configure_mcp(
         let status = existing.status();
         if status.enabled
             && status.can_edit_annotations == can_edit_annotations
+            && status.can_capture == can_capture
             && status.endpoint == Some(format!("http://127.0.0.1:{}/mcp", preferences.port))
         {
             return Ok(status);
@@ -125,11 +206,13 @@ pub async fn configure_mcp(
     if let Some(old) = server.take() {
         old.stop().await;
     }
-    let started = DesktopMcpServer::start_on_port(
+    let started = DesktopMcpServer::start_on_port_with_capture(
         state.workbench.clone(),
         &directory,
         can_edit_annotations,
         preferences.port,
+        Arc::new(DesktopCaptureController(app.clone())),
+        can_capture,
     )
     .await
     .map_err(to_string)?;
@@ -138,6 +221,7 @@ pub async fn configure_mcp(
         &Preferences {
             enabled: true,
             can_edit: can_edit_annotations,
+            can_capture,
             port: preferences.port,
         },
     )
@@ -327,11 +411,13 @@ pub fn restore_mcp(app: AppHandle) {
                 let current = onboarding::read_preferences(&directory).map_err(to_string)?;
                 if current.enabled && server.is_none() {
                     *server = Some(
-                        DesktopMcpServer::start_on_port(
+                        DesktopMcpServer::start_on_port_with_capture(
                             state.workbench.clone(),
                             &directory,
                             current.can_edit,
                             current.port,
+                            Arc::new(DesktopCaptureController(app.clone())),
+                            current.can_capture,
                         )
                         .await
                         .map_err(to_string)?,
@@ -380,12 +466,13 @@ pub async fn mcp_revoke_authorization(
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     let server = state.mcp.lock().await;
+    let server = server.as_ref().ok_or("Enable MCP first")?;
     server
-        .as_ref()
-        .and_then(|s| s.authorization())
+        .authorization()
         .ok_or("Enable MCP first")?
         .revoke(&grant_id)
-        .map_err(to_string)
+        .map_err(to_string)?;
+    Ok(())
 }
 
 pub fn bridge_workbench_events(
@@ -400,7 +487,9 @@ pub fn bridge_workbench_events(
             loop {
                 match receiver.recv_timeout(Duration::from_secs(1)) {
                     Ok(event) => {
-                        app.state::<AppState>().remote_events.publish(serde_json::json!({"kind":"workbench_event","event":event.as_ref()}));
+                        app.state::<AppState>().remote_events.publish(
+                            serde_json::json!({"kind":"workbench_event","event":event.as_ref()}),
+                        );
                         let _ = app.emit("workbench_event", event.as_ref());
                     }
                     Err(RecvTimeoutError::Timeout) => {}
@@ -410,7 +499,9 @@ pub fn bridge_workbench_events(
                             Err(_) => break,
                         }
                         let _ = app.emit("workbench_resync_required", ());
-                        app.state::<AppState>().remote_events.publish(serde_json::json!({"kind":"resync_required"}));
+                        app.state::<AppState>()
+                            .remote_events
+                            .publish(serde_json::json!({"kind":"resync_required"}));
                     }
                 }
             }

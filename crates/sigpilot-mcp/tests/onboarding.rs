@@ -41,6 +41,7 @@ async fn stable_configuration_survives_restart_and_self_check_uses_delivered_bri
     onboarding::save_preferences(
         &directory,
         &Preferences {
+            can_capture: false,
             enabled: true,
             can_edit: true,
             ..Preferences::default()

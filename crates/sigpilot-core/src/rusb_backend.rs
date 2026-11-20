@@ -92,7 +92,8 @@ fn trigger_metadata_from_status(
     (settings.trigger_enabled && status.trig_out_validset != 0).then_some(CaptureTriggerMetadata {
         sample_index: u64::from(status.real_pos),
         channel: settings.trigger_channel,
-        kind: settings.trigger_kind,
+        kind: Some(settings.trigger_kind),
+        protocol: None,
     })
 }
 
@@ -2306,7 +2307,8 @@ mod tests {
             Some(CaptureTriggerMetadata {
                 sample_index: 8_192,
                 channel: 7,
-                kind: crate::CaptureTriggerKind::Falling,
+                kind: Some(crate::CaptureTriggerKind::Falling),
+                protocol: None,
             })
         );
     }

@@ -83,6 +83,7 @@ async fn configure(State(f): State<Arc<Fixture>>, body: Bytes) -> Response {
         onboarding::save_preferences(
             &f.directory,
             &Preferences {
+                can_capture: false,
                 enabled,
                 can_edit,
                 ..onboarding::read_preferences(&f.directory).map_err(|e| e.to_string())?

@@ -1433,7 +1433,8 @@ mod tests {
         capture.metadata.trigger = Some(CaptureTriggerMetadata {
             sample_index: 50,
             channel: 0,
-            kind: CaptureTriggerKind::Rising,
+            kind: Some(CaptureTriggerKind::Rising),
+            protocol: None,
         });
         let path = temp_file("roundtrip.pxcap");
         save_pxcap(&path, &capture).unwrap();
@@ -1460,7 +1461,8 @@ mod tests {
         capture.metadata.trigger = Some(CaptureTriggerMetadata {
             sample_index: 50,
             channel: 0,
-            kind: CaptureTriggerKind::Rising,
+            kind: Some(CaptureTriggerKind::Rising),
+            protocol: None,
         });
         let session = project_session();
         let path = temp_file("roundtrip.pxl");

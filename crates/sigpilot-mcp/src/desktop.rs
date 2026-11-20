@@ -23,6 +23,7 @@ pub struct InstanceCredentials {
 pub struct DesktopMcpStatus {
     pub enabled: bool,
     pub can_edit_annotations: bool,
+    pub can_capture: bool,
     pub instance_id: Option<String>,
     pub endpoint: Option<String>,
     pub instance_file: Option<PathBuf>,
@@ -33,6 +34,7 @@ impl DesktopMcpStatus {
         Self {
             enabled: false,
             can_edit_annotations: false,
+            can_capture: false,
             instance_id: None,
             endpoint: None,
             instance_file: None,
@@ -47,6 +49,7 @@ pub struct DesktopMcpServer {
     _connection_lock: std::fs::File,
     authorization: Option<crate::oauth::Authorization>,
     internal_token: String,
+    capture_service: Option<Arc<crate::capture::CaptureService>>,
 }
 
 impl DesktopMcpServer {
@@ -64,6 +67,36 @@ impl DesktopMcpServer {
         directory: &Path,
         can_edit: bool,
         port: u16,
+    ) -> io::Result<Self> {
+        Self::start_internal(workbench, directory, can_edit, port, None, false).await
+    }
+
+    pub async fn start_on_port_with_capture(
+        workbench: Arc<WorkbenchService>,
+        directory: &Path,
+        can_edit: bool,
+        port: u16,
+        controller: Arc<dyn crate::capture::CaptureController>,
+        can_capture: bool,
+    ) -> io::Result<Self> {
+        Self::start_internal(
+            workbench,
+            directory,
+            can_edit,
+            port,
+            Some(controller),
+            can_capture,
+        )
+        .await
+    }
+
+    async fn start_internal(
+        workbench: Arc<WorkbenchService>,
+        directory: &Path,
+        can_edit: bool,
+        port: u16,
+        controller: Option<Arc<dyn crate::capture::CaptureController>>,
+        can_capture: bool,
     ) -> io::Result<Self> {
         crate::storage::directory(directory)?;
         let connection_lock = crate::storage::lock(directory)?;
@@ -84,12 +117,21 @@ impl DesktopMcpServer {
             pid: std::process::id(),
         };
         let file = directory.join("connection.json");
-        let adapter = McpAdapter::new(
+        let capture_service = controller.map(|controller| {
+            crate::capture::CaptureService::new(
+                workbench.clone(),
+                controller,
+                tokio::runtime::Handle::current(),
+            )
+        });
+        let mut adapter = McpAdapter::new(
             workbench,
             vec![],
             can_edit,
             format!("desktop-mcp-{instance_id}"),
         );
+        adapter.can_capture = can_capture;
+        adapter.capture_service = capture_service.clone();
         let authorization = if port == 0 {
             None
         } else {
@@ -98,6 +140,10 @@ impl DesktopMcpServer {
                 endpoint.trim_end_matches("/mcp").to_string(),
             )?)
         };
+        let authorization = authorization.map(|auth| match &capture_service {
+            Some(service) => auth.with_capture_service(service),
+            None => auth,
+        });
         let router = match &authorization {
             Some(auth) => crate::oauth::router(adapter, auth.clone(), credentials.token.clone()),
             None => crate::server::http_router(adapter, credentials.token.clone())?,
@@ -109,6 +155,7 @@ impl DesktopMcpServer {
         let status = DesktopMcpStatus {
             enabled: true,
             can_edit_annotations: can_edit,
+            can_capture,
             instance_id: Some(instance_id),
             endpoint: Some(endpoint),
             instance_file: if cfg!(unix) { Some(file.clone()) } else { None },
@@ -128,6 +175,7 @@ impl DesktopMcpServer {
             _connection_lock: connection_lock,
             authorization,
             internal_token,
+            capture_service,
         })
     }
 
@@ -157,6 +205,9 @@ impl DesktopMcpServer {
     /// Wait until the old discovery cleanup has finished before releasing the
     /// stable connection lock; a replacement server cannot lose its descriptor.
     pub async fn stop(mut self) {
+        if let Some(service) = &self.capture_service {
+            service.cancel_all();
+        }
         self.shutdown.take();
         self.task.abort();
         let _ = (&mut self.task).await;
@@ -205,6 +256,9 @@ pub async fn check_http(
 
 impl Drop for DesktopMcpServer {
     fn drop(&mut self) {
+        if let Some(service) = &self.capture_service {
+            service.cancel_all();
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }

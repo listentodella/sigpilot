@@ -19,6 +19,7 @@ import type {
 // Type-only: `logger.ts` imports `frontendLog` from here, so a value import
 // would be a cycle. The type is erased at compile time.
 import type { LogLevel } from "./logger.ts";
+import type { ProtocolTriggerConfig } from "./protocolTrigger.ts";
 import type { WaveformAnnotationShape } from "./waveformAnnotations";
 import {
   cancelWebUsbCapture,
@@ -134,7 +135,8 @@ export type ExternalTriggerMode = "Close" | "Rising" | "One" | "Falling" | "Zero
 export interface CaptureTriggerMetadata {
   sample_index: number;
   channel: number;
-  kind: CaptureTriggerKind;
+  kind?: CaptureTriggerKind | null;
+  protocol?: string | null;
 }
 
 export interface CaptureMetadata {
@@ -153,6 +155,13 @@ export interface CaptureMetadata {
 export interface CaptureSummary {
   metadata: CaptureMetadata;
   bytes: number;
+  protocol_trigger?: {
+    status: "matched" | "timed_out" | "stopped_without_match" | "buffer_limit" | "incomplete";
+    trigger_sample: number | null;
+    retained_start_sample: number;
+    pre_trigger_complete: boolean;
+    post_trigger_complete: boolean;
+  } | null;
 }
 
 export interface OpenCaptureResult {
@@ -1356,7 +1365,11 @@ export function startCapture(
   settings: CaptureSettings,
   callbacks: CaptureCallbacks = {},
   demoAnalyzers: DemoAnalyzerSettings[] = [],
+  protocolTrigger?: ProtocolTriggerConfig,
 ): Promise<CaptureSummary> {
+  if (protocolTrigger && !isTauriRuntime()) {
+    return Promise.reject(new Error("Protocol triggers require the desktop runtime."));
+  }
   if (isWebUsbRuntime() && !isWebUsbDemoDevice(settings.device_id)) {
     webUsbDemoSessions.delete(sessionId);
     return startWebUsbCapture(sessionId, settings, callbacks);
@@ -1462,7 +1475,7 @@ export function startCapture(
       update();
     });
   }
-  return callBackend("start_capture", { sessionId, settings, demoAnalyzers });
+  return callBackend("start_capture", { sessionId, settings, demoAnalyzers, protocolTrigger });
 }
 
 export function cancelCapture(): Promise<void> {

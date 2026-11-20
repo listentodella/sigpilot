@@ -28,6 +28,8 @@ use sigpilot_graph::{
     DigitalPointMeasurement, GraphFrameRequest, GraphFrameResponse, GraphSession,
     NativeAnalyzerDecodeProgress, NearestDigitalTransition, SessionView, ViewIntent, ViewLimits,
 };
+use sigpilot_core::protocol_trigger::{validate_request as validate_protocol_trigger, ProtocolTriggerConfig};
+use sigpilot_graph::protocol_trigger_capture::{ProtocolTriggerCapture, ProtocolTriggerReport};
 use sigpilot_waveform::{
     DigitalRangeMeasurementRequest, DigitalRangeMeasurementStats, WaveformRequest, WaveformTile,
 };
@@ -105,6 +107,8 @@ struct ActiveCapture {
 struct CaptureSummary {
     metadata: CaptureMetadata,
     bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protocol_trigger: Option<ProtocolTriggerReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +126,7 @@ fn sparse_capture_summary(capture: &SparseCaptureData) -> CaptureSummary {
     CaptureSummary {
         metadata: capture.metadata.clone(),
         bytes,
+        protocol_trigger: None,
     }
 }
 
@@ -633,6 +638,7 @@ struct UiPublisher {
 enum UiMessage {
     Progress(CaptureProgress, CaptureMemoryUpdatedEvent),
     Updated(CaptureUpdatedEvent),
+    Triggered(CaptureTriggeredEvent),
     Diagnostic(DiagnosticEvent),
 }
 
@@ -648,6 +654,9 @@ impl UiMessage {
             UiMessage::Updated(event) => {
                 events.publish(serde_json::json!({"kind":"capture_updated","update":event}));
                 let _ = app.emit("capture_updated", &event);
+            }
+            UiMessage::Triggered(event) => {
+                let _ = app.emit("capture_triggered", &event);
             }
             UiMessage::Diagnostic(event) => {
                 let _ = app.emit("usb_diagnostic", &event);
@@ -681,6 +690,46 @@ impl UiPublisher {
     }
 }
 
+/// The watchdog is owned by this acquisition. Joining it before releasing the
+/// active-capture guard prevents a delayed timeout from cancelling the next run.
+struct ProtocolTriggerWatchdog {
+    stop: Option<mpsc::Sender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProtocolTriggerWatchdog {
+    fn start(
+        controller: Arc<Mutex<Option<ProtocolTriggerCapture>>>,
+        cancel: Arc<AtomicBool>,
+    ) -> CommandResult<Self> {
+        let (stop, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("sigpilot-protocol-trigger".into())
+            .spawn(move || loop {
+                match receiver.recv_timeout(Duration::from_millis(50)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if cancel.load(Ordering::Acquire) {
+                    break;
+                }
+                if controller.lock().as_mut().is_some_and(|trigger| trigger.tick()) {
+                    cancel.store(true, Ordering::Release);
+                    break;
+                }
+            })
+            .map_err(|error| format!("Cannot start protocol trigger watchdog: {error}"))?;
+        Ok(Self { stop: Some(stop), worker: Some(worker) })
+    }
+}
+
+impl Drop for ProtocolTriggerWatchdog {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() { let _ = stop.send(()); }
+        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+    }
+}
+
 #[tauri::command]
 async fn start_capture(
     app: AppHandle,
@@ -688,7 +737,11 @@ async fn start_capture(
     session_id: String,
     settings: CaptureSettings,
     demo_analyzers: Option<Vec<DemoAnalyzerSettings>>,
+    protocol_trigger: Option<ProtocolTriggerConfig>,
 ) -> CommandResult<CaptureSummary> {
+    if let Some(config) = &protocol_trigger {
+        validate_protocol_trigger(config, &settings)?;
+    }
     // The entry log is what makes a failed capture explainable after the fact:
     // it records which device was asked for and with what configuration, so a
     // later error can be attributed to the request rather than guessed at.
@@ -705,6 +758,7 @@ async fn start_capture(
         threshold_volts = settings.threshold_volts,
         mode = ?settings.mode,
         trigger_enabled = settings.trigger_enabled,
+        protocol_trigger_enabled = protocol_trigger.is_some(),
         "start_capture requested"
     );
 
@@ -715,6 +769,20 @@ async fn start_capture(
         *active = Some(ActiveCapture { device_id: settings.device_id.clone(), session_id: session_id.clone() });
         state.cancel.store(false, Ordering::Release);
     }
+    if session_id.starts_with("mcp-") {
+        let analyzers: Vec<_> = demo_analyzers
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|analyzer| &analyzer.settings)
+            .collect();
+        let _ = app.emit(
+            "mcp_capture_started",
+            &serde_json::json!({
+                "session_id": session_id, "settings": settings, "analyzers": analyzers,
+            }),
+        );
+    }
     let cancel = state.cancel.clone();
     let active_capture = state.active_capture.clone();
     let app_state = state.inner().clone();
@@ -724,6 +792,16 @@ async fn start_capture(
         impl Drop for CaptureGuard { fn drop(&mut self) { *self.0.lock() = None; } }
         let _capture_guard = CaptureGuard(active_capture.clone());
         let buffer_bytes = settings.buffer_size_mb.saturating_mul(1024 * 1024);
+        let has_protocol_trigger = protocol_trigger.is_some();
+        let protocol_controller = Arc::new(Mutex::new(protocol_trigger.map(ProtocolTriggerCapture::new)));
+        let watchdog = if has_protocol_trigger {
+            Some(ProtocolTriggerWatchdog::start(protocol_controller.clone(), cancel.clone())?)
+        } else { None };
+        let buffer_limit = Arc::new(AtomicBool::new(false));
+        let progress_buffer_limit = buffer_limit.clone();
+        // Kingst reports bytes_expected == bytes_read for every live update;
+        // only its memory budget can identify a capacity stop here.
+        let progress_has_sample_limit = !sigpilot_core::kingst_la2016::owns(&settings.device_id);
         let publisher = UiPublisher::new(app.clone());
         let progress_app = publisher.clone();
         let progress_graph = graph.clone();
@@ -733,9 +811,13 @@ async fn start_capture(
             .checked_sub(Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
         let mut progress = |event: CaptureProgress| {
+            if progress_has_sample_limit && event.bytes_expected > 0 && event.bytes_read >= event.bytes_expected {
+                progress_buffer_limit.store(true, Ordering::Release);
+            }
             let usage =
                 progress_graph.capture_memory_usage(buffer_bytes, Some(event.sample_memory_bytes));
             if usage.total_bytes >= buffer_bytes {
+                progress_buffer_limit.store(true, Ordering::Release);
                 // The only thing that stops a capture from this side, so record
                 // the numbers when it fires: "it stopped early" is otherwise
                 // impossible to tell from "the device went quiet".
@@ -781,15 +863,29 @@ async fn start_capture(
             && settings.decode_cross;
         let started_graph = graph.clone();
         let started_error = graph_error.clone();
+        let started_controller = protocol_controller.clone();
+        let started_cancel = cancel.clone();
         let mut started = move |metadata: &CaptureMetadata| {
+            if let Some(controller) = started_controller.lock().as_mut() {
+                if let Err(error) = controller.start(metadata) {
+                    *started_error.lock() = Some(error);
+                    started_cancel.store(true, Ordering::Release);
+                    return;
+                }
+            }
             if let Err(error) = started_graph.begin_capture(metadata.clone()) {
                 *started_error.lock() = Some(error.to_string());
+                started_cancel.store(true, Ordering::Release);
             }
         };
         let samples_graph = graph.clone();
         let samples_error = graph_error.clone();
         let update_app = publisher.clone();
         let update_session_id = session_id.clone();
+        let samples_controller = protocol_controller.clone();
+        let samples_cancel = cancel.clone();
+        let protocol_app = publisher.clone();
+        let protocol_session_id = session_id.clone();
         let mut last_update = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
@@ -800,7 +896,32 @@ async fn start_capture(
             if !use_packed_graph {
                 if let Err(error) = samples_graph.append_samples(chunk) {
                     *samples_error.lock() = Some(error.to_string());
+                    samples_cancel.store(true, Ordering::Release);
                     return;
+                }
+            }
+            if has_protocol_trigger {
+                let mut controller = samples_controller.lock();
+                if let Some(controller) = controller.as_mut() {
+                    match controller.feed(chunk) {
+                        Ok(Some(trigger)) => {
+                            if let Err(error) = samples_graph.set_trigger(trigger.clone()) {
+                                *samples_error.lock() = Some(error.to_string());
+                                samples_cancel.store(true, Ordering::Release);
+                                return;
+                            }
+                            protocol_app.send(UiMessage::Triggered(CaptureTriggeredEvent {
+                                session_id: protocol_session_id.clone(), trigger,
+                            }));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            *samples_error.lock() = Some(error);
+                            samples_cancel.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                    if controller.should_stop() { samples_cancel.store(true, Ordering::Release); }
                 }
             }
             let metadata = samples_graph.metadata();
@@ -824,6 +945,7 @@ async fn start_capture(
                         .unwrap_or(usize::MAX)
                         .saturating_mul(usize::from(metadata.unitsize)),
                     metadata,
+                    protocol_trigger: None,
                 };
                 update_app.send(UiMessage::Updated(CaptureUpdatedEvent {
                     session_id: update_session_id.clone(),
@@ -885,10 +1007,8 @@ async fn start_capture(
                 &mut samples,
             )
         } else if sigpilot_core::kingst_la2016::owns(&settings.device_id) {
-            // The Kingst LA series samples into its own SDRAM and is downloaded
-            // afterwards, so it hands back a complete capture instead of
-            // streaming through `samples`. `started` still has to run, because
-            // that is what tells the graph session a capture began.
+            // Stream mode feeds the common sample callback; Buffer mode
+            // downloads after acquisition and cannot use software triggering.
             #[cfg(feature = "rusb-transport")]
             {
                 // `started` opens the graph session and `samples` feeds it, so
@@ -939,6 +1059,18 @@ async fn start_capture(
             }
         };
 
+        drop(watchdog);
+        // PXLogic reports Cancelled when stopped before its first sample.
+        // Preserve the protocol timeout result instead of presenting it as a
+        // driver failure; genuine USB errors still follow the error path.
+        let capture = match capture {
+            Err(sigpilot_core::CoreError::Cancelled) => protocol_controller
+                .lock()
+                .as_ref()
+                .and_then(ProtocolTriggerCapture::empty_capture_if_timed_out)
+                .ok_or(sigpilot_core::CoreError::Cancelled),
+            other => other,
+        };
         match capture {
             Ok(capture) => {
                 tracing::info!(
@@ -954,11 +1086,19 @@ async fn start_capture(
                 if let Some(error) = graph_error.lock().take() {
                     return Err(error);
                 }
-                let summary = CaptureSummary {
-                    metadata: capture.metadata.clone(),
-                    bytes: capture.samples.len(),
+                let summary = if let Some(controller) = protocol_controller.lock().as_mut() {
+                    let (metadata, bytes, report) = controller.finish(
+                        &graph, capture, buffer_limit.load(Ordering::Acquire),
+                    )?;
+                    tracing::info!(target: "sigpilot::capture", ?report, "protocol trigger capture finished");
+                    CaptureSummary { metadata, bytes, protocol_trigger: Some(report) }
+                } else {
+                    let summary = CaptureSummary {
+                        metadata: capture.metadata.clone(), bytes: capture.samples.len(), protocol_trigger: None,
+                    };
+                    graph.finish_capture(capture).map_err(to_string)?;
+                    summary
                 };
-                graph.finish_capture(capture).map_err(to_string)?;
                 let _ = app.emit(
                     "capture_memory_updated",
                     &CaptureMemoryUpdatedEvent {
@@ -1041,6 +1181,7 @@ fn open_capture(
                 let summary = CaptureSummary {
                     metadata: capture.metadata.clone(),
                     bytes: capture.samples.len(),
+                    protocol_trigger: None,
                 };
                 state
                     .session(&session_id)?
@@ -1071,6 +1212,7 @@ fn open_capture(
     let summary = CaptureSummary {
         metadata: capture.metadata.clone(),
         bytes: capture.samples.len(),
+        protocol_trigger: None,
     };
     state
         .session(&session_id)?
@@ -1153,7 +1295,7 @@ async fn trim_capture(
         let (metadata, bytes) = workbench
             .trim_capture(&session_id, start, end)
             .map_err(to_string)?;
-        Ok(CaptureSummary { metadata, bytes })
+        Ok(CaptureSummary { metadata, bytes, protocol_trigger: None })
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2473,6 +2615,8 @@ mod logging;
 mod mcp;
 mod remote;
 mod terminal;
+#[cfg(debug_assertions)]
+mod verification;
 
 fn main() {
     // Install the log sink before anything else, so a failure during start-up
@@ -2489,6 +2633,12 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            #[cfg(debug_assertions)]
+            verification::on_page_load(&webview, &payload);
+            #[cfg(not(debug_assertions))]
+            let _ = (webview, payload);
+        })
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

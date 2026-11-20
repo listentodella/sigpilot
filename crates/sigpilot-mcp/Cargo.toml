@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+sigpilot-core = { path = "../sigpilot-core", default-features = false }
 base64.workspace = true
 sigpilot-workbench = { path = "../sigpilot-workbench" }
 sigpilot-analysis = { path = "../sigpilot-analysis" }

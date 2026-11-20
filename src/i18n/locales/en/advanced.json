@@ -110,7 +110,7 @@
   "mcpCheckPassed": "Service ready. {{count}} tools discovered.",
   "mcpOAuthHint": "Approve the first connection in SigPilot’s AI / MCP panel. No API key is needed. Authorization survives restarts and can be revoked in advanced details.",
   "mcpAuthorizationRequest": "Agent connection request",
-  "mcpAuthorizationHint": "Allow this client to use MCP tools. Editing follows the permission above. The client supplies its name; check that this is the connection you just started.",
+  "mcpAuthorizationHint": "Allow this client to use MCP tools. Editing and device capture follow the separate permissions above. The client supplies its name; check that this is the connection you just started.",
   "mcpApprove": "Allow connection",
   "mcpDeny": "Deny",
   "mcpRevoke": "Revoke",
@@ -119,5 +119,13 @@
   "mcpCopyUrl": "Copy URL",
   "mcpPort": "HTTP port",
   "mcpApplyPort": "Apply port",
-  "mcpPortHint": "Default: 10531 on every platform. An occupied port produces an error. After changing it, update the agent URL and authorize again."
+  "mcpPortHint": "Default: 10531 on every platform. An occupied port produces an error. After changing it, update the agent URL and authorize again.",
+  "mcpAllowCapture": "Allow agents to capture from devices",
+  "mcpCapturePermissionHint": "Start and stop bounded acquisitions in new tabs. An occupied device is never interrupted; you can stop recording from the desktop.",
+  "mcpCaptureStarted": "Agent requested capture; preparing the device…",
+  "mcpCaptureTab": "MCP capture",
+  "mcpCaptureBusy": "A capture is already running. Stop it or wait for it to finish before starting another.",
+  "mcpCaptureFinished": "Agent capture completed.",
+  "mcpCaptureVerifyHint": "Ask your agent to capture from the Demo device, then inspect the new tab and returned results.",
+  "mcpCaptureTestPrompt": "Use SigPilot MCP to list devices and read the Demo device capabilities. Start a 10 ms digital capture on D0–D3 at 1 MHz, with an 8 MiB buffer and a 10-second deadline. Poll until it finishes, then return its capture reference, actual sampling rate and sample count, and read the first few edges on D0."
 }

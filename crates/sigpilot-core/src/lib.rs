@@ -16,6 +16,7 @@ pub mod fake;
 pub mod models;
 pub mod performance;
 pub mod protocol;
+pub mod protocol_trigger;
 pub mod pxview_profile;
 pub mod transport;
 

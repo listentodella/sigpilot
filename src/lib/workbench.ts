@@ -88,6 +88,7 @@ export type WorkbenchEvent =
 export interface McpStatus {
   enabled: boolean;
   can_edit_annotations: boolean;
+  can_capture: boolean;
   instance_id: string | null;
   endpoint: string | null;
   instance_file: string | null;
@@ -213,6 +214,6 @@ export function undoWorkbenchAnnotations(snapshot: WorkbenchSnapshot): Promise<A
 }
 
 export function readMcpStatus(): Promise<McpStatus> { return invoke("mcp_status"); }
-export function configureMcp(enabled: boolean, canEditAnnotations: boolean,port?:number): Promise<McpStatus> {
-  return invoke("configure_mcp", { enabled, canEditAnnotations,port });
+export function configureMcp(enabled: boolean, canEditAnnotations: boolean, port?:number, canCapture?:boolean): Promise<McpStatus> {
+  return invoke("configure_mcp", { enabled, canEditAnnotations, port, canCapture });
 }
